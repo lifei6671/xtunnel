@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"os"
@@ -77,12 +78,13 @@ server:
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	dataDir := t.TempDir()
+	var stderr bytes.Buffer
 	go func() {
 		done <- run(ctx, "xtunnel-agent", []string{
 			"--config", configPath,
 			"--set", "data_dir=" + dataDir,
 			"--set", "auth.token_file=" + filepath.Join(dataDir, "token"),
-		}, nil, &bytes.Buffer{})
+		}, nil, &stderr)
 	}()
 
 	select {
@@ -100,6 +102,8 @@ server:
 	case <-time.After(time.Second):
 		t.Fatal("run() did not return after cancellation")
 	}
+
+	assertLifecycleLogs(t, stderr.String(), "agent")
 }
 
 func TestRunRejectsInvalidConfig(t *testing.T) {
@@ -116,4 +120,22 @@ func writeConfig(t *testing.T, content string) string {
 		t.Fatalf("os.WriteFile() error = %v", err)
 	}
 	return path
+}
+
+func assertLifecycleLogs(t *testing.T, output, component string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lifecycle log lines = %d, want 2; output = %q", len(lines), output)
+	}
+	wantEvents := []string{"process_started", "process_stopped"}
+	for index, line := range lines {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("json.Unmarshal(log line %d) error = %v", index, err)
+		}
+		if record["component"] != component || record["event"] != wantEvents[index] {
+			t.Fatalf("log line %d = %#v", index, record)
+		}
+	}
 }

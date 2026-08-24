@@ -11,20 +11,32 @@ import (
 
 	agentconfig "github.com/lifei6671/xtunnel/internal/agent/config"
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
+	"github.com/lifei6671/xtunnel/internal/logging"
 )
 
-// run 完成 Agent 进程当前阶段的配置加载，并保持前台运行直到收到退出信号。
+// run 完成 Agent 进程当前阶段的配置和日志初始化，并保持前台运行直到收到退出信号。
 // 后续任务会在等待 Context 取消前依次接入身份、Control Session 和 WorkPool。
 func run(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
 	options, err := parseConfigOptions(program, args, environ, stderr)
 	if err != nil {
 		return err
 	}
-	if _, err := agentconfig.Load(options); err != nil {
+	config, err := agentconfig.Load(options)
+	if err != nil {
 		return fmt.Errorf("load agent config: %w", err)
 	}
+	logger, err := logging.New(stderr, logging.Options{
+		Level:     config.Logging.Level,
+		Format:    config.Logging.Format,
+		Component: "agent",
+	})
+	if err != nil {
+		return fmt.Errorf("initialize agent logging: %w", err)
+	}
 
+	logger.InfoContext(ctx, "process_started")
 	<-ctx.Done()
+	logger.Info("process_stopped")
 	return nil
 }
 

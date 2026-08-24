@@ -10,21 +10,33 @@ import (
 	"strings"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
+	"github.com/lifei6671/xtunnel/internal/logging"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 )
 
-// run 完成 Server 进程当前阶段的配置加载，并保持前台运行直到收到退出信号。
-// 后续任务会在等待 Context 取消前依次接入日志、外部锁、数据库和 Listener。
+// run 完成 Server 进程当前阶段的配置和日志初始化，并保持前台运行直到收到退出信号。
+// 后续任务会在等待 Context 取消前依次接入外部锁、数据库和 Listener。
 func run(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
 	options, err := parseConfigOptions(program, args, environ, stderr)
 	if err != nil {
 		return err
 	}
-	if _, err := serverconfig.Load(options); err != nil {
+	config, err := serverconfig.Load(options)
+	if err != nil {
 		return fmt.Errorf("load server config: %w", err)
 	}
+	logger, err := logging.New(stderr, logging.Options{
+		Level:     config.Logging.Level,
+		Format:    config.Logging.Format,
+		Component: "server",
+	})
+	if err != nil {
+		return fmt.Errorf("initialize server logging: %w", err)
+	}
 
+	logger.InfoContext(ctx, "process_started")
 	<-ctx.Done()
+	logger.Info("process_stopped")
 	return nil
 }
 

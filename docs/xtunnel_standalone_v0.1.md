@@ -6775,6 +6775,8 @@ level
 
 component
 
+request_id
+
 agent_id
 
 installation_id
@@ -6794,6 +6796,11 @@ event
 error_code
 ```
 
+每条日志固定包含 `timestamp`、`level`、`component` 和 `event`。`timestamp`
+使用 UTC RFC3339Nano，`level` 使用 `debug/info/warn/error` 小写值。`request_id`、
+`trace_id` 及各业务 ID 只在真实上下文存在时写入，不输出空值，也不在日志层生成
+替代 ID。标准 JSON 日志不保留 `slog` 默认的 `time` 和 `msg` 字段。
+
 ---
 
 # 159. 禁止日志输出
@@ -6807,12 +6814,18 @@ Admin Password
 
 Session Cookie
 
+Session Secret
+
 TLS Private Key
 
 Authorization Header
 
 Config Signing Private Key
 ```
+
+共享日志 Handler 会对上述明确的敏感属性名写出 `[REDACTED]`。调用方仍不得把
+Secret 拼入 `event`、错误文本或任意非敏感字段，也不得直接记录完整 Config、
+HTTP Header、Cookie、请求体或认证对象。
 
 ---
 
