@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M0 工程初始化
 >
-> **当前结论**：`M0-01` 至 `M0-06` 已完成；`M0-07` 已通过用户 Code Review，但尚无 Commit SHA 和干净 Checkout 证据，因此保持 `REVIEW`；补齐提交证据后才能进入 `DONE` 并开始 `M0-08`
+> **当前结论**：`M0-01` 至 `M0-07` 已完成；`M0-07` 的本地实现提交为 `fc6ab176070`，WSL 可执行文件隔离修复为 `f5c7e5f73b8`，均未推送；`M0-08` 的依赖与文档边界已获批准，正在实施
 
 ---
 
@@ -100,7 +100,7 @@ M1 Secure TCP Data Plane Baseline
 
 | 里程碑 | 任务数 | 已完成 | 状态 | 入口依赖 | 退出 Gate |
 | --- | ---: | ---: | --- | --- | --- |
-| M0 工程初始化 | 12 | 6 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
+| M0 工程初始化 | 12 | 7 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
 | M0.5 Protocol Freeze | 10 | 0 | `NOT_STARTED` | M0-06 | M05-10 |
 | M1 Secure TCP Baseline | 14 | 0 | `NOT_STARTED` | M0-12 + M05-10 | M1-14 |
 | M2 Replica/Credential | 8 | 0 | `NOT_STARTED` | M1-14 | M2-08 |
@@ -127,8 +127,8 @@ M1 Secure TCP Data Plane Baseline
 | M0-04 | 结构化日志基座 | M0-01 | 共享 Logging 配置与 JSON Handler | 级别、时间、`request_id/trace_id` 字段稳定；无 Secret 输出 | `DONE` |
 | M0-05 | Server Data Target/External Lock + SQLite/Migration | M0-01、M0-02 | Stable Target/External Lock、`migrations/`、`internal/repository/sqlite` | 数据库访问统一使用 GORM；必须先计算 Stable Data Target 并获取 Data Directory 外的同一把 Lock，再检查 Restore Journal/Open SQLite；双进程在触碰 DB/PKI 前拒绝；新库、幂等启动、中断 Migration 测试；引入依赖前先确认 | `DONE` |
 | M0-06 | 锁定 Proto 工具链骨架 | M0-01 | `buf*.yaml`、`tools/versions.env`、`tools/go.mod`、`bootstrap-proto.sh`、`proto.sh` | `tools/go.mod` 与根 Module 使用相同 Go 1.27.x 工具链；`GOTOOLCHAIN=local` 构建 protoc-gen-go；Buf/protoc-gen-go 精确版本与分发包 SHA-256 可校验；不回落 PATH；三个 Wrapper 子命令可运行 | `DONE` |
-| M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `REVIEW` |
-| M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `NOT_STARTED` |
+| M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `DONE` |
+| M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `IN_PROGRESS` |
 | M0-09 | OCI 与 systemd 包装骨架 | M0-03、M0-08 | `deploy/docker`、`deploy/systemd` | amd64/arm64；非 root；只读镜像 + Data Volume；install/start/restart/stop/uninstall Smoke | `NOT_STARTED` |
 | M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `NOT_STARTED` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `NOT_STARTED` |
@@ -415,9 +415,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01` 至 `M0-06` 已完成，`M0-07` 已通过用户 Code Review但尚未提交。按逐任务推进约定，本轮只处理：
+当前 `M0-01` 至 `M0-07` 已完成。按逐任务推进约定，本轮只处理：
 
-1. `M0-07` — 补齐 Commit SHA 和干净 Checkout 验收证据；进入 `DONE` 后才能开始 `M0-08`。
+1. `M0-08` — Web 工程、生产构建与 Go Embed。
 
 推进规则：
 
@@ -439,7 +439,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | SQLite Driver/GORM/Migration 方案 | M0-05 开工前 | 用户已明确要求数据库访问使用 GORM；开工时仍需记录 GORM、SQLite Driver 和 Migration 组件的精确版本与选择依据，Migration 保持显式 forward-only，不以 `AutoMigrate` 取代版本管理 |
 | Buf/protoc-gen-go 精确版本 | M0-06 完成前 | 记录版本、下载源、分发包 SHA-256 和生成结果 |
 | OpenAPI Validator/Generator | M0-07/M5-01 开工前 | M0-07 已批准并锁定 vacuum `v0.30.0` 官方 Linux amd64/arm64 归档与二进制 SHA-256，唯一入口为 `tools/openapi.sh validate`；M5-01 首次引入 Generator 前仍需单独确认，CI 不维护第二套方式 |
-| Web 依赖与 Node 版本 | M0-08 开工前 | 版本和 Lockfile 受控；新增/升级依赖前先确认 |
+| Web 依赖与 Node 版本 | M0-08 开工前 | 已批准 Node `24.19.0`、npm `11.17.0`、React/React DOM `19.2.8`、Vite `8.2.2`、Plugin React `6.1.0`、TypeScript `6.0.2` 与对应类型包；直接依赖精确锁定，npm 11 生成并提交 Lockfile，CI 只运行 `npm ci`；Tailwind/shadcn/Router/Query/Lucide 等在 M5 有真实使用点时再确认引入 |
 | 首次 Buf Breaking Baseline | M05-04 完成前 | 显式记录“无历史前代”，禁止与当前文件自比较 |
 | CI/arm64/Privileged Runner | M0-10/M7-08 开工前 | 记录 Runner 架构和权限；特权 Chaos 不得静默跳过 |
 
@@ -540,12 +540,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 验收结果：命令目录仅剩两个 `main.go`，依赖方向固定为 `cmd → internal/*/bootstrap`；迁移后的单元测试、Race、Vet、Linux Test Binary 和真实进程 Smoke 全部通过。Agent/Server 均输出 `process_started`、收到 `SIGTERM` 后输出 `process_stopped` 并以退出码 0 结束；Server 实际创建 `xtunnel.db` 和 Data Directory 外的 External Lock。
 - 状态影响：本次仅修正既有 M0-03/M0-05 的代码归属，不改变公共 API、Protocol、Config、数据库 Schema 或 Gate；结构复审通过后，M0-05 与 M0-06 进入 `DONE`，下一任务为 `M0-07`。
 
-## 2026-08-24 · M0-07 · REVIEW
+## 2026-08-24 · M0-07 · DONE
 
 - 负责人：Codex。
-- Commit/PR：尚未提交、未推送；用户 Code Review 已通过，但尚无 `DONE` 所需的 Commit SHA 和干净 Checkout 证据。
+- Commit/PR：`fc6ab176070f4eb3120f4605c7b895494c144a56`（实现）与 `f5c7e5f73b8142b0a3a34faa9006b526954529be`（WSL 可执行文件隔离修复），均为本地提交、未推送；用户 Code Review 已通过。
 - 产物：OpenAPI `3.1.0` 可校验骨架；唯一同源 Server 基路径 `/api/v1`；基于 vacuum `v0.30.0` Recommended Ruleset 的项目规则，机器锁定 OpenAPI 方言、唯一 Server、基路径和无 Server Variables；固定 Linux amd64/arm64 官方归档与解压后二进制 SHA-256 的 `tools/versions.env`；只安装到 `.tools/bin` 的 POSIX Bootstrap；唯一 `validate` Wrapper 与隔离负例测试；README 中的 Windows/WSL 使用方式。当前没有业务 Endpoint、DTO、Generator 或 Gin 依赖，避免提前承担 M5 Contract。
 - 验收命令：`$env:GOTOOLCHAIN='local'; go env GOVERSION; go env GOTOOLCHAIN; ./tools/check-go-version.ps1`；根/工具 Module `go mod verify`；根 Module `go test ./...`、`go vet ./...`；工具 Module `go build -mod=readonly ./...`；WSL 中 `bootstrap-openapi.sh` 首次安装与二次幂等运行；`sh -n`、`dash -n`、`bash --posix -n`；`openapi.sh validate`；`test-openapi.sh`；vacuum 版本、官方归档与二进制 SHA-256 独立核验；`git diff --check`。
-- 验收结果：用户已在开工前确认 vacuum `v0.30.0` 依赖和 OpenAPI `3.1.0` 方言，且本轮 Code Review 已通过；本机工具链为 `go1.27.0` 且 `GOTOOLCHAIN=local`，根 Module 测试/Vet 和根/工具 Module 校验通过；Canonical Validate 得分 `100/100`。隔离测试覆盖方言漂移、占位/错误基路径、多 Server、Server Variables、Malformed YAML、未解析 `$ref`、工具篡改、PATH 伪工具、未知命令的稳定退出码和安装归档校验失败不覆盖旧工具；Wrapper 固定用法错误退出码 2、校验失败退出码 1。三种 POSIX Shell 语法通过，Bootstrap 幂等；依赖锁定复审无问题，契约/工具复审发现的 `/api/v1` 和退出码问题均已修复并回归通过。当前只缺 Commit SHA 和提交后的干净 Checkout 复验，不能提前标记 `DONE`。
+- 验收结果：用户已在开工前确认 vacuum `v0.30.0` 依赖和 OpenAPI `3.1.0` 方言，且本轮 Code Review 已通过；本机工具链为 `go1.27.0` 且 `GOTOOLCHAIN=local`，根 Module 测试/Vet 和根/工具 Module 校验通过；Canonical Validate 得分 `100/100`。隔离测试覆盖方言漂移、占位/错误基路径、多 Server、Server Variables、Malformed YAML、未解析 `$ref`、工具篡改、PATH 伪工具、未知命令的稳定退出码和安装归档校验失败不覆盖旧工具；Wrapper 固定用法错误退出码 2、校验失败退出码 1。提交态复验发现并修复 WSL/NTFS 对刚执行二进制的短暂占用，篡改测试改用从未执行过的独立副本，不增加 sleep 或重试；连续三轮回归和最终干净 Checkout 复验通过，工作区无漂移。
 - 剩余风险：当前环境没有 ShellCheck，未执行 `shellcheck -s sh`；Linux arm64 已独立核验官方归档与二进制哈希但未原生执行，由 `M0-10` CI 矩阵补证。M0-07 只提供 CI 可调用的校验入口，尚未创建 CI Workflow；M5 OpenAPI Breaking、Generated Contract Drift、真实 Handler/Client 零漂移及 Gin 版本确认均未开始。
-- 解锁的后续任务：补齐 Commit SHA 和提交后的干净 Checkout 复验、将 M0-07 标记 `DONE` 后，可进入 `M0-08`；本轮未启动下一任务。
+- 解锁的后续任务：`M0-08` 的依赖已满足并已开始；`M5-01` 继续等待其余前置契约任务。
