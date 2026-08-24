@@ -4636,7 +4636,7 @@ busy_timeout = 5000
 synchronous = NORMAL
 ```
 
-这些 PRAGMA 必须作用于 `database/sql` 创建的每一条物理连接，而不是只在启动时对某一条临时连接执行。SQLite Driver 必须通过 DSN 或 ConnectHook 固定设置，并在连接初始化失败时拒绝把该连接放入 Pool。启动自检至少查询 `foreign_keys`、`busy_timeout` 和 `journal_mode`；集成测试要把 Pool 扩到多连接并逐连接验证约束实际生效。
+这些 PRAGMA 必须作用于 GORM 底层 `database/sql` Pool 创建的每一条物理连接，而不是只在启动时对某一条临时连接执行。SQLite Driver 必须通过 DSN 或 ConnectHook 固定设置，并在连接初始化失败时拒绝把该连接放入 Pool。启动自检至少查询 `foreign_keys`、`busy_timeout` 和 `journal_mode`；集成测试要把 Pool 扩到多连接并逐连接验证约束实际生效。
 
 所有数据库事务：
 
@@ -4680,7 +4680,12 @@ xtunnel-server backup restore --input /secure/backup/xtunnel-backup.tar
 
 ```go
 db.Query(...)
+gormDB.Where(...)
 ```
+
+V0.1 的 SQLite Repository 统一使用 GORM。业务持久化不得绕过 Repository
+直接操作 `*gorm.DB`；仅连接初始化、逐连接 PRAGMA 自检和 SQLite Backup API
+等 GORM 不提供等价能力的基础设施路径可以访问底层 `database/sql`。
 
 Repository：
 
@@ -4721,7 +4726,13 @@ type TxStore interface {
 }
 ```
 
-跨表不变量只能由 Application Service 在一次 `Store.WithTx` 中完成。传入的 `TxStore` 中所有 Repository 必须共享同一 `*sql.Tx`，Repository 自身不得再开启或提交事务；Service 创建、切换 Binding、删除 Service、Token 轮换等多表操作都遵循这一规则。
+跨表不变量只能由 Application Service 在一次 `Store.WithTx` 中完成。传入的
+`TxStore` 中所有 Repository 必须共享同一个事务作用域内的 `*gorm.DB`，
+Repository 自身不得再开启或提交事务；Service 创建、切换 Binding、删除
+Service、Token 轮换等多表操作都遵循这一规则。
+
+Migration 继续使用显式、可审查的 forward-only 版本和
+`schema_migrations` 记录；不得用 GORM `AutoMigrate` 取代版本化 Migration。
 
 V0.1：
 
