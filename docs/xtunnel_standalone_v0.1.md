@@ -11,7 +11,7 @@
 > **Agent Gateway 默认端口**：TCP 7443，可配置
 > **核心定位**：可直接部署使用的集中式反向隧道 Standalone 产品
 > **修订日期**：2026-08-24
-> **本次修订**：补齐 Revision 门控、Session fencing、Work 协议帧、安全初始化、代理链、容量预算、持久化恢复与量化验收契约
+> **本次修订**：冻结 Protocol v1 交付门、Control Session 并发所有权、Agent Trust State、状态聚合、统一配置、Health 容量、OpenAPI 契约与里程碑依赖
 
 ---
 
@@ -133,6 +133,8 @@ Instance Identity
 Control Session
 
 Session Authentication
+
+Auth Bare-frame → Established Envelope Atomic Handoff
 
 ALPN Empty / Unknown Rejection
 
@@ -315,6 +317,8 @@ xtunnel-agent
 Identity
 +
 Config
+
+Server / Agent JSON Schema + Config Drift Check
 +
 Control Session
 +
@@ -439,7 +443,7 @@ session_id
 例如：
 
 ```text
-ag_01K5H3...
+ag_01ARZ3NDEKTSV4RRFFQ69G5FAV
 ```
 
 它拥有：
@@ -479,7 +483,7 @@ Services:
 第一次启动时生成：
 
 ```text
-inst_01K5...
+inst_01ARZ3NDEKTSV4RRFFQ69G5FAV
 ```
 
 保存在：
@@ -495,11 +499,11 @@ inst_01K5...
 ```text
 Host A
 /var/lib/xtunnel/a
-→ inst_A
+→ inst_01ARZ3NDEKTSV4RRFFQ69G5FAV
 
 Host A
 /var/lib/xtunnel/b
-→ inst_B
+→ inst_01ARZ3NDEKTSV4RRFFQ69G5FAW
 ```
 
 这样同一台服务器可以运行多个 Replica。
@@ -523,7 +527,7 @@ instance_id
 例如：
 
 ```text
-ai_01K5...
+ai_01ARZ3NDEKTSV4RRFFQ69G5FAV
 ```
 
 进程重启后：
@@ -553,7 +557,7 @@ Generate Session ID
 例如：
 
 ```text
-sess_01K5...
+sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
 ```
 
 断网重连：
@@ -582,22 +586,22 @@ Session ID
 
 ```text
 Agent
-ag_production
+ag_01ARZ3NDEKTSV4RRFFQ69G5FAV
 │
 ├── Installation
-│   inst_server01
+│   inst_01ARZ3NDEKTSV4RRFFQ69G5FAV
 │   │
-│   ├── Instance ai_A
-│   │      └── Session sess_101
+│   ├── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAV
+│   │      └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
 │   │
-│   └── Instance ai_B
-│          └── Session sess_102
+│   └── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAW
+│          └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAW
 │
 └── Installation
-    inst_server02
+    inst_01ARZ3NDEKTSV4RRFFQ69G5FAW
     │
-    └── Instance ai_C
-           └── Session sess_103
+    └── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAX
+           └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAX
 ```
 
 ---
@@ -820,6 +824,8 @@ Agent status = REVOKED
 
 属于强安全操作。
 
+Revoke 的 Desired State、全部 Token 状态和 `agents.version` 必须在同一个 `BEGIN IMMEDIATE` 事务中提交并受 `If-Match` 保护；事务提交后再在 Runtime Lock 内收集需要关闭的 Session/WorkConn，释放锁后执行实际 Close。
+
 ---
 
 # 20. Agent Token 表
@@ -868,6 +874,8 @@ WHERE status = 'ACTIVE';
 ```
 
 Rotate 必须在同一个 `BEGIN IMMEDIATE` 事务中完成旧 Token 状态更新、新 Token 插入和 version 递增。
+
+这里同时包含 Agent Aggregate 的乐观锁：事务先校验 `agents.version == If-Match`，成功后把 `agents.version` 递增一次。Token 自身的 `agent_tokens.version` 继续表示 Credential 代次，两种 Version 不得混用。
 
 ---
 
@@ -1183,6 +1191,26 @@ Control Handler   Work Handler
 
 # 28. Control Session Authentication
 
+Protocol v1 的唯一权威来源固定为：
+
+```text
+api/proto/common.proto
+api/proto/control.proto
+api/proto/work.proto
+```
+
+`.proto` 中的 package、field number、enum number、reserved range 和 message direction 才是线上协议契约。本文中的 Protobuf 片段只解释设计语义，不得作为第二份可独立修改的 Schema。任何协议字段或 enum 变更必须先修改 `.proto`，通过 Buf lint、breaking check、generate drift check 和 Protocol Golden Vector 后，再同步本文语义说明。
+
+M0.5 完成前，禁止开始 Server/Agent Protocol Handler。Protocol v1 固定：
+
+```text
+package = xtunnel.protocol.v1
+
+go_package = <当前 Go Module>/internal/protocol/gen;protocolv1
+```
+
+实际 Go Module Path 在 M0 创建 `go.mod` 时确定；M0.5 必须把完整值写入所有 Proto，之后不得使用相对或占位 `go_package`。
+
 Agent 首先建立：
 
 ```text
@@ -1254,10 +1282,17 @@ installation_id 已绑定其他 agent_id
 
 V0.1 的信任边界是：持有某个 Agent Token 的进程，被视为该逻辑 Agent 的完整受信副本。它可以注册新的 Installation、接收该 Agent 的全部 Binding，并承接对应业务流量；Installation ID 只用于审计和冲突检测，不能降低 Token 泄漏后的权限。Server 首次见到 Installation 时必须写入 Security Event，并在 Web Console 中突出展示。若不同主机之间不能共享这一信任边界，管理员必须为它们创建不同的逻辑 Agent；每 Installation 独立 Enrollment Credential 不属于 V0.1。
 
-成功返回：
+认证统一返回显式 Result，而不是只定义成功响应：
 
 ```protobuf
-message AgentAuthResponse {
+message AgentAuthResult {
+    oneof result {
+        AgentAuthSuccess success = 1;
+        AgentAuthFailure failure = 2;
+    }
+}
+
+message AgentAuthSuccess {
     string agent_id = 1;
 
     string session_id = 2;
@@ -1275,9 +1310,30 @@ message AgentAuthResponse {
 
     string server_epoch = 9;
 }
+
+message AgentAuthFailure {
+    ErrorCode error_code = 1;
+    uint32 retry_after_ms = 2;
+}
 ```
 
 `config_signing_public_key` 只在 Agent 尚未确认该 `key_id`，或 Server 正处于签名 Key 轮换期时返回。
+
+认证失败流程固定为：
+
+```text
+TLS Established
+ ↓
+AgentAuthRequest
+ ↓
+AgentAuthResult{failure: AgentAuthFailure}
+ ↓
+在 control.write_timeout 内 flush 完整 Frame
+ ↓
+Close TLS Connection
+```
+
+除 TLS 已经不可写或对端提前关闭外，禁止用直接 EOF 代替认证失败结果。`TOKEN_INVALID`、`TOKEN_REVOKED`、`AGENT_REVOKED`、`INSTALLATION_ID_CONFLICT`、`VERSION_UNSUPPORTED` 和可重试的 Server 容量错误必须能够被 Agent 区分。只有可重试错误允许设置非零 `retry_after_ms`；永久 Credential、Pin 或版本错误不得通过短周期自动重连放大负载。
 
 ---
 
@@ -1353,6 +1409,21 @@ nonce = 32 byte crypto/rand
 所有字符串必须先通过对应 ID 格式校验
 ```
 
+Protocol v1 的 ID 格式必须在 `common.proto` 对应注释和共享校验包中固定为 ASCII、带类型前缀的 ULID：
+
+```text
+agent_id         = ag_<26-char Crockford ULID>
+installation_id  = inst_<26-char Crockford ULID>
+instance_id      = ai_<26-char Crockford ULID>
+session_id       = sess_<26-char Crockford ULID>
+work_id          = work_<26-char Crockford ULID>
+connection_id    = conn_<26-char Crockford ULID>
+budget_lease_id  = lease_<26-char Crockford ULID>
+drain_id         = drain_<26-char Crockford ULID>
+```
+
+类型前缀固定为上述小写形式，ULID Body 固定为 26 位大写 Crockford Base32。接收端拒绝错误大小写、错误前缀、错误长度、非 Crockford 字符和额外空白。ID 校验必须发生在日志字段、Map Key、HMAC 输入或状态查找之前。
+
 ---
 
 # 32. WorkHello 防重放
@@ -1386,6 +1457,10 @@ Lease 到期 / Session 关闭 → 清理对应分桶
 
 即使 Replay Cache 条目已经随过期 Lease 清理，旧 WorkHello 也会因 Lease 无效而拒绝。`timestamp_ms` 的 Protobuf field number 6 永久保留，不得在 Protocol v1 中复用。
 
+所有 Protocol v1 结构化 Message，只要自身或任意递归子消息存在 Protobuf Unknown Fields，就必须在业务、HMAC、签名、Revision 或 Transition 判断前以 `PROTOCOL_ERROR` 拒绝。该规则同时覆盖 Auth、Control、Work、Snapshot 和本地 Last Known Snapshot 恢复。禁止在某一端 discard、另一端 preserve，也禁止把未知字段静默带入 deterministic marshal。V1 需要扩展时必须发布 Protocol v2，或新增由已协商 Capability 明确启用的独立 Message，不能向既有 v1 Message 偷加字段。
+
+MAC/签名输入必须由已验证的已知字段重新构造，清空 `mac`、`signatures` 或 `signature_by_current` 后使用固定版本 `google.golang.org/protobuf` 的 `proto.MarshalOptions{Deterministic: true}` 生成。升级该 Runtime 必须重新运行全部 Golden Vector；Golden Vector 字节变化属于 Protocol Breaking Change。
+
 ---
 
 # 33. Protocol Framing
@@ -1395,8 +1470,12 @@ Control Session 和 WorkConn 的结构化阶段统一使用：
 ```text
 UVarint Frame Length
 +
-Protobuf Envelope
+Protobuf Message
 ```
+
+Frame 内层类型按连接与状态唯一确定：AUTH 使用裸 `AgentAuthRequest` / `AgentAuthResult`；ESTABLISHED/DRAINING Control 使用 `ControlEnvelope`；WorkConn 在 RAW 前按状态使用唯一合法的裸 Work Message。
+
+AUTH 阶段使用同样 UVarint Length 和 MaxAuthFrameSize，但不把 Auth Message 放入 `ControlEnvelope`。Server 只在完整 `AgentAuthResult.success` Frame 已在 `write_timeout` 内 flush 成功后才原子切换到 `ESTABLISHED`；Agent 只在完整解码并验证该 Success 后切换。两个提交点之前双方均禁止发送或接受 `ControlEnvelope`。Auth Failure flush 后直接关闭，不进入 ControlEnvelope 阶段。
 
 Control Session Envelope：
 
@@ -1415,7 +1494,7 @@ message ControlEnvelope {
 
         WorkDemand work_demand = 13;
 
-        TunnelHealth tunnel_health = 14;
+        TunnelHealthBatch tunnel_health_batch = 14;
 
         DrainRequest drain_request = 15;
 
@@ -1429,6 +1508,36 @@ message ControlEnvelope {
     }
 }
 ```
+
+Control Session 状态固定为：
+
+```text
+AUTH
+ESTABLISHED
+DRAINING
+CLOSED
+```
+
+消息方向和合法状态必须同时写入 `control.proto` 注释，并由表驱动 Protocol State Test 锁定：
+
+| Message | Agent → Server | Server → Agent | AUTH | ESTABLISHED | DRAINING |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AgentAuthRequest | ✓ | × | ✓ | × | × |
+| AgentAuthResult | × | ✓ | ✓ | × | × |
+| Heartbeat | ✓ | × | × | ✓ | ✓ |
+| AgentSnapshot | × | ✓ | × | ✓ | × |
+| ConfigAck | ✓ | × | × | ✓ | ✓ |
+| WorkDemand | × | ✓ | × | ✓ | × |
+| TunnelHealthBatch | ✓ | × | × | ✓ | ✓ |
+| DrainRequest | ✓ | × | × | ✓ | 幂等 |
+| DrainAck | × | ✓ | × | ✓ | 幂等 |
+| ConfigKeyTransition | × | ✓ | × | ✓ | × |
+| EpochTransition | × | ✓ | × | ✓ | × |
+| Error | ✓ | ✓ | × | ✓ | ✓ |
+
+AUTH 阶段不使用 `ControlEnvelope.Error`。Server 能安全解码 `AgentAuthRequest` 但发现版本、未知字段或认证语义错误时，发送 `AgentAuthResult.failure{error_code: PROTOCOL_ERROR 或对应 Auth Error}`，flush 后关闭；Frame 已无法安全解码时直接关闭。Agent 在 AUTH 收到无法解码、非法 oneof 或非期望 Result 时直接关闭，不发送 Control Error。
+
+`ESTABLISHED/DRAINING` 收到错误方向、当前状态不允许的 Message 时，接收端应在仍可安全写入时发送 `ControlEnvelope.Error{error_code: PROTOCOL_ERROR}`，随后关闭 Control Session。完全相同的 Transition、DrainRequest 和 DrainAck 必须幂等，返回或重发当前状态；同一 ID 但内容不同必须视为 `PROTOCOL_ERROR`。`protocol_version` 必须等于 TLS/Auth 协商出的版本，任何不一致都关闭 Session。
 
 WorkConn：
 
@@ -1454,7 +1563,33 @@ message WorkReady {
     WorkReadyStatus status = 2;
     ErrorCode error_code = 3;
 }
+
 ```
+
+`common.proto` 必须完整定义并冻结至少以下 enum：
+
+```text
+ErrorCode
+WorkReadyStatus
+OpenStatus
+IngressType
+HealthType
+HealthStatus
+ConfigApplyStatus
+```
+
+零值规则只有两个有意例外：`ERROR_CODE_OK=0` 和 `HEALTH_STATUS_UNKNOWN=0`；其他状态 enum 的零值均为 `*_UNSPECIFIED`，接收端禁止把它解释为成功。初始固定映射为：
+
+```text
+WorkReadyStatus: UNSPECIFIED=0, READY=1, REJECTED=2
+OpenStatus:      UNSPECIFIED=0, OK=1, ERROR=2
+IngressType:     UNSPECIFIED=0, HTTP=1, TCP=2
+HealthType:      UNSPECIFIED=0, DISABLED=1, TCP=2, HTTP=3
+HealthStatus:    UNKNOWN=0, HEALTHY=1, UNHEALTHY=2
+ConfigApplyStatus: UNSPECIFIED=0, APPLIED=1, REJECTED=2
+```
+
+WebSocket 属于 HTTP/1.1 Upgrade，HTTPS 已由前置代理终止，都不增加独立 IngressType。第 99 节列出的 Error Code 数值必须原样进入 `common.proto`；新增值只能使用未占用编号，删除值必须 `reserved`。
 
 每个 Frame 必须使用严格 bounded reader。读取结构化 Frame 时不得预读 Frame 边界外的数据。
 
@@ -1530,12 +1665,59 @@ VERSION_UNSUPPORTED
 
 ---
 
-# 36. Agent Runtime Registry
+# 36. Runtime Ownership and Agent Runtime Registry
+
+每条 Control Session 的并发模型固定为：
+
+```text
+TLS Conn
+  │
+  ├── readLoop（唯一 ReadFrame 调用者）
+  │       ↓
+  │   SessionOwner（唯一状态所有者）
+  │       ↓
+  │   bounded + coalesced ControlOutbox
+  │       ↓
+  └── writeLoop（唯一 WriteFrame 调用者）
+          ↓
+       TLS Conn
+```
+
+任何 Heartbeat Timer、Snapshot Reconciler、WorkDemand、Drain、Health Checker 或其他业务 goroutine 都禁止直接调用 Control TLS Conn 的 `Read`、`Write`、`ReadFrame` 或 `WriteFrame`。它们只能把事件投递给 `SessionOwner`；只有 `writeLoop` 可以写入完整的 `UVarint Length + Protobuf Payload` Frame。
+
+默认 Outbox 契约：
+
+```yaml
+control:
+  high_priority_queue: 32
+  normal_queue: 128
+  write_timeout: 5s
+```
+
+队列语义固定为：
+
+```text
+High Priority
+├── Error
+├── DrainRequest / DrainAck
+├── ConfigKeyTransition / EpochTransition（严格有序）
+├── ConfigAck（含 Transition observed fields）
+└── 最新 Heartbeat
+
+Coalescible
+├── AgentSnapshot              key = agent_id，保留最高 revision
+├── WorkDemand                 key = instance_id，保留最高 generation
+└── TunnelHealth pending accumulator，按 tunnel_id 保留最新项
+```
+
+旧 Heartbeat 尚未发送时由新 Heartbeat 覆盖，不允许累计。Health 结果在唯一 pending accumulator 中按 `tunnel_id` 合并；只在出队并冻结为不可变 `TunnelHealthBatch` 时才分配严格递增的 `generation`，已冻结 Frame 不再改写。Transition 必须先于依赖新 Key/Epoch 的 Snapshot 入队和写出。Normal Queue 满时，先执行上述合并；仍无法容纳的新消息不得无限等待。High Priority Queue 满、完整 Frame 在 `write_timeout` 内无法写完，或 Owner 无法保证消息次序时，记录 `SESSION_RESOURCE_EXHAUSTED` 并关闭该 Session。关闭动作必须解除 readLoop/writeLoop 的阻塞并等待二者退出，禁止遗留 goroutine。
 
 Server 内存：
 
 ```go
 type AgentRuntime struct {
+    mu sync.Mutex
+
     AgentID string
 
     Instances map[string]*InstanceRuntime
@@ -1575,13 +1757,44 @@ type ActiveWorkRuntime struct {
     AgentID      string
     InstanceID   string
     SessionID    string
+    Generation   uint64
     WorkID       string
+
+    Cancel context.CancelFunc
+    WorkConn net.Conn
+    PeerConn net.Conn
+    closeOnce sync.Once
 }
 ```
+
+一个逻辑 Agent 内所有 Instance、Session、WorkPool、Health 和 ActiveWork 状态变化，都必须在对应 `AgentRuntime.mu` 下线性化。不同 Agent 使用不同锁；禁止建立跨 Agent 的嵌套 Runtime Lock。
+
+固定线性化点：
+
+```text
+Session Replacement
+= lock → generation++ → CurrentSession = newSession → unlock
+
+Acquire Idle
+= lock → IDLE → OPENING → 从 Idle Pool 移除 → unlock
+
+OPEN_OK
+= lock → OPENING → ACTIVE → 注册 ActiveWork → unlock
+
+Active Close
+= lock → Active Registry remove → CLOSED → unlock
+
+Drain
+= lock → Draining=true → 从选择集合摘除 → unlock
+```
+
+持有 Runtime Lock 时禁止进行网络 IO、SQLite 操作、阻塞 Channel Send、等待 goroutine 或调用 `Conn.Close`。需要关闭的 Conn 和 Cancel Handle 在锁内收集，释放锁后通过 `closeOnce` 执行 `Cancel → SetDeadline(now) → Close`。所有 Counter、Budget Lease 和 Registry 删除必须由同一个终止路径执行且只执行一次。
 
 Session 清理只能在 `instance_id + session_id + generation` 仍匹配时修改 Current Session。旧 Session 的延迟清理不得删除或关闭新 Session。
 
 Agent Revoke 必须通过 Agent 级 ActiveWork Registry 找到并关闭所有旧、新 Session 的 Active WorkConn。
+
+旧 Session cleanup 只能关闭属于旧 Session 的 Idle/Opening WorkConn。已经进入 ACTIVE 的旧 WorkConn 必须继续留在 Agent 级 ActiveWork Registry，直到自然结束、Agent Revoke 或 drain timeout；cleanup 不得仅因 Session 已被 fencing 就删除或关闭它们。
 
 ---
 
@@ -1668,21 +1881,24 @@ REVOKED
 计算规则：
 
 ```text
-Agent 创建后从未有 Installation 上线
-→ PENDING
-
-曾经上线，但当前没有任何可选 Instance
-→ OFFLINE
-
-至少一个健康 Instance
-→ ONLINE
-
-存在 Instance，但所有 Instance 都异常
-→ DEGRADED
-
 Agent revoked
 → REVOKED
+
+Agent 创建后从未成功完成认证
+→ PENDING
+
+曾经成功认证，但当前没有 Current Control Session
+→ OFFLINE
+
+至少一个 Instance Status == ONLINE
+→ ONLINE
+
+至少一个 Current Control Session，
+但所有 Instance 都是 DEGRADED / DRAINING
+→ DEGRADED
 ```
+
+Agent Status 只聚合 Connector Runtime，不读取任何 Tunnel/Origin Health。某个 Instance 可以访问 SSH Origin、但不能访问 Jenkins Origin，此时 Agent/Instance 仍可能 ONLINE；差异只反映在对应 Service Status。
 
 ---
 
@@ -1695,6 +1911,25 @@ DEGRADED
 
 DRAINING
 ```
+
+计算规则：
+
+```text
+DRAINING
+= 已进入 Drain，两阶段握手尚未结束
+
+ONLINE
+= Current Control Session 存活
++ Heartbeat Fresh
++ Instance-wide Transport 可以接受新 Work
+
+DEGRADED
+= Current Control Session 存活
++ Heartbeat Fresh
++ Instance-wide Transport 持续无法接受新 Work
+```
+
+`Instance-wide Transport` 只包含 Control/WorkPool/Budget/FD 等 Instance 级能力。Per-Tunnel Origin Health 不参与 Instance Status。Heartbeat 超时或 Control Session 关闭后，Instance 不保留一个永久 OFFLINE Runtime 状态，而是按下述 Tombstone 规则删除或保留。
 
 Instance 不保存永久 OFFLINE Runtime 对象。
 
@@ -1726,7 +1961,7 @@ heartbeat_interval = 10s
 heartbeat_timeout = 30s
 ```
 
-`AgentAuthResponse.heartbeat_interval_ms` 是该 Control Session 的 Server 权威值，必须满足 `0 < heartbeat_interval <= heartbeat_timeout / 3`。Agent 认证成功后立即采用，不能继续使用本地旧默认值。Server 以本地单调时钟记录“最后一次成功收到 Heartbeat”的时间并判断 Timeout，不使用客户端 `timestamp_ms` 计算存活，避免时钟漂移造成误下线。
+`AgentAuthSuccess.heartbeat_interval_ms` 是该 Control Session 的 Server 权威值，必须满足 `0 < heartbeat_interval <= heartbeat_timeout / 3`。Agent 认证成功后立即采用，不能继续使用本地旧默认值。Server 以本地单调时钟记录“最后一次成功收到 Heartbeat”的时间并判断 Timeout，不使用客户端 `timestamp_ms` 计算存活，避免时钟漂移造成误下线。
 
 Agent：
 
@@ -1910,6 +2145,18 @@ CLOSED
 ```text
 ACTIVE → IDLE
 ```
+
+WorkConn 消息方向与状态固定为：
+
+| Message / Data | 方向 | 合法状态 |
+| --- | --- | --- |
+| WorkHello | Agent → Server | AUTHENTICATING |
+| WorkReady | Server → Agent | AUTHENTICATING |
+| OpenRequest | Server → Agent | IDLE；收到后原子进入 OPENING |
+| OpenResponse | Agent → Server | OPENING |
+| RAW Bytes | 双向 | ACTIVE |
+
+WorkConn 在 RAW 之前不使用 Envelope，每个方向和状态只有一种合法的裸 Message 类型，因此禁止通过“先尝试解码哪个 Message”推断类型。正常的认证/打开拒绝只能通过期望状态中的 `WorkReady.status/error_code` 或 `OpenResponse.status/error_code` 表达。错误方向、重复的非幂等 Frame、状态不允许的 Frame、Unknown Field 或 `work_id/connection_id` 不匹配时，接收端直接关闭对应 WorkConn，不发送额外结构化 Error Frame。任何一方都不得在 `OPEN_OK` 前发送 RAW，也不得在进入 ACTIVE 后重新解释或发送结构化 Frame；ACTIVE 中的错误只能通过关闭/Half-Close 表达。
 
 ---
 
@@ -2348,6 +2595,8 @@ CREATE TABLE tunnels (
     name TEXT NOT NULL,
 
     enabled INTEGER NOT NULL DEFAULT 1,
+
+    version INTEGER NOT NULL DEFAULT 1,
 
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -2811,6 +3060,41 @@ Server：
 /data/pki/server.epoch
 ```
 
+Agent 不再把单独的 `config-sign.pub` 视为权威信任状态。Agent 端固定使用：
+
+```text
+<data-dir>/identity/trust-state.pb
+```
+
+保存完整、可恢复的本地信任状态。该文件是本地持久化格式，不是线上 Protocol Message：
+
+```protobuf
+message AgentTrustState {
+    uint32 format_version = 1;
+
+    SigningKey current_key = 2;
+    SigningKey next_key = 3;
+
+    string current_epoch = 4;
+
+    EpochTransition pending_epoch_transition = 5;
+    ConfigKeyTransition pending_key_transition = 6;
+
+    uint64 observed_revision = 7;
+    bytes snapshot_sha256 = 8;
+
+    bytes last_key_transition_hash = 9;
+    bytes last_epoch_transition_hash = 10;
+}
+
+message SigningKey {
+    string key_id = 1;
+    bytes public_key = 2;
+}
+```
+
+`format_version` 在 V0.1 固定为 `1`。读取到未知格式版本、非法 Key 长度、Key ID 与 Public Key 不匹配、Epoch 为空但已存在 Snapshot，或 TrustState 与 Snapshot 无法恢复到同一提交时，Agent 必须快速失败并给出本地恢复错误，禁止重新 TOFU 或覆盖 Pin。
+
 Agent 首次认证成功后获得：
 
 ```text
@@ -2830,6 +3114,7 @@ message ConfigKeyTransition {
     bytes next_public_key = 3;
     uint64 valid_from_revision = 4;
     bytes signature_by_current = 5;
+    string transition_id = 6;
 }
 
 message EpochTransition {
@@ -2839,6 +3124,7 @@ message EpochTransition {
     bytes signature_by_current = 4;
     string current_key_id = 5;
     uint64 valid_from_revision = 6;
+    string transition_id = 7;
 }
 
 message ConfigAck {
@@ -2847,6 +3133,10 @@ message ConfigAck {
     string observed_server_epoch = 3;
     ConfigApplyStatus apply_status = 4;
     ErrorCode error_code = 5;
+    string transition_id = 6;
+    bytes transition_artifact_sha256 = 7;
+    string observed_next_signing_key_id = 8;
+    string observed_next_server_epoch = 9;
 }
 
 enum ConfigApplyStatus {
@@ -2866,12 +3156,33 @@ Transition 的签名输入固定为：
 || deterministic_protobuf(EpochTransitionWithoutSignature)
 ```
 
-计算时清空 `signature_by_current`，并沿用 Snapshot 的 deterministic protobuf 与未知字段规则。ConfigAck 必须回报完整 Revision、Key ID、Epoch 和 Apply 结果，供 Server 判断是否可以结束过渡期。
+计算时清空 `signature_by_current`，并沿用 Snapshot 的 deterministic protobuf 与未知字段规则。`transition_id` 是 Server 生成并持久化的不变 ID，纳入被签名内容。
+
+Transition Artifact Hash 的字节定义固定为：
+
+```text
+SHA-256(
+  deterministic_protobuf(
+    完整 ConfigKeyTransition 或 EpochTransition
+    （包含 transition_id 与 signature_by_current）
+  )
+)
+```
+
+该 Hash 不包含外层 `ControlEnvelope`、UVarint Length 或 TLS Record 字节。Config Key 和 Epoch Transition 的 Golden Vector 必须同时固定 deterministic Artifact Bytes 与该 SHA-256。
+
+ConfigAck 语义固定为：
+
+- 普通 Snapshot Ack：`transition_id` 与两个 `observed_next_*` 字段必须为空；`observed_signing_key_id/observed_server_epoch` 表示已持久化的 Current 值。
+- Key Transition Ack：必须同时携带已持久化的 `transition_id`、按上述定义计算的 Artifact SHA-256 和 `observed_next_signing_key_id`；`observed_next_server_epoch` 必须为空。
+- Epoch Transition Ack：必须同时携带已持久化的 `transition_id`、按上述定义计算的 Artifact SHA-256 和 `observed_next_server_epoch`；`observed_next_signing_key_id` 必须为空。
+
+Transition 成功 Ack 的其余字段也是唯一的：`observed_revision`、`observed_signing_key_id` 和 `observed_server_epoch` 必须等于 durable TrustState 中的 Current 值，`apply_status=CONFIG_APPLIED`，`error_code=ERROR_CODE_OK`。Server 只在 Ack 的 Current 字段、Transition ID、Artifact Hash 和目标 Next 值全部与 Journal/Installation 状态一致时才标记该 Installation `ACKED`。字段缺失、类型混用或值不一致均不得推进过渡状态。Transition 签名、ID 或语义校验失败时发送 `ControlEnvelope.Error{PROTOCOL_ERROR}` 并关闭，不发 ConfigAck；本地 Persist/fsync/rename 失败时直接关闭 Session 且不 Ack，重连后由 Server 重发同一 Artifact。
 
 首次 Pin 只允许发生在：
 
 ```text
-Agent 本地不存在 config-sign.pub
+Agent 本地不存在 trust-state.pb
 +
 Agent Gateway TLS 已按 public CA 或 server SPKI pin 验证成功
 +
@@ -2926,6 +3237,30 @@ CREATE TABLE installation_transition_acks (
 
 Config Key 与 Epoch 过渡都写入持久化 Transition Journal。顺序固定为：生成 Transition → 使用旧 Key 签名 → 连同旧值、新值、起始 Revision、Ack 集合原子持久化 → fsync → 才切换 Current 并开始发送。进程崩溃后必须从 Journal 恢复同一个过渡，不得重新随机生成或覆盖旧 Artifact。
 
+Agent 收到 Key/Epoch Transition 后，必须先用 Current Key 验证签名并检查 ID、Revision 和 Epoch，再计算完整 Artifact 的 SHA-256。完全相同 Hash 的重复 Transition 幂等，可重新 Ack；同一 `next_key_id` 或目标 Epoch 对应不同 Artifact/Key 内容时，以 `PROTOCOL_ERROR` 拒绝且不得覆盖 TrustState。
+
+Transition 落盘顺序固定为：
+
+```text
+Verify Transition
+ ↓
+Build New AgentTrustState
+ ↓
+write trust-state.pb.tmp
+ ↓
+fsync(file)
+ ↓
+atomic rename → trust-state.pb
+ ↓
+fsync(identity directory)
+ ↓
+Atomic Swap In-memory TrustState
+ ↓
+ConfigAck（携带 Transition ID + Artifact Hash + observed Next Key/Epoch）
+```
+
+Ack 只能表示对应 TrustState 已经 durable，不能在临时文件写入后提前发送。该 Ack 必须使用上述显式 Transition 字段，不得用 Current 字段暗示 Next 已落盘。
+
 Gateway TLS Key、Config Signing Key、`server_epoch` 和 SQLite 必须纳入同一套一致性备份。丢失旧 Signing Key 时不得自动生成新 Key 后继续推送配置。
 
 ---
@@ -2979,14 +3314,26 @@ Validate Config
  ↓
 Build New Resolver
  ↓
-Persist Snapshot
+write + fsync config/snapshot.next
  ↓
-Atomic Swap
+fsync config directory
+ ↓
+write + fsync identity/trust-state.pb.tmp
+ ↓
+atomic rename trust-state.pb.tmp → trust-state.pb
+ ↓
+fsync identity directory（持久化提交点）
+ ↓
+atomic rename snapshot.next → snapshot.pb
+ ↓
+fsync config directory
+ ↓
+Atomic Swap Runtime Resolver
  ↓
 ConfigAck
 ```
 
-Persist 失败时不得切换运行态或发送 ConfigAck。Persist 成功后的 Resolver Swap 必须是不可失败操作。
+新 TrustState 的 `observed_revision`、`snapshot_sha256`、Current/Next Key 和 Epoch 必须与 Candidate Snapshot 一致。`trust-state.pb` 的 atomic rename 是逻辑切换点，随后 `fsync(identity directory)` 成功返回才是 durable commit point。二者之间崩溃时，文件系统允许恢复到旧或新目录项；重启必须根据 TrustState 中的 `observed_revision/snapshot_sha256`、`snapshot.pb` 和 `snapshot.next` 的 Hash 按第 71 节规则幂等收敛，不得仅根据 rename 是否曾返回猜测。任何 Persist、Hash、rename 或目录 fsync 失败时不得切换运行态或发送 ConfigAck。Durable Commit 后的 Resolver Swap 必须是不可失败操作。
 
 Apply 必须：
 
@@ -3002,17 +3349,29 @@ Agent：
 
 ```text
 <data-dir>/config/snapshot.pb
+
+<data-dir>/config/snapshot.next
+
+<data-dir>/identity/trust-state.pb
 ```
 
-写入：
+重启恢复规则：
 
 ```text
-temp
- ↓
-fsync
- ↓
-atomic rename
+TrustState.snapshot_sha256 == snapshot.pb SHA-256
+→ 删除无关 snapshot.next，正常加载
+
+TrustState.snapshot_sha256 == snapshot.next SHA-256
+→ 完成 snapshot.next → snapshot.pb promote + fsync
+
+TrustState 仍指向旧 snapshot.pb，存在不同 Hash 的 snapshot.next
+→ 提交点前遗留，删除 snapshot.next
+
+TrustState 与 snapshot.pb / snapshot.next 均不匹配
+→ 快速失败，禁止猜测恢复或重新 Pin
 ```
+
+写入 `snapshot.next` 后必须先 fsync 文件和 `config` 目录，确保 TrustState 提交后至少存在一份可恢复的新 Snapshot。恢复完成前不得连接 Gateway 或发送 observed Revision。加载 Last Known Config 时同样执行 Snapshot Signature、Unknown Field、Hash、Revision、Key 和 Epoch 全量校验，不能因为文件来自本地磁盘就跳过。
 
 Server 暂时不可连接：
 
@@ -3067,6 +3426,51 @@ Web Console
 ```
 
 HTTP 默认期望状态范围为 `200-399`。任何自定义范围、成功阈值和失败阈值都必须持久化并随 Snapshot 下发，禁止只保存在 UI 状态中。
+
+每个 Agent Instance 只能运行一个中心化 Health Scheduler，禁止为每个 Binding 启动独立永久 Ticker/Goroutine。调度器固定包含：
+
+```text
+Timing Heap / Timing Wheel
++
+Global Semaphore
++
+Per-Origin Semaphore
++
+Rate Limiter
++
+Report Batcher
+```
+
+Agent 默认契约：
+
+```yaml
+health:
+  max_concurrent: 64
+  max_checks_per_second: 50
+  max_concurrent_per_origin: 4
+  initial_jitter: 1.0
+  interval_jitter: 0.2
+  report_flush_interval: 1s
+  report_batch_size: 128
+```
+
+首次检查在 `[0, interval]` 均匀随机分散；后续检查间隔为 `interval × random(0.8, 1.2)`。Rate/Concurrency 已满时，Scheduler 只能在仍可满足该 Binding 的配置 Interval 和 Stale TTL 时短暂排队；无法满足时必须报告 `HEALTH_BUDGET_EXCEEDED`，不能静默把 10 秒检查拖成更长周期后继续显示正常。
+
+V0.1 产品容量约束：
+
+```text
+health-enabled bindings × online replicas
+<= 2000 / logical agent
+
+global scheduled health targets
+<= 50000 / Server
+```
+
+Management 写入必须按事务内 Candidate Binding 与当前在线 Replica 数预检；新 Instance 认证导致预算超限时，Server 返回可重试的 `HEALTH_BUDGET_EXCEEDED` Auth Failure 和 `retry_after_ms`，不建立半可用 Session。相关数值属于第 156 节唯一 Limits 契约，可经 Benchmark 调整，但不得移除这一预算维度。
+
+Management Candidate 和 Control Auth 必须通过同一个内存 `HealthTargetBudgetManager` 执行原子 `Reserve → Commit/Release`，禁止先分别读取计数再决定。配置写入先按 Candidate Delta 预留，再执行短 SQLite 事务；事务失败释放 Reservation，提交成功后 Commit 并触发 Reconcile。
+
+Runtime Health Budget 的唯一所有权 Key 是 `(agent_id, instance_id)`，`session_generation` 只用于 fencing，不作为额外计费对象。首个 Session 在发布到 Runtime Registry 前，按该 Agent 当前 health-enabled Binding 数预留并 Commit；同一 Instance 重连时，必须按 `AgentRuntime.mu → HealthTargetBudgetManager.mu` 的唯一锁顺序将已有 Reservation 原子转移给新 generation，不得重复计费。`HealthTargetBudgetManager.mu` 持有期间禁止反向获取任何 `AgentRuntime.mu`；需要跨多个 Agent 重算时，必须先在各 Agent Lock 内生成不可变 Delta，释放 Agent Lock 后再单独进入 Budget Lock，不允许同时持有多个 Agent Lock。旧 generation cleanup 因 CAS 失败时不得释放新 generation 持有的 Reservation；只有 Instance Runtime 最终删除或 Tombstone 结束时才按所有权 Key 释放。首次预留失败则发送 Auth Failure，不发布半可用 Session。Budget Lock 内禁止 SQLite、网络 IO 或等待 Channel。Server Restart 从 SQLite Desired State 和重建中的唯一 Instance Runtime 重新计算，任何计数不变量破坏都阻止对应 Session/Config 发布，而不是产生负数或超额 Target。
 
 ---
 
@@ -3168,6 +3572,11 @@ message TunnelHealth {
 
     uint64 binding_revision = 6;
 }
+
+message TunnelHealthBatch {
+    uint64 generation = 1;
+    repeated TunnelHealth items = 2;
+}
 ```
 
 Health 是：
@@ -3182,6 +3591,8 @@ Per Tunnel
 Health Report 必须绑定产生它的 `binding_revision`，值取对应 `TunnelBindingConfig.required_revision`。Server 只接受它与 SQLite/Runtime 中该 Tunnel 当前 `required_revision` 完全相等的报告；旧 Revision 或未知 Revision 全部丢弃，不能覆盖新状态。`checked_at_ms` 只用于 UI/日志展示，不参与新旧裁决；Health 新鲜度使用 Server 本地 monotonic `received_at` 与配置的 Stale TTL 判断，禁止比较 Agent 与 Server 的 wall clock。Agent-level Revision 因其他 Tunnel 变化而递增时，未变化 Tunnel 的 Health Checker 不必重启。
 
 Agent 应用新 Snapshot 时，必须先取消受影响 Tunnel 的旧 Health Checker，并把对应状态原子重置为 `UNKNOWN`，再启动带新 Revision 的检查。启用 Health Check 的 Tunnel 只有在新 Revision 首次检查成功后才可 Eligible；旧 Origin 的 HEALTHY 不能沿用到新 Origin。
+
+Agent 不逐条发送 Health Frame。Report Batcher 在 `report_flush_interval` 到达、累计达到 `report_batch_size`，或进入 Drain 前生成 `TunnelHealthBatch`；同一批次内每个 Tunnel 只保留最新结果。`generation` 在当前 Control Session 内严格递增，Server 丢弃重复或倒退 Batch，但仍以每个 Item 的 `binding_revision` 作为配置新旧的最终裁决。Batch 序列化后仍必须小于 MaxControlFrameSize；超限时按不超过 `report_batch_size` 的子批次拆分，并为每个 Frame 使用新 generation。
 
 Server 在 Binding `required_revision` 变化时也必须立即把所有 Instance 上该 Tunnel 的 Runtime Health 重置为 `UNKNOWN`。Instance Selection 除检查状态为 HEALTHY 外，还必须检查已存 Health 的 `binding_revision == Tunnel required_revision`，因此 ConfigAck 先于新 Health Report 到达也不会短暂放行旧 HEALTHY。
 
@@ -3985,6 +4396,7 @@ error_code
 0x3001 WORK_POOL_EXHAUSTED
 0x3002 AGENT_BUSY
 0x3003 OPEN_DRAINING
+0x3004 HEALTH_BUDGET_EXCEEDED
 
 0x4001 TOKEN_INVALID
 0x4002 TOKEN_REVOKED
@@ -3999,6 +4411,8 @@ error_code
 0x6001 INTERNAL_ERROR
 ```
 
+以上分类和值必须在 M0.5 原样写入 `common.proto/ErrorCode`。M0.5 完成后，`.proto` 是唯一 Wire Authority；本文仅保留便于架构阅读的分类镜像，并由 CI 生成检查保证与 Proto 一致。已发布数值永久不得复用。
+
 ---
 
 # 100. Connection ID
@@ -4012,7 +4426,7 @@ conn_<ULID>
 例如：
 
 ```text
-conn_01K5...
+conn_01ARZ3NDEKTSV4RRFFQ69G5FAV
 ```
 
 完整链路：
@@ -4105,7 +4519,7 @@ tcp
 {
   "name": "jenkins",
 
-  "agent_id": "ag_xxx",
+  "agent_id": "ag_01ARZ3NDEKTSV4RRFFQ69G5FAV",
 
   "origin": {
     "scheme": "http",
@@ -4183,6 +4597,8 @@ Revision 规则：
 ```
 
 PATCH、enable、disable、delete 必须复用同一 Application Service 事务规则，禁止各 Handler 自行决定是否递增 Revision。
+
+这些 Service Mutation 还必须在同一事务校验 `tunnels.version == If-Match`，并只把 Aggregate Version 递增一次；Agent `desired_revision` 是否递增仍严格按上述字段变化规则决定。ETag Version 用于管理员并发写保护，Agent Revision 用于配置分发，两者语义独立。
 
 ---
 
@@ -4408,6 +4824,8 @@ CREATE TABLE agents (
     id TEXT PRIMARY KEY,
 
     name TEXT NOT NULL,
+
+    version INTEGER NOT NULL DEFAULT 1,
 
     desired_revision INTEGER NOT NULL DEFAULT 0,
 
@@ -5237,11 +5655,60 @@ ObservedRevision >= RequiredRevision
 READY
 ```
 
+Service Status 必须由 Server 的唯一状态计算模块生成，固定优先级为：
+
+```text
+DISABLED
+>
+APPLY_FAILED
+>
+AGENT_OFFLINE
+>
+CONFIG_SYNCING
+>
+ORIGIN_UNHEALTHY
+>
+NO_CAPACITY
+>
+READY
+```
+
+规范算法：
+
+```go
+switch {
+case !service.Enabled:
+    return DISABLED
+case runtimeApplyFailed:
+    return APPLY_FAILED
+case noConnectedInstance:
+    return AGENT_OFFLINE
+case noInstanceObservedRequiredRevision:
+    return CONFIG_SYNCING
+case healthEnabled && noHealthyRevisionEligibleInstance:
+    return ORIGIN_UNHEALTHY
+case noRuntimeCapacity:
+    return NO_CAPACITY
+default:
+    return READY
+}
+```
+
+`CONFIG_SYNCING` 必须先于 `ORIGIN_UNHEALTHY`，因为旧 Revision Health 明确不可用。该算法只能在 `internal/server/status` 实现一次；Dashboard、Service Detail 和 Web Console 必须展示 API 返回值，禁止在前端或不同 Handler 中重新计算。
+
 `CONFIG_SYNCING` 表示 Desired State 已提交，但尚无满足 Tunnel RequiredRevision 的 Instance。`APPLY_FAILED` 表示 TCP Listener 等 Runtime 副作用无法达到 Desired State；详情必须包含稳定错误码和最近失败时间。
 
 ---
 
 # 134. REST API
+
+REST API 的唯一权威来源固定为：
+
+```text
+api/openapi/openapi.yaml
+```
+
+M5 Handler、TypeScript Client、Mock、DTO 校验和契约测试必须从该文件生成或由 CI 验证一致；本文只定义产品语义。M5 开始前必须冻结全部 Request/Response Schema、Required/Nullable、分页、错误响应、ETag 和 HTTP Status，禁止由 Handler 与 Web 分别维护 DTO。
 
 基础：
 
@@ -5259,6 +5726,76 @@ POST /auth/logout
 GET  /auth/me
 ```
 
+所有 List API 统一使用不透明 Cursor：
+
+```http
+GET /api/v1/services?page_size=50&page_token=...
+```
+
+```json
+{
+  "items": [],
+  "next_page_token": "..."
+}
+```
+
+`page_size` 默认 `50`、最大 `200`；无下一页时 `next_page_token` 为空或省略，具体表现必须在 OpenAPI 中固定。Token 对客户端完全 opaque，Server 不信任其中任何可解码内容，并至少校验 Resource Type、排序字段、最后一条记录和 Filter Hash；客户端不得解析或构造。非法、过期或与当前 Filter 不匹配的 Token 返回 `400 INVALID_PAGE_TOKEN`。
+
+PATCH 统一要求 `Content-Type: application/merge-patch+json`，并使用 JSON Merge 语义的显式 DTO：
+
+```text
+omitted → 不修改
+null    → 仅对 OpenAPI 标记 nullable 的字段执行清空
+value   → 修改为该值
+```
+
+未知字段返回 `400 INVALID_REQUEST`。非 Nullable 字段传 `null` 返回 `422 VALIDATION_FAILED`。嵌套对象的 omitted/null/value 语义必须逐字段生成测试，禁止用 Go 零值猜测“未提供”。
+
+Agent 和 Service 都是 Aggregate Root，`agents.version` 与 `tunnels.version` 是各自并发版本。单个 Resource 的 GET、POST Create 和 PATCH 成功响应返回强 ETag；List Response 不返回 Aggregate ETag：
+
+```http
+ETag: "7"
+```
+
+PATCH、DELETE、Rotate、Revoke、Enable 和 Disable 必须携带单个精确 `If-Match`，不接受 `*`。缺失返回 `428 PRECONDITION_REQUIRED`，语法错误或多值返回 `400 INVALID_IF_MATCH`。Application Service 在同一事务中执行：
+
+```text
+UPDATE aggregate
+SET ..., version = version + 1
+WHERE id = ? AND version = expected
+```
+
+DELETE 使用 `DELETE ... WHERE id = ? AND version = expected`；Action 使用等价的条件 UPDATE。任何路径受影响行数为零时，必须在同一事务内区分 `404 RESOURCE_NOT_FOUND` 与 `412 RESOURCE_VERSION_CONFLICT`，不能把两者都返回 404。
+
+版本不匹配返回 `412 RESOURCE_VERSION_CONFLICT`，不得覆盖其他管理员已经提交的修改。除成功删除的 Resource 外，Action/Mutation 返回新 ETag；涉及 Tunnel/Binding/Route 的 Service 变更，只递增 `tunnels.version` 一次，同时继续遵循第 103 节 Agent Revision 规则。
+
+HTTP Status 固定为：
+
+| HTTP | 语义 |
+| ---: | --- |
+| 200 | GET/PATCH 或带响应 Body 的 Action 成功 |
+| 201 | Resource Created |
+| 204 | 无响应 Body 的 Delete/Action 成功 |
+| 400 | JSON、Header、分页 Token 或请求格式错误 |
+| 401 | 未认证或 Session 失效 |
+| 403 | 已认证但操作不允许 |
+| 404 | Resource 不存在 |
+| 409 | 领域不变量冲突 |
+| 412 | ETag/Version 冲突 |
+| 422 | 业务字段或容量校验失败 |
+| 428 | 缺少必须的 If-Match |
+| 429 | Rate Limited |
+| 500 | Internal Error |
+
+返回 Agent Token、Rotate Token 或其他一次性 Secret 的响应必须包含：
+
+```http
+Cache-Control: no-store
+Pragma: no-cache
+```
+
+不得被 Dashboard Recent Activity、Access Log Body 或前端持久化缓存记录。Settings 页面在 V0.1 只读展示 `/system/config` 的非敏感有效配置和“需重启”标记；不提供修改 Server/Agent 主配置的 API。
+
 ---
 
 # 135. Agent API
@@ -5269,6 +5806,8 @@ POST /agents
 GET /agents
 
 GET /agents/{id}
+
+PATCH /agents/{id}
 
 GET /agents/{id}/instances
 
@@ -5487,6 +6026,16 @@ server {
 
 # 142. Server 配置
 
+Server 配置的唯一机器可读契约为 `configs/server.schema.json`，Agent 配置的唯一机器可读契约为 `configs/agent.schema.json`。JSON Schema 必须与 Go Config Struct、示例配置和配置测试从同一字段清单生成或由 CI 做双向一致性检查。字段类型、默认值、范围、是否必填、Secret 标记和是否可热加载只允许在 Schema 中定义一次；本文示例不构成第二份默认值来源。
+
+覆盖优先级固定为：
+
+```text
+CLI > XTUNNEL_* Environment > YAML > Schema Default
+```
+
+YAML 使用 Strict Decode，未知字段或重复 Key 直接启动失败；未知 CLI Flag 直接失败；`XTUNNEL_*` 命名空间下无法映射到 Schema 的变量直接失败。Duration 统一使用 Go Duration String，大小统一使用整数 Byte。V0.1 不热加载 Server/Agent 主配置；变更后必须显式重启，动态 Service/Binding 配置仍通过 Revision/Snapshot 生效。
+
 推荐：
 
 ```yaml
@@ -5495,6 +6044,11 @@ server:
 
 management:
   listen: "127.0.0.1:8080"
+
+  public_url: "https://admin.example.com"
+
+  allowed_hosts:
+    - "admin.example.com"
 
   trusted_proxies:
     - "127.0.0.1/32"
@@ -5519,30 +6073,20 @@ transport:
   tcp:
     work_acquire_timeout: 2s
 
+control:
+  high_priority_queue: 32
+  normal_queue: 128
+  write_timeout: 5s
+
 tcp_ingress:
   bind: "0.0.0.0"
 
   min_port: 10000
   max_port: 60000
 
-agent:
+agent_runtime:
   heartbeat_interval: 10s
   heartbeat_timeout: 30s
-
-limits:
-  max_agents: 1000
-  max_instances: 5000
-
-  max_bindings_per_agent: 1000
-
-  max_agent_snapshot_bytes: 786432
-  max_active_connections: 20000
-  max_connections_per_agent: 5000
-  max_work_connections: 60000
-  max_idle_work_connections: 20000
-  max_connecting_work_connections: 1000
-  max_pending_opens: 1024
-  max_replay_entries_per_session: 4096
 
 metrics:
   listen: "127.0.0.1:9090"
@@ -5552,6 +6096,18 @@ logging:
   level: info
   format: json
 ```
+
+`management.public_url` 必填，必须是绝对 `https` URL，Path 只能是空或 `/`，并禁止包含 Userinfo、Query 或 Fragment。它规范化为 `scheme + IDNA ASCII host + effective port`。`allowed_hosts` 使用规范化的 `host[:port]`，只补充允许到达 Management Handler 的 Host，不扩大合法 Origin；Host 同样 lowercase、IDNA ASCII、移除尾点并规范化默认端口。
+
+Management 请求先按 `management.trusted_proxies` 得到可信 Scheme/Host，再执行：
+
+```text
+Request Host ∈ {public_url derived host} ∪ allowed_hosts
+
+Login Origin == normalized public_url Origin
+```
+
+开发模式的 Vite Loopback Origin 必须显式进入开发专用 `public_url/allowed_hosts`，不能由 CSRF Handler 猜测，也不能在生产配置中自动放行。`limits` 的完整字段、默认值和范围只以 `configs/server.schema.json` 为准；第 156 节是由 Schema 自动生成或 CI 校验的人类可读镜像，禁止人工独立维护默认值。其他章节中的 YAML 只能作为部署示例。
 
 ---
 
@@ -5583,6 +6139,20 @@ reconnect:
   max_delay: 30s
   jitter: 0.2
 
+control:
+  high_priority_queue: 32
+  normal_queue: 128
+  write_timeout: 5s
+
+health:
+  max_concurrent: 64
+  max_checks_per_second: 50
+  max_concurrent_per_origin: 4
+  initial_jitter: 1.0
+  interval_jitter: 0.2
+  report_flush_interval: 1s
+  report_batch_size: 128
+
 logging:
   level: info
   format: json
@@ -5600,10 +6170,11 @@ logging:
 ├── agent.lock
 │
 ├── identity/
-│   └── config-sign.pub
+│   └── trust-state.pb
 │
 └── config/
-    └── snapshot.pb
+    ├── snapshot.pb
+    └── snapshot.next     # 仅 Apply/Crash Recovery 期间存在
 ```
 
 权限：
@@ -5612,6 +6183,10 @@ logging:
 directory 0700
 
 token 0600
+
+trust-state.pb 0600
+
+snapshot.pb / snapshot.next 0600
 ```
 
 ---
@@ -5738,9 +6313,10 @@ Jitter
 Session 断开：
 
 ```text
-Instance
+CAS 清除该 generation 的 CurrentSession
  ↓
-OFFLINE
+无旧 ActiveWork：从 Runtime Registry 删除
+仍有旧 ActiveWork：保留不可选择 Tombstone
 ```
 
 Server：
@@ -5807,7 +6383,7 @@ session_id 改变
 
 旧 Active WorkConn 可继续直到完成。
 
-重连时 Server 为该 Instance 递增 `session_generation`。旧 Session cleanup 必须携带旧 generation，并通过 Compare-And-Swap 确认自己仍是 Current Session；否则只能清理属于旧 Session 的 Idle/Active Registry 项，禁止修改新 Session 状态。
+重连时 Server 为该 Instance 递增 `session_generation`。旧 Session cleanup 必须携带旧 generation，并通过 Compare-And-Swap 确认自己仍是 Current Session；若 CAS 失败，只能清理属于旧 Session 且尚未 ACTIVE 的 Idle/Opening Registry 项，禁止修改新 Session 状态。旧 `ActiveWork` 仍在全局 Registry 中，只能自然结束，或由 Revoke / 明确 drain timeout 路径通过其自身 `closeOnce` 关闭。
 
 ---
 
@@ -6009,7 +6585,13 @@ limits:
 
   max_instances: 5000
 
+  max_instances_per_agent: 100
+
   max_bindings_per_agent: 1000
+
+  max_health_targets_per_agent: 2000
+
+  max_health_targets_global: 50000
 
   max_agent_snapshot_bytes: 786432
 
@@ -6037,6 +6619,8 @@ limits:
 
   max_pending_auth: 512
 
+  max_pending_tls_handshakes: 512
+
   max_replay_entries_per_session: 4096
 
   max_control_frame_bytes: 1048576
@@ -6049,6 +6633,8 @@ limits:
 ```
 
 WorkConn 全局预算包含 Connecting、Idle、Opening 和 Active。每个 Instance 的 `target_idle` 是 best effort，只能通过 Server 发放的 WorkDemand Budget Lease 补池；达到全局 Idle/FD 预算后不得继续建连。Budget Manager 必须同时实施 per-agent 和 per-instance 公平份额，并为有真实 Pending OPEN 的 Agent 保留最小可用额度，禁止某个拥有大量 Replica 的 Agent 抢占全部 Idle。
+
+`configs/server.schema.json` 是所有 Server 硬限制的唯一机器权威和默认值来源。第 156 节只是由 Schema 生成或经 CI 反向校验的人类可读镜像，不得独立修改。`max_instances_per_agent` 在 Control Auth Commit 前执行；Health 两级 Target Budget 在 Management Candidate 校验和新 Instance Auth Commit 前执行。各 Limit 自其所属里程碑起必须进入真实分配/状态转换路径，不能只解析配置或只上报 Metric：Data Plane/Frame/Queue/FD Limit 从 M1 生效，Health Target Budget 从 M3 生效，HTTP 入口限制从 M4 生效。M7 允许根据 Benchmark 调整默认值，但不能第一次实现这些上限。
 
 公网公平性限制分两层：Active Connection 上限和 Accept/Open Rate Token Bucket。Raw TCP 使用实际 Peer IP；HTTP 使用第 91 节 Trusted Proxy 规则得到的 normalized client IP。HTTP 还执行可配置的请求速率限制，不能只限制底层长连接。所有 per-source 状态使用有容量上限和过期时间的分片 LRU；运维可按 NAT 场景调整数值，但不能绕过 Agent/Tunnel/Global 上限。
 
@@ -6095,6 +6681,9 @@ TLS Handshake
 
 Agent Authentication
 10s
+
+Auth Result Write
+5s
 
 HTTP Header Read
 10s
@@ -6227,6 +6816,10 @@ xtunnel_egress_bytes_total
 
 xtunnel_origin_errors_total
 
+xtunnel_health_targets
+
+xtunnel_health_budget_rejections_total
+
 xtunnel_gateway_certificate_expiry_seconds
 ```
 
@@ -6242,6 +6835,10 @@ xtunnel_agent_tcp_active
 xtunnel_agent_origin_connect_total
 
 xtunnel_agent_origin_errors_total
+
+xtunnel_agent_health_checks_in_flight
+
+xtunnel_agent_health_budget_exceeded_total
 
 xtunnel_agent_config_revision
 ```
@@ -6397,6 +6994,8 @@ xtunnel/
 │   └── systemd/
 │
 ├── configs/
+│   ├── server.schema.json
+│   └── agent.schema.json
 │
 ├── docs/
 │   ├── architecture/
@@ -6407,7 +7006,14 @@ xtunnel/
     ├── integration/
     ├── e2e/
     ├── benchmark/
-    └── fuzz/
+    ├── fuzz/
+    └── golden/
+        └── protocol-v1/
+            ├── workhello.json
+            ├── snapshot.json
+            ├── config-key-transition.json
+            ├── epoch-transition.json
+            └── README.md
 ```
 
 Proto 工具链固定使用 Buf 管理，但不引入 gRPC：
@@ -6436,6 +7042,8 @@ git diff --exit-code -- api/proto internal/protocol/gen buf.lock
 ```
 
 CI 调用同一 Wrapper；不得维护另一套安装或生成命令。签名/HMAC 使用的消息必须继续显式调用 deterministic protobuf Marshal，并用跨平台 Golden Vector 验证；生成代码一致不等于签名字节已经正确。
+
+每个 Protocol Golden Vector 必须包含固定 Private/Public Key、`session_secret`、nonce、完整输入字段、deterministic protobuf hex、带 Domain Separator 的 signing input hex、HMAC/Signature hex 和最终 Message hex。测试逐字节比较已有 Fixture；禁止在普通测试运行中自动重写 Fixture。更新 Fixture 必须作为显式 Protocol Review 变更，并同时通过 unknown-field、字段乱序、空字段和签名失败测试。
 
 ---
 
@@ -6506,11 +7114,11 @@ Load/Create Installation ID
  ↓
 Load Token
  ↓
-Load Pinned Gateway Identity + Config Signing Public Key
+Load Pinned Gateway Identity + AgentTrustState（首次安装可不存在）
  ↓
-Load Last Snapshot
+Recover snapshot.next / snapshot.pb Commit
  ↓
-Verify Last Snapshot With Pinned Key
+Verify Last Snapshot Hash + Signature + Revision + Key + Epoch
  ↓
 Generate Instance ID
  ↓
@@ -6560,6 +7168,14 @@ WorkHello Replay Without Wall Clock Dependency
 
 Work Frame Boundary + RAW Handoff
 
+WorkConn Unexpected Structured Message Direct Close Before RAW
+
+Protocol v1 Direction / State Matrix
+
+Protocol v1 Recursive Unknown-field Rejection
+
+Protocol Golden Vector Byte Equality
+
 Frame Decoder
 
 Route Matcher
@@ -6576,6 +7192,14 @@ Snapshot Binding Count + Serialized Size Boundary
 
 Session Generation Fencing
 
+Control Session Single Reader / Single Writer
+
+Control Outbox Priority / Coalescing / Full-close
+
+AgentRuntime Linearization + Lock-free IO Rule
+
+ActiveWork CloseOnce + Counter Exactly-once
+
 Reconcile Generation Monotonicity
 
 Snapshot Signature
@@ -6583,6 +7207,12 @@ Snapshot Signature
 Transition Signature + Journal Recovery
 
 Transition Ack / Exclusion Persistence
+
+Transition Ack ID / Artifact Hash / Observed Next Field Validation
+
+AgentTrustState Transition Idempotency
+
+AgentTrustState / Snapshot Crash Recovery At Every Commit Step
 
 SQLite Repository
 
@@ -6593,6 +7223,12 @@ ConfigWriteCoordinator Serialization
 Health Revision Fencing
 
 WorkDemand Coalescing + Budget Lease Expiry
+
+Health Scheduler Rate / Concurrency / Jitter / Batch
+
+Agent / Instance / Service Status Priority
+
+Strict Config Schema + Override Precedence
 
 Lease / Health / Drain Monotonic Time Semantics
 
@@ -6605,6 +7241,8 @@ Canonical Host + Path Segment Boundary
 Canonical Path Prefix Trailing Slash
 
 Origin DNS / IPv4 / IPv6 Dial Policy
+
+OpenAPI Schema / Nullable PATCH / ETag Contract
 ```
 
 ---
@@ -6636,6 +7274,10 @@ Control Reconnect
 
 Old Session Cleanup After New Session
 
+Old Session Cleanup Preserves ActiveWork
+
+Concurrent Session Replace + Drain + OPEN
+
 WorkConn Registration
 
 OPEN
@@ -6657,6 +7299,12 @@ Concurrent Revision 18 / 19 Reconcile
 Health
 
 Old Revision Health Report Cannot Override New UNKNOWN/UNHEALTHY
+
+Health Batch Generation / Split / Deduplication
+
+Health Target Budget Rejects Config Write And Excess Replica Auth
+
+Health Budget At-capacity Session Replacement Does Not Double Reserve Or Release New Generation
 
 Token Rotation
 
@@ -6684,6 +7332,8 @@ Offline Installation Receives Preserved Key/Epoch Transition
 
 ACK_EXCLUDED Installation Later Catches Up Through Preserved Transition Chain
 
+AgentTrustState Commit-point Crash Before/After Every fsync And rename
+
 Agent/Server Wall Clock Skew ±5min Does Not Expire Lease, Health Or Drain Early
 
 Agent/Server Wall Clock Skew Does Not Affect WorkHello Authentication
@@ -6691,6 +7341,10 @@ Agent/Server Wall Clock Skew Does Not Affect WorkHello Authentication
 Origin DNS Address Change Without Agent Restart
 
 Health And Business Dial Share Resolver / SNI Policy
+
+Concurrent PATCH With Same ETag Returns One Success + One 412
+
+OpenAPI Generated Client / Server Contract Drift Check
 ```
 
 ---
@@ -7089,7 +7743,9 @@ Logging
 
 SQLite Migration
 
-Proto
+Proto Toolchain + Schema Skeleton
+
+OpenAPI Skeleton + Validate
 
 Pinned Buf / protoc-gen-go Toolchain + Generate Drift Check
 
@@ -7107,9 +7763,9 @@ Vite HTTPS Dev Proxy + CSRF Same-origin Flow
 ```text
 Server / Agent 可以启动
 
-Linux amd64 与 arm64 Binary 均可构建；arm64 在原生或受控 Runner 完成启动 + Protocol Smoke
+Linux amd64 与 arm64 Binary 均可构建；arm64 在原生或受控 Runner 完成进程启动 + Config/Shutdown Smoke
 
-OCI amd64/arm64 Image 以前台非 root 进程运行，验证只读镜像、持久化 Data Volume 和 SIGTERM Drain
+OCI amd64/arm64 Image 以前台非 root 进程运行，验证只读镜像、持久化 Data Volume 和 SIGTERM 进程退出/资源释放 Smoke（M0 不要求真实 Session Drain）
 
 systemd 执行 install / start / restart / stop / uninstall Smoke
 
@@ -7117,18 +7773,82 @@ systemd 执行 install / start / restart / stop / uninstall Smoke
 
 CI 使用 `npm ci`，缺失或与 `package.json` 不一致的 Lockfile 直接失败；CI 不自动生成或改写 Lockfile
 
+Server/Agent Config Schema 校验、Strict YAML、CLI/Env/YAML/Default 优先级测试通过
+
+OpenAPI Skeleton Validate 通过且不存在未解析占位 Server URL
+
 Vite HTTPS Proxy 完成 Login / Secure Cookie / CSRF POST / Logout Smoke
 ```
 
 ---
 
-# 179. M1：TCP Data Plane
-
-暂时静态配置。
+# 179. M0.5：Protocol v1 Contract Freeze
 
 完成：
 
 ```text
+common.proto / control.proto / work.proto
+
+固定 package / go_package
+
+完整 Message / Enum / Reserved Range
+
+Control 与 WorkConn 方向/状态矩阵
+
+Recursive Unknown-field Rejection
+
+Deterministic Protobuf 规则
+
+Protocol Golden Vector
+```
+
+验收：
+
+```text
+./tools/proto.sh lint = PASS
+
+./tools/proto.sh breaking = PASS
+
+./tools/proto.sh generate-check = PASS
+
+Golden Vector 逐 byte PASS
+
+Auth Success / Failure Transcript PASS
+
+Auth 裸 Frame 与 Established Envelope 切换边界 PASS
+
+Control / WorkConn 全部非法方向和非法状态 Case PASS
+
+WorkConn 错误方向/状态/Unknown Field 直接关闭 Case PASS
+
+Transition Ack ID / Artifact Hash / observed Next 组合校验 PASS
+
+Auth、Control、Work、Snapshot 及本地 Last Known Snapshot 的全部结构化 Message 递归 Unknown Field Case 均被拒绝
+```
+
+M0.5 是强制 Gate，不是可与 M1 并行补写的文档任务。M0.5 未通过，禁止实现 Server/Agent Protocol Handler；允许继续开发与 Wire Contract 无关的 Lock、Repository、Proxy、Origin Dialer 和测试 Harness。
+
+---
+
+# 180. M1：Secure TCP Data Plane Baseline
+
+M1 使用正式身份和安全协议，但产品能力只要求一个 Agent、一个 Instance、一个静态 Tunnel。
+
+完成：
+
+```text
+Protocol v1 Generated Contract
+
+Agent Entity + Token Verification
+
+Installation ID + Instance ID + Session ID
+
+Runtime Registry + Session Generation Fencing
+
+Control Single Reader / Writer / State Owner
+
+Bounded + Coalesced Control Outbox
+
 Agent Gateway
 
 TLS
@@ -7139,7 +7859,15 @@ Session Secret
 
 WorkConn HMAC
 
+Replay Protection
+
 Work Pool
+
+Budget Lease
+
+Frame / Auth / Queue / Connection Limits
+
+Timeout + FD Budget
 
 OPEN
 
@@ -7148,6 +7876,10 @@ OPEN_OK
 RAW
 
 Half-Close
+
+Baseline Control Reconnect
+
+Baseline Server / Agent Graceful Shutdown
 ```
 
 验收：
@@ -7162,32 +7894,28 @@ Agent
 Echo Origin
 ```
 
-验收必须包含逐字节分片、多个 Frame 合并、`OPEN_OK + RAW 首包` 同一次 Read、Half-Close 和 Context Cancel；断言字节零丢失、零重复，测试结束后 FD 与 goroutine 回到基线。
+验收必须包含逐字节分片、多个 Frame 合并、`OPEN_OK + RAW 首包` 同一次 Read、Half-Close、Context Cancel、Control Reconnect、旧 Session cleanup 不影响新 Session、Outbox 合并/满载关闭以及所有 M1 硬限制生效；断言字节零丢失、零重复，测试结束后 FD 与 goroutine 回到基线。
 
 ---
 
-# 180. M2：Agent Identity + Replica
+# 181. M2：Replica & Credential Lifecycle
 
 完成：
 
 ```text
-Agent Entity
-
-Agent Token
-
-Token Rotation
-
-Installation ID
-
-Instance ID
-
-Session ID
-
-Runtime Registry
-
 Multi Replica
 
 Instance Selection
+
+Installation History
+
+Token Rotation + Revoke
+
+Agent Revoke
+
+Old Session ActiveWork Preservation
+
+Replica Failover
 ```
 
 验收：
@@ -7200,11 +7928,13 @@ Instance Selection
 Server 能独立识别所有 Instance
 
 新连接自动分布
+
+旧 Session ActiveWork 自然完成，Revoke 可跨代关闭
 ```
 
 ---
 
-# 181. M3：Configuration
+# 182. M3：Configuration + Trust + Health
 
 完成：
 
@@ -7219,9 +7949,15 @@ Snapshot
 
 Signature
 
+AgentTrustState
+
+Config Key / Epoch Transition
+
 Origin Resolver
 
-Health Check
+Health Scheduler + Batch Report
+
+Health Target Budget
 ```
 
 验收：
@@ -7232,13 +7968,17 @@ Integration Test 通过 Application Service 修改 Origin
 Agent 无需重启
 
 自动生效
+
+TrustState / Snapshot 在每个 Commit Crash Point 后可恢复
+
+Health Budget 与配置 Interval 均可被自动化验证
 ```
 
 M3 不依赖尚未实现的 Web Console 或 REST Handler。测试直接调用与后续 REST API 共用的 Application Service；M5 只增加 HTTP 契约和界面，不重新实现配置写入逻辑。
 
 ---
 
-# 182. M4：HTTP + TCP Product Data Plane
+# 183. M4：HTTP + TCP Product Data Plane
 
 完成：
 
@@ -7274,12 +8014,28 @@ Raw TCP
 
 ---
 
-# 183. M5：REST API + Web Console
+# 184. M5：OpenAPI + REST API + Web Console
+
+M5 Entry Gate（Handler 和 Web 并行开发前必须通过）：
+
+```text
+OpenAPI 完整冻结
+
+Pagination / PATCH / ETag / Error Schema 完整
+
+Lint + Breaking Check + Generated Contract Drift Check = PASS
+```
+
+入口 Gate 通过后，OpenAPI 在 M5 期间只能通过显式 Contract Change Review 修改，不得由 Handler 或 UI 实现反向定义契约。
 
 完成：
 
 ```text
 Login
+
+Generated OpenAPI Client / Server Contract
+
+Pagination / PATCH / ETag
 
 Dashboard
 
@@ -7302,11 +8058,15 @@ Settings
 日常使用无需操作 SQLite
 
 无需手改 Agent Service Config
+
+并发 PATCH 不丢失更新
+
+OpenAPI Client / Server Contract 零漂移
 ```
 
 ---
 
-# 184. M6：Observability
+# 185. M6：Observability
 
 完成：
 
@@ -7338,22 +8098,20 @@ Protocol Error
 
 ---
 
-# 185. M7：Hardening
+# 186. M7：Hardening
 
 完成：
 
 ```text
-Resource Limits
+Resource Limit / Timeout / Rate Limit 参数调优
 
-Timeout
+Graceful Shutdown Chaos + Deadline / Leak 收敛
 
-Rate Limit
+Reconnect Storm + Backoff / Fencing 收敛
 
-Graceful Shutdown
+Crash Recovery Failpoint 覆盖收敛
 
-Reconnect
-
-Crash Recovery
+磁盘满 / EIO / fsync / rename Failpoint
 
 Race Detector
 
@@ -7368,6 +8126,8 @@ Large Transfer
 Privileged Network Chaos
 ```
 
+M7 不允许第一次实现 Frame、Queue、Auth、Connection、FD 或 Health Budget 上限；这些正确性边界必须从 M1/M3 起存在。M7 只负责压测校准、异常注入、泄漏消除和发布阈值收敛。
+
 完成后：
 
 ```text
@@ -7378,7 +8138,7 @@ XTunnel Standalone Alpha
 
 ---
 
-# 186. 第一阶段最终验收流程
+# 187. 第一阶段最终验收流程
 
 ## 通用通过标准
 
@@ -7391,6 +8151,12 @@ go test -race ./... = PASS，零 Data Race
 
 `./tools/proto.sh lint / breaking / generate-check` = PASS
 
+Protocol v1 Golden Vector + Direction/State Matrix = PASS
+
+Server/Agent JSON Schema 与 Go Config Struct Drift Check = PASS
+
+OpenAPI Validate + Generated Client/Server Contract Drift Check = PASS
+
 npm ci / npm run build = PASS，Lockfile 零漂移
 
 Linux amd64 / arm64 Build Matrix = PASS，arm64 Protocol Smoke = PASS
@@ -7400,6 +8166,12 @@ OCI amd64 / arm64 Manifest + Foreground / Volume / SIGTERM Smoke = PASS
 systemd Install / Restart / Uninstall Smoke = PASS
 
 协议 Fuzz Corpus = PASS，零 Panic / OOM
+
+Control Outbox 满载、Session Replace、Drain/OPEN 并发 = PASS，零 Frame 交错
+
+AgentTrustState / Snapshot 全 Commit Point Crash Recovery = PASS
+
+Health Scheduler Rate/Concurrency/Batch 与两级 Target Budget = PASS
 
 1000 并发连接成功率 >= 99.9%
 
@@ -7545,7 +8317,7 @@ SSH 正常。
 
 ---
 
-# 187. 第一阶段 ADR
+# 188. 第一阶段 ADR
 
 仓库初始化建议立即建立：
 
@@ -7581,11 +8353,25 @@ ADR-014-config-signing.md
 ADR-015-agent-instance-selection.md
 
 ADR-016-no-quic-v0.1.md
+
+ADR-017-proto-is-wire-contract.md
+
+ADR-018-control-session-and-runtime-ownership.md
+
+ADR-019-agent-trust-state-commit.md
+
+ADR-020-status-aggregation.md
+
+ADR-021-config-schema-authority.md
+
+ADR-022-health-scheduler-and-budget.md
+
+ADR-023-openapi-etag-concurrency.md
 ```
 
 ---
 
-# 188. 第一阶段最重要的工程约束
+# 189. 第一阶段最重要的工程约束
 
 开发过程中不得破坏：
 
@@ -7630,11 +8416,27 @@ ADR-016-no-quic-v0.1.md
 19. 配置同步必须使用 Revision。
 
 20. Snapshot 必须签名。
+
+21. `.proto` 是唯一 Wire Contract，M0.5 未通过不得实现协议 Handler。
+
+22. 每条 Control Session 只能有一个 Reader、一个 Writer、一个 State Owner。
+
+23. Runtime State 在 AgentRuntime Lock 下线性化，锁内禁止 IO、阻塞和 Conn.Close。
+
+24. Agent TrustState 与 Snapshot 必须按持久化提交点恢复到同一代。
+
+25. Agent/Instance 不聚合 Origin Health；Service Status 只由 Server 统一计算。
+
+26. Server/Agent 主配置以 JSON Schema 为唯一机器可读契约并 Strict Decode。
+
+27. Health Check 必须中心调度、批量上报并服从两级 Target Budget。
+
+28. REST API 以 OpenAPI 为唯一契约，Mutation 使用 ETag/If-Match 防止丢失更新。
 ```
 
 ---
 
-# 189. 第一阶段最终产品形态
+# 190. 第一阶段最终产品形态
 
 最终：
 
