@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M0 工程初始化
 >
-> **当前结论**：`M0-05` 已通过用户 Code Review、因尚未提交保持 `REVIEW`；`M0-06` 已完成实现、独立复审与本地/WSL 验收，状态为 `REVIEW`，等待用户 Code Review
+> **当前结论**：`M0-05`、`M0-06` 与 Bootstrap 结构调整已有本地提交 `8c883b0ef242`；`M0-05` 因结构调整仍待用户 Code Review 保持 `REVIEW`，`M0-06` 已完成实现、独立复审与本地/WSL 验收，状态为 `REVIEW`，等待用户 Code Review
 
 ---
 
@@ -514,7 +514,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 ## 2026-08-24 · M0-05 · REVIEW
 
 - 负责人：Codex。
-- Commit/PR：用户 Code Review 已通过；按用户要求尚未提交或推送。
+- Commit/PR：`8c883b0ef2428548e98ed6cb99f65150f7571d81`（本地提交，未推送）；原实现已通过用户 Code Review，Bootstrap 结构调整仍待复审。
 - 产物：Stable Data Target 解析与 Canonical 校验；Linux `/run/xtunnel/server-lock-<sha256>.lock` 非阻塞 External Lock；Pending Restore Journal 启动前检测；基于 `gorm.io/gorm v1.31.2` 和纯 Go `github.com/libtnb/sqlite v1.2.2` 的 SQLite Store；`schema_migrations(version, applied_at)` 首个显式 forward-only Migration；Server 启停顺序与资源释放接入。选择纯 Go Driver 是为了保持 Linux amd64/arm64 的 `CGO_ENABLED=0` 构建，不引入交叉 C 工具链。
 - 验收命令：`$env:GOTOOLCHAIN='local'; ./tools/check-go-version.ps1`；`gofmt`；`go mod tidy`；`go mod verify`；`go test ./...`；`go test -race ./internal/server/datadir ./internal/repository/sqlite ./cmd/server`；`go test -cover ./internal/server/datadir ./internal/repository/sqlite ./cmd/server`；`go vet ./...`；`git diff --check`；`CGO_ENABLED=0` 的 Linux amd64/arm64 Test Binary 与 Server/Agent Binary 交叉编译；WSL 执行 Linux amd64 Data Target、External Lock、SQLite、Server、Agent Test Binary，并以普通 Runtime UID 与 root 分别执行 External Lock Suite。
 - 验收结果：用户已在开工前确认 GORM/SQLite/x/sys 精确依赖、间接依赖与首个数据库 Schema；Go 1.27.0 本地工具链、全包测试、定向 Race、Vet、格式、依赖校验和跨架构纯 Go 编译通过；WSL Linux amd64 测试全部通过，覆盖跨进程抢锁、锁前不触碰数据库、Journal 先于 leaf、root 离线维护复用锁、多物理连接 PRAGMA/外键、全新库、幂等启动、高版本拒绝、SQL 错误/Context 取消原子回滚和修复后继续 Migration。三路独立只读复审均无剩余阻断。
@@ -524,7 +524,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 ## 2026-08-24 · M0-06 · REVIEW
 
 - 负责人：Codex。
-- Commit/PR：待用户 Code Review；按用户要求尚未提交或推送。
+- Commit/PR：`8c883b0ef2428548e98ed6cb99f65150f7571d81`（本地提交，未推送）；待用户 Code Review。
 - 产物：Buf v2 Module/Generate 配置（使用 `clean: true` 清理纯生成目录）；空 `api/proto` 骨架；`STANDARD` Lint（仅排除与冻结平铺路径冲突的 `PACKAGE_DIRECTORY_MATCH`）与 `FILE` Breaking Policy；固定 Buf `v1.72.0`、`protoc-gen-go v1.36.12`、Linux amd64/arm64 官方分发包 SHA-256 的 `tools/versions.env`；使用 `go 1.27` / `toolchain go1.27.0` 与 Go `tool` directive 的独立 `tools` Module；只使用 `.tools/bin` 的 POSIX Bootstrap 和 `lint`、`breaking`、`generate-check` Wrapper；`.tools` 忽略规则与 Shell LF 属性。当前没有外部 Proto module 依赖，Buf 明确不生成 `buf.lock`，未手写空文件。
 - 验收命令：`$env:GOTOOLCHAIN='local'; ./tools/check-go-version.ps1`；`tools/go.mod` 下 `go mod tidy`、`go mod verify` 与 `go build -mod=readonly`；WSL 中首次/二次 `bootstrap-proto.sh`；Buf/Generator 版本、amd64/arm64 SHA-256 与 Go Build Metadata 检查；`sh -n`、`dash -n`、`bash --posix -n`；`proto.sh lint|breaking|generate-check`；真实临时 Proto Lint、无 Baseline 硬失败、生成漂移和孤立 `*.pb.go` 失败用例；伪造 PATH 工具隔离；根 Module `go test ./...`、`go vet ./...`；`git diff --check`。
 - 验收结果：根/工具 Module 均固定 Go 1.27.0 且 `GOTOOLCHAIN=local`；工具 Module 校验和通过，Linux amd64 Generator 由固定 Module 构建并运行，Linux arm64 Generator 交叉构建通过；两个 Buf 官方发行包 SHA-256 均实测匹配。Bootstrap 首次安装与第二次幂等运行通过；三个空骨架命令按契约输出 `SKIP`，不宣称 Protocol Gate PASS。真实临时 Proto 通过 Lint，Breaking 在无初始 Baseline 时拒绝，Generate Check 检出 staged/untracked 漂移和孤立生成物，`clean: true` 实测删除旧生成物，伪造 PATH 未被使用；根 Module 全包测试和 Vet 通过。
@@ -534,7 +534,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 ## 2026-08-24 · M0-03/M0-05 · 结构复审
 
 - 负责人：Codex。
-- Commit/PR：待用户 Code Review；按用户要求未执行暂存、提交或推送。
+- Commit/PR：`8c883b0ef2428548e98ed6cb99f65150f7571d81`（本地提交，未推送）；待用户 Code Review。
 - 产物：`cmd/server` 与 `cmd/agent` 均只保留单一 `main.go` 进程入口；CLI、配置装载、日志、信号生命周期和资源编排下沉到 `internal/server/bootstrap`、`internal/agent/bootstrap`；Server 的 Stable Data Target、External Lock、Restore Journal、Canonical Data Directory 与 GORM/SQLite 启动顺序保持不变。
 - 验收命令：`gofmt`；`go test ./internal/agent/bootstrap ./internal/server/bootstrap ./cmd/agent ./cmd/server`；`go test ./...`；`go test -race ./internal/agent/bootstrap ./internal/server/bootstrap`；`go test -cover ./internal/agent/bootstrap ./internal/server/bootstrap`；`go vet ./...`；Linux amd64 `CGO_ENABLED=0` Binary/Test Binary 交叉编译；WSL 执行两组 Test Binary，并对实际 Server/Agent Binary 执行真实 `SIGTERM` Smoke。
 - 验收结果：命令目录仅剩两个 `main.go`，依赖方向固定为 `cmd → internal/*/bootstrap`；迁移后的单元测试、Race、Vet、Linux Test Binary 和真实进程 Smoke 全部通过。Agent/Server 均输出 `process_started`、收到 `SIGTERM` 后输出 `process_stopped` 并以退出码 0 结束；Server 实际创建 `xtunnel.db` 和 Data Directory 外的 External Lock。
