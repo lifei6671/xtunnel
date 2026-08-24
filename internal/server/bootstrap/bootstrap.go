@@ -42,7 +42,7 @@ func executeWithRun(
 	return 0
 }
 
-// run 完成 Server 的配置、日志、External Lock 和 SQLite 初始化，并保持前台运行直到收到退出信号。
+// run 完成 Server 的配置、日志、Web 资源、External Lock 和 SQLite 初始化，并保持前台运行直到收到退出信号。
 // 后续任务会在 SQLite 已就绪且 External Lock 仍被持有时继续接入 PKI 和 Listener。
 func run(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
 	return runWithStorage(ctx, program, args, environ, stderr, func(ctx context.Context, dataDir string) (storage, error) {
@@ -66,6 +66,9 @@ func runWithStorage(ctx context.Context, program string, args, environ []string,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize server logging: %w", err)
+	}
+	if err := validateEmbeddedWeb(); err != nil {
+		return fmt.Errorf("initialize embedded web: %w", err)
 	}
 	resources, err := openStorage(ctx, config.Server.DataDir)
 	if err != nil {

@@ -33,6 +33,33 @@ OpenAPI 机器契约固定为 3.1.0，并使用仓库锁定的 vacuum 校验。�
 
 当前 `api/openapi/openapi.yaml` 只有可校验骨架，Server 固定为同源基路径 `/api/v1`，尚不包含业务路径或 DTO。Validate 通过只代表 M0 骨架和基路径约束有效，不代表 M5 REST Contract Gate 已通过。
 
+Web 工程固定使用 Node 24.19.0、npm 11.17.0，直接依赖由 `web/package-lock.json` 精确锁定。生产构建必须先于任何会编译 `web` Go Package 的命令：
+
+```powershell
+Push-Location web
+npm ci
+npm run build
+Pop-Location
+
+$env:GOTOOLCHAIN='local'
+go test ./...
+go build ./cmd/server
+```
+
+`web/dist` 是被忽略的可重复构建产物，不提交占位文件；缺少生产构建时 Go Embed 会直接编译失败。当前页面只是 React/Vite 工程骨架，不包含业务 DTO、API Client 或真实管理页面。
+
+本地开发只允许 HTTPS。将两个环境变量指向仓库外已信任的 Loopback Certificate 和 Private Key，并把 `management.public_url` 配置为浏览器实际使用的 Vite HTTPS Origin：
+
+```powershell
+$env:XTUNNEL_DEV_TLS_CERT='C:\path\to\loopback-cert.pem'
+$env:XTUNNEL_DEV_TLS_KEY='C:\path\to\loopback-key.pem'
+npm --prefix web run dev
+
+./tools/test-web-proxy.ps1
+```
+
+开发代理只转发 `/api/v1` 到 `127.0.0.1:8080`，并保留 Host/Origin。缺少证书时不会降级 HTTP；脚本 Smoke 只验证 HTTPS 和代理机械链路，真实 Login、Secure Cookie、CSRF 与 Logout E2E 留到 M5。
+
 两个进程使用相同的配置入口：
 
 ```text

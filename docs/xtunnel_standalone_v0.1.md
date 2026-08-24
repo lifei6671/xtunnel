@@ -5166,6 +5166,8 @@ TanStack Table
 
 不使用大型企业 UI Framework。
 
+M0-08 的工程基线固定为 Node `24.19.0`、npm `11.17.0`、React/React DOM `19.2.8`、Vite `8.2.2`、Plugin React `6.1.0`、TypeScript `6.0.2` 和用于管理菜单图标的 `lucide-react 1.34.0`，直接依赖必须精确写入 `package.json` 并由 npm 11 Lockfile 锁定。M0-08 只引入已有真实使用点的 React/Vite/TypeScript 基础与 Lucide 图标；Tailwind CSS、shadcn/ui、React Router 和 TanStack Query 仍是冻结的产品技术方向，在 M5 首次出现真实使用点时分别确认版本并引入，不得以空配置或未使用依赖提前占位。
+
 ---
 
 # 118. 前端目录
@@ -5260,7 +5262,7 @@ Go Management 127.0.0.1:8080
 
 本地开发证书只用于 Loopback，`/api/v1` 代理保留浏览器可见 Host/Origin，并由开发配置显式加入 Management Allowed Hosts。这样 Secure Cookie、Origin 和 CSRF 仍走生产同源模型；禁止为联调增加 `Access-Control-Allow-Origin: *`、关闭 Secure Cookie 或跳过 CSRF。`npm run dev` 与代理配置必须进入 M0 开发说明。
 
-开发者通过 `XTUNNEL_DEV_TLS_CERT` 和 `XTUNNEL_DEV_TLS_KEY` 指向本机已信任的 Loopback Certificate；文件位于仓库外，或位于被 `web/.gitignore` 排除的 `.dev-certs/`，目录权限 `0700`、Key `0600`。缺失证书时 `npm run dev` 必须给出可操作错误并退出，禁止自动提交证书、私钥或静默降级 HTTP。M0 Smoke Test 必须通过 Vite Proxy 完成 Login、Secure Cookie、CSRF POST 和 Logout。
+开发者通过 `XTUNNEL_DEV_TLS_CERT` 和 `XTUNNEL_DEV_TLS_KEY` 指向本机已信任的 Loopback Certificate；文件位于仓库外，或位于被 `web/.gitignore` 排除的 `.dev-certs/`，目录权限 `0700`、Key `0600`。缺失证书时 `npm run dev` 必须给出可操作错误并退出，禁止自动提交证书、私钥或静默降级 HTTP。M0-08 使用临时上游 Fixture 验证 HTTPS、`/api/v1` 代理以及 Host/Origin 保持，只能记为 Proxy Harness 证据；真实 Login、Secure Cookie、CSRF POST 和 Logout E2E 依赖 M5-03 的 Auth Handler 与 Web Login，必须在 M5-10 完成，不得由 M0 Fixture 冒充产品链路。
 
 ---
 
@@ -7826,7 +7828,7 @@ Server/Agent Config Schema 校验、Strict YAML、CLI/Env/YAML/Default 优先级
 
 OpenAPI Skeleton Validate 通过且不存在未解析占位 Server URL
 
-Vite HTTPS Proxy 完成 Login / Secure Cookie / CSRF POST / Logout Smoke
+Vite HTTPS Proxy Harness 验证证书失败、`/api/v1` 转发和 Host/Origin 保持；真实 Login / Secure Cookie / CSRF POST / Logout E2E 留到 M5
 ```
 
 ---
