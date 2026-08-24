@@ -4670,7 +4670,7 @@ xtunnel-server backup restore --input /secure/backup/xtunnel-backup.tar
 
 备份包等同于长期私钥材料。输出文件必须使用 `O_CREATE | O_EXCL`、权限 `0600` 且禁止跟随符号链接；临时目录权限 `0700`，失败必须清理，禁止输出到 stdout 或复用已有目标文件。
 
-`backup restore` 只允许 Server 停止后执行，必须先由 `realpath(parent) + basename` 计算 Stable Data Target、获取同一外部锁，再校验 Manifest/Hash/Schema 兼容性。恢复内容写到同盘 sibling staging 目录，然后按“旧目录 rename 为 rollback → staging rename 为正式目录 → fsync 父目录”的顺序切换。切换前在父目录写入权限 `0600` 的 `.xtunnel-restore-<hash>.journal`，其中记录 Stable Target、staging、rollback、当前 phase 和 Manifest Hash；三条路径都必须校验为同一 `realpath(parent)` 的直接子项。Journal 位于替换边界外且跨重启保留，崩溃后下次 Server/Restore 命令先按 Stable Target 取得同一把锁，再完成或回滚，不能要求 leaf 预先存在。外部锁在整个流程中不变，因此替换 Data Directory 不会替换当前持有的 Lock inode。禁止与现有数据库合并，也禁止只复制 `xtunnel.db` 而遗漏 WAL 或 PKI。集成测试必须覆盖“备份 → Migration → 恢复 → Agent 通过原 Pin 重连”以及两个 rename 之间崩溃后的回滚。
+`backup restore` 只允许 Server 停止后执行，必须先由 `realpath(parent) + basename` 计算 Stable Data Target、获取同一外部锁，再校验 Manifest/Hash/Schema 兼容性。恢复内容写到同盘 sibling staging 目录，然后按“旧目录 rename 为 rollback → staging rename 为正式目录 → fsync 父目录”的顺序切换。切换前在父目录写入权限 `0600` 的 `.xtunnel-restore-<hash>.journal`，文件名中的 `<hash>` 固定为 Stable Data Target 的 SHA-256，Journal 内容另行记录 Manifest Hash；其中还记录 Stable Target、staging、rollback 和当前 phase。三条路径都必须校验为同一 `realpath(parent)` 的直接子项。Journal 位于替换边界外且跨重启保留，崩溃后下次 Server/Restore 命令先按 Stable Target 取得同一把锁，再完成或回滚，不能要求 leaf 预先存在。外部锁在整个流程中不变，因此替换 Data Directory 不会替换当前持有的 Lock inode。禁止与现有数据库合并，也禁止只复制 `xtunnel.db` 而遗漏 WAL 或 PKI。集成测试必须覆盖“备份 → Migration → 恢复 → Agent 通过原 Pin 重连”以及两个 rename 之间崩溃后的回滚。
 
 ---
 
@@ -6935,12 +6935,13 @@ Usage Aggregator
 
 ```text
 xtunnel/
+├── .gitattributes
 ├── .gitignore
 ├── go.mod
 ├── go.sum
 ├── buf.yaml
 ├── buf.gen.yaml
-├── buf.lock
+├── buf.lock                 # 有外部 Proto module 依赖时由 Buf 生成
 ├── tools/
 │   ├── versions.env
 │   ├── go.mod
@@ -6985,6 +6986,7 @@ xtunnel/
 │   │       └── work_conn.go
 │   │
 │   ├── server/
+│   │   ├── bootstrap/
 │   │   ├── app/
 │   │   ├── auth/
 │   │   ├── api/
@@ -7003,6 +7005,7 @@ xtunnel/
 │   │   └── metrics/
 │   │
 │   ├── agent/
+│   │   ├── bootstrap/
 │   │   ├── app/
 │   │   ├── identity/
 │   │   ├── control/
@@ -7057,12 +7060,14 @@ xtunnel/
 Proto 工具链固定使用 Buf 管理，但不引入 gRPC：
 
 ```text
-buf.yaml        → module / lint / breaking policy
+buf.yaml        → v2 module / STANDARD lint / FILE breaking policy
 buf.gen.yaml    → protoc-gen-go 输出到 internal/protocol/gen
-buf.lock        → Proto module lock
+buf.lock        → 存在外部 Proto module 依赖时由 Buf 生成的 lock
 tools/versions.env → 精确 Buf 版本/分发包 SHA-256与预期 Plugin 版本
 tools/go.mod / go.sum → 固定 protoc-gen-go Module 与校验和
 ```
+
+V0.1 的三份 Proto 按冻结路径直接位于 `api/proto` 根目录，因此 Lint 仅排除与该路径契约冲突的 `PACKAGE_DIRECTORY_MATCH`，其余 `STANDARD` 规则保持启用。M0-06 固定 Buf `v1.72.0` 与 `protoc-gen-go v1.36.12`；Buf 官方 Linux amd64/arm64 单文件分发包分别固定 SHA-256。当前没有外部 Proto module 依赖，Buf `dep update` 不生成 `buf.lock`；禁止手写空 Lock File，后续出现真实依赖时只接受 Buf 生成结果。
 
 生成文件提交仓库。统一命令：
 
@@ -7073,11 +7078,13 @@ tools/go.mod / go.sum → 固定 protoc-gen-go Module 与校验和
 ./tools/proto.sh generate-check
 ```
 
-`bootstrap-proto.sh` 读取 `versions.env`，把匹配 SHA-256 的 Buf Release Binary 安装到根 `.gitignore` 排除的 `.tools/bin`；`protoc-gen-go` 则从 `tools/go.mod/go.sum` 通过 `go build -mod=readonly` 构建到同一目录，并核对输出版本。`proto.sh` 只调用该目录的绝对路径，在每次执行前核对版本，禁止回落到开发机 PATH。`generate-check` 执行 generate 后再运行：
+`bootstrap-proto.sh` 只支持 Linux amd64/arm64。它读取 `versions.env`，把匹配 SHA-256 的 Buf Release Binary 安装到根 `.gitignore` 排除的 `.tools/bin`；`protoc-gen-go` 则从 `tools/go.mod/go.sum` 通过 `GOTOOLCHAIN=local go build -mod=readonly` 构建到同一目录，并核对输出版本。下载或构建先写同目录临时产物，校验成功后才替换正式文件。`proto.sh` 只调用该目录的绝对路径，在每次执行前核对版本，禁止回落到开发机 PATH。`buf.gen.yaml` 使用 `clean: true`，生成前清理纯生成目录，防止删除 Proto 后遗留孤立 `*.pb.go`。`generate-check` 执行 generate 后再运行：
 
 ```bash
 git diff --exit-code -- api/proto internal/protocol/gen buf.lock
 ```
+
+还必须通过 `git status --porcelain --untracked-files=all` 检测同一范围内的 staged/untracked 漂移，因为 `git diff` 不覆盖这两类文件。M0-06 尚无 `.proto`：`lint` 和 `generate-check` 明确报告无输入，`breaking` 明确报告初始契约尚未冻结；空输入只能作为 Wrapper 机械链路证据。一旦出现 `.proto` 而 M05-04 尚未建立不可变初始 Baseline，`breaking` 必须失败，禁止与当前 Schema 自比较伪造 PASS。
 
 CI 调用同一 Wrapper；不得维护另一套安装或生成命令。签名/HMAC 使用的消息必须继续显式调用 deterministic protobuf Marshal，并用跨平台 Golden Vector 验证；生成代码一致不等于签名字节已经正确。
 

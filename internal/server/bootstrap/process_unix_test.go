@@ -1,9 +1,11 @@
 //go:build !windows
 
-package main
+package bootstrap
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
@@ -12,10 +14,15 @@ import (
 )
 
 func TestProcessExitsOnSIGTERM(t *testing.T) {
-	if os.Getenv("XTUNNEL_SERVER_TEST_HELPER") == "1" {
+	if os.Getenv("GO_WANT_XTUNNEL_SERVER_HELPER_PROCESS") == "1" {
 		for index, arg := range os.Args {
 			if arg == "--" {
-				os.Exit(execute("xtunnel-server", os.Args[index+1:], os.Environ(), os.Stderr))
+				runner := func(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
+					return runWithStorage(ctx, program, args, environ, stderr, func(context.Context, string) (storage, error) {
+						return &fakeStorage{}, nil
+					})
+				}
+				os.Exit(executeWithRun("xtunnel-server", os.Args[index+1:], os.Environ(), os.Stderr, runner))
 			}
 		}
 		os.Exit(2)
@@ -33,7 +40,7 @@ agent_gateway:
 		"--set", "server.data_dir=" + t.TempDir(),
 	}
 	command := exec.Command(os.Args[0], args...)
-	command.Env = append(os.Environ(), "XTUNNEL_SERVER_TEST_HELPER=1")
+	command.Env = append(os.Environ(), "GO_WANT_XTUNNEL_SERVER_HELPER_PROCESS=1")
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output

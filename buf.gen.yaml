@@ -1,0 +1,8 @@
+version: v2
+clean: true
+
+plugins:
+  - local: .tools/bin/protoc-gen-go
+    out: internal/protocol/gen
+    opt:
+      - paths=source_relative

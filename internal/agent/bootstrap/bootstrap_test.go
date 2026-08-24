@@ -1,4 +1,4 @@
-package main
+package bootstrap
 
 import (
 	"bytes"
@@ -16,7 +16,7 @@ import (
 func TestParseConfigOptions(t *testing.T) {
 	configPath := writeConfig(t, "logging:\n  level: warn\n")
 	options, err := parseConfigOptions(
-		"xtunnel-server",
+		"xtunnel-agent",
 		[]string{"--config", configPath, "--set", "logging.level=error", "--set", "logging.level=debug"},
 		[]string{"OTHER=value"},
 		&bytes.Buffer{},
@@ -49,7 +49,7 @@ func TestParseConfigOptionsRejectsInvalidCommandLine(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := parseConfigOptions("xtunnel-server", test.args, nil, &bytes.Buffer{})
+			_, err := parseConfigOptions("xtunnel-agent", test.args, nil, &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), test.match) {
 				t.Fatalf("parseConfigOptions() error = %v, want substring %q", err, test.match)
 			}
@@ -59,7 +59,7 @@ func TestParseConfigOptionsRejectsInvalidCommandLine(t *testing.T) {
 
 func TestParseConfigOptionsHelp(t *testing.T) {
 	var stderr bytes.Buffer
-	_, err := parseConfigOptions("xtunnel-server", []string{"--help"}, nil, &stderr)
+	_, err := parseConfigOptions("xtunnel-agent", []string{"--help"}, nil, &stderr)
 	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("parseConfigOptions() error = %v, want flag.ErrHelp", err)
 	}
@@ -70,19 +70,20 @@ func TestParseConfigOptionsHelp(t *testing.T) {
 
 func TestRunWaitsForContextCancellation(t *testing.T) {
 	configPath := writeConfig(t, `
-management:
-  public_url: https://admin.example.com
-agent_gateway:
-  public_hostname: tunnel.example.com
+server:
+  endpoint: tunnel.example.com:7443
+  tls:
+    server_pin: sha256:dGVzdC1waW4=
 `)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	dataDir := t.TempDir()
 	var stderr bytes.Buffer
 	go func() {
-		done <- run(ctx, "xtunnel-server", []string{
+		done <- run(ctx, "xtunnel-agent", []string{
 			"--config", configPath,
-			"--set", "server.data_dir=" + dataDir,
+			"--set", "data_dir=" + dataDir,
+			"--set", "auth.token_file=" + filepath.Join(dataDir, "token"),
 		}, nil, &stderr)
 	}()
 
@@ -102,12 +103,12 @@ agent_gateway:
 		t.Fatal("run() did not return after cancellation")
 	}
 
-	assertLifecycleLogs(t, stderr.String(), "server")
+	assertLifecycleLogs(t, stderr.String(), "agent")
 }
 
 func TestRunRejectsInvalidConfig(t *testing.T) {
-	err := run(context.Background(), "xtunnel-server", nil, nil, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "load server config") {
+	err := run(context.Background(), "xtunnel-agent", nil, nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "load agent config") {
 		t.Fatalf("run() error = %v, want config error", err)
 	}
 }

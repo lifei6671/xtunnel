@@ -1,4 +1,5 @@
-package main
+// Package bootstrap 负责装配并运行 Agent 进程。
+package bootstrap
 
 import (
 	"context"
@@ -7,12 +8,29 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	agentconfig "github.com/lifei6671/xtunnel/internal/agent/config"
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	"github.com/lifei6671/xtunnel/internal/logging"
 )
+
+// Execute 把操作系统输入和信号接入 Agent 生命周期，并返回进程退出码。
+func Execute(program string, args, environ []string, stderr io.Writer) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, program, args, environ, stderr); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		fmt.Fprintf(stderr, "%s: %v\n", program, err)
+		return 1
+	}
+	return 0
+}
 
 // run 完成 Agent 进程当前阶段的配置和日志初始化，并保持前台运行直到收到退出信号。
 // 后续任务会在等待 Context 取消前依次接入身份、Control Session 和 WorkPool。

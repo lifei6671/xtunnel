@@ -1,4 +1,4 @@
-package main
+package bootstrap
 
 import (
 	"bytes"
@@ -16,7 +16,7 @@ import (
 func TestParseConfigOptions(t *testing.T) {
 	configPath := writeConfig(t, "logging:\n  level: warn\n")
 	options, err := parseConfigOptions(
-		"xtunnel-agent",
+		"xtunnel-server",
 		[]string{"--config", configPath, "--set", "logging.level=error", "--set", "logging.level=debug"},
 		[]string{"OTHER=value"},
 		&bytes.Buffer{},
@@ -49,7 +49,7 @@ func TestParseConfigOptionsRejectsInvalidCommandLine(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := parseConfigOptions("xtunnel-agent", test.args, nil, &bytes.Buffer{})
+			_, err := parseConfigOptions("xtunnel-server", test.args, nil, &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), test.match) {
 				t.Fatalf("parseConfigOptions() error = %v, want substring %q", err, test.match)
 			}
@@ -59,7 +59,7 @@ func TestParseConfigOptionsRejectsInvalidCommandLine(t *testing.T) {
 
 func TestParseConfigOptionsHelp(t *testing.T) {
 	var stderr bytes.Buffer
-	_, err := parseConfigOptions("xtunnel-agent", []string{"--help"}, nil, &stderr)
+	_, err := parseConfigOptions("xtunnel-server", []string{"--help"}, nil, &stderr)
 	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("parseConfigOptions() error = %v, want flag.ErrHelp", err)
 	}
@@ -70,21 +70,26 @@ func TestParseConfigOptionsHelp(t *testing.T) {
 
 func TestRunWaitsForContextCancellation(t *testing.T) {
 	configPath := writeConfig(t, `
-server:
-  endpoint: tunnel.example.com:7443
-  tls:
-    server_pin: sha256:dGVzdC1waW4=
+management:
+  public_url: https://admin.example.com
+agent_gateway:
+  public_hostname: tunnel.example.com
 `)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	dataDir := t.TempDir()
 	var stderr bytes.Buffer
+	resources := &fakeStorage{}
 	go func() {
-		done <- run(ctx, "xtunnel-agent", []string{
+		done <- runWithStorage(ctx, "xtunnel-server", []string{
 			"--config", configPath,
-			"--set", "data_dir=" + dataDir,
-			"--set", "auth.token_file=" + filepath.Join(dataDir, "token"),
-		}, nil, &stderr)
+			"--set", "server.data_dir=" + dataDir,
+		}, nil, &stderr, func(_ context.Context, gotDataDir string) (storage, error) {
+			if gotDataDir != dataDir {
+				t.Errorf("storage dataDir = %q, want %q", gotDataDir, dataDir)
+			}
+			return resources, nil
+		})
 	}()
 
 	select {
@@ -102,13 +107,37 @@ server:
 	case <-time.After(time.Second):
 		t.Fatal("run() did not return after cancellation")
 	}
+	if !resources.closed {
+		t.Fatal("runWithStorage() returned without closing storage")
+	}
 
-	assertLifecycleLogs(t, stderr.String(), "agent")
+	assertLifecycleLogs(t, stderr.String(), "server")
+}
+
+func TestRunReturnsStorageCloseError(t *testing.T) {
+	configPath := writeConfig(t, `
+management:
+  public_url: https://admin.example.com
+agent_gateway:
+  public_hostname: tunnel.example.com
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	wantErr := errors.New("close failed")
+	err := runWithStorage(ctx, "xtunnel-server", []string{
+		"--config", configPath,
+		"--set", "server.data_dir=" + t.TempDir(),
+	}, nil, &bytes.Buffer{}, func(context.Context, string) (storage, error) {
+		return &fakeStorage{closeErr: wantErr}, nil
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runWithStorage() error = %v, want close error", err)
+	}
 }
 
 func TestRunRejectsInvalidConfig(t *testing.T) {
-	err := run(context.Background(), "xtunnel-agent", nil, nil, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "load agent config") {
+	err := run(context.Background(), "xtunnel-server", nil, nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "load server config") {
 		t.Fatalf("run() error = %v, want config error", err)
 	}
 }
@@ -138,4 +167,14 @@ func assertLifecycleLogs(t *testing.T, output, component string) {
 			t.Fatalf("log line %d = %#v", index, record)
 		}
 	}
+}
+
+type fakeStorage struct {
+	closed   bool
+	closeErr error
+}
+
+func (storage *fakeStorage) Close() error {
+	storage.closed = true
+	return storage.closeErr
 }

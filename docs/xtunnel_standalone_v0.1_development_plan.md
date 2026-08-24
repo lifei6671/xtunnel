@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M0 工程初始化
 >
-> **当前结论**：`M0-04` 已完成实现、用户 Code Review、提交与本地验收；下一任务为 `M0-05`，等待依赖与数据库变更确认
+> **当前结论**：`M0-05` 已通过用户 Code Review、因尚未提交保持 `REVIEW`；`M0-06` 已完成实现、独立复审与本地/WSL 验收，状态为 `REVIEW`，等待用户 Code Review
 
 ---
 
@@ -125,8 +125,8 @@ M1 Secure TCP Data Plane Baseline
 | M0-02 | 定义 Config Schema 与加载器 | M0-01 | `configs/server.schema.json`、`agent.schema.json`、Server/Agent Config | Strict YAML；CLI > Env > YAML > Schema Default；未知字段/环境变量失败 | `DONE` |
 | M0-03 | Server/Agent 进程骨架 | M0-01、M0-02 | `cmd/server/main.go`、`cmd/agent/main.go`、启停生命周期 | 两个进程均可启动；SIGTERM 退出且释放资源 | `DONE` |
 | M0-04 | 结构化日志基座 | M0-01 | 共享 Logging 配置与 JSON Handler | 级别、时间、`request_id/trace_id` 字段稳定；无 Secret 输出 | `DONE` |
-| M0-05 | Server Data Target/External Lock + SQLite/Migration | M0-01、M0-02 | Stable Target/External Lock、`migrations/`、`internal/repository/sqlite` | 数据库访问统一使用 GORM；必须先计算 Stable Data Target 并获取 Data Directory 外的同一把 Lock，再检查 Restore Journal/Open SQLite；双进程在触碰 DB/PKI 前拒绝；新库、幂等启动、中断 Migration 测试；引入依赖前先确认 | `READY` |
-| M0-06 | 锁定 Proto 工具链骨架 | M0-01 | `buf*.yaml`、`tools/versions.env`、`tools/go.mod`、`bootstrap-proto.sh`、`proto.sh` | `tools/go.mod` 与根 Module 使用相同 Go 1.27.x 工具链；`GOTOOLCHAIN=local` 构建 protoc-gen-go；Buf/protoc-gen-go 精确版本与分发包 SHA-256 可校验；不回落 PATH；三个 Wrapper 子命令可运行 | `READY` |
+| M0-05 | Server Data Target/External Lock + SQLite/Migration | M0-01、M0-02 | Stable Target/External Lock、`migrations/`、`internal/repository/sqlite` | 数据库访问统一使用 GORM；必须先计算 Stable Data Target 并获取 Data Directory 外的同一把 Lock，再检查 Restore Journal/Open SQLite；双进程在触碰 DB/PKI 前拒绝；新库、幂等启动、中断 Migration 测试；引入依赖前先确认 | `REVIEW` |
+| M0-06 | 锁定 Proto 工具链骨架 | M0-01 | `buf*.yaml`、`tools/versions.env`、`tools/go.mod`、`bootstrap-proto.sh`、`proto.sh` | `tools/go.mod` 与根 Module 使用相同 Go 1.27.x 工具链；`GOTOOLCHAIN=local` 构建 protoc-gen-go；Buf/protoc-gen-go 精确版本与分发包 SHA-256 可校验；不回落 PATH；三个 Wrapper 子命令可运行 | `REVIEW` |
 | M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `READY` |
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `NOT_STARTED` |
 | M0-09 | OCI 与 systemd 包装骨架 | M0-03、M0-08 | `deploy/docker`、`deploy/systemd` | amd64/arm64；非 root；只读镜像 + Data Volume；install/start/restart/stop/uninstall Smoke | `NOT_STARTED` |
@@ -415,18 +415,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-第一批只启动：
+当前 `M0-01` 至 `M0-04` 已完成；`M0-05` 与 `M0-06` 均停在 `REVIEW`，等待提交证据或用户 Code Review。按逐任务推进约定，完成 M0-06 Code Review 前不启动下一任务。之后可独立执行的下一项是：
 
-1. `M0-01` — 建立 Go Module 与目录骨架。
-
-`M0-01` 完成后，第二批可并行：
-
-1. `M0-02` — Config Schema 与加载器。
-2. `M0-04` — 结构化日志基座。
-3. `M0-06` — Proto 工具链骨架。
-4. `M0-07` — OpenAPI 骨架。
-
-`M0-05` 还依赖 `M0-02`，必须等 Config Schema 与加载器 `DONE` 后再启动。
+1. `M0-07` — OpenAPI 骨架与校验。
 
 推进规则：
 
@@ -519,3 +510,32 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 验收结果：用户 Code Review 通过；本机 `go1.27.0` / `GOTOOLCHAIN=local` 检查通过；全包测试、定向 Race、Vet、格式和依赖整理通过；日志包语句覆盖率 100.0%，Server/Agent 命令包均为 75.9%。测试按行解析 JSON，覆盖四级阈值、字段规范化、真实关联 ID 注入、空 ID 不写入、顶层与嵌套 Secret 脱敏以及双进程生命周期事件。
 - 剩余风险：属性键脱敏不能识别被调用方拼入 `event`、错误文本或任意对象内部的 Secret，因此日志 API 注释和技术方案明确禁止这些调用方式；全链路日志审计与真实 Trace Context 注入仍由 `M6-01`、`M6-03` 完成。当前未引入 Gin、OpenTelemetry、日志轮转或第三方日志依赖。
 - 解锁的后续任务：可进入 `M0-05`；该任务首次引入 GORM/SQLite 依赖并新增数据库 Schema，必须先取得明确确认。
+
+## 2026-08-24 · M0-05 · REVIEW
+
+- 负责人：Codex。
+- Commit/PR：用户 Code Review 已通过；按用户要求尚未提交或推送。
+- 产物：Stable Data Target 解析与 Canonical 校验；Linux `/run/xtunnel/server-lock-<sha256>.lock` 非阻塞 External Lock；Pending Restore Journal 启动前检测；基于 `gorm.io/gorm v1.31.2` 和纯 Go `github.com/libtnb/sqlite v1.2.2` 的 SQLite Store；`schema_migrations(version, applied_at)` 首个显式 forward-only Migration；Server 启停顺序与资源释放接入。选择纯 Go Driver 是为了保持 Linux amd64/arm64 的 `CGO_ENABLED=0` 构建，不引入交叉 C 工具链。
+- 验收命令：`$env:GOTOOLCHAIN='local'; ./tools/check-go-version.ps1`；`gofmt`；`go mod tidy`；`go mod verify`；`go test ./...`；`go test -race ./internal/server/datadir ./internal/repository/sqlite ./cmd/server`；`go test -cover ./internal/server/datadir ./internal/repository/sqlite ./cmd/server`；`go vet ./...`；`git diff --check`；`CGO_ENABLED=0` 的 Linux amd64/arm64 Test Binary 与 Server/Agent Binary 交叉编译；WSL 执行 Linux amd64 Data Target、External Lock、SQLite、Server、Agent Test Binary，并以普通 Runtime UID 与 root 分别执行 External Lock Suite。
+- 验收结果：用户已在开工前确认 GORM/SQLite/x/sys 精确依赖、间接依赖与首个数据库 Schema；Go 1.27.0 本地工具链、全包测试、定向 Race、Vet、格式、依赖校验和跨架构纯 Go 编译通过；WSL Linux amd64 测试全部通过，覆盖跨进程抢锁、锁前不触碰数据库、Journal 先于 leaf、root 离线维护复用锁、多物理连接 PRAGMA/外键、全新库、幂等启动、高版本拒绝、SQL 错误/Context 取消原子回滚和修复后继续 Migration。三路独立只读复审均无剩余阻断。
+- 剩余风险：M0-05 只检测 Pending Restore Journal 并安全拒绝，正式完成/回滚状态机由 `M3-12` 实现；Linux arm64 当前只有交叉编译证据，原生运行由 `M0-10` CI 矩阵补齐；`/run/xtunnel` 的 systemd/OCI 创建由 `M0-09` 实现；V0.1 Windows 不提供生产 External Lock；当前 Schema 仅包含 Migration 账本，领域表由后续任务逐步添加。
+- 解锁的后续任务：提交证据补齐并进入 `DONE` 后，`M0-11` 的依赖之一完成；当前已按串行开发约定进入 `M0-06`。
+
+## 2026-08-24 · M0-06 · REVIEW
+
+- 负责人：Codex。
+- Commit/PR：待用户 Code Review；按用户要求尚未提交或推送。
+- 产物：Buf v2 Module/Generate 配置（使用 `clean: true` 清理纯生成目录）；空 `api/proto` 骨架；`STANDARD` Lint（仅排除与冻结平铺路径冲突的 `PACKAGE_DIRECTORY_MATCH`）与 `FILE` Breaking Policy；固定 Buf `v1.72.0`、`protoc-gen-go v1.36.12`、Linux amd64/arm64 官方分发包 SHA-256 的 `tools/versions.env`；使用 `go 1.27` / `toolchain go1.27.0` 与 Go `tool` directive 的独立 `tools` Module；只使用 `.tools/bin` 的 POSIX Bootstrap 和 `lint`、`breaking`、`generate-check` Wrapper；`.tools` 忽略规则与 Shell LF 属性。当前没有外部 Proto module 依赖，Buf 明确不生成 `buf.lock`，未手写空文件。
+- 验收命令：`$env:GOTOOLCHAIN='local'; ./tools/check-go-version.ps1`；`tools/go.mod` 下 `go mod tidy`、`go mod verify` 与 `go build -mod=readonly`；WSL 中首次/二次 `bootstrap-proto.sh`；Buf/Generator 版本、amd64/arm64 SHA-256 与 Go Build Metadata 检查；`sh -n`、`dash -n`、`bash --posix -n`；`proto.sh lint|breaking|generate-check`；真实临时 Proto Lint、无 Baseline 硬失败、生成漂移和孤立 `*.pb.go` 失败用例；伪造 PATH 工具隔离；根 Module `go test ./...`、`go vet ./...`；`git diff --check`。
+- 验收结果：根/工具 Module 均固定 Go 1.27.0 且 `GOTOOLCHAIN=local`；工具 Module 校验和通过，Linux amd64 Generator 由固定 Module 构建并运行，Linux arm64 Generator 交叉构建通过；两个 Buf 官方发行包 SHA-256 均实测匹配。Bootstrap 首次安装与第二次幂等运行通过；三个空骨架命令按契约输出 `SKIP`，不宣称 Protocol Gate PASS。真实临时 Proto 通过 Lint，Breaking 在无初始 Baseline 时拒绝，Generate Check 检出 staged/untracked 漂移和孤立生成物，`clean: true` 实测删除旧生成物，伪造 PATH 未被使用；根 Module 全包测试和 Vet 通过。
+- 剩余风险：WSL 未原生安装 Go，本次 Bootstrap 使用受控的 Windows Go 1.27.0 互操作入口构建 Linux amd64 Generator；原生 Linux amd64/arm64 干净 checkout 由 `M0-10` CI 补齐。当前环境没有 ShellCheck，已完成三种 Shell 语法检查但未运行 `shellcheck -s sh`。`buf.lock` 要等首次真实外部 Proto module 依赖出现后由 Buf 生成。Windows Git 配置不跟踪 file mode，提交时必须把 `bootstrap-proto.sh`、`proto.sh` 和既有 `check-go-version.sh` 记录为 `100755`。
+- 解锁的后续任务：用户 Code Review 通过后可进入 `M0-07`；`M05-01` 仍需等待 M0-06 具备提交证据并进入 `DONE`。
+
+## 2026-08-24 · M0-03/M0-05 · 结构复审
+
+- 负责人：Codex。
+- Commit/PR：待用户 Code Review；按用户要求未执行暂存、提交或推送。
+- 产物：`cmd/server` 与 `cmd/agent` 均只保留单一 `main.go` 进程入口；CLI、配置装载、日志、信号生命周期和资源编排下沉到 `internal/server/bootstrap`、`internal/agent/bootstrap`；Server 的 Stable Data Target、External Lock、Restore Journal、Canonical Data Directory 与 GORM/SQLite 启动顺序保持不变。
+- 验收命令：`gofmt`；`go test ./internal/agent/bootstrap ./internal/server/bootstrap ./cmd/agent ./cmd/server`；`go test ./...`；`go test -race ./internal/agent/bootstrap ./internal/server/bootstrap`；`go test -cover ./internal/agent/bootstrap ./internal/server/bootstrap`；`go vet ./...`；Linux amd64 `CGO_ENABLED=0` Binary/Test Binary 交叉编译；WSL 执行两组 Test Binary，并对实际 Server/Agent Binary 执行真实 `SIGTERM` Smoke。
+- 验收结果：命令目录仅剩两个 `main.go`，依赖方向固定为 `cmd → internal/*/bootstrap`；迁移后的单元测试、Race、Vet、Linux Test Binary 和真实进程 Smoke 全部通过。Agent/Server 均输出 `process_started`、收到 `SIGTERM` 后输出 `process_stopped` 并以退出码 0 结束；Server 实际创建 `xtunnel.db` 和 Data Directory 外的 External Lock。
+- 状态影响：本次仅修正既有 M0-03/M0-05 的代码归属，不改变公共 API、Protocol、Config、数据库 Schema、任务状态或 Gate；`M0-06` 仍等待用户 Code Review，未启动 `M0-07`。

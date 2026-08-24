@@ -1,4 +1,5 @@
-package main
+// Package bootstrap 负责装配并运行 Server 进程。
+package bootstrap
 
 import (
 	"context"
@@ -7,16 +8,49 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	"github.com/lifei6671/xtunnel/internal/logging"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
+	"github.com/lifei6671/xtunnel/internal/server/externallock"
 )
 
-// run 完成 Server 进程当前阶段的配置和日志初始化，并保持前台运行直到收到退出信号。
-// 后续任务会在等待 Context 取消前依次接入外部锁、数据库和 Listener。
+// Execute 把操作系统输入和信号接入 Server 生命周期，并返回进程退出码。
+func Execute(program string, args, environ []string, stderr io.Writer) int {
+	return executeWithRun(program, args, environ, stderr, run)
+}
+
+func executeWithRun(
+	program string,
+	args, environ []string,
+	stderr io.Writer,
+	runner func(context.Context, string, []string, []string, io.Writer) error,
+) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := runner(ctx, program, args, environ, stderr); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		fmt.Fprintf(stderr, "%s: %v\n", program, err)
+		return 1
+	}
+	return 0
+}
+
+// run 完成 Server 的配置、日志、External Lock 和 SQLite 初始化，并保持前台运行直到收到退出信号。
+// 后续任务会在 SQLite 已就绪且 External Lock 仍被持有时继续接入 PKI 和 Listener。
 func run(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
+	return runWithStorage(ctx, program, args, environ, stderr, func(ctx context.Context, dataDir string) (storage, error) {
+		return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
+	})
+}
+
+func runWithStorage(ctx context.Context, program string, args, environ []string, stderr io.Writer, openStorage func(context.Context, string) (storage, error)) error {
 	options, err := parseConfigOptions(program, args, environ, stderr)
 	if err != nil {
 		return err
@@ -33,10 +67,18 @@ func run(ctx context.Context, program string, args, environ []string, stderr io.
 	if err != nil {
 		return fmt.Errorf("initialize server logging: %w", err)
 	}
+	resources, err := openStorage(ctx, config.Server.DataDir)
+	if err != nil {
+		return fmt.Errorf("initialize server storage: %w", err)
+	}
 
 	logger.InfoContext(ctx, "process_started")
 	<-ctx.Done()
+	closeErr := resources.Close()
 	logger.Info("process_stopped")
+	if closeErr != nil {
+		return fmt.Errorf("close server storage: %w", closeErr)
+	}
 	return nil
 }
 

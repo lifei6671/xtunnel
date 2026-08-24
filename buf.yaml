@@ -1,0 +1,15 @@
+version: v2
+
+modules:
+  - path: api/proto
+
+lint:
+  use:
+    - STANDARD
+  # Protocol v1 的三份权威文件按冻结契约直接位于 api/proto 根目录。
+  except:
+    - PACKAGE_DIRECTORY_MATCH
+
+breaking:
+  use:
+    - FILE

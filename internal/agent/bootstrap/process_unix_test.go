@@ -1,6 +1,6 @@
 //go:build !windows
 
-package main
+package bootstrap
 
 import (
 	"bytes"
@@ -13,10 +13,10 @@ import (
 )
 
 func TestProcessExitsOnSIGTERM(t *testing.T) {
-	if os.Getenv("XTUNNEL_AGENT_TEST_HELPER") == "1" {
+	if os.Getenv("GO_WANT_XTUNNEL_AGENT_HELPER_PROCESS") == "1" {
 		for index, arg := range os.Args {
 			if arg == "--" {
-				os.Exit(execute("xtunnel-agent", os.Args[index+1:], os.Environ(), os.Stderr))
+				os.Exit(Execute("xtunnel-agent", os.Args[index+1:], os.Environ(), os.Stderr))
 			}
 		}
 		os.Exit(2)
@@ -36,7 +36,7 @@ server:
 		"--set", "auth.token_file=" + filepath.Join(dataDir, "token"),
 	}
 	command := exec.Command(os.Args[0], args...)
-	command.Env = append(os.Environ(), "XTUNNEL_AGENT_TEST_HELPER=1")
+	command.Env = append(os.Environ(), "GO_WANT_XTUNNEL_AGENT_HELPER_PROCESS=1")
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output
