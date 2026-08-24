@@ -1,0 +1,118 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"flag"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestParseConfigOptions(t *testing.T) {
+	configPath := writeConfig(t, "logging:\n  level: warn\n")
+	options, err := parseConfigOptions(
+		"xtunnel-server",
+		[]string{"--config", configPath, "--set", "logging.level=error", "--set", "logging.level=debug"},
+		[]string{"OTHER=value"},
+		&bytes.Buffer{},
+	)
+	if err != nil {
+		t.Fatalf("parseConfigOptions() error = %v", err)
+	}
+	if string(options.YAML) != "logging:\n  level: warn\n" {
+		t.Fatalf("YAML = %q", options.YAML)
+	}
+	if options.CLI["logging.level"] != "debug" {
+		t.Fatalf("CLI logging.level = %q, want last override", options.CLI["logging.level"])
+	}
+	if len(options.Environment) != 1 || options.Environment[0] != "OTHER=value" {
+		t.Fatalf("Environment = %#v", options.Environment)
+	}
+}
+
+func TestParseConfigOptionsRejectsInvalidCommandLine(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		match string
+	}{
+		{name: "unknown flag", args: []string{"--unknown"}, match: "flag provided but not defined"},
+		{name: "positional argument", args: []string{"extra"}, match: "unexpected positional arguments"},
+		{name: "invalid set", args: []string{"--set", "logging.level"}, match: "expected path=value"},
+		{name: "missing file", args: []string{"--config", filepath.Join(t.TempDir(), "missing.yaml")}, match: "read config file"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseConfigOptions("xtunnel-server", test.args, nil, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.match) {
+				t.Fatalf("parseConfigOptions() error = %v, want substring %q", err, test.match)
+			}
+		})
+	}
+}
+
+func TestParseConfigOptionsHelp(t *testing.T) {
+	var stderr bytes.Buffer
+	_, err := parseConfigOptions("xtunnel-server", []string{"--help"}, nil, &stderr)
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("parseConfigOptions() error = %v, want flag.ErrHelp", err)
+	}
+	if !strings.Contains(stderr.String(), "--config") || !strings.Contains(stderr.String(), "--set") {
+		t.Fatalf("help output = %q", stderr.String())
+	}
+}
+
+func TestRunWaitsForContextCancellation(t *testing.T) {
+	configPath := writeConfig(t, `
+management:
+  public_url: https://admin.example.com
+agent_gateway:
+  public_hostname: tunnel.example.com
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	dataDir := t.TempDir()
+	go func() {
+		done <- run(ctx, "xtunnel-server", []string{
+			"--config", configPath,
+			"--set", "server.data_dir=" + dataDir,
+		}, nil, &bytes.Buffer{})
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("run() returned before cancellation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("run() did not return after cancellation")
+	}
+}
+
+func TestRunRejectsInvalidConfig(t *testing.T) {
+	err := run(context.Background(), "xtunnel-server", nil, nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "load server config") {
+		t.Fatalf("run() error = %v, want config error", err)
+	}
+}
+
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	return path
+}
