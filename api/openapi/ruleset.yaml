@@ -1,0 +1,32 @@
+extends: [[vacuum:oas, recommended]]
+
+rules:
+  xtunnel-openapi-version:
+    description: XTunnel V0.1 must use the frozen OpenAPI dialect.
+    severity: error
+    given: $.openapi
+    then:
+      function: pattern
+      functionOptions:
+        match: '^3\.1\.0$'
+
+  xtunnel-server-base-path:
+    description: XTunnel V0.1 must expose one same-origin /api/v1 server without variables.
+    severity: error
+    given: $
+    then:
+      field: servers
+      function: schema
+      functionOptions:
+        schema:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            required: [url]
+            properties:
+              url:
+                const: /api/v1
+            not:
+              required: [variables]

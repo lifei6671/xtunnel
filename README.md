@@ -23,6 +23,16 @@ export GOTOOLCHAIN=local
 
 当前尚未进入 Protocol v1 冻结阶段，因此 `api/proto` 为空，三个检查会明确输出 `SKIP`。这只证明 M0 工具链骨架可执行，不代表 Protocol Lint 或 Breaking Gate 已通过。
 
+OpenAPI 机器契约固定为 3.1.0，并使用仓库锁定的 vacuum 校验。工具同样只安装到 `.tools/bin`，Windows 开发机通过 WSL 执行：
+
+```sh
+./tools/bootstrap-openapi.sh
+./tools/openapi.sh validate
+./tools/test-openapi.sh
+```
+
+当前 `api/openapi/openapi.yaml` 只有可校验骨架，Server 固定为同源基路径 `/api/v1`，尚不包含业务路径或 DTO。Validate 通过只代表 M0 骨架和基路径约束有效，不代表 M5 REST Contract Gate 已通过。
+
 两个进程使用相同的配置入口：
 
 ```text
