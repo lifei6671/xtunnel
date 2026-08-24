@@ -21,6 +21,7 @@
 3. Server/Agent 配置：`configs/server.schema.json`、`configs/agent.schema.json`。
 4. REST API：`api/openapi/openapi.yaml`。
 5. 开发任务与进度：本文档。
+6. 开发工具链与协作约束：根目录 `AGENTS.md`。
 
 如果任务描述与上述权威契约冲突，必须先修正任务，不允许以“任务已排期”为由偏离契约。
 
@@ -47,6 +48,7 @@
 - 任务相关单元/集成/契约测试通过，断言覆盖关键业务字段和失败分支。
 - 验收命令在干净 checkout 或 CI 中成功。
 - 证据包含：Commit SHA、命令与结果摘要。M0-10 完成前，允许使用干净 checkout 的本地命令记录；M0-10 完成后，所有新 `DONE` 证据必须再附 CI Run 链接/编号。
+- Go 任务的证据必须记录 `go env GOVERSION` 和 `go env GOTOOLCHAIN`；实际工具链必须是 M0-01 批准的精确 `go1.27.x` 版本，且 `GOTOOLCHAIN=local`。
 - 没有未处理的安全、数据一致性、协议或资源泄漏类错误。
 - 若修改契约，总方案、Proto/Schema/OpenAPI 和相关 Golden Fixture 已同步。
 
@@ -119,16 +121,16 @@ M1 Secure TCP Data Plane Baseline
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M0-01 | 建立 Go Module 与目录骨架 | 无 | `go.mod`、`cmd/server`、`cmd/agent`、`internal/*` 骨架 | 在 `go.mod` 固定 Module Path 和 Go 支持版本；`go test ./...`、`go vet ./...`；无空壳公共抽象 | `READY` |
+| M0-01 | 建立 Go Module 与目录骨架 | 无 | `go.mod`、`cmd/server`、`cmd/agent`、`internal/*` 骨架 | `go.mod` 声明 `go 1.27` 并由 `toolchain` 记录稳定的精确 `go1.27.x` 版本；提供 `GOTOOLCHAIN=local` 的版本检查入口；`go test ./...`、`go vet ./...`；无空壳公共抽象 | `READY` |
 | M0-02 | 定义 Config Schema 与加载器 | M0-01 | `configs/server.schema.json`、`agent.schema.json`、Server/Agent Config | Strict YAML；CLI > Env > YAML > Schema Default；未知字段/环境变量失败 | `NOT_STARTED` |
 | M0-03 | Server/Agent 进程骨架 | M0-01、M0-02 | `cmd/server/main.go`、`cmd/agent/main.go`、启停生命周期 | 两个进程均可启动；SIGTERM 退出且释放资源 | `NOT_STARTED` |
 | M0-04 | 结构化日志基座 | M0-01 | 共享 Logging 配置与 JSON Handler | 级别、时间、`request_id/trace_id` 字段稳定；无 Secret 输出 | `NOT_STARTED` |
 | M0-05 | Server Data Target/External Lock + SQLite/Migration | M0-01、M0-02 | Stable Target/External Lock、`migrations/`、`internal/repository/sqlite` | 必须先计算 Stable Data Target 并获取 Data Directory 外的同一把 Lock，再检查 Restore Journal/Open SQLite；双进程在触碰 DB/PKI 前拒绝；新库、幂等启动、中断 Migration 测试；引入依赖前先确认 | `NOT_STARTED` |
-| M0-06 | 锁定 Proto 工具链骨架 | M0-01 | `buf*.yaml`、`tools/versions.env`、`tools/go.mod`、`bootstrap-proto.sh`、`proto.sh` | Buf/protoc-gen-go 精确版本与分发包 SHA-256 可校验；不回落 PATH；三个 Wrapper 子命令可运行 | `NOT_STARTED` |
+| M0-06 | 锁定 Proto 工具链骨架 | M0-01 | `buf*.yaml`、`tools/versions.env`、`tools/go.mod`、`bootstrap-proto.sh`、`proto.sh` | `tools/go.mod` 与根 Module 使用相同 Go 1.27.x 工具链；`GOTOOLCHAIN=local` 构建 protoc-gen-go；Buf/protoc-gen-go 精确版本与分发包 SHA-256 可校验；不回落 PATH；三个 Wrapper 子命令可运行 | `NOT_STARTED` |
 | M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `NOT_STARTED` |
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `NOT_STARTED` |
 | M0-09 | OCI 与 systemd 包装骨架 | M0-03、M0-08 | `deploy/docker`、`deploy/systemd` | amd64/arm64；非 root；只读镜像 + Data Volume；install/start/restart/stop/uninstall Smoke | `NOT_STARTED` |
-| M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | 干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `NOT_STARTED` |
+| M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `NOT_STARTED` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `NOT_STARTED` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `NOT_STARTED` |
 
@@ -147,6 +149,7 @@ M0-03 + M0-05 ── M0-11 ─────────────────�
 
 ## 5.3 M0 Gate Checklist
 
+- [ ] 根 `go.mod` 声明 `go 1.27`，根/工具 Module、CI 和 OCI Builder 使用同一个稳定、精确的 `go1.27.x` 补丁版本；验收设置 `GOTOOLCHAIN=local`，并记录匹配的 `go env GOVERSION`/`GOTOOLCHAIN`。
 - [ ] `go test ./...` 通过。
 - [ ] `go vet ./...` 通过。
 - [ ] Server/Agent Config Schema、Strict Decode 与覆盖优先级测试通过。
@@ -435,7 +438,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | 决策 | 最晚完成点 | 要求 |
 | --- | --- | --- |
-| Go Module Path 与支持版本 | M0-01 完成前 | 写入 `go.mod` 和 CI，禁止使用占位值 |
+| Go Module Path 与 Go 1.27.x 补丁版本 | M0-01 完成前 | `go.mod` 声明 `go 1.27`；选择稳定的精确补丁版本并同步到根/工具 Module、CI、OCI Builder 和版本检查；设置 `GOTOOLCHAIN=local`，禁止占位值、自动切换、旧版本回落和未记录升级 |
 | SQLite Driver/Migration 方案 | M0-05 开工前 | 新增第三方依赖及锁文件前必须先获得明确确认 |
 | Buf/protoc-gen-go 精确版本 | M0-06 完成前 | 记录版本、下载源、分发包 SHA-256 和生成结果 |
 | OpenAPI Validator/Generator | M0-07/M5-01 开工前 | 唯一命令入口，CI 不维护第二套方式 |

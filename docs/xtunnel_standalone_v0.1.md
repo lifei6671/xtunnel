@@ -2,7 +2,7 @@
 
 > **文档状态**：开发基线
 > **目标状态**：完成后可作为 XTunnel Alpha 发布
-> **核心语言**：Go
+> **核心语言**：Go 1.27
 > **部署形态**：单 Server + 多逻辑 Agent + 多 Agent Replica
 > **数据存储**：SQLite
 > **数据传输**：TLS/TCP
@@ -11,7 +11,19 @@
 > **Agent Gateway 默认端口**：TCP 7443，可配置
 > **核心定位**：可直接部署使用的集中式反向隧道 Standalone 产品
 > **修订日期**：2026-08-24
-> **本次修订**：冻结 Protocol v1 交付门、Control Session 并发所有权、Agent Trust State、状态聚合、统一配置、Health 容量、OpenAPI 契约与里程碑依赖
+> **本次修订**：冻结 Go 1.27 工具链基线、Protocol v1 交付门、Control Session 并发所有权、Agent Trust State、状态聚合、统一配置、Health 容量、OpenAPI 契约与里程碑依赖
+
+---
+
+## Go 工具链基线（冻结）
+
+- 项目 Go 语言版本固定为 **Go 1.27**，根 `go.mod` 必须声明 `go 1.27`。
+- M0-01 必须选择一个稳定的 `go1.27.x` 补丁版本，由 `go.mod` 的 `toolchain` 指令记录，并在 CI、OCI Builder 和版本检查入口中使用同一个精确版本。开发、测试、代码生成、发布构建必须设置 `GOTOOLCHAIN=local` 并使用该工具链，不允许自动下载、静默切换或回落到其他 Go 版本。
+- 根 `go.mod` 是工具链版本权威；`tools/go.mod` 必须使用相同的 `go`/`toolchain` 版本，Proto 生成工具也必须由同一个 Go 1.27.x 工具链构建。补丁版本升级必须显式同步两个 Module、CI、OCI Builder、版本检查和构建证据。
+- 项目代码允许并应在适合的场景优先使用 Go 1.27 已稳定发布的语言、标准库和运行时特性；V0.1 不承诺兼容 Go 1.26 及更早版本，也不为旧工具链保留兼容垫片。
+- 使用 Go 1.27 特性必须服务于当前实现的正确性、可维护性、性能或简化目标，并由相关测试覆盖；不得为了“体现新版本”引入无关抽象。
+- `GOEXPERIMENT`、开发分支、tip-only API 或尚未进入稳定 Go 1.27 的能力不属于项目基线，使用前必须单独评审并获得明确授权。
+- 所有 Go 验收命令执行前必须记录 `go env GOVERSION`；版本不是 `go1.27.x` 时快速失败，不得把结果记录为任务或 Gate 证据。
 
 ---
 
@@ -7725,7 +7737,7 @@ Untrusted Input
 完成：
 
 ```text
-Go Module
+Go 1.27 Module 与固定工具链
 
 Repository
 
@@ -7761,6 +7773,10 @@ Vite HTTPS Dev Proxy + CSRF Same-origin Flow
 验收：
 
 ```text
+go.mod 声明 go 1.27，根 Module/tool Module/CI/OCI Builder 使用同一个稳定 go1.27.x 补丁版本
+
+所有 Go 验收命令设置 GOTOOLCHAIN=local，证据中的 go env GOVERSION 均为已批准的精确 go1.27.x 版本
+
 Server / Agent 可以启动
 
 Linux amd64 与 arm64 Binary 均可构建；arm64 在原生或受控 Runner 完成进程启动 + Config/Shutdown Smoke
