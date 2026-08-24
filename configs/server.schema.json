@@ -1,0 +1,362 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:xtunnel:config:server:v1",
+  "title": "XTunnel Server Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "server",
+    "management",
+    "http_ingress",
+    "agent_gateway",
+    "transport",
+    "control",
+    "tcp_ingress",
+    "agent_runtime",
+    "metrics",
+    "logging",
+    "limits"
+  ],
+  "properties": {
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data_dir"],
+      "properties": {
+        "data_dir": {
+          "type": "string",
+          "minLength": 1,
+          "default": "/var/lib/xtunnel",
+          "description": "Server 持久化数据目录，必须为绝对路径。",
+          "x-secret": false,
+          "x-reloadable": false
+        }
+      }
+    },
+    "management": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["listen", "public_url", "allowed_hosts", "trusted_proxies"],
+      "properties": {
+        "listen": {
+          "type": "string",
+          "minLength": 1,
+          "default": "127.0.0.1:8080",
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "public_url": {
+          "type": "string",
+          "minLength": 1,
+          "format": "uri",
+          "description": "Management 的唯一外部 HTTPS Origin。",
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "allowed_hosts": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true,
+          "default": [],
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "trusted_proxies": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true,
+          "default": ["127.0.0.1/32", "::1/128"],
+          "x-secret": false,
+          "x-reloadable": false
+        }
+      }
+    },
+    "http_ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["listen", "trusted_proxies"],
+      "properties": {
+        "listen": {
+          "type": "string",
+          "minLength": 1,
+          "default": "127.0.0.1:8081",
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "trusted_proxies": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true,
+          "default": ["127.0.0.1/32", "::1/128"],
+          "x-secret": false,
+          "x-reloadable": false
+        }
+      }
+    },
+    "agent_gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["listen", "public_hostname", "tls"],
+      "properties": {
+        "listen": {
+          "type": "string",
+          "minLength": 1,
+          "default": "0.0.0.0:7443",
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "public_hostname": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Agent 连接和证书校验使用的公网主机名。",
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["public", "pinned"],
+              "default": "pinned",
+              "x-secret": false,
+              "x-reloadable": false
+            },
+            "cert_file": {
+              "type": "string",
+              "minLength": 1,
+              "description": "public TLS 证书文件路径。",
+              "x-secret": false,
+              "x-reloadable": false
+            },
+            "key_file": {
+              "type": "string",
+              "minLength": 1,
+              "description": "public TLS 私钥文件路径；路径不是 Secret，文件内容是 Secret。",
+              "x-secret": false,
+              "x-reloadable": false
+            }
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"mode": {"const": "public"}}, "required": ["mode"]},
+              "then": {"required": ["cert_file", "key_file"]},
+              "else": {
+                "not": {
+                  "anyOf": [
+                    {"required": ["cert_file"]},
+                    {"required": ["key_file"]}
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tcp"],
+      "properties": {
+        "tcp": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["work_acquire_timeout"],
+          "properties": {
+            "work_acquire_timeout": {
+              "type": "string",
+              "format": "go-duration",
+              "default": "2s",
+              "x-secret": false,
+              "x-reloadable": false
+            }
+          }
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["high_priority_queue", "normal_queue", "write_timeout"],
+      "properties": {
+        "high_priority_queue": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576,
+          "default": 32,
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "normal_queue": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576,
+          "default": 128,
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "write_timeout": {
+          "type": "string",
+          "format": "go-duration",
+          "default": "5s",
+          "x-secret": false,
+          "x-reloadable": false
+        }
+      }
+    },
+    "tcp_ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bind", "min_port", "max_port"],
+      "properties": {
+        "bind": {
+          "type": "string",
+          "minLength": 1,
+          "default": "0.0.0.0",
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "min_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 10000,
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "max_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 60000,
+          "x-secret": false,
+          "x-reloadable": false
+        }
+      }
+    },
+    "agent_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["heartbeat_interval", "heartbeat_timeout"],
+      "properties": {
+        "heartbeat_interval": {
+          "type": "string",
+          "format": "go-duration",
+          "default": "10s",
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "heartbeat_timeout": {
+          "type": "string",
+          "format": "go-duration",
+          "default": "30s",
+          "x-secret": false,
+          "x-reloadable": false
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["listen", "path"],
+      "properties": {
+        "listen": {
+          "type": "string",
+          "minLength": 1,
+          "default": "127.0.0.1:9090",
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "default": "/metrics",
+          "x-secret": false,
+          "x-reloadable": false
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "format"],
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": ["debug", "info", "warn", "error"],
+          "default": "info",
+          "x-secret": false,
+          "x-reloadable": false
+        },
+        "format": {
+          "type": "string",
+          "const": "json",
+          "default": "json",
+          "x-secret": false,
+          "x-reloadable": false
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_agents",
+        "max_instances",
+        "max_instances_per_agent",
+        "max_bindings_per_agent",
+        "max_health_targets_per_agent",
+        "max_health_targets_global",
+        "max_agent_snapshot_bytes",
+        "max_active_connections",
+        "max_connections_per_agent",
+        "max_connections_per_tunnel",
+        "max_connections_per_source_ip",
+        "max_open_rate_per_source_ip",
+        "max_open_burst_per_source_ip",
+        "max_http_requests_per_source_ip_per_second",
+        "max_work_connections",
+        "max_idle_work_connections",
+        "max_connecting_work_connections",
+        "max_pending_opens",
+        "max_pending_auth",
+        "max_pending_tls_handshakes",
+        "max_replay_entries_per_session",
+        "max_control_frame_bytes",
+        "max_auth_frame_bytes",
+        "max_work_frame_bytes",
+        "max_http_header_bytes"
+      ],
+      "properties": {
+        "max_agents": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 1000, "x-secret": false, "x-reloadable": false},
+        "max_instances": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 5000, "x-secret": false, "x-reloadable": false},
+        "max_instances_per_agent": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 100, "x-secret": false, "x-reloadable": false},
+        "max_bindings_per_agent": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 1000, "x-secret": false, "x-reloadable": false},
+        "max_health_targets_per_agent": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 2000, "x-secret": false, "x-reloadable": false},
+        "max_health_targets_global": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 50000, "x-secret": false, "x-reloadable": false},
+        "max_agent_snapshot_bytes": {"type": "integer", "minimum": 1, "maximum": 786432, "default": 786432, "x-secret": false, "x-reloadable": false},
+        "max_active_connections": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 20000, "x-secret": false, "x-reloadable": false},
+        "max_connections_per_agent": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 5000, "x-secret": false, "x-reloadable": false},
+        "max_connections_per_tunnel": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 5000, "x-secret": false, "x-reloadable": false},
+        "max_connections_per_source_ip": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 200, "x-secret": false, "x-reloadable": false},
+        "max_open_rate_per_source_ip": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 50, "x-secret": false, "x-reloadable": false},
+        "max_open_burst_per_source_ip": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 100, "x-secret": false, "x-reloadable": false},
+        "max_http_requests_per_source_ip_per_second": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 100, "x-secret": false, "x-reloadable": false},
+        "max_work_connections": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 60000, "x-secret": false, "x-reloadable": false},
+        "max_idle_work_connections": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 20000, "x-secret": false, "x-reloadable": false},
+        "max_connecting_work_connections": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 1000, "x-secret": false, "x-reloadable": false},
+        "max_pending_opens": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 1024, "x-secret": false, "x-reloadable": false},
+        "max_pending_auth": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 512, "x-secret": false, "x-reloadable": false},
+        "max_pending_tls_handshakes": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 512, "x-secret": false, "x-reloadable": false},
+        "max_replay_entries_per_session": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 4096, "x-secret": false, "x-reloadable": false},
+        "max_control_frame_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576, "default": 1048576, "x-secret": false, "x-reloadable": false},
+        "max_auth_frame_bytes": {"type": "integer", "minimum": 1, "maximum": 65536, "default": 65536, "x-secret": false, "x-reloadable": false},
+        "max_work_frame_bytes": {"type": "integer", "minimum": 1, "maximum": 65536, "default": 65536, "x-secret": false, "x-reloadable": false},
+        "max_http_header_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536, "x-secret": false, "x-reloadable": false}
+      }
+    }
+  }
+}

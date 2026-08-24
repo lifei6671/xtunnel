@@ -6059,6 +6059,8 @@ CLI > XTUNNEL_* Environment > YAML > Schema Default
 
 YAML 使用 Strict Decode，未知字段或重复 Key 直接启动失败；未知 CLI Flag 直接失败；`XTUNNEL_*` 命名空间下无法映射到 Schema 的变量直接失败。Duration 统一使用 Go Duration String，大小统一使用整数 Byte。V0.1 不热加载 Server/Agent 主配置；变更后必须显式重启，动态 Service/Binding 配置仍通过 Revision/Snapshot 生效。
 
+两份配置 Schema 固定使用 JSON Schema Draft 2020-12。每个叶子字段必须显式声明 `x-secret` 和 `x-reloadable`；V0.1 主配置的 `x-reloadable` 全部为 `false`。环境变量名由 Schema 点分路径转换：路径段大写后使用双下划线连接，例如 `management.public_url` 对应 `XTUNNEL_MANAGEMENT__PUBLIC_URL`。数组覆盖值使用 JSON Array，标量覆盖值按 Schema 类型解析。CLI 层在加载器内部同样使用 Schema 点分路径；进程对外 Flag 名称与解析由 `M0-03` 冻结。
+
 推荐：
 
 ```yaml
@@ -8054,6 +8056,8 @@ Lint + Breaking Check + Generated Contract Drift Check = PASS
 ```
 
 入口 Gate 通过后，OpenAPI 在 M5 期间只能通过显式 Contract Change Review 修改，不得由 Handler 或 UI 实现反向定义契约。
+
+对外 HTTP API 服务允许采用 Gin 作为路由和 Middleware 框架，优先用于 Management REST API。Gin 只承担 HTTP 适配、参数绑定、认证授权 Middleware 和响应写出；OpenAPI 仍是唯一 API 契约，Handler 必须调用既有 Application Service，不得在框架层重新实现事务或业务规则。Tunnel HTTP Ingress、Streaming Reverse Proxy、WebSocket 和其他数据面路径按各自协议语义实现，不因为采用 Gin 而强行接入同一套路由栈。具体 Gin 版本在首次实现对应 API 任务时确认并锁定，本决策不要求在尚无 Handler 的阶段提前引入依赖。
 
 完成：
 
