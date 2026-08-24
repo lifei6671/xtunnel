@@ -149,11 +149,22 @@ paths:
 EOF
 expect_status 1 unresolved-reference sh "$isolated_wrapper" validate
 
-cp "$repo_root/api/openapi/openapi.yaml" "$isolated_spec"
-printf 'tampered\n' >>"$isolated_bin/vacuum"
-expect_status 1 tampered-tool sh "$isolated_wrapper" validate
+# 工具篡改测试使用从未执行过的副本，避免 WSL/NTFS 暂时占用刚退出的可执行文件。
+tool_root="$test_root/tool-repository"
+tool_tools="$tool_root/tools"
+tool_openapi="$tool_root/api/openapi"
+tool_bin="$tool_root/.tools/bin"
+tool_wrapper="$tool_tools/openapi.sh"
+mkdir -p "$tool_tools" "$tool_openapi" "$tool_bin"
+cp "$script_dir/openapi.sh" "$script_dir/versions.env" "$tool_tools/"
+cp "$repo_root/api/openapi/openapi.yaml" "$repo_root/api/openapi/ruleset.yaml" \
+    "$tool_openapi/"
+cp "$managed_vacuum" "$tool_bin/vacuum"
+chmod 0755 "$tool_wrapper" "$tool_bin/vacuum"
+printf 'tampered\n' >>"$tool_bin/vacuum"
+expect_status 1 tampered-tool sh "$tool_wrapper" validate
 
-rm -f -- "$isolated_bin/vacuum"
+rm -f -- "$tool_bin/vacuum"
 fake_bin="$test_root/fake-bin"
 mkdir -p "$fake_bin"
 cat >"$fake_bin/vacuum" <<'EOF'
@@ -161,7 +172,7 @@ cat >"$fake_bin/vacuum" <<'EOF'
 exit 0
 EOF
 chmod 0755 "$fake_bin/vacuum"
-expect_status 1 no-path-fallback env PATH="$fake_bin:$PATH" sh "$isolated_wrapper" validate
+expect_status 1 no-path-fallback env PATH="$fake_bin:$PATH" sh "$tool_wrapper" validate
 
 # 校验和失败时不能覆盖已存在的工具。单独使用未执行过二进制的隔离目录，
 # 避免 WSL/NTFS 对刚结束的可执行文件仍保持短暂占用。
