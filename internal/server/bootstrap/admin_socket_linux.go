@@ -89,6 +89,7 @@ type adminBootstrapSocket struct {
 	authorize  func(*net.UnixConn) error
 
 	stopOnce sync.Once
+	done     chan struct{}
 	wait     sync.WaitGroup
 }
 
@@ -119,18 +120,22 @@ func openAdminBootstrapSocketWith(ctx context.Context, runtimeDir, targetHash st
 		return nil, errors.Join(fmt.Errorf("set admin bootstrap socket permissions: %w", err), closeErr, removeErr)
 	}
 
-	socket := &adminBootstrapSocket{listener: listener, path: path, store: store, targetHash: targetHash, authorize: authorize}
-	socket.wait.Add(1)
+	socket := &adminBootstrapSocket{
+		listener:   listener,
+		path:       path,
+		store:      store,
+		targetHash: targetHash,
+		authorize:  authorize,
+		done:       make(chan struct{}),
+	}
+	socket.wait.Add(2)
 	go socket.serve(ctx)
+	go socket.watchContext(ctx)
 	return socket, nil
 }
 
 func (socket *adminBootstrapSocket) serve(ctx context.Context) {
 	defer socket.wait.Done()
-	go func() {
-		<-ctx.Done()
-		socket.stop()
-	}()
 	for {
 		connection, err := socket.listener.AcceptUnix()
 		if err != nil {
@@ -144,6 +149,15 @@ func (socket *adminBootstrapSocket) serve(ctx context.Context) {
 			defer socket.wait.Done()
 			socket.handle(ctx, connection)
 		}()
+	}
+}
+
+func (socket *adminBootstrapSocket) watchContext(ctx context.Context) {
+	defer socket.wait.Done()
+	select {
+	case <-ctx.Done():
+		socket.stop()
+	case <-socket.done:
 	}
 }
 
@@ -181,6 +195,7 @@ func (socket *adminBootstrapSocket) handle(ctx context.Context, connection *net.
 
 func (socket *adminBootstrapSocket) stop() {
 	socket.stopOnce.Do(func() {
+		close(socket.done)
 		_ = socket.listener.Close()
 		_ = os.Remove(socket.path)
 	})

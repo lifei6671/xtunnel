@@ -54,6 +54,11 @@ func TestResolveTokenSourcesAndPrecedence(t *testing.T) {
 			environ: []string{"CREDENTIALS_DIRECTORY=" + credentialDirectory},
 			want:    "xta_credential_secret",
 		},
+		{
+			name: "maximum size token is accepted",
+			args: []string{"--token", "xta_" + strings.Repeat("x", maxTokenBytes-len("xta_"))},
+			want: "xta_" + strings.Repeat("x", maxTokenBytes-len("xta_")),
+		},
 	}
 
 	for _, test := range tests {
@@ -246,6 +251,38 @@ func TestExecuteServiceCommands(t *testing.T) {
 	}
 	if services.uninstallCalls != 1 {
 		t.Fatalf("service uninstall calls = %d, want 1", services.uninstallCalls)
+	}
+}
+
+func TestExecuteServiceInstallRejectsInvalidInputWithoutLeakingToken(t *testing.T) {
+	const token = "xta_service_install_secret"
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing Token", args: []string{"service", "install"}, want: "requires --token"},
+		{name: "unknown flag", args: []string{"service", "install", "--config", token}, want: "flag provided but not defined"},
+		{name: "positional argument", args: []string{"service", "install", "--token", token, "extra"}, want: "does not accept positional"},
+		{name: "invalid Token", args: []string{"service", "install", "--token", "wrong_" + token}, want: "must start with xta_"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			services := &fakeServiceOperations{}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			err := execute(context.Background(), "xtunnel-agent", test.args, nil, &stdout, &stderr, services)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("execute(service install) error = %v, want substring %q", err, test.want)
+			}
+			if services.installCalls != 0 {
+				t.Fatal("invalid service install input invoked service installation")
+			}
+			if strings.Contains(err.Error()+stdout.String()+stderr.String(), token) {
+				t.Fatal("invalid service install input leaked Token")
+			}
+		})
 	}
 }
 

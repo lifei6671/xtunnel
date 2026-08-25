@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M0 工程初始化
 >
-> **当前结论**：`M0-01`、`M0-03` 至 `M0-08`、`M0-10` 已完成；`M0-02` 因 Agent 改为 Token-only Bootstrap 而重新进入实施并等待 CI/复审，`M0-09` 的 Linux Agent Binary Self-install 已通过真实 systemd Smoke，Windows SCM 静态测试/构建已通过但提升权限的正向 SCM Smoke 未运行，真实 OCI/Compose Smoke 与新 CI 也尚未完成；`M0-11` 首个 Admin Bootstrap 正在实现并等待 Linux Race 验证范围确认。
+> **当前结论**：`M0-01`、`M0-03` 至 `M0-08`、`M0-10` 已完成；`M0-02` 因 Agent 改为 Token-only Bootstrap 而重新进入实施并等待新的 CI/复审，`M0-09` 的 Linux Agent Binary Self-install 已通过真实 systemd Smoke，Windows SCM 静态测试/构建已通过但提升权限的正向 SCM Smoke 未运行，真实 OCI/Compose Smoke 与新 CI 也尚未完成；`M0-11` 首个 Admin Bootstrap 的 Linux 普通用户/root 运行验证与用户复审已通过，现处于 `REVIEW`，仅等待新的 CI Run。
 
 ---
 
@@ -131,7 +131,7 @@ M1 Secure TCP Data Plane Baseline
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `DONE` |
 | M0-09 | OCI/Compose 双栈、Server Shell Packaging 与跨平台 Agent Binary Self-install | M0-03、M0-08 | `deploy/docker`、Server-only `deploy/systemd`、Agent `service install/uninstall`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Agent 在 root/systemd>=249 快速失败，原子安装 Binary、root-only Credential 与 Managed Unit；Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；两端持久启动项只含 Binary + `run` 且无 Secret，均以 managed marker 拒绝覆盖/删除非受管同名服务，卸载保留 Credential；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `IN_PROGRESS` |
 | M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `DONE` |
-| M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `IN_PROGRESS` |
+| M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `REVIEW` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `NOT_STARTED` |
 
 ## 5.2 可并行推进
@@ -618,3 +618,29 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 已验证证据：`go1.27.0` / `GOTOOLCHAIN=local`；全包 `go test ./...`、`go vet ./...`、`go test -race ./...`，Agent Service/Bootstrap 定向 Test/Vet/Race，Linux amd64/arm64 Agent Build，Windows arm64 Agent Build 与 Bootstrap/Service Test Binary 编译均通过；本机 Windows DPAPI LocalMachine Roundtrip 真实执行通过。Windows CI/Harness 侧 `go mod verify`、Agent 定向 Test/Race/Vet、Windows arm64 Build/Test Compile 通过；`smoke.ps1` 在 Windows PowerShell 5.1 与 PowerShell 7 Parser、ASCII-only、Diff Check 通过，非管理员 Binary/Harness 均在写目标目录前快速拒绝，Harness 能同时报告主失败与 Cleanup 失败。
 - 未验证边界：当前 Windows 宿主不是管理员，正向 SCM install/reinstall/stop/start/uninstall Smoke 未运行；新增 GitHub `windows-2022` CI Job 尚未触发。运行中已安装 EXE 的 `DELAY_UNTIL_REBOOT` 路径只有注入单元测试，尚未真实触发；真实 Agent OCI/Compose Runtime Smoke 仍因 Docker Socket 权限未执行。本条不记录 Windows SCM/Docker/CI Gate PASS。
 - 状态影响：`M0-02`、`M0-09` 继续为 `IN_PROGRESS`；M0 保持 `8/12`、总计保持 `8/95`，未新增 `DONE`。`M0-09` 仍等待提升权限的真实 Windows SCM Smoke、真实 Agent OCI/Compose Runtime Smoke 及 M0-10 后的新 CI Run/复审证据。
+
+## 2026-08-25 · M0-11 · REVIEW
+
+- 负责人：Codex；`ee9227a` 的首个 Admin Bootstrap 实现已完成用户复审。本轮未提交、未推送，未改变暂存区。
+- 产物：`admin create` 的 TTY/文件密码输入、离线 External Lock 写入、Linux `0600` Unix Socket 与 root `SO_PEERCRED` 授权路径保持既有契约。本轮让 Socket 的 Context 监听协程在首管创建成功或显式 `Close` 后立即退出，避免 Server 生命周期内的残留协程；新增真实 root/non-root peer、授权拒绝不写库及 Socket 关闭路径测试。
+- 验收命令：`GOTOOLCHAIN=local go test -count=1 ./...`；`GOTOOLCHAIN=local go test -race -count=1 ./...`；`GOTOOLCHAIN=local go vet ./...`；`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go vet ./internal/server/bootstrap ./internal/repository/sqlite`；使用本机 Go `go1.27.0` 交叉编译 Linux amd64 Bootstrap Test Binary，并在 WSL Ubuntu 22.04 分别以普通用户和 root 运行 Socket/离线用例；`git diff --check`。
+- 验收结果：本机 Go 环境为 `go1.27.0` / `GOTOOLCHAIN=local`；全包 Test、Race、Vet 与 Linux 目标 Vet 通过。WSL Linux 真实运行验证普通用户被 `SO_PEERCRED` 拒绝且数据库未写入、Socket 保留；root 成功创建首个管理员；`0600` Socket、目标 Hash 拒绝、客户端断连提交、显式关闭与离线路径重复拒绝均通过。临时 Linux Test Binary 已清理。
+- 状态影响：`M0-11` 转为 `REVIEW`；M0 和总计的 `DONE` 数仍为 `8/12`、`8/95`。本记录不勾选 M0 Gate，也不将 `M0-11` 标记为 `DONE`。
+- 剩余风险与解除条件：本机没有 Linux Go/gcc，无法执行 Linux `-race`；必须在 `ee9227a` 之后包含本轮改动的原生 Linux CI Run 中执行相应 Race Suite，才可考虑 `M0-11=DONE`。M0-02 与 M0-09 的独立外部验证缺口不受本任务影响。
+
+## 2026-08-25 · M0-02 · IN_PROGRESS
+
+- 负责人：Codex；本轮只补齐 Token-only Agent Bootstrap 的契约边界测试，未提交、未推送，未改变暂存区。
+- 产物：验证恰好 `8192` bytes 的 `xta_` Token 可接受；`service install` 对缺失 Token、未知 Flag、位置参数和非法 Token 失败且不调用安装逻辑、不回显 Token；Windows DPAPI Credential 文件读取、缺失文件和损坏密文的失败链均不泄露明文。生产路径仅抽出内部文件读取函数，ProgramData Known Folder 与 Machine-scope DPAPI 契约未改变。
+- 验收命令：`GOTOOLCHAIN=local go test -count=1 ./internal/agent/bootstrap ./internal/agent/service ./cmd/agent`；`GOTOOLCHAIN=local go test -race -count=1 ./internal/agent/bootstrap ./internal/agent/service`；`GOTOOLCHAIN=local go vet ./internal/agent/bootstrap ./internal/agent/service ./cmd/agent`；`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go vet ./internal/agent/bootstrap ./internal/agent/service`；Linux amd64 Bootstrap Test Binary 在 WSL Ubuntu 22.04 运行；Windows arm64 Agent、Bootstrap Test 与 Service Test Binary 交叉编译；`git diff --check`。
+- 验收结果：本机 Go 环境为 `go1.27.0` / `GOTOOLCHAIN=local`；定向 Test、Race、Vet 与 Linux 目标 Vet 通过。WSL 实际验证 Token 来源优先级、8192-byte 包含边界、拒绝旧参数/位置参数、Token 不回显和 SIGTERM 前台退出；Windows arm64 三项编译通过。Windows arm64 临时产物位于用户 Temp，受当前执行环境的删除策略限制未能自动删除；它们不在工作区或暂存区。
+- 状态影响：`M0-02` 保持 `IN_PROGRESS`；M0 和总计的 `DONE` 数仍为 `8/12`、`8/95`。本记录不勾选 M0 Gate，也不将“已有 CI Workflow”记为本轮 CI 证据。
+- 剩余风险与解除条件：需让包含 `ee9227a` 和本轮未提交改动的干净提交进入原生 Linux amd64/arm64 与 Windows CI，获得 Token-only 契约的 Test/Race/Vet/Build 证据，并完成用户复审后，才能考虑 `M0-02=DONE`。Windows 提升权限 SCM Smoke、OCI/Compose Runtime Smoke 属于 `M0-09`，不作为 M0-02 的完成条件。
+
+## 2026-08-25 · M0-09 · IN_PROGRESS
+
+- 负责人：Codex；本轮只重新尝试 Token-only Agent OCI Runtime 验证，未提交、未推送，未改变暂存区。
+- 验收命令：以 WSL Ubuntu 22.04 root 访问 Docker Engine，运行 `./deploy/docker/smoke.sh --target agent --platform linux/amd64`；随后只读检查 Docker Container、Network 和 Volume 遗留。
+- 验收结果：Windows 宿主未安装 Docker CLI，WSL 普通用户无 Docker Socket 权限；WSL root 可访问 Docker `29.1.3`、Compose `2.40.3`。Agent OCI Smoke 在 BuildKit 冷构建阶段 360 秒内没有产生运行结果，按计划阈值中止，不能记录为 Smoke PASS。检查确认没有运行中/已停止的 Smoke Container，也没有 `xtunnel` Network 或 Volume 遗留。
+- 状态影响：`M0-09` 保持 `IN_PROGRESS`；M0 和总计的 `DONE` 数仍为 `8/12`、`8/95`。本记录不勾选 M0 Gate，不把 Docker Engine 可访问或 BuildKit 已开始构建记为 OCI Runtime 证据。
+- 剩余风险与解除条件：在具备可复现冷构建性能的干净 Linux amd64/arm64 环境或 CI，完成 Server/Agent OCI 及 Compose 双栈 Runtime Smoke；另需在提升权限的 Windows 环境运行 SCM 正向 Harness。当前非管理员 Windows 会话只能完成静态测试，不能替代真实 Service 安装/启动/停止/卸载证据。

@@ -179,6 +179,118 @@ func TestAdminBootstrapSocketStopsAfterCreateWhenClientDisconnects(t *testing.T)
 	}
 }
 
+func TestAdminBootstrapSocketRequiresRootPeer(t *testing.T) {
+	runtimeDir := newRuntimeDirectory(t)
+	store, err := sqlite.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+	const targetHash = "8af9ccd5d28f30d94285f5655fdf21456f87d5fe998c7fd64ca4f3e260ced532"
+	socket, err := openAdminBootstrapSocket(context.Background(), runtimeDir, targetHash, store)
+	if err != nil {
+		t.Fatalf("openAdminBootstrapSocket() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := socket.Close(); err != nil {
+			t.Errorf("admin Bootstrap Socket Close() error = %v", err)
+		}
+	})
+
+	handled, err := requestAdminBootstrap(context.Background(), filepath.Join(runtimeDir, adminBootstrapSocketName), targetHash, "admin", "root peer password")
+	if !handled {
+		t.Fatal("requestAdminBootstrap() did not use the running Bootstrap Socket")
+	}
+	hasAdmin, hasAdminErr := store.HasAdmin(context.Background())
+	if hasAdminErr != nil {
+		t.Fatalf("HasAdmin() error = %v", hasAdminErr)
+	}
+	if os.Geteuid() == 0 {
+		if err != nil || !hasAdmin {
+			t.Fatalf("root requestAdminBootstrap() = error %v, hasAdmin %t; want success", err, hasAdmin)
+		}
+		return
+	}
+	if err == nil || hasAdmin {
+		t.Fatalf("non-root requestAdminBootstrap() = error %v, hasAdmin %t; want rejection without write", err, hasAdmin)
+	}
+	if _, statErr := os.Lstat(filepath.Join(runtimeDir, adminBootstrapSocketName)); statErr != nil {
+		t.Fatalf("non-root rejection removed Bootstrap Socket: %v", statErr)
+	}
+}
+
+func TestAdminBootstrapSocketRejectedPeerDoesNotCreateAdmin(t *testing.T) {
+	runtimeDir := newRuntimeDirectory(t)
+	store, err := sqlite.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+	const targetHash = "0d44849d1513411ad283287d996410ad007549cd85caab9cae8ece933ce93f47"
+	socket, err := openAdminBootstrapSocketWith(context.Background(), runtimeDir, targetHash, store, func(*net.UnixConn) error {
+		return errors.New("test peer rejection")
+	})
+	if err != nil {
+		t.Fatalf("openAdminBootstrapSocketWith() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := socket.Close(); err != nil {
+			t.Errorf("admin Bootstrap Socket Close() error = %v", err)
+		}
+	})
+
+	handled, err := requestAdminBootstrap(context.Background(), filepath.Join(runtimeDir, adminBootstrapSocketName), targetHash, "admin", "rejected peer password")
+	if !handled || err == nil {
+		t.Fatalf("requestAdminBootstrap() = handled %t, error %v; want handled rejection", handled, err)
+	}
+	hasAdmin, err := store.HasAdmin(context.Background())
+	if err != nil {
+		t.Fatalf("HasAdmin() error = %v", err)
+	}
+	if hasAdmin {
+		t.Fatal("rejected Bootstrap peer created an admin")
+	}
+	if _, err := os.Lstat(filepath.Join(runtimeDir, adminBootstrapSocketName)); err != nil {
+		t.Fatalf("rejected Bootstrap peer removed socket: %v", err)
+	}
+}
+
+func TestAdminBootstrapSocketCloseStopsContextWatcher(t *testing.T) {
+	runtimeDir := newRuntimeDirectory(t)
+	store, err := sqlite.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+	socket, err := openAdminBootstrapSocketWith(context.Background(), runtimeDir, "close-watcher", store, func(*net.UnixConn) error { return nil })
+	if err != nil {
+		t.Fatalf("openAdminBootstrapSocketWith() error = %v", err)
+	}
+	if err := socket.Close(); err != nil {
+		t.Fatalf("admin Bootstrap Socket Close() error = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(runtimeDir, adminBootstrapSocketName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("admin Bootstrap Socket Close() left socket path: %v", err)
+	}
+	select {
+	case <-socket.done:
+	default:
+		t.Fatal("Bootstrap Socket Close() did not stop its context watcher")
+	}
+}
+
 func TestAdminCreateOfflineUsesExternalLockAndRejectsDuplicate(t *testing.T) {
 	runtimeDir := newRuntimeDirectory(t)
 	dataDir := filepath.Join(t.TempDir(), "data")

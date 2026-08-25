@@ -373,7 +373,11 @@ func loadWindowsCredential() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	protected, err := os.ReadFile(paths.credential)
+	return loadWindowsCredentialFile(paths.credential)
+}
+
+func loadWindowsCredentialFile(credentialPath string) (string, error) {
+	protected, err := os.ReadFile(credentialPath)
 	if err != nil {
 		return "", fmt.Errorf("read DPAPI credential: %w", err)
 	}

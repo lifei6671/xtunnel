@@ -4,6 +4,8 @@ package service
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +52,32 @@ func TestWindowsDPAPIRoundTrip(t *testing.T) {
 	}
 	if string(got) != string(plainText) {
 		t.Fatal("DPAPI round trip changed plaintext")
+	}
+}
+
+func TestLoadWindowsCredentialFile(t *testing.T) {
+	const token = "xta_dpapi_file_secret"
+	path := filepath.Join(t.TempDir(), "agent.token.dpapi")
+	protected, err := protectWindowsCredential([]byte(token))
+	if err != nil {
+		t.Fatalf("protectWindowsCredential() error = %v", err)
+	}
+	if err := os.WriteFile(path, protected, 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	got, err := loadWindowsCredentialFile(path)
+	if err != nil || got != token {
+		t.Fatalf("loadWindowsCredentialFile() = %q, %v; want Token", got, err)
+	}
+
+	if _, err := loadWindowsCredentialFile(filepath.Join(t.TempDir(), "missing")); err == nil || strings.Contains(err.Error(), token) {
+		t.Fatalf("missing credential error = %v, want non-secret read failure", err)
+	}
+	if err := os.WriteFile(path, []byte("not a DPAPI credential"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(corrupt credential) error = %v", err)
+	}
+	if _, err := loadWindowsCredentialFile(path); err == nil || strings.Contains(err.Error(), token) {
+		t.Fatalf("corrupt credential error = %v, want non-secret decrypt failure", err)
 	}
 }
 
