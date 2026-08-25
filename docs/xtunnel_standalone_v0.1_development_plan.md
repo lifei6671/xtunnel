@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M0 工程初始化
 >
-> **当前结论**：`M0-01` 至 `M0-08` 已完成；`M0-09` 实现与本地验收已完成，当前处于 `REVIEW` 并等待用户 Code Review；本轮仅本地提交、不推送
+> **当前结论**：`M0-01` 至 `M0-09` 已完成；`M0-10` CI 和跨平台构建矩阵正在实施；本轮仅本地提交、不推送
 
 ---
 
@@ -100,7 +100,7 @@ M1 Secure TCP Data Plane Baseline
 
 | 里程碑 | 任务数 | 已完成 | 状态 | 入口依赖 | 退出 Gate |
 | --- | ---: | ---: | --- | --- | --- |
-| M0 工程初始化 | 12 | 8 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
+| M0 工程初始化 | 12 | 9 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
 | M0.5 Protocol Freeze | 10 | 0 | `NOT_STARTED` | M0-06 | M05-10 |
 | M1 Secure TCP Baseline | 14 | 0 | `NOT_STARTED` | M0-12 + M05-10 | M1-14 |
 | M2 Replica/Credential | 8 | 0 | `NOT_STARTED` | M1-14 | M2-08 |
@@ -109,7 +109,7 @@ M1 Secure TCP Data Plane Baseline
 | M5 REST API/Web | 11 | 0 | `NOT_STARTED` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 0 | `NOT_STARTED` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **8** |  |  |  |
+| **合计** | **95** | **9** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -129,8 +129,8 @@ M1 Secure TCP Data Plane Baseline
 | M0-06 | 锁定 Proto 工具链骨架 | M0-01 | `buf*.yaml`、`tools/versions.env`、`tools/go.mod`、`bootstrap-proto.sh`、`proto.sh` | `tools/go.mod` 与根 Module 使用相同 Go 1.27.x 工具链；`GOTOOLCHAIN=local` 构建 protoc-gen-go；Buf/protoc-gen-go 精确版本与分发包 SHA-256 可校验；不回落 PATH；三个 Wrapper 子命令可运行 | `DONE` |
 | M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `DONE` |
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `DONE` |
-| M0-09 | OCI、Compose 双栈与 systemd 包装骨架 | M0-03、M0-08 | `deploy/docker`、`deploy/systemd`、未接入启动路径的双栈监听原语 | amd64/arm64；非 root；只读镜像 + Data Volume；Compose IPv4/IPv6 Network/Host Binding；原生 tcp4/tcp6 Socket 测试；install/start/restart/stop/uninstall Smoke | `REVIEW` |
-| M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `NOT_STARTED` |
+| M0-09 | OCI、Compose 双栈与 systemd 包装骨架 | M0-03、M0-08 | `deploy/docker`、`deploy/systemd`、未接入启动路径的双栈监听原语 | amd64/arm64；非 root；只读镜像 + Data Volume；Compose IPv4/IPv6 Network/Host Binding；原生 tcp4/tcp6 Socket 测试；install/start/restart/stop/uninstall Smoke | `DONE` |
+| M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `IN_PROGRESS` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `NOT_STARTED` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `NOT_STARTED` |
 
@@ -415,11 +415,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01` 至 `M0-08` 已完成。按逐任务推进约定，当前待办为：
+当前 `M0-01` 至 `M0-09` 已完成。按逐任务推进约定，当前待办为：
 
-1. `M0-09` — 用户 Code Review。
+1. `M0-10` — CI 和跨平台构建矩阵。
 
-`M0-09` 已完成实现与本地验收并停在 `REVIEW`；用户确认前不得标记 `DONE`，也不得进入 `M0-10`。
+`M0-09` 已于 2026-08-25 经用户 Code Review 通过并标记 `DONE`。`M0-10` 的依赖已全部满足，用户已确认 CI 配置变更；当前等待首个真实 GitHub Actions Run 提供跨架构验收证据。
 
 推进规则：
 
@@ -563,12 +563,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 剩余风险：`dist` 按设计不提交，干净 Checkout 必须先执行 `npm ci`/Web Build 再执行 Go Test/Build，该顺序由 `M0-10` CI 固化；Linux arm64 只有交叉构建、没有原生运行证据；PowerShell Harness 已通过 Parser 和真实执行，当前环境未运行 PSScriptAnalyzer；真实 Login、Secure Cookie、CSRF POST 与 Logout E2E 依赖 `M5-03`，由 `M5-10` 完成。本记录不勾选 M0 Gate。
 - 解锁的后续任务：`M0-09` 的 M0-08 依赖已完成，但尚未开始并继续等待用户明确指令；`M5-03` 继续等待其他前置任务。
 
-## 2026-08-24 · M0-09 · REVIEW
+## 2026-08-24 · M0-09 · DONE
 
 - 负责人：Codex。
-- Commit/PR：本地提交见本任务交付回复，未推送；等待用户 Code Review。
+- Commit/PR：`88ab3eb`（本地提交，未推送）；2026-08-25 用户 Code Review 通过。
 - 产物：按多架构索引摘要固定 Node `24.19.0`、Go `1.27.0` 与 Distroless Nonroot 的多阶段 Dockerfile；Server/Agent 独立 Binary Stage 和最终镜像；Dockerfile 专属 allowlist Context；覆盖 amd64/arm64、非 root、只读根、Data Volume、Server Runtime tmpfs、镜像隔离、同卷二次启动与 SIGTERM 的 OCI Smoke；新增 Compose v2 双栈 Profile 与隔离镜像/网络/Volume 的 Smoke，Management 只发布到宿主回环，Agent Gateway 显式发布 IPv4/IPv6；新增未接入启动路径的双栈监听原语与 Config IPv6 测试；使用 `xtunnel-server`/`xtunnel-agent` 双用户、独立 Runtime/State Directory、角色配置权限和保留式卸载的 systemd Unit、安装/卸载与隔离 Smoke；同步 README 与长期部署契约。
 - 验收命令：`shellcheck --shell=sh deploy/docker/*.sh deploy/systemd/*.sh`；`sh -n`、`dash -n`、`bash --posix -n`；四组 `deploy/docker/smoke.sh --target <server|agent> --platform <linux/amd64|linux/arm64>`；`docker compose version`、`docker compose --file deploy/docker/compose.dualstack.yaml config --quiet`；amd64/arm64(QEMU) `sh deploy/docker/dualstack-smoke.sh --skip-build`；Docker CLI 等价双栈 Network/容器地址检查；三个固定基础摘要的 `docker buildx imagetools inspect`；`deploy/systemd/smoke.sh`；`$env:GOTOOLCHAIN='local'; ./tools/check-go-version.ps1`；Windows `go test ./...`、`go test -race ./internal/server/bootstrap ./internal/server/config`、`go vet ./...`；Linux 固定 Go 1.27 镜像定向 Listener Test；`npm --prefix web run check`；`npm --prefix web run build`；`git diff --check`。
 - 验收结果：原 OCI/systemd 证据保持有效。WSL 安装并实测 Docker Compose `2.40.3+ds1-0ubuntu1~22.04.1`，官方 Config 校验通过；amd64 原生与 arm64 QEMU 的 Compose Smoke 均验证 Server/Agent 获得 IPv4/IPv6 地址、Management/Agent Gateway 四组 Host Binding 分配非零端口、独立 Data Volume、Server Runtime tmpfs、`65532:65532`、只读 RootFS、`CapDrop=ALL`、No New Privileges、独立入口和 SIGTERM 退出。Go 1.27.0 本地工具链下全包测试、定向 Race、Vet 通过；Linux 固定 Go 1.27 镜像实际验证 tcp4/tcp6 同端口 Dial/Accept、`IPV6_V6ONLY=1`、第二地址族绑定失败后第一地址族端口释放。ShellCheck、三种 POSIX 语法、Compose Config 与 Diff Check 通过；Smoke 临时容器、网络、Volume、镜像标签和测试 Cache 均已清理。
 - 剩余风险：默认 Compose 冷构建两次在 WSL BuildKit Go 编译阶段超过 360 秒后终止，`--skip-build` 使用本轮前已验收的 amd64/arm64 镜像完成运行层验证；同一 WSL 的 Linux Race 冷编译也超过 360 秒，未记录为通过。arm64 仍是 QEMU 仿真，不等同于原生 Runner；原生干净 Checkout、Registry Manifest 和该环境冷编译问题由 `M0-10` 补齐。当前双栈监听原语没有生产调用者，Management、Agent Gateway、Ingress、TLS、Session 和公网 IPv6 E2E 均未实现；Host Binding 不是应用连通或公网可达证据。本记录不勾选 M0 Gate。
-- 解锁的后续任务：等待用户 Code Review；通过后 `M0-09` 可标记 `DONE`，随后才可进入 `M0-10`。
+- 解锁的后续任务：`M0-10` 的依赖已满足并进入 `READY`；实施前须取得 CI 配置变更的用户明确确认。

@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  verify:
+    name: verify (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 使用原生 Linux arm64 Runner；QEMU 或仅交叉编译不能作为 arm64 进程 Smoke 证据。
+          - arch: amd64
+            runner: ubuntu-24.04
+            uname_arch: x86_64
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            uname_arch: aarch64
+            platform: linux/arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Go 1.27.0
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.0'
+          check-latest: false
+          cache: false
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Verify runner and fixed toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.uname_arch }}"
+          test "$(go env GOVERSION)" = 'go1.27.0'
+          test "$(go env GOTOOLCHAIN)" = 'local'
+          test "$(node --version)" = 'v24.19.0'
+          test "$(npm --version)" = '11.17.0'
+          ./tools/check-go-version.sh
+
+      - name: Verify Proto toolchain and wrapper path
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/bootstrap-proto.sh
+          ./tools/proto.sh lint
+          ./tools/proto.sh breaking
+          ./tools/proto.sh generate-check
+
+      - name: Verify OpenAPI toolchain and wrapper path
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/bootstrap-openapi.sh
+          ./tools/openapi.sh validate
+          ./tools/test-openapi.sh
+
+      - name: Build the embedded web assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix web ci
+          npm --prefix web run check
+          npm --prefix web run build
+
+      - name: Test Go modules and build both processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod verify
+          (
+            cd tools
+            go mod verify
+            go build -mod=readonly ./...
+          )
+          go test ./...
+          go test -race ./internal/server/bootstrap ./internal/agent/bootstrap ./internal/server/config ./internal/agent/config
+          go vet ./...
+          go build ./cmd/server ./cmd/agent
+
+      - name: Run native OCI smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/docker/smoke.sh --target server --platform '${{ matrix.platform }}'
+          ./deploy/docker/smoke.sh --target agent --platform '${{ matrix.platform }}'
+
+      - name: Verify generated files remain clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git status --porcelain --untracked-files=all)"
