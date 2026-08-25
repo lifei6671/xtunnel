@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M0 工程初始化
 >
-> **当前结论**：`M0-01`、`M0-03` 至 `M0-08`、`M0-10` 已完成；`M0-02` 因 Agent 改为 Token-only Bootstrap 而重新进入实施并等待新的 CI/复审，`M0-09` 的 Linux Agent Binary Self-install 已通过真实 systemd Smoke，Windows SCM 静态测试/构建已通过但提升权限的正向 SCM Smoke 未运行，真实 OCI/Compose Smoke 与新 CI 也尚未完成；`M0-11` 首个 Admin Bootstrap 的 Linux 普通用户/root 运行验证与用户复审已通过，现处于 `REVIEW`，仅等待新的 CI Run。
+> **当前结论**：`M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11` 已完成；`M0-02` 的 Token-only Bootstrap 已有新的跨平台 CI 证据，等待用户复审；`M0-09` 已有 Linux systemd、Windows 提升权限 SCM、Linux amd64/arm64 原生 OCI Smoke 与跨平台 CI 证据，仍缺 Compose IPv4/IPv6 Runtime Smoke 及复审，因此保持实施中。
 
 ---
 
@@ -100,8 +100,8 @@ M1 Secure TCP Data Plane Baseline
 
 | 里程碑 | 任务数 | 已完成 | 状态 | 入口依赖 | 退出 Gate |
 | --- | ---: | ---: | --- | --- | --- |
-| M0 工程初始化 | 12 | 8 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
-| M0.5 Protocol Freeze | 10 | 0 | `NOT_STARTED` | M0-06 | M05-10 |
+| M0 工程初始化 | 12 | 9 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
+| M0.5 Protocol Freeze | 10 | 0 | `IN_PROGRESS` | M0-06 | M05-10 |
 | M1 Secure TCP Baseline | 14 | 0 | `NOT_STARTED` | M0-12 + M05-10 | M1-14 |
 | M2 Replica/Credential | 8 | 0 | `NOT_STARTED` | M1-14 | M2-08 |
 | M3 Config/Health | 13 | 0 | `NOT_STARTED` | M1-14 | M3-13 |
@@ -131,7 +131,7 @@ M1 Secure TCP Data Plane Baseline
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `DONE` |
 | M0-09 | OCI/Compose 双栈、Server Shell Packaging 与跨平台 Agent Binary Self-install | M0-03、M0-08 | `deploy/docker`、Server-only `deploy/systemd`、Agent `service install/uninstall`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Agent 在 root/systemd>=249 快速失败，原子安装 Binary、root-only Credential 与 Managed Unit；Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；两端持久启动项只含 Binary + `run` 且无 Secret，均以 managed marker 拒绝覆盖/删除非受管同名服务，卸载保留 Credential；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `IN_PROGRESS` |
 | M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `DONE` |
-| M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `REVIEW` |
+| M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `DONE` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `NOT_STARTED` |
 
 ## 5.2 可并行推进
@@ -176,7 +176,7 @@ M0.5 Gate 通过前，禁止开发 Server/Agent Protocol Handler。可并行开�
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M05-01 | 冻结 Common Types | M0-06 | `api/proto/common.proto` | package/go_package、enum 数值、reserved range、ErrorCode 完整 | `NOT_STARTED` |
+| M05-01 | 冻结 Common Types | M0-06 | `api/proto/common.proto` | package/go_package、enum 数值、reserved range、ErrorCode 完整 | `REVIEW` |
 | M05-02 | 冻结 Connection Token + Auth/Control Contract | M05-01 | Connection Token v1 编码/解析契约、`api/proto/control.proto` | Token 仍是单个不透明 `xta_...`；冻结 Endpoint、TLS Trust、Agent/Token Identity、Secret 的精确编码/完整性/版本分派与失败语义；裸 Auth Frame、ControlEnvelope、Snapshot/ConfigAck、Health Batch 完整 | `NOT_STARTED` |
 | M05-03 | 冻结 Work Contract | M05-01 | `api/proto/work.proto` | WorkHello/Ready/Open/Response；RAW 切换；各状态唯一裸 Message | `NOT_STARTED` |
 | M05-04 | 生成代码与 Breaking Baseline | M05-01至 M05-03 | `internal/protocol/gen`、Buf Initial Baseline | 明确记录“首次冻结无历史前代”的 Baseline 建立方式，禁止与自身比较伪装 Breaking 证据；生成结果提交；`lint/breaking/generate-check` 通过 | `NOT_STARTED` |
@@ -421,11 +421,10 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10` 已完成。按逐任务推进约定，当前待办为：
 
-1. `M0-02` — Server Config Schema + Agent Token Bootstrap，等待新契约 CI 与复审证据。
-2. `M0-09` — Token-only Agent 的 OCI/Compose 与跨平台 Binary Self-install；Linux systemd 已有真实 Smoke，Windows SCM 静态测试/构建已通过但提升权限的正向 Smoke 未运行，OCI/Compose Runtime 与新 CI 证据也未完成。
-3. `M0-11` — 首个 Admin Bootstrap。
+1. `M0-02` — Server Config Schema + Agent Token Bootstrap，新的跨平台 CI 已通过，等待用户复审。
+2. `M0-09` — Token-only Agent 的 OCI/Compose 与跨平台 Binary Self-install；Linux systemd、Windows SCM 及 Linux amd64/arm64 OCI Smoke 已通过，仍等待 Compose IPv4/IPv6 Runtime Smoke 与复审。
 
-`M0-10` 已于 2026-08-25 经用户 Code Review 通过并标记 `DONE`。`M0-02` 因删除 Agent Schema/Loader 并改写 Bootstrap 输入而回退为 `IN_PROGRESS`；`M0-09` 因 Token-only 与跨平台 Service 部署契约调整保持 `IN_PROGRESS`；二者都需要更新后的 CI/复审，`M0-09` 还需要 Windows SCM 与真实 OCI/Compose 证据。`M0-11` 仍按已确认边界实施。
+`M0-10` 已于 2026-08-25 经用户 Code Review 通过并标记 `DONE`。`M0-11` 已取得用户复审及原生 Linux CI Race 证据，现为 `DONE`。`M0-02` 因删除 Agent Schema/Loader 并改写 Bootstrap 输入而保持 `IN_PROGRESS`，只等待用户复审；`M0-09` 保持 `IN_PROGRESS`，只等待 Compose 双栈 Runtime Smoke 与复审。
 
 推进规则：
 
@@ -644,3 +643,25 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 验收结果：Windows 宿主未安装 Docker CLI，WSL 普通用户无 Docker Socket 权限；WSL root 可访问 Docker `29.1.3`、Compose `2.40.3`。Agent OCI Smoke 在 BuildKit 冷构建阶段 360 秒内没有产生运行结果，按计划阈值中止，不能记录为 Smoke PASS。检查确认没有运行中/已停止的 Smoke Container，也没有 `xtunnel` Network 或 Volume 遗留。
 - 状态影响：`M0-09` 保持 `IN_PROGRESS`；M0 和总计的 `DONE` 数仍为 `8/12`、`8/95`。本记录不勾选 M0 Gate，不把 Docker Engine 可访问或 BuildKit 已开始构建记为 OCI Runtime 证据。
 - 剩余风险与解除条件：在具备可复现冷构建性能的干净 Linux amd64/arm64 环境或 CI，完成 Server/Agent OCI 及 Compose 双栈 Runtime Smoke；另需在提升权限的 Windows 环境运行 SCM 正向 Harness。当前非管理员 Windows 会话只能完成静态测试，不能替代真实 Service 安装/启动/停止/卸载证据。
+
+## 2026-08-25 · M0 CI 收尾验证 · M0-11 DONE / M0-02、M0-09 IN_PROGRESS
+
+- 负责人：Codex；用户授权提交、推送与提升权限 Windows SCM Smoke。代码提交 `95f9dcb` 补齐 Bootstrap/Admin Socket 契约测试，CI #5 的 Windows checkout 因嵌入 systemd Unit 被 Git 转为 CRLF 而让 LF 专用测试误失败；提交 `d1557db` 将该测试归一化为逻辑行结束符后重新触发 CI。未修改冻结 Protocol、Config Schema、OpenAPI、产品契约或依赖。
+- 验收证据：本机 `go1.27.0` / `GOTOOLCHAIN=local` 下，`go test -count=1 ./internal/agent/... ./cmd/agent`、`go test -race -count=1 ./internal/agent/bootstrap ./internal/agent/service`、`go vet ./internal/agent/... ./cmd/agent` 与 `go test -count=1 ./internal/server/bootstrap` 通过。提升权限执行 `deploy/windows/smoke.ps1` 的真实 SCM install/reinstall/start/stop/uninstall Harness 退出码为 0，清理后 Service、ProgramFiles Binary 与 ProgramData Credential 均由 Harness 清理。CI Run `32815381791`（提交 `d1557db`）的 `verify (amd64)`、`verify (arm64)` 和 `Windows Agent service` 全部成功；Linux 两个原生 Job 均执行 Server/Agent OCI Smoke，Windows Job 执行 Windows Service Smoke。
+- 状态影响：`M0-11` 的用户复审、Socket 权限/失败路径本机与 WSL 证据，以及 CI Linux Race 已齐备，标记 `DONE`。M0 为 `9/12`，总计为 `9/95`。`M0-02` 新 CI 已覆盖 Token-only Bootstrap 的 Test/Race/Vet/Build，但仍等待用户复审；`M0-09` 的 Linux systemd、提升权限 Windows SCM 和原生双架构 OCI Smoke 已补齐，仍为 `IN_PROGRESS`。
+- 未完成边界：CI Workflow 不执行 `docker compose` 双栈 Profile，且本轮未取得 Compose IPv4/IPv6 Runtime Smoke；不得把 OCI Smoke 推论为 Compose Gate PASS。`M0-09` 完成前还需要该真实 Compose Smoke 与用户复审；因此 `M0-12` Gate 仍不得开始或勾选。
+
+## 2026-08-25 · M0-09 · Compose 双栈 Runtime 重试未通过
+
+- 负责人：Codex；本轮未改动代码、Compose 定义、冻结契约或依赖，未暂存、未提交、未推送。执行环境为 WSL Ubuntu 22.04 root，Docker Engine `29.1.3`、Docker Compose `2.40.3`；普通 WSL 用户没有 Docker Socket 权限。
+- 验收命令：两次执行 `./deploy/docker/dualstack-smoke.sh --platform linux/amd64`。每次都只输出 BuildKit 加载 compose/Dockerfile 定义，随后在顺序冷构建阶段 360 秒内未产生容器启动或 Runtime 断言结果，按既定阈值中断；不得记录为 Compose Smoke PASS。中断后检查没有本轮完整构建留下的容器、网络、卷或临时镜像。
+- 环境演练：为区分 Builder 与 Compose 环境，使用 17 小时前生成的 `xtunnel-server-smoke:amd64`/`xtunnel-agent-smoke:amd64` 执行 `--skip-build`。该演练已创建唯一项目名的双栈 Network、Volume 和两个 Container，但在创建后 120 秒无后续输出而中断；历史镜像不绑定当前提交，不能作为验收证据。清理检查发现其遗留 Network/Volume，无容器；随后仅删除已核实的该项目 Network/Volume，确认无残留。
+- 状态影响：`M0-09` 保持 `IN_PROGRESS`，M0 仍为 `9/12`、总计仍为 `9/95`；不勾选 M0 Gate，不把 Engine 可访问、Network 创建、历史镜像演练或 OCI CI Smoke 视为 Compose Runtime PASS。
+- 剩余风险与解除条件：需要在 Builder 可在阈值内完成当前提交镜像的 Linux Docker/Compose 环境，运行并通过当前提交的 Compose IPv4/IPv6 Runtime Smoke；成功证据必须单独记录实际镜像来源、架构、Docker/Compose 版本、项目名和清理检查，再经用户复审才可考虑进入 `REVIEW`。该 Smoke 仍不证明 Management/Gateway 应用连通或公网 IPv6 路由。
+
+## 2026-08-25 · M05-01 · REVIEW
+
+- 负责人：Codex；用户明确确认开始 Protocol Freeze。新增唯一 Wire Authority `api/proto/common.proto`，固定 `package xtunnel.protocol.v1` 与 `go_package=github.com/lifei6671/xtunnel/internal/protocol/gen;protocolv1`；只冻结共享 ID 格式注释、`ErrorCode` 全表及 `WorkReadyStatus`、`OpenStatus`、`IngressType`、`HealthType`、`HealthStatus`、`ConfigApplyStatus`，没有提前定义 Auth、Control、Snapshot、Health 消息或 Work 消息。
+- Lint 契约：总方案明确 `ERROR_CODE_OK=0` 与 `HEALTH_STATUS_UNKNOWN=0` 是仅有的有意零值例外。Buf STANDARD 默认要求 `_UNSPECIFIED`，因此 `buf.yaml` 只对 `api/proto/common.proto` 的 `ENUM_ZERO_VALUE_SUFFIX` 设置 `ignore_only`；`internal/protocol/contract/common_contract_test.go` 完整锁定七个 enum 的成员、顺序与数值，以及七种 ID 前缀说明，防止该例外放宽 Protocol 约束。
+- 验收命令：Windows 本机在 `go1.27.0` / `GOTOOLCHAIN=local` 下执行 `gofmt`、`go test -count=1 ./internal/protocol/contract` 与 `go test -count=1 ./...` 均通过；WSL Ubuntu 22.04 root 使用仓库受管 Buf 执行 `./tools/proto.sh lint` 通过。`./tools/proto.sh breaking` 在 Proto 已存在而 M05-04 初始不可变 Baseline 尚未配置时明确失败，已作为预期失败分支验证，不得视为 Breaking PASS；WSL root 没有 Go，因此未在该环境运行 Go 版本检查。
+- 状态影响：`M05-01` 转为 `REVIEW`，M0.5 里程碑转为 `IN_PROGRESS`；M0.5 和全局 `DONE` 计数均不增加，M0 Gate、M05-10 与所有 Protocol Handler 仍不得开始。待用户复审、提交后取得相应 CI 证据，再按任务依赖推进 M05-02/M05-03 与 M05-04 初始 Baseline。

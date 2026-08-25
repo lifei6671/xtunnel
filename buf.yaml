@@ -9,6 +9,11 @@ lint:
   # Protocol v1 的三份权威文件按冻结契约直接位于 api/proto 根目录。
   except:
     - PACKAGE_DIRECTORY_MATCH
+  # 技术契约明确指定两个有语义的零值，而非未指定状态；仅 Common
+  # Types 可例外，完整名称/数值由 Go 契约测试锁定。
+  ignore_only:
+    ENUM_ZERO_VALUE_SUFFIX:
+      - api/proto/common.proto
 
 breaking:
   use:
