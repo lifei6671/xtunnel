@@ -9,7 +9,9 @@ import (
 )
 
 func TestEmbeddedUnitContract(t *testing.T) {
-	content := string(unitFile)
+	// Git may materialize this embedded text file with CRLF on Windows runners.
+	// The contract is about the unit's logical lines, not checkout line endings.
+	content := strings.ReplaceAll(string(unitFile), "\r\n", "\n")
 	checks := []string{
 		ManagedUnitMarker + "\n",
 		"LoadCredential=xtunnel-agent.token:/etc/xtunnel/credentials/agent.token",
