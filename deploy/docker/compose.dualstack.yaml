@@ -63,13 +63,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    volumes:
-      - agent-data:/var/lib/xtunnel
-    command:
-      - --set
-      - server.endpoint=${XTUNNEL_AGENT_SERVER_ENDPOINT:-server:7443}
-      - --set
-      - server.tls.mode=public
+    environment:
+      XTUNNEL_TOKEN: ${XTUNNEL_AGENT_TOKEN:?set XTUNNEL_AGENT_TOKEN}
     networks:
       - dualstack
     stop_grace_period: 30s
@@ -81,4 +76,3 @@ networks:
 
 volumes:
   server-data:
-  agent-data:

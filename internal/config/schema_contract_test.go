@@ -8,29 +8,15 @@ import (
 	"testing"
 
 	configschemas "github.com/lifei6671/xtunnel/configs"
-	agentconfig "github.com/lifei6671/xtunnel/internal/agent/config"
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 )
 
-func TestSchemaAndGoStructFieldsMatch(t *testing.T) {
-	tests := []struct {
-		name       string
-		schemaData []byte
-		configType reflect.Type
-	}{
-		{name: "server", schemaData: configschemas.ServerSchema(), configType: reflect.TypeFor[serverconfig.Config]()},
-		{name: "agent", schemaData: configschemas.AgentSchema(), configType: reflect.TypeFor[agentconfig.Config]()},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			schemaFields := schemaLeafTypes(t, test.schemaData)
-			structFields := structLeafTypes(test.configType, "")
-			if !maps.Equal(schemaFields, structFields) {
-				t.Fatalf("Schema fields = %#v\nGo struct fields = %#v", schemaFields, structFields)
-			}
-		})
+func TestServerSchemaAndGoStructFieldsMatch(t *testing.T) {
+	schemaFields := schemaLeafTypes(t, configschemas.ServerSchema())
+	structFields := structLeafTypes(reflect.TypeFor[serverconfig.Config](), "")
+	if !maps.Equal(schemaFields, structFields) {
+		t.Fatalf("Schema fields = %#v\nGo struct fields = %#v", schemaFields, structFields)
 	}
 }
 

@@ -58,6 +58,7 @@ export XTUNNEL_AGENT_GATEWAY_HOSTNAME=localhost
 # 端口 0 让 Docker 为四个宿主监听分别选择空闲端口，避免 Smoke 与现有服务冲突。
 export XTUNNEL_MANAGEMENT_PORT=0
 export XTUNNEL_AGENT_GATEWAY_PORT=0
+export XTUNNEL_AGENT_TOKEN=xta_compose_smoke_not_secret
 if [ "$build" -eq 1 ]; then
 	export XTUNNEL_SERVER_IMAGE="xtunnel-server-$project:local"
 	export XTUNNEL_AGENT_IMAGE="xtunnel-agent-$project:local"
@@ -127,7 +128,13 @@ verify_container() {
 	test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container_id")" = true
 	test "$(docker inspect --format '{{join .HostConfig.CapDrop " "}}' "$container_id")" = ALL
 	docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container_id" | grep -F 'no-new-privileges:true' >/dev/null
-	test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/xtunnel"}}{{.RW}}{{end}}{{end}}' "$container_id")" = true
+	if [ "$service" = server ]; then
+		test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/xtunnel"}}{{.RW}}{{end}}{{end}}' "$container_id")" = true
+	else
+		test "$(docker inspect --format '{{len .Mounts}}' "$container_id")" -eq 0
+		test "$(docker inspect --format '{{join .Config.Cmd " "}}' "$container_id")" = run
+		docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" | grep -Fx "XTUNNEL_TOKEN=$XTUNNEL_AGENT_TOKEN" >/dev/null
+	fi
 
 	ipv4_address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container_id")
 	ipv6_address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.GlobalIPv6Address}}{{end}}' "$container_id")
@@ -144,10 +151,8 @@ test -n "$(docker inspect --format '{{index .HostConfig.Tmpfs "/run/xtunnel"}}' 
 agent_tmpfs=$(docker inspect --format '{{json .HostConfig.Tmpfs}}' "$agent_id")
 test "$agent_tmpfs" = null || test "$agent_tmpfs" = '{}'
 server_volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/xtunnel"}}{{.Name}}{{end}}{{end}}' "$server_id")
-agent_volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/xtunnel"}}{{.Name}}{{end}}{{end}}' "$agent_id")
 test -n "$server_volume"
-test -n "$agent_volume"
-test "$server_volume" != "$agent_volume"
+test -z "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/xtunnel"}}{{.Name}}{{end}}{{end}}' "$agent_id")"
 
 published_ports=$(docker inspect --format '{{json .NetworkSettings.Ports}}' "$server_id")
 printf '%s' "$published_ports" | grep -F '"HostIp":"127.0.0.1"' >/dev/null

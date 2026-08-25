@@ -10,8 +10,8 @@
 > **Public HTTP 前置代理**：Caddy / Nginx
 > **Agent Gateway 默认端口**：TCP 7443，可配置
 > **核心定位**：可直接部署使用的集中式反向隧道 Standalone 产品
-> **修订日期**：2026-08-24
-> **本次修订**：冻结 Go 1.27 工具链基线、Protocol v1 交付门、Control Session 并发所有权、Agent Trust State、状态聚合、统一配置、Health 容量、OpenAPI 契约与里程碑依赖
+> **修订日期**：2026-08-25
+> **本次修订**：将 Agent 收敛为 Token-only、远端托管的轻状态 Replica，并冻结 Linux systemd + Windows SCM 跨平台 Binary Self-install；用户只需一个版本化 Connection Token，Agent 无 YAML、无用户管理的 Token 文件、无本地业务或配置状态
 
 ---
 
@@ -138,9 +138,7 @@ Graceful Shutdown
 ```text
 Agent Token 认证
 
-Installation Identity
-
-Instance Identity
+Ephemeral Instance Identity
 
 Control Session
 
@@ -168,9 +166,9 @@ TCP Origin
 
 Health Check
 
-Config Snapshot
+Remote Config Snapshot
 
-Last Known Config
+In-memory Atomic Config Apply
 
 Automatic Reconnect
 
@@ -416,12 +414,10 @@ Agent
 
 # 8. 身份层次
 
-XTunnel 第一阶段定义四级身份：
+XTunnel 第一阶段定义三级身份：
 
 ```text
 Agent
-    ↓
-Installation
     ↓
 Instance
     ↓
@@ -432,8 +428,6 @@ Session
 
 ```text
 agent_id
-
-installation_id
 
 instance_id
 
@@ -486,77 +480,19 @@ Services:
 
 ---
 
-# 10. installation_id
+# 10. instance_id
 
-表示：
-
-> 一个具体 Agent 安装目录。
-
-第一次启动时生成：
-
-```text
-inst_01ARZ3NDEKTSV4RRFFQ69G5FAV
-```
-
-保存在：
-
-```text
-<data-dir>/installation.id
-```
-
-不会因为进程重启改变。
-
-例如：
-
-```text
-Host A
-/var/lib/xtunnel/a
-→ inst_01ARZ3NDEKTSV4RRFFQ69G5FAV
-
-Host A
-/var/lib/xtunnel/b
-→ inst_01ARZ3NDEKTSV4RRFFQ69G5FAW
-```
-
-这样同一台服务器可以运行多个 Replica。
-
----
-
-# 11. instance_id
-
-每启动一个：
-
-```text
-xtunnel-agent
-```
-
-进程生成新的：
-
-```text
-instance_id
-```
-
-例如：
+每启动一个 `xtunnel-agent` 进程，就在内存中生成新的：
 
 ```text
 ai_01ARZ3NDEKTSV4RRFFQ69G5FAV
 ```
 
-进程重启后：
-
-```text
-instance_id
-```
-
-重新生成。
-
-它代表：
-
-> 当前正在运行的具体 Agent 进程。
+它代表当前运行中的具体 Agent Replica。`instance_id` 不落盘、不绑定物理机器或安装目录；进程重启后重新生成。
 
 ---
 
-# 12. session_id
+# 11. session_id
 
 Agent 每次成功建立 Control Session：
 
@@ -594,42 +530,32 @@ Session ID
 
 ---
 
-# 13. 身份树示例
+# 12. 身份树示例
 
 ```text
 Agent
 ag_01ARZ3NDEKTSV4RRFFQ69G5FAV
 │
-├── Installation
-│   inst_01ARZ3NDEKTSV4RRFFQ69G5FAV
-│   │
-│   ├── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAV
-│   │      └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
-│   │
-│   └── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAW
-│          └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAW
+├── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAV
+│      └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
 │
-└── Installation
-    inst_01ARZ3NDEKTSV4RRFFQ69G5FAW
-    │
-    └── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAX
-           └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAX
+├── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAW
+│      └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAW
+│
+└── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAX
+       └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAX
 ```
 
 ---
 
-# 14. 同一主机运行多个 Agent
+# 13. 同一主机运行多个 Agent
 
 允许：
 
 ```bash
-xtunnel-agent install \
-  --data-dir /var/lib/xtunnel/replica-a \
-  ...
+xtunnel-agent run --token 'xta_...'
 
-xtunnel-agent install \
-  --data-dir /var/lib/xtunnel/replica-b \
-  ...
+xtunnel-agent run --token 'xta_...'
 ```
 
 两个实例使用：
@@ -641,101 +567,74 @@ xtunnel-agent install \
 但拥有不同：
 
 ```text
-installation_id
 instance_id
 session_id
 ```
 
 ---
 
-# 15. Data Directory Lock
+# 14. Agent 运行身份边界
 
-同一个 Data Directory：
+`instance_id` 和 `session_id` 都是运行时标识，不是独立 Credential。持有同一个 Agent Token 的进程都被视为该逻辑 Agent 的完整受信 Replica，可以接收该 Agent 的全部远程配置并承接对应流量。
 
-```text
-只允许一个 Agent 进程
-```
-
-启动时打开：
-
-```text
-agent.lock
-```
-
-并对该文件获取进程全生命周期持有的非阻塞 OS 文件锁：
-
-```text
-Linux: flock(LOCK_EX | LOCK_NB)
-```
-
-锁文件残留不代表 Data Directory 正在使用。只有文件锁获取失败才拒绝启动。
-
-创建和打开锁文件时必须禁止跟随符号链接，文件权限为 `0600`。
-
-如果：
-
-```text
-/data-dir
-```
-
-已经被另一个 Agent 使用：
-
-```text
-Agent refuses to start
-```
-
-避免：
-
-```text
-Snapshot 冲突
-
-Token File 冲突
-
-Installation ID 冲突
-
-并发文件写入
-```
-
-同机 Replica 使用不同 Data Directory。
+Server 使用 `agent_id + instance_id + session_id + generation` 做 Session fencing、WorkConn 归属和日志关联；这些标识不用于设备注册、硬件绑定或跨重启恢复。需要隔离信任边界时，管理员必须创建不同的逻辑 Agent 和 Token。
 
 ---
 
-# 16. Agent Token
+# 15. Agent 轻状态边界
 
-Agent Token 是：
-
-> 逻辑 Agent 的长期 Credential。
-
-它不是一次性 Enrollment Token。
-
-例如：
+Agent 不维护 Data Directory、安装身份、本地数据库、本地配置或本地 Desired State。运行所需输入只有：
 
 ```text
-xta_A7dP...
+Binary
++ one opaque versioned Connection Token (`xta_...`)
 ```
 
-生成：
+Connection Token 在语义上同时携带 Server Endpoint、TLS Trust Descriptor、Agent/Token Identity 与认证 Secret。Agent 不要求用户另外提供 YAML、Endpoint、Pin 或 Token 文件。
+
+以下对象只存在于当前进程内存：
 
 ```text
-crypto/rand
-32 bytes
+instance_id / session_id
+current revision + full remote config
+Origin Resolver / Health / WorkPool
+Control Session / WorkConn
 ```
 
-然后：
-
-```text
-Base64URL
-```
-
-加固定前缀：
-
-```text
-xta_
-```
+多个 Agent 进程可以使用同一个 Connection Token；它们不共享可写目录。进程退出后 Instance 消失，重新启动时生成新 `instance_id`，仅凭 Token 连接并从 Server 获取完整当前配置。
 
 ---
 
-# 17. Agent Token 生命周期
+# 16. Agent Connection Token
+
+Agent Token 是一个版本化 Connection Token：
+
+> 用户只需要复制和部署一次的单个不透明 `xta_...` 字符串。
+
+它不是一次性 Enrollment Token，也不是只包含认证 Secret 的裸 Token。其语义字段为：
+
+```text
+format version
+Server Endpoint
+TLS Trust Descriptor
+agent identity
+token identity / version
+authentication secret
+```
+
+`TLS Trust Descriptor` 必须足以让 Agent 在没有其他本地配置的情况下完成 public CA 或 pinned SPKI 验证。Endpoint 或 TLS Trust 改变时，需要签发并重新部署包含新连接信息的 Token。
+
+对用户可见的形式固定为：
+
+```text
+xta_...
+```
+
+V0.1 的精确编码、字段边界、版本分派、解析失败语义和 Golden Vector 在 M05-02 Protocol Freeze 冻结；本阶段不得提前把它写死为 JSON、HMAC 或其他具体封装。认证 Secret 必须由 CSPRNG 生成并提供至少 256 bit 随机熵。
+
+---
+
+# 17. Connection Token 生命周期
 
 默认：
 
@@ -759,15 +658,17 @@ Generate Token
 Show Once
 ```
 
-Token 明文只在创建或 Rotate 时返回一次。
+完整 Connection Token 只在创建或 Rotate 时返回一次。每次签发都使用 Server 当前对外 Agent Gateway Endpoint 与 TLS Trust Descriptor；Rotate 不得继续复制过时的连接描述。
 
 数据库只保存：
 
 ```text
-SHA-256(token)
+token identity / version
+authentication secret hash
+status / timestamps
 ```
 
-由于 Token 拥有 256 bit 随机熵，不需要使用 Argon2 等慢哈希。
+数据库不保存可还原的完整 Connection Token。由于认证 Secret 拥有至少 256 bit 随机熵，不需要使用 Argon2 等慢哈希；具体 Hash 输入和常量时间校验在 M1-01/M1-02 冻结。
 
 ---
 
@@ -782,7 +683,7 @@ Rotate Token
 Server：
 
 ```text
-Generate Token v2
+Generate Connection Token with token_version = 2
         ↓
 v1 = REVOKED_FOR_NEW_SESSION
         ↓
@@ -840,7 +741,7 @@ Revoke 的 Desired State、全部 Token 状态和 `agents.version` 必须在同�
 
 ---
 
-# 20. Agent Token 表
+# 20. Connection Token 表
 
 ```sql
 CREATE TABLE agent_tokens (
@@ -848,7 +749,7 @@ CREATE TABLE agent_tokens (
 
     agent_id TEXT NOT NULL,
 
-    token_hash BLOB NOT NULL UNIQUE,
+    secret_hash BLOB NOT NULL UNIQUE,
 
     version INTEGER NOT NULL,
 
@@ -918,12 +819,7 @@ agent_gateway:
   listen: ":7443"
 ```
 
-Agent：
-
-```yaml
-server:
-  endpoint: tunnel.example.com:7443
-```
+Agent 从 Connection Token 解析 Endpoint；不读取独立 Agent 配置。
 
 ---
 
@@ -1133,11 +1029,10 @@ xtunnel_gateway_certificate_expiry_seconds
 Pinned Private Key 泄漏或必须更换 SPKI 时，V0.1 不提供通过旧 Control Session 自动轮换 Gateway Pin 的协议。唯一合法入口是离线维护命令：
 
 ```bash
-xtunnel-server gateway rotate-key --maintenance \
-  --new-pin-output /secure/xtunnel-new-gateway-pin
+xtunnel-server gateway rotate-key --maintenance
 ```
 
-命令要求 Server 已停止并取得 Server External Lock；如果任何 Server 进程仍持锁则拒绝。新 Pin 文件使用 `O_CREATE | O_EXCL`、权限 `0600`，禁止输出到 stdout。命令读取 Installation 清单，生成新的 Key/Certificate 到 `pki` 同盘临时文件，写入并 fsync Gateway Identity Rotation Journal 后再原子 rename。崩溃后 Server 启动必须先根据 Journal 完成或回滚，禁止加载 Key/Certificate 不匹配的组合；成功后写入 Security Audit Event。
+命令要求 Server 已停止并取得 Server External Lock；如果任何 Server 进程仍持锁则拒绝。命令生成新的 Key/Certificate 到 `pki` 同盘临时文件，写入并 fsync Gateway Identity Rotation Journal 后再原子 rename。崩溃后 Server 启动必须先根据 Journal 完成或回滚，禁止加载 Key/Certificate 不匹配的组合；成功后写入 Security Audit Event。新 Pin 不作为独立 Agent 配置或用户文件输出，而是由之后签发的 Connection Token 携带。
 
 完整维护流程：
 
@@ -1146,16 +1041,16 @@ xtunnel-server gateway rotate-key --maintenance \
  ↓
 执行 gateway rotate-key --maintenance
  ↓
-通过受信配置管理或本机 Secret 文件更新所有 Agent server_pin
+启动 xtunnel-server；旧 pinned Token 因 Pin 不匹配保持离线
  ↓
-重启每个 Agent，使其重新读取 Pin
+通过 Web/API Rotate 每个 Agent Token，使新 Token 携带当前 Endpoint 与 Pin
  ↓
-核对 Installation 清单与遗漏项
+把新的单字符串 Token 重新部署到前台、容器、Linux systemd 或 Windows SCM
  ↓
-启动 xtunnel-server
+重启 Agent 并核对全部 Replica 恢复 ONLINE
 ```
 
-Agent 不热加载 `server_pin`；只有进程启动时从权限受控 Config 读取。禁止在 Pin 不匹配时自动接受新 Key、TOFU 覆盖或回落 `--insecure`。未完成 Pin 更新并重启的 Installation 会保持离线，必须人工重新配置；这是 V0.1 明确接受的维护中断。在线双 Pin 轮换留到后续协议版本。
+Agent 只使用 Connection Token 内的 TLS Trust Descriptor，禁止在 Pin 不匹配时自动接受新 Key、TOFU 覆盖或回落 `--insecure`。未部署新 Token 并重启的 Agent 进程会保持离线；这是 V0.1 明确接受的维护中断。在线双 Pin/Token 轮换留到后续协议版本。
 
 ---
 
@@ -1223,7 +1118,7 @@ go_package = <当前 Go Module>/internal/protocol/gen;protocolv1
 
 实际 Go Module Path 在 M0 创建 `go.mod` 时确定；M0.5 必须把完整值写入所有 Proto，之后不得使用相对或占位 `go_package`。
 
-Agent 首先建立：
+Agent 先解析 Connection Token，取得 Endpoint 与 TLS Trust Descriptor，再建立：
 
 ```text
 TLS
@@ -1233,27 +1128,19 @@ TLS
 
 ```protobuf
 message AgentAuthRequest {
-    string token = 1;
+    string connection_token = 1;
 
-    string installation_id = 2;
-    string instance_id = 3;
+    string instance_id = 2;
+    string hostname = 3;
 
-    string hostname = 4;
-    string machine_id = 5;
+    string version = 4;
+    string os = 5;
+    string arch = 6;
 
-    string version = 6;
-    string os = 7;
-    string arch = 8;
+    uint32 min_protocol = 7;
+    uint32 max_protocol = 8;
 
-    uint32 min_protocol = 9;
-    uint32 max_protocol = 10;
-
-    uint64 observed_revision = 11;
-
-    repeated string capabilities = 12;
-
-    string observed_signing_key_id = 13;
-    string observed_server_epoch = 14;
+    repeated string capabilities = 9;
 }
 ```
 
@@ -1264,9 +1151,11 @@ message AgentAuthRequest {
 Server：
 
 ```text
-SHA256(token)
+Parse + validate Connection Token version/integrity
  ↓
-agent_tokens lookup
+Lookup token identity + agent identity
+ ↓
+Constant-time verify authentication secret hash
  ↓
 Token ACTIVE?
  ↓
@@ -1277,12 +1166,11 @@ Protocol compatible?
 Authentication success
 ```
 
-身份冲突规则：
+Connection Token 的连接描述、身份和 Secret 必须作为同一受保护语义整体解析；未知版本、缺字段、超限、完整性失败或身份不一致都在认证提交前拒绝。M0 Agent Bootstrap 只做输入形状校验，真正的编码与解析器由 M05-02 冻结并由 M1-02/M1-05 接入。除认证所需的 Token 外，Agent 不向 Server 请求 Endpoint 或 TLS Trust，也不接受 Server 在 TLS 建立后反向覆盖 Token 内的信任根。
+
+运行身份规则：
 
 ```text
-installation_id 已绑定其他 agent_id
-→ INSTALLATION_ID_CONFLICT
-
 同一 instance_id 已存在 Current Session
 → 新 Session 完成认证后递增 generation，并 fencing 旧 Session
 
@@ -1290,9 +1178,9 @@ installation_id 已绑定其他 agent_id
 → 只能清理自己的 session_id + generation
 ```
 
-`installation_id`、`instance_id`、`machine_id` 是 Agent Token 认证后的运行时标识，不是独立安全凭据。Server 不得在 Token 验证前依据这些自报字段执行覆盖或删除。
+`instance_id` 是 Token 认证后的临时运行标识，不是独立安全凭据。Server 不得在 Token 验证前依据自报字段执行覆盖或删除。
 
-V0.1 的信任边界是：持有某个 Agent Token 的进程，被视为该逻辑 Agent 的完整受信副本。它可以注册新的 Installation、接收该 Agent 的全部 Binding，并承接对应业务流量；Installation ID 只用于审计和冲突检测，不能降低 Token 泄漏后的权限。Server 首次见到 Installation 时必须写入 Security Event，并在 Web Console 中突出展示。若不同主机之间不能共享这一信任边界，管理员必须为它们创建不同的逻辑 Agent；每 Installation 独立 Enrollment Credential 不属于 V0.1。
+V0.1 的信任边界是：持有某个 Agent Token 的进程，被视为该逻辑 Agent 的完整受信副本。它可以接收该 Agent 的全部 Binding 并承接对应业务流量。Server 只把 Instance 作为当前在线 Replica 观测对象，不建立跨重启 Installation 身份或设备注册记录。若不同主机之间不能共享这一信任边界，管理员必须为它们创建不同的逻辑 Agent。
 
 认证统一返回显式 Result，而不是只定义成功响应：
 
@@ -1316,11 +1204,6 @@ message AgentAuthSuccess {
     uint64 desired_revision = 5;
 
     uint32 heartbeat_interval_ms = 6;
-
-    string config_signing_key_id = 7;
-    bytes config_signing_public_key = 8;
-
-    string server_epoch = 9;
 }
 
 message AgentAuthFailure {
@@ -1329,7 +1212,7 @@ message AgentAuthFailure {
 }
 ```
 
-`config_signing_public_key` 只在 Agent 尚未确认该 `key_id`，或 Server 正处于签名 Key 轮换期时返回。
+认证成功后，Server 必须向新 Control Session 下发当前完整 AgentSnapshot；Agent 不依赖本地 Revision 决定是否跳过首份配置。
 
 认证失败流程固定为：
 
@@ -1345,7 +1228,7 @@ AgentAuthResult{failure: AgentAuthFailure}
 Close TLS Connection
 ```
 
-除 TLS 已经不可写或对端提前关闭外，禁止用直接 EOF 代替认证失败结果。`TOKEN_INVALID`、`TOKEN_REVOKED`、`AGENT_REVOKED`、`INSTALLATION_ID_CONFLICT`、`VERSION_UNSUPPORTED` 和可重试的 Server 容量错误必须能够被 Agent 区分。只有可重试错误允许设置非零 `retry_after_ms`；永久 Credential、Pin 或版本错误不得通过短周期自动重连放大负载。
+除 TLS 已经不可写或对端提前关闭外，禁止用直接 EOF 代替认证失败结果。`TOKEN_INVALID`、`TOKEN_REVOKED`、`AGENT_REVOKED`、`VERSION_UNSUPPORTED` 和可重试的 Server 容量错误必须能够被 Agent 区分。只有可重试错误允许设置非零 `retry_after_ms`；永久 Credential、Pin 或版本错误不得通过短周期自动重连放大负载。
 
 ---
 
@@ -1385,15 +1268,13 @@ Agent 新建 WorkConn：
 message WorkHello {
     string agent_id = 1;
 
-    string installation_id = 2;
+    string instance_id = 2;
 
-    string instance_id = 3;
+    string session_id = 3;
 
-    string session_id = 4;
+    string work_id = 4;
 
-    string work_id = 5;
-
-    reserved 6;
+    reserved 5, 6;
 
     bytes nonce = 7;
 
@@ -1425,7 +1306,6 @@ Protocol v1 的 ID 格式必须在 `common.proto` 对应注释和共享校验包
 
 ```text
 agent_id         = ag_<26-char Crockford ULID>
-installation_id  = inst_<26-char Crockford ULID>
 instance_id      = ai_<26-char Crockford ULID>
 session_id       = sess_<26-char Crockford ULID>
 work_id          = work_<26-char Crockford ULID>
@@ -1469,9 +1349,9 @@ Lease 到期 / Session 关闭 → 清理对应分桶
 
 即使 Replay Cache 条目已经随过期 Lease 清理，旧 WorkHello 也会因 Lease 无效而拒绝。`timestamp_ms` 的 Protobuf field number 6 永久保留，不得在 Protocol v1 中复用。
 
-所有 Protocol v1 结构化 Message，只要自身或任意递归子消息存在 Protobuf Unknown Fields，就必须在业务、HMAC、签名、Revision 或 Transition 判断前以 `PROTOCOL_ERROR` 拒绝。该规则同时覆盖 Auth、Control、Work、Snapshot 和本地 Last Known Snapshot 恢复。禁止在某一端 discard、另一端 preserve，也禁止把未知字段静默带入 deterministic marshal。V1 需要扩展时必须发布 Protocol v2，或新增由已协商 Capability 明确启用的独立 Message，不能向既有 v1 Message 偷加字段。
+所有 Protocol v1 结构化 Message，只要自身或任意递归子消息存在 Protobuf Unknown Fields，就必须在业务、HMAC 或 Revision 判断前以 `PROTOCOL_ERROR` 拒绝。该规则覆盖 Auth、Control、Work 和 Snapshot。禁止在某一端 discard、另一端 preserve，也禁止把未知字段静默带入 deterministic marshal。V1 需要扩展时必须发布 Protocol v2，或新增由已协商 Capability 明确启用的独立 Message，不能向既有 v1 Message 偷加字段。
 
-MAC/签名输入必须由已验证的已知字段重新构造，清空 `mac`、`signatures` 或 `signature_by_current` 后使用固定版本 `google.golang.org/protobuf` 的 `proto.MarshalOptions{Deterministic: true}` 生成。升级该 Runtime 必须重新运行全部 Golden Vector；Golden Vector 字节变化属于 Protocol Breaking Change。
+HMAC 输入必须由已验证的已知字段重新构造，清空 `mac` 后使用固定版本 `google.golang.org/protobuf` 的 `proto.MarshalOptions{Deterministic: true}` 生成。Snapshot 的确定性序列化仍用于大小 Gate 和 Golden Vector。升级该 Runtime 必须重新运行全部 Golden Vector；Golden Vector 字节变化属于 Protocol Breaking Change。
 
 ---
 
@@ -1512,11 +1392,7 @@ message ControlEnvelope {
 
         Error error = 16;
 
-        ConfigKeyTransition config_key_transition = 17;
-
-        EpochTransition epoch_transition = 18;
-
-        DrainAck drain_ack = 19;
+        DrainAck drain_ack = 17;
     }
 }
 ```
@@ -1543,13 +1419,11 @@ CLOSED
 | TunnelHealthBatch | ✓ | × | × | ✓ | ✓ |
 | DrainRequest | ✓ | × | × | ✓ | 幂等 |
 | DrainAck | × | ✓ | × | ✓ | 幂等 |
-| ConfigKeyTransition | × | ✓ | × | ✓ | × |
-| EpochTransition | × | ✓ | × | ✓ | × |
 | Error | ✓ | ✓ | × | ✓ | ✓ |
 
 AUTH 阶段不使用 `ControlEnvelope.Error`。Server 能安全解码 `AgentAuthRequest` 但发现版本、未知字段或认证语义错误时，发送 `AgentAuthResult.failure{error_code: PROTOCOL_ERROR 或对应 Auth Error}`，flush 后关闭；Frame 已无法安全解码时直接关闭。Agent 在 AUTH 收到无法解码、非法 oneof 或非期望 Result 时直接关闭，不发送 Control Error。
 
-`ESTABLISHED/DRAINING` 收到错误方向、当前状态不允许的 Message 时，接收端应在仍可安全写入时发送 `ControlEnvelope.Error{error_code: PROTOCOL_ERROR}`，随后关闭 Control Session。完全相同的 Transition、DrainRequest 和 DrainAck 必须幂等，返回或重发当前状态；同一 ID 但内容不同必须视为 `PROTOCOL_ERROR`。`protocol_version` 必须等于 TLS/Auth 协商出的版本，任何不一致都关闭 Session。
+`ESTABLISHED/DRAINING` 收到错误方向、当前状态不允许的 Message 时，接收端应在仍可安全写入时发送 `ControlEnvelope.Error{error_code: PROTOCOL_ERROR}`，随后关闭 Control Session。完全相同的 DrainRequest 和 DrainAck 必须幂等，返回或重发当前状态；同一 ID 但内容不同必须视为 `PROTOCOL_ERROR`。`protocol_version` 必须等于 TLS/Auth 协商出的版本，任何不一致都关闭 Session。
 
 WorkConn：
 
@@ -1623,7 +1497,7 @@ MaxWorkFrameSize = 64 KB
 MaxAgentSnapshotBytes = 768 KiB
 ```
 
-`MaxAgentSnapshotBytes` 是 AgentSnapshot 本体的业务上限，必须低于 1 MB Control Frame，为 Envelope、签名、未知字段和后续兼容字段预留空间。禁止把 1 MB 当作可用 Payload 大小。
+`MaxAgentSnapshotBytes` 是 AgentSnapshot 本体的业务上限，必须低于 1 MB Control Frame，为 Envelope、未知字段和后续兼容字段预留空间。禁止把 1 MB 当作可用 Payload 大小。
 
 任何：
 
@@ -1712,8 +1586,7 @@ control:
 High Priority
 ├── Error
 ├── DrainRequest / DrainAck
-├── ConfigKeyTransition / EpochTransition（严格有序）
-├── ConfigAck（含 Transition observed fields）
+├── ConfigAck
 └── 最新 Heartbeat
 
 Coalescible
@@ -1722,7 +1595,7 @@ Coalescible
 └── TunnelHealth pending accumulator，按 tunnel_id 保留最新项
 ```
 
-旧 Heartbeat 尚未发送时由新 Heartbeat 覆盖，不允许累计。Health 结果在唯一 pending accumulator 中按 `tunnel_id` 合并；只在出队并冻结为不可变 `TunnelHealthBatch` 时才分配严格递增的 `generation`，已冻结 Frame 不再改写。Transition 必须先于依赖新 Key/Epoch 的 Snapshot 入队和写出。Normal Queue 满时，先执行上述合并；仍无法容纳的新消息不得无限等待。High Priority Queue 满、完整 Frame 在 `write_timeout` 内无法写完，或 Owner 无法保证消息次序时，记录 `SESSION_RESOURCE_EXHAUSTED` 并关闭该 Session。关闭动作必须解除 readLoop/writeLoop 的阻塞并等待二者退出，禁止遗留 goroutine。
+旧 Heartbeat 尚未发送时由新 Heartbeat 覆盖，不允许累计。Health 结果在唯一 pending accumulator 中按 `tunnel_id` 合并；只在出队并冻结为不可变 `TunnelHealthBatch` 时才分配严格递增的 `generation`，已冻结 Frame 不再改写。Snapshot 按 Revision 串行 Apply，较高 Revision 可以覆盖尚未开始 Apply 的较低 Revision。Normal Queue 满时，先执行上述合并；仍无法容纳的新消息不得无限等待。High Priority Queue 满、完整 Frame 在 `write_timeout` 内无法写完，或 Owner 无法保证消息次序时，记录 `SESSION_RESOURCE_EXHAUSTED` 并关闭该 Session。关闭动作必须解除 readLoop/writeLoop 的阻塞并等待二者退出，禁止遗留 goroutine。
 
 Server 内存：
 
@@ -1742,8 +1615,7 @@ Instance：
 
 ```go
 type InstanceRuntime struct {
-    InstanceID     string
-    InstallationID string
+    InstanceID string
 
     Hostname string
 
@@ -1838,39 +1710,19 @@ Server 重启后通过 Agent 重连重新建立。
 
 ---
 
-# 38. Agent Installation 持久化
+# 38. Ephemeral Instance 观测
 
-SQLite 可以保存：
+Instance 只存在于 Server Runtime Registry，不写入 SQLite。Web 和 API 可以展示当前在线或仍有 ActiveWork 的 Tombstone Instance：
 
 ```text
-Installation Metadata
+instance_id
+hostname / os / arch / version
+connected_at / last_heartbeat_at
+session_id / generation
+WorkPool / ActiveWork / Health
 ```
 
-用于 UI 展示历史主机信息。
-
-```sql
-CREATE TABLE agent_installations (
-    id TEXT PRIMARY KEY,
-
-    agent_id TEXT NOT NULL,
-
-    hostname TEXT,
-
-    machine_id TEXT,
-
-    os TEXT,
-    arch TEXT,
-
-    first_seen_at INTEGER NOT NULL,
-    last_seen_at INTEGER NOT NULL,
-
-    FOREIGN KEY(agent_id)
-        REFERENCES agents(id)
-        ON DELETE CASCADE
-);
-```
-
-它不代表实时 Session。
+进程退出且 Tombstone 清理完成后，该 Instance 从运行态消失。V0.1 不提供跨重启 Installation History、设备清单或机器身份审计；长期审计依赖结构化安全事件和 Server 日志，而不是 Agent 本地身份文件。
 
 ---
 
@@ -1953,13 +1805,7 @@ Instance 不保存永久 OFFLINE Runtime 对象。
 
 如果仍有旧 Active WorkConn，则保留不可选择的 Instance Tombstone，直到 Active 数归零。它不参与新连接选择，但继续承担计数、Usage、日志和 Revoke 归属。
 
-Installation 页面通过：
-
-```text
-last_seen_at
-```
-
-显示历史。
+Web 只展示当前在线 Instance 和尚有 ActiveWork 的 Tombstone，不把一次进程生命周期伪装成永久设备记录。
 
 ---
 
@@ -1989,11 +1835,7 @@ message Heartbeat {
     uint64 ingress_bytes = 5;
     uint64 egress_bytes = 6;
 
-    string observed_signing_key_id = 7;
-    string observed_server_epoch = 8;
-
-    uint32 requested_target_idle = 9;
-    uint32 tcp_connecting = 10;
+    uint32 tcp_connecting = 7;
 }
 ```
 
@@ -2108,17 +1950,15 @@ Agent
     └── WorkPool B
 ```
 
-默认：
+Server 的 WorkDemand 策略默认目标为：
 
-```yaml
-transport:
-  tcp:
-    min_idle: 4
-    target_idle: 8
-    max_idle: 32
-    max_connecting: 16
-    max_total: 256
+```text
+min_idle = 4
+target_idle = 8
+max_idle = 32
 ```
+
+Agent 不维护这些本地配置。V0.1 Binary 使用不可由远端放大的安全硬上限：`max_connecting = 16`、`max_total = 256`；Server 下发的 Demand 必须同时受 Server Budget 和 Agent 本地硬上限钳制。
 
 `max_total` 包含：
 
@@ -2256,7 +2096,7 @@ message WorkDemand {
 
 Server 发送 WorkDemand 前，必须由全局 WorkConn Budget Manager 为 `budget_lease_id` 预留最多 `max_new_connections` 个槽位。Lease 绑定 `agent_id + instance_id + session_id + session_generation`，不能跨 Session 或 Instance 使用。双方在收到消息时分别用本地 monotonic clock 从 `lease_ttl_ms` 建立 Deadline，禁止比较跨主机绝对时间；Server 是 Lease 是否仍有效的最终裁决者。Agent 只能在本地 Deadline 前建连，并在 WorkHello 中携带该 Lease ID；Server 在 WorkHello 验证阶段检查自己的 Deadline 并原子消费一个槽位。未消费槽位在 TTL 到期、Session 关闭或 Demand 取消时归还。Agent 仍受本地 `max_connecting` 限制，不能把 Lease 当作绕过本地上限的许可。
 
-Control Session 建立后，Agent 通过 Heartbeat 报告 `requested_target_idle`；Server 综合全局、Agent、Instance 和 FD 预算生成初始 Demand。Agent 不得在没有有效 Lease 时主动创建 WorkConn。
+Control Session 建立后，Server 根据远端策略、当前 Heartbeat Pool 计数、全局/Agent/Instance/FD 预算生成初始 Demand。Agent 不得在没有有效 Lease 时主动创建 WorkConn，也不得因远端 Demand 超过 Binary 硬上限而无界分配。
 
 公网请求最多等待：
 
@@ -2968,19 +2808,8 @@ Instance ObservedRevision 更新
 ```protobuf
 message AgentSnapshot {
     string agent_id = 1;
-
     uint64 revision = 2;
-
     repeated TunnelBindingConfig bindings = 3;
-
-    repeated SnapshotSignature signatures = 4;
-
-    string server_epoch = 5;
-}
-
-message SnapshotSignature {
-    string key_id = 1;
-    bytes signature = 2;
 }
 
 message TunnelBindingConfig {
@@ -3021,295 +2850,68 @@ encoded ControlEnvelope <= MaxControlFrameSize
 
 所有可能改变 Agent Snapshot 的 Management 写入，必须在 SQLite Commit 前从事务内 Candidate State 构建受影响 Agent 的完整 Snapshot，并检查 Binding 数、确定性序列化大小和最终 Envelope 大小。超限返回 `422 AGENT_BINDING_LIMIT` 或 `422 SNAPSHOT_TOO_LARGE`，事务不得提交。
 
-Server 启动和 Migration 后也必须对现有数据执行同一检查；不合法时保持 Public Listener 未启动并报告具体 Agent/大小，禁止进入“Agent 重连 → 收到超大 Frame → 再重连”的循环。V0.1 不实现 Snapshot 分片或依赖压缩绕过上限；带整体 Hash 和签名的分片协议留到后续版本。
+Server 启动和 Migration 后也必须对现有数据执行同一检查；不合法时保持 Public Listener 未启动并报告具体 Agent/大小，禁止进入“Agent 重连 → 收到超大 Frame → 再重连”的循环。V0.1 不实现 Snapshot 分片或依赖压缩绕过上限。
 
 ---
 
-# 67. Snapshot Signing
+# 67. Snapshot 传输安全
 
-Server 独立生成：
+AgentSnapshot 只允许在已经完成 TLS Server 身份验证、Agent Token 认证和 Auth→Established 原子切换的 Control Session 中由 Server 下发。V0.1 不再建立独立的 Config Signing Key、Server Epoch 或离线签名验证链。
 
-```text
-Ed25519 Config Signing Key
-```
-
-Server：
+配置完整性和来源认证由以下边界共同保证：
 
 ```text
-signing_bytes =
-"xtunnel-config-v1"
-||
-deterministic_protobuf(AgentSnapshotWithoutSignatures)
-
-signature = Ed25519.Sign(config_signing_private_key, signing_bytes)
+TLS 1.3
++ public CA 或显式 SPKI Pin
++ Agent Token Authentication
++ Control Protocol Direction/State Validation
++ Recursive Unknown-field Rejection
 ```
 
-签名和验签必须使用 deterministic protobuf；`signatures` 字段在计算时清空。未知字段不得静默参与一次、忽略另一次，Server 与 Agent 必须使用同一规范化实现。
-
-Agent：
-
-```text
-Receive
- ↓
-Verify Signature
- ↓
-Revision Check
- ↓
-Apply
-```
+Agent 不接受本地 Snapshot、旁路文件或其他进程注入的业务配置；TLS 验证失败、Pin 不匹配或 Control Message 方向非法时必须拒绝配置并关闭连接。取消独立签名不会削弱 TLS Gateway 身份校验、Token Rotate/Revoke、Session Secret、WorkHello HMAC 或 Replay Protection。
 
 ---
 
-# 68. Config Signing Key
+# 68. Full Snapshot Sync
 
-Server：
-
-```text
-/data/pki/config-sign.key
-
-/data/pki/config-sign.pub
-
-/data/pki/server.epoch
-```
-
-Agent 不再把单独的 `config-sign.pub` 视为权威信任状态。Agent 端固定使用：
+Server 是 Agent Desired State 的唯一权威。每个新 Control Session 认证成功后，Server 必须下发当前完整 AgentSnapshot，而不是要求 Agent 从本地 Revision、差量文件或 Last Known Config 恢复。
 
 ```text
-<data-dir>/identity/trust-state.pb
+Auth Success
+ ↓
+Server build current full Snapshot
+ ↓
+Agent validate + build candidate Resolver
+ ↓
+Atomic Swap in memory
+ ↓
+ConfigAck
+ ↓
+Instance becomes revision-eligible
 ```
 
-保存完整、可恢复的本地信任状态。该文件是本地持久化格式，不是线上 Protocol Message：
-
-```protobuf
-message AgentTrustState {
-    uint32 format_version = 1;
-
-    SigningKey current_key = 2;
-    SigningKey next_key = 3;
-
-    string current_epoch = 4;
-
-    EpochTransition pending_epoch_transition = 5;
-    ConfigKeyTransition pending_key_transition = 6;
-
-    uint64 observed_revision = 7;
-    bytes snapshot_sha256 = 8;
-
-    bytes last_key_transition_hash = 9;
-    bytes last_epoch_transition_hash = 10;
-}
-
-message SigningKey {
-    string key_id = 1;
-    bytes public_key = 2;
-}
-```
-
-`format_version` 在 V0.1 固定为 `1`。读取到未知格式版本、非法 Key 长度、Key ID 与 Public Key 不匹配、Epoch 为空但已存在 Snapshot，或 TrustState 与 Snapshot 无法恢复到同一提交时，Agent 必须快速失败并给出本地恢复错误，禁止重新 TOFU 或覆盖 Pin。
-
-Agent 首次认证成功后获得：
-
-```text
-config signing public key
-```
-
-并 Pin 到本地。
-
-后续 Snapshot 必须验证。
-
-Key Transition 和 Epoch Transition 的 Protobuf 必须包含旧 Key ID、新 Key/Epoch、有效起始 Revision 和旧 Key 签名；Agent 只接受由当前 Pin Key 验证通过且目标值与当前值不同的 Transition。重复 Transition 必须幂等。
-
-```protobuf
-message ConfigKeyTransition {
-    string current_key_id = 1;
-    string next_key_id = 2;
-    bytes next_public_key = 3;
-    uint64 valid_from_revision = 4;
-    bytes signature_by_current = 5;
-    string transition_id = 6;
-}
-
-message EpochTransition {
-    string current_epoch = 1;
-    string next_epoch = 2;
-    uint64 created_at_ms = 3;
-    bytes signature_by_current = 4;
-    string current_key_id = 5;
-    uint64 valid_from_revision = 6;
-    string transition_id = 7;
-}
-
-message ConfigAck {
-    uint64 observed_revision = 1;
-    string observed_signing_key_id = 2;
-    string observed_server_epoch = 3;
-    ConfigApplyStatus apply_status = 4;
-    ErrorCode error_code = 5;
-    string transition_id = 6;
-    bytes transition_artifact_sha256 = 7;
-    string observed_next_signing_key_id = 8;
-    string observed_next_server_epoch = 9;
-}
-
-enum ConfigApplyStatus {
-    CONFIG_APPLY_STATUS_UNSPECIFIED = 0;
-    CONFIG_APPLIED = 1;
-    CONFIG_REJECTED = 2;
-}
-```
-
-Transition 的签名输入固定为：
-
-```text
-"xtunnel-config-key-transition-v1"
-|| deterministic_protobuf(ConfigKeyTransitionWithoutSignature)
-
-"xtunnel-epoch-transition-v1"
-|| deterministic_protobuf(EpochTransitionWithoutSignature)
-```
-
-计算时清空 `signature_by_current`，并沿用 Snapshot 的 deterministic protobuf 与未知字段规则。`transition_id` 是 Server 生成并持久化的不变 ID，纳入被签名内容。
-
-Transition Artifact Hash 的字节定义固定为：
-
-```text
-SHA-256(
-  deterministic_protobuf(
-    完整 ConfigKeyTransition 或 EpochTransition
-    （包含 transition_id 与 signature_by_current）
-  )
-)
-```
-
-该 Hash 不包含外层 `ControlEnvelope`、UVarint Length 或 TLS Record 字节。Config Key 和 Epoch Transition 的 Golden Vector 必须同时固定 deterministic Artifact Bytes 与该 SHA-256。
-
-ConfigAck 语义固定为：
-
-- 普通 Snapshot Ack：`transition_id` 与两个 `observed_next_*` 字段必须为空；`observed_signing_key_id/observed_server_epoch` 表示已持久化的 Current 值。
-- Key Transition Ack：必须同时携带已持久化的 `transition_id`、按上述定义计算的 Artifact SHA-256 和 `observed_next_signing_key_id`；`observed_next_server_epoch` 必须为空。
-- Epoch Transition Ack：必须同时携带已持久化的 `transition_id`、按上述定义计算的 Artifact SHA-256 和 `observed_next_server_epoch`；`observed_next_signing_key_id` 必须为空。
-
-Transition 成功 Ack 的其余字段也是唯一的：`observed_revision`、`observed_signing_key_id` 和 `observed_server_epoch` 必须等于 durable TrustState 中的 Current 值，`apply_status=CONFIG_APPLIED`，`error_code=ERROR_CODE_OK`。Server 只在 Ack 的 Current 字段、Transition ID、Artifact Hash 和目标 Next 值全部与 Journal/Installation 状态一致时才标记该 Installation `ACKED`。字段缺失、类型混用或值不一致均不得推进过渡状态。Transition 签名、ID 或语义校验失败时发送 `ControlEnvelope.Error{PROTOCOL_ERROR}` 并关闭，不发 ConfigAck；本地 Persist/fsync/rename 失败时直接关闭 Session 且不 Ack，重连后由 Server 重发同一 Artifact。
-
-首次 Pin 只允许发生在：
-
-```text
-Agent 本地不存在 trust-state.pb
-+
-Agent Gateway TLS 已按 public CA 或 server SPKI pin 验证成功
-+
-Agent Token Authentication 成功
-```
-
-已存在 Pin 时，AuthResponse 中不同的 Key 不得直接覆盖本地文件；Agent 已记录 `server_epoch` 时，AuthResponse 中不同的 Epoch 也只能触发 Transition 协商，不能直接覆盖。首次安装可以在 TLS 与 Token Authentication 都成功后同时 Pin Key 和初始 Epoch。
-
-签名 Key 轮换使用双 Key 过渡：
-
-```text
-Current Key 签名 Next Public Key + Next Key ID
- ↓
-Agent 验证并保存 Next Key
- ↓
-过渡期 Snapshot 使用 Current + Next 双签名
- ↓
-确认所有属于非 REVOKED Agent、且未 ACK_EXCLUDED 的已知 Installation 已观察 Next Key
- ↓
-切换 Next 为 Current
-```
-
-“在线”不能作为结束过渡期的条件。Server 必须保留旧 Key 可验证的 Transition Artifact、旧/新双签 Snapshot 能力和逐 Installation Ack 集合，直到每个属于非 REVOKED Agent、且未被排除的已知 Installation 已 Ack。长期离线 Installation 只能由管理员在给出原因后显式标记为 `ACK_EXCLUDED`，使其不再阻塞 Current 切换。
-
-`ACK_EXCLUDED` 只是管理员从本次 Transition 等待集合中排除历史 Installation 的审计决定，不是安全隔离或强制重新注册。共享 Agent Token 的持有者仍可提交新 Installation ID；V0.1 不宣称能靠该状态阻止它。被排除的旧 Installation 以后重连时，Server 仍必须补发由其旧 Pin 可验证的完整 Transition Chain，使其升级后再接收当前 Snapshot。
-
-Transition 与逐 Installation 状态必须持久化：
-
-```sql
-CREATE TABLE config_transitions (
-    id TEXT PRIMARY KEY,
-    transition_type TEXT NOT NULL,
-    artifact BLOB NOT NULL,
-    state TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    completed_at INTEGER
-);
-
-CREATE TABLE installation_transition_acks (
-    transition_id TEXT NOT NULL,
-    installation_id TEXT NOT NULL,
-    status TEXT NOT NULL, -- PENDING | ACKED | ACK_EXCLUDED
-    observed_at INTEGER,
-    excluded_at INTEGER,
-    excluded_by TEXT,
-    exclusion_reason TEXT,
-    PRIMARY KEY(transition_id, installation_id)
-);
-```
-
-`ACK_EXCLUDED` 必须记录管理员、时间和非空原因。Ack、排除决定和“允许 Current 切换”的持久化状态必须在同一 SQLite 事务中提交；Key/Epoch 文件切换继续遵循下述 Journal + fsync Barrier，并在崩溃恢复时幂等完成。即使 Transition 已完成，其签名 Artifact 和必要的 Chain 也不得因排除而删除；只有相关 Installation 被正式删除且保留期结束后，才能按审计策略归档。
-
-Config Key 与 Epoch 过渡都写入持久化 Transition Journal。顺序固定为：生成 Transition → 使用旧 Key 签名 → 连同旧值、新值、起始 Revision、Ack 集合原子持久化 → fsync → 才切换 Current 并开始发送。进程崩溃后必须从 Journal 恢复同一个过渡，不得重新随机生成或覆盖旧 Artifact。
-
-Agent 收到 Key/Epoch Transition 后，必须先用 Current Key 验证签名并检查 ID、Revision 和 Epoch，再计算完整 Artifact 的 SHA-256。完全相同 Hash 的重复 Transition 幂等，可重新 Ack；同一 `next_key_id` 或目标 Epoch 对应不同 Artifact/Key 内容时，以 `PROTOCOL_ERROR` 拒绝且不得覆盖 TrustState。
-
-Transition 落盘顺序固定为：
-
-```text
-Verify Transition
- ↓
-Build New AgentTrustState
- ↓
-write trust-state.pb.tmp
- ↓
-fsync(file)
- ↓
-atomic rename → trust-state.pb
- ↓
-fsync(identity directory)
- ↓
-Atomic Swap In-memory TrustState
- ↓
-ConfigAck（携带 Transition ID + Artifact Hash + observed Next Key/Epoch）
-```
-
-Ack 只能表示对应 TrustState 已经 durable，不能在临时文件写入后提前发送。该 Ack 必须使用上述显式 Transition 字段，不得用 Current 字段暗示 Next 已落盘。
-
-Gateway TLS Key、Config Signing Key、`server_epoch` 和 SQLite 必须纳入同一套一致性备份。丢失旧 Signing Key 时不得自动生成新 Key 后继续推送配置。
+Server 可以合并尚未开始 Apply 的旧 Revision，只保留最新完整 Snapshot；一旦某个 Revision 开始 Apply，后续 Snapshot 必须串行处理，禁止并发修改 Resolver。
 
 ---
 
-# 69. Revision Rollback
+# 69. Revision 语义
 
-Agent 使用 `(server_epoch, revision)` 判断回退。
+`desired_revision` 由 Server 持久化并随 Desired State 事务递增。Agent 的 `observed_revision` 只代表当前进程、当前 Control Session 已成功应用的内存配置。
 
-如果：
-
-```text
-incoming revision
-<
-local revision
-```
-
-默认：
+同一 Control Session 内：
 
 ```text
-Reject
+incoming revision > observed revision
+→ 可以 Apply
+
+incoming revision == observed revision 且内容完全相同
+→ 幂等 Ack
+
+incoming revision < observed revision
+→ PROTOCOL_ERROR
 ```
 
-防止旧配置重放。
-
-正常运行时不允许降低同一 `server_epoch` 下的 Revision。
-
-从旧 SQLite 备份恢复时，管理员必须显式执行：
-
-```text
-xtunnel-server recovery new-epoch
-```
-
-Server 生成新的随机 `server_epoch`，并使用当前已 Pin 的 Config Signing Key 签署 Epoch Transition。Agent 只有在 Transition 能由当前信任 Key 验证时才接受新 Epoch，然后从新 Revision 重新同步。
-
-AuthRequest 和 Heartbeat 必须携带 Agent 当前观察到的 Epoch 与 Signing Key ID。Server 根据 Transition Journal 决定补发 Snapshot、ConfigKeyTransition 或 EpochTransition，禁止只根据 revision 数值猜测。Epoch 过渡同样保留旧/新值和逐 Installation Ack，直到所有属于非 REVOKED Agent 的已知 Installation 完成，或由管理员留下审计理由后将特定历史 Installation 标记为 `ACK_EXCLUDED`；排除不删除它未来追赶所需的签名 Chain。
-
-V0.1 不提供绕过签名或自动清空 Agent 本地 Snapshot 的回退方式。
+新 Control Session 必须接受 Server 认证后下发的当前完整 Snapshot 作为该 Session 的新基线，即使 Server 因显式 Backup Restore 回到了较低 Revision。Agent 不承担跨 Server Restore 的持久化反回滚；Restore 的授权、锁、Manifest、审计和一致性由 Server 端 Durable Operations 保证。
 
 ---
 
@@ -3318,89 +2920,62 @@ V0.1 不提供绕过签名或自动清空 Agent 本地 Snapshot 的回退方式�
 Agent：
 
 ```text
-Receive Snapshot
+Receive full Snapshot
  ↓
-Verify Signature
+Validate Frame / Unknown Fields / Agent ID
  ↓
-Validate Config
+Validate Revision / Binding Count / Serialized Size
  ↓
-Build New Resolver
+Validate every Binding and referenced Origin / Health Policy
  ↓
-write + fsync config/snapshot.next
+Build immutable Resolver + Health Plan
  ↓
-fsync config directory
- ↓
-write + fsync identity/trust-state.pb.tmp
- ↓
-atomic rename trust-state.pb.tmp → trust-state.pb
- ↓
-fsync identity directory（持久化提交点）
- ↓
-atomic rename snapshot.next → snapshot.pb
- ↓
-fsync config directory
- ↓
-Atomic Swap Runtime Resolver
+Atomic Swap Runtime Config
  ↓
 ConfigAck
 ```
 
-新 TrustState 的 `observed_revision`、`snapshot_sha256`、Current/Next Key 和 Epoch 必须与 Candidate Snapshot 一致。`trust-state.pb` 的 atomic rename 是逻辑切换点，随后 `fsync(identity directory)` 成功返回才是 durable commit point。二者之间崩溃时，文件系统允许恢复到旧或新目录项；重启必须根据 TrustState 中的 `observed_revision/snapshot_sha256`、`snapshot.pb` 和 `snapshot.next` 的 Hash 按第 71 节规则幂等收敛，不得仅根据 rename 是否曾返回猜测。任何 Persist、Hash、rename 或目录 fsync 失败时不得切换运行态或发送 ConfigAck。Durable Commit 后的 Resolver Swap 必须是不可失败操作。
-
-Apply 必须：
-
-```text
-idempotent
+```protobuf
+message ConfigAck {
+    uint64 observed_revision = 1;
+    ConfigApplyStatus apply_status = 2;
+    ErrorCode error_code = 3;
+}
 ```
+
+Apply 必须先完整构建不可变 Candidate，再通过单一原子交换发布。任何字段、Origin、Health、资源边界或构建错误都不得发布部分结果。
+
+- 有旧内存配置时：保留旧配置，发送 `CONFIG_REJECTED`，等待更高 Revision。
+- 首份配置失败时：Instance 保持不可选择，发送 `CONFIG_REJECTED`；Server 不得把它标记 ONLINE/Eligible。
+- Apply 成功时：先完成内存交换，再发送 `CONFIG_APPLIED` Ack；Ack 的 `observed_revision` 必须等于当前内存 Revision。
+
+V0.1 没有 Agent 本地 Persist、fsync、rename 或 Snapshot Crash Recovery 提交点。
 
 ---
 
-# 71. Last Known Config
+# 71. Agent Restart 与 Control Reconnect
 
-Agent：
+Agent 不保存 `snapshot.pb`、`snapshot.next`、`trust-state.pb` 或 Revision 文件。
 
-```text
-<data-dir>/config/snapshot.pb
-
-<data-dir>/config/snapshot.next
-
-<data-dir>/identity/trust-state.pb
-```
-
-重启恢复规则：
+新进程启动：
 
 ```text
-TrustState.snapshot_sha256 == snapshot.pb SHA-256
-→ 删除无关 snapshot.next，正常加载
-
-TrustState.snapshot_sha256 == snapshot.next SHA-256
-→ 完成 snapshot.next → snapshot.pb promote + fsync
-
-TrustState 仍指向旧 snapshot.pb，存在不同 Hash 的 snapshot.next
-→ 提交点前遗留，删除 snapshot.next
-
-TrustState 与 snapshot.pb / snapshot.next 均不匹配
-→ 快速失败，禁止猜测恢复或重新 Pin
+observed revision = none
+ ↓
+Connect + Authenticate
+ ↓
+Receive full current Snapshot
+ ↓
+Apply in memory
+ ↓
+Ack + ONLINE
 ```
 
-写入 `snapshot.next` 后必须先 fsync 文件和 `config` 目录，确保 TrustState 提交后至少存在一份可恢复的新 Snapshot。恢复完成前不得连接 Gateway 或发送 observed Revision。加载 Last Known Config 时同样执行 Snapshot Signature、Unknown Field、Hash、Revision、Key 和 Epoch 全量校验，不能因为文件来自本地磁盘就跳过。
+同一进程的 Control Session 断开时，当前内存配置可以继续服务已经进入 ACTIVE 的 WorkConn，并用于安全清理；Agent 按 Backoff 重连。新 Session 建立后仍接收完整当前 Snapshot并以它重建基线，不能要求 Server 提供本地差量链。
 
-Server 暂时不可连接：
-
-```text
-Agent 可以加载 Last Known Config
-```
-
-但由于 Server 本身不可访问，此时主要用于：
-
-```text
-快速恢复
-
-避免配置丢失
-```
+Server 不可达时，新 Agent 不能进入 ONLINE，也不能依赖本地旧配置伪装为可服务状态。这个取舍用远端启动依赖换取无 Agent 持久状态、无本地 Desired State 和更简单的恢复模型。
 
 ---
-
 # 72. Origin Health
 
 Health Check 在每个 Agent Instance 本地执行。
@@ -3453,18 +3028,19 @@ Rate Limiter
 Report Batcher
 ```
 
-Agent 默认契约：
+Agent V0.1 Binary 的中心调度安全上限固定为：
 
-```yaml
-health:
-  max_concurrent: 64
-  max_checks_per_second: 50
-  max_concurrent_per_origin: 4
-  initial_jitter: 1.0
-  interval_jitter: 0.2
-  report_flush_interval: 1s
-  report_batch_size: 128
+```text
+max_concurrent = 64
+max_checks_per_second = 50
+max_concurrent_per_origin = 4
+initial_jitter = 1.0
+interval_jitter = 0.2
+report_flush_interval = 1s
+report_batch_size = 128
 ```
+
+这些值不是 Agent 本地配置项。每个 Binding 的 Health 行为随远端 Snapshot 下发；Server 的全局预算与 Agent Binary 的固定上限共同限制实际调度。需要调整硬上限时必须通过版本发布和容量基准，而不是在每台 Agent 上维护配置漂移。
 
 首次检查在 `[0, interval]` 均匀随机分散；后续检查间隔为 `interval × random(0.8, 1.2)`。Rate/Concurrency 已满时，Scheduler 只能在仍可满足该 Binding 的配置 Interval 和 Stale TTL 时短暂排队；无法满足时必须报告 `HEALTH_BUDGET_EXCEEDED`，不能静默把 10 秒检查拖成更长周期后继续显示正常。
 
@@ -4415,7 +3991,6 @@ error_code
 0x4003 AGENT_REVOKED
 0x4004 SESSION_INVALID
 0x4005 SESSION_RESOURCE_EXHAUSTED
-0x4006 INSTALLATION_ID_CONFLICT
 
 0x5001 PROTOCOL_ERROR
 0x5002 VERSION_UNSUPPORTED
@@ -4622,7 +4197,7 @@ PATCH、enable、disable、delete 必须复用同一 Application Service 事务�
 <server.data_dir>/xtunnel.db
 ```
 
-V0.1 不提供独立 `database.path`。SQLite、PKI、Epoch、Transition Journal 必须全部位于同一个 Canonical `server.data_dir` 管理边界内，避免两个不同 Data Directory 指向同一外部数据库而绕过互斥锁，也保证 Backup/Restore 不会组合出不同代的 DB 与身份文件。
+V0.1 不提供独立 `database.path`。SQLite、Gateway TLS Identity 和 Server Durable Operation Journal 必须全部位于同一个 Canonical `server.data_dir` 管理边界内，避免两个不同 Data Directory 指向同一外部数据库而绕过互斥锁，也保证 Backup/Restore 不会组合出不同代的数据库与 Gateway 身份文件。
 
 配置：
 
@@ -4666,7 +4241,7 @@ xtunnel-server backup create --output /secure/backup/xtunnel-backup.tar
 xtunnel-server backup restore --input /secure/backup/xtunnel-backup.tar
 ```
 
-在线 `backup create` 通过本机控制通道暂停新的 Config Write，等待当前短事务结束，再使用 SQLite Backup API 获取一致数据库镜像；在同一 Barrier 内复制 Gateway TLS Key、Config Signing Key、`server_epoch` 和 Transition Journal。备份 Manifest 必须记录格式版本、数据库 Schema 版本、文件清单和 SHA-256。若 Server 未运行，命令必须先获取与 Server 相同的外部锁。
+在线 `backup create` 通过本机控制通道暂停新的 Config Write，等待当前短事务结束，再使用 SQLite Backup API 获取一致数据库镜像；在同一 Barrier 内复制 Gateway TLS Key 和尚未完成的 Gateway Identity Rotation Journal。备份 Manifest 必须记录格式版本、数据库 Schema 版本、文件清单和 SHA-256。若 Server 未运行，命令必须先获取与 Server 相同的外部锁。
 
 备份包等同于长期私钥材料。输出文件必须使用 `O_CREATE | O_EXCL`、权限 `0600` 且禁止跟随符号链接；临时目录权限 `0700`，失败必须清理，禁止输出到 stdout 或复用已有目标文件。
 
@@ -4753,9 +4328,14 @@ CREATE TABLE admin_users (
     password_hash TEXT NOT NULL,
 
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+
+    -- NULL means the user has never completed a successful login.
+    last_login_at INTEGER
 );
 ```
+
+`last_login_at` 仅在一次成功登录完成后更新；创建首个管理员不会写入该字段。
 
 密码：
 
@@ -5115,12 +4695,12 @@ cooldown
 ```text
 Normalized Peer IP-only Bucket
 
-Normalized Peer IP + token_hash_prefix Bucket
+Normalized Peer IP + bounded token_fingerprint Bucket
 
 Server Global Failed-auth Bucket
 ```
 
-IP-only Bucket 防止攻击者不断更换随机 Token 绕过 `IP + prefix`；组合 Bucket 限制对单个 Credential 前缀的集中尝试；Global Bucket 限制分布式攻击。所有失败同时记入适用层级，成功认证不消耗失败预算，也不能清空 IP 或全局失败计数。
+IP-only Bucket 防止攻击者不断更换随机 Token 绕过 `IP + fingerprint`；组合 Bucket 限制对单个 Credential 的集中尝试；Global Bucket 限制分布式攻击。Fingerprint 必须从已限制到 8192 bytes 的原始输入以不可逆方式计算，不能把 Token Identity 或 Secret 写入日志/Metric。所有失败同时记入适用层级，成功认证不消耗失败预算，也不能清空 IP 或全局失败计数。
 
 同 NAT 下多个合法 Agent 共享 IP 时，成功认证不消耗失败预算。另设全局 Pending TLS/Auth 上限和单 IP 握手并发上限，具体 Rate/Burst 必须通过 5000 Instance 重连风暴测试确定，不能把示例值作为不可调整的硬编码值。桶表使用有最大容量和过期时间的 LRU，避免随机 IP/Token 造成内存 DoS。
 
@@ -5377,8 +4957,6 @@ Instances：
 ```text
 Hostname
 
-Installation ID
-
 Instance ID
 
 Version
@@ -5413,18 +4991,25 @@ Name
 ```text
 Agent ID
 
-Agent Token
+Connection Token (`xta_...`)
 
-Install Command
+Foreground / Container / Linux systemd / Windows SCM usage
 ```
 
 例如：
 
 ```bash
-xtunnel-agent install \
-  --server tunnel.example.com:7443 \
-  --token-file '<secure-token-file>' \
-  --server-pin 'sha256:xxxx'
+xtunnel-agent run --token 'xta_...'
+
+docker run --rm -e XTUNNEL_TOKEN='xta_...' xtunnel-agent:<version>
+
+sudo xtunnel-agent service install --token 'xta_...'
+```
+
+Windows 提升权限的 PowerShell：
+
+```powershell
+.\xtunnel-agent.exe service install --token 'xta_...'
 ```
 
 Token：
@@ -5433,7 +5018,7 @@ Token：
 只展示一次
 ```
 
-Token 与安装命令必须分开展示。Web Console 不得把明文 Token 拼接进可复制命令；用户先将 Token 写入权限为 `0600` 的临时 Secret 文件，再执行安装。
+用户只需复制一个完整 Connection Token；不再另外复制 Endpoint、Pin、Agent ID 或准备 Token 文件。Web Console 可以提供不含真实 Secret 的命令模板，但 Token 明文只存在于一次性展示区域，不得进入 Recent Activity、日志、URL、前端持久化缓存或后续 API 响应。
 
 ---
 
@@ -5819,7 +5404,7 @@ Cache-Control: no-store
 Pragma: no-cache
 ```
 
-不得被 Dashboard Recent Activity、Access Log Body 或前端持久化缓存记录。Settings 页面在 V0.1 只读展示 `/system/config` 的非敏感有效配置和“需重启”标记；不提供修改 Server/Agent 主配置的 API。
+不得被 Dashboard Recent Activity、Access Log Body 或前端持久化缓存记录。Settings 页面在 V0.1 只读展示 `/system/config` 的非敏感 Server 有效配置和“需重启”标记；不提供修改 Server 主配置或 Agent 本地配置的 API。
 
 ---
 
@@ -6051,7 +5636,7 @@ server {
 
 # 142. Server 配置
 
-Server 配置的唯一机器可读契约为 `configs/server.schema.json`，Agent 配置的唯一机器可读契约为 `configs/agent.schema.json`。JSON Schema 必须与 Go Config Struct、示例配置和配置测试从同一字段清单生成或由 CI 做双向一致性检查。字段类型、默认值、范围、是否必填、Secret 标记和是否可热加载只允许在 Schema 中定义一次；本文示例不构成第二份默认值来源。
+Server 配置的唯一机器可读契约为 `configs/server.schema.json`。JSON Schema 必须与 Server Go Config Struct、示例配置和配置测试从同一字段清单生成或由 CI 做双向一致性检查。字段类型、默认值、范围、是否必填、Secret 标记和是否可热加载只允许在 Schema 中定义一次；本文示例不构成第二份默认值来源。
 
 覆盖优先级固定为：
 
@@ -6059,9 +5644,9 @@ Server 配置的唯一机器可读契约为 `configs/server.schema.json`，Agent
 CLI > XTUNNEL_* Environment > YAML > Schema Default
 ```
 
-YAML 使用 Strict Decode，未知字段或重复 Key 直接启动失败；未知 CLI Flag 直接失败；`XTUNNEL_*` 命名空间下无法映射到 Schema 的变量直接失败。Duration 统一使用 Go Duration String，大小统一使用整数 Byte。V0.1 不热加载 Server/Agent 主配置；变更后必须显式重启，动态 Service/Binding 配置仍通过 Revision/Snapshot 生效。
+Server YAML 使用 Strict Decode，未知字段或重复 Key 直接启动失败；未知 CLI Flag 直接失败；`XTUNNEL_*` 命名空间下无法映射到 Schema 的变量直接失败。Duration 统一使用 Go Duration String，大小统一使用整数 Byte。V0.1 不热加载 Server 主配置；变更后必须显式重启，动态 Service/Binding 配置仍通过 Revision/Snapshot 生效。
 
-两份配置 Schema 固定使用 JSON Schema Draft 2020-12。每个叶子字段必须显式声明 `x-secret` 和 `x-reloadable`；V0.1 主配置的 `x-reloadable` 全部为 `false`。环境变量名由 Schema 点分路径转换：路径段大写后使用双下划线连接，例如 `management.public_url` 对应 `XTUNNEL_MANAGEMENT__PUBLIC_URL`。数组覆盖值使用 JSON Array，标量覆盖值按 Schema 类型解析。CLI 层同样使用 Schema 点分路径。Server/Agent 公共配置入口固定为可选的 `--config <path>` 和可重复的 `--set <schema.path>=<value>`；不接受位置参数，未知 Flag 或 Schema 路径直接失败，同一路径重复覆盖时以后出现的值为准。
+Server 配置 Schema 固定使用 JSON Schema Draft 2020-12。每个叶子字段必须显式声明 `x-secret` 和 `x-reloadable`；V0.1 Server 主配置的 `x-reloadable` 全部为 `false`。环境变量名由 Schema 点分路径转换：路径段大写后使用双下划线连接，例如 `management.public_url` 对应 `XTUNNEL_MANAGEMENT__PUBLIC_URL`。数组覆盖值使用 JSON Array，标量覆盖值按 Schema 类型解析。CLI 层同样使用 Schema 点分路径。Server 配置入口固定为可选的 `--config <path>` 和可重复的 `--set <schema.path>=<value>`；不接受位置参数，未知 Flag 或 Schema 路径直接失败，同一路径重复覆盖时以后出现的值为准。Agent 不使用此 Schema/Loader，Bootstrap 输入按下一节的单 Token 契约处理。
 
 推荐：
 
@@ -6138,173 +5723,147 @@ Login Origin == normalized public_url Origin
 
 ---
 
-# 143. Agent 配置
+# 143. Agent Token Bootstrap
 
-```yaml
-server:
-  endpoint: tunnel.example.com:7443
+Agent 没有 YAML、`--config`、`--set` 或本地配置 Schema。唯一 Secret 输入是一个完整 Connection Token，来源优先级固定为：
 
-  tls:
-    mode: pinned
-    server_pin: "sha256:..."
-
-auth:
-  token_file: /var/lib/xtunnel/token
-
-data_dir: /var/lib/xtunnel
-
-transport:
-  tcp:
-    min_idle: 4
-    target_idle: 8
-    max_idle: 32
-    max_connecting: 16
-    max_total: 256
-
-reconnect:
-  initial_delay: 1s
-  max_delay: 30s
-  jitter: 0.2
-
-control:
-  high_priority_queue: 32
-  normal_queue: 128
-  write_timeout: 5s
-
-health:
-  max_concurrent: 64
-  max_checks_per_second: 50
-  max_concurrent_per_origin: 4
-  initial_jitter: 1.0
-  interval_jitter: 0.2
-  report_flush_interval: 1s
-  report_batch_size: 128
-
-logging:
-  level: info
-  format: json
+```text
+1. --token 'xta_...'                 # 前台交互或安装输入
+2. XTUNNEL_TOKEN='xta_...'           # OCI/Compose
+3. OS Service Credential                # Linux systemd LoadCredential 或 Windows SCM + DPAPI
 ```
+
+Linux 的第 3 级来源为 `$CREDENTIALS_DIRECTORY/xtunnel-agent.token`；Windows SCM 的第 3 级来源为 `%ProgramData%\XTunnel\credentials\agent.token.dpapi` 经 DPAPI Machine-scope 解密后的 Token。高优先级来源存在时覆盖低优先级来源；没有任何来源时启动失败。未知 Flag、位置参数、空的 Linux `CREDENTIALS_DIRECTORY`、Windows Credential 缺失/ACL 错误/DPAPI 解密失败都必须直接失败。Agent 不接受 Endpoint、TLS Trust、Agent Identity 或认证 Secret 的独立覆盖，避免把同一连接契约拆成多份本地配置。
+
+M0 Bootstrap 只执行以下输入边界校验：
+
+```text
+非空
+没有首尾空白
+以 `xta_` 开头
+UTF-8 byte length <= 8192
+```
+
+这不是 Connection Token Protocol 验证。精确编码、版本分派、完整性、语义字段和 Golden Vector 由 M05-02 冻结；Agent Gateway 实现接入后，未知版本或解析失败必须在发起网络连接前快速失败。
+
+Tunnel、Binding、Origin、Health Policy 和 Revision 全部由 Server 远端托管并通过完整 Snapshot 下发。WorkPool、Reconnect、Control Queue 和 Health Scheduler 的安全边界使用 Server Policy 与 Binary 固定上限。Agent 日志在 V0.1 使用 Binary 固定的安全默认值，Token 不得进入日志。
 
 ---
 
-# 144. Agent Local Files
+# 144. Agent Local Inputs
+
+Agent 自身没有 Data Directory，也不创建或维护任何长期状态、业务配置或用户配置文件。运行方式固定为：
 
 ```text
-<agent.data_dir>/
-├── config.yaml
-├── token
-├── installation.id
-├── agent.lock
-│
-├── identity/
-│   └── trust-state.pb
-│
-└── config/
-    ├── snapshot.pb
-    └── snapshot.next     # 仅 Apply/Crash Recovery 期间存在
+Foreground: xtunnel-agent run --token 'xta_...'
+OCI:        XTUNNEL_TOKEN='xta_...' xtunnel-agent run
+systemd:    LoadCredential 提供运行时 xtunnel-agent.token
+Windows:    SCM 启动 xtunnel-agent.exe run，并读取 DPAPI Machine-scope Credential
 ```
 
-权限：
+Agent Binary 的 `service install` 子命令内部创建 `/etc/xtunnel/credentials/agent.token`，父目录为 `root:root 0700`，文件为 `root:root 0600`。Binary 内嵌带 XTunnel managed marker 的 Unit：
 
-```text
-directory 0700
-
-token 0600
-
-trust-state.pb 0600
-
-snapshot.pb / snapshot.next 0600
+```systemd
+# Managed by xtunnel-agent service install
+LoadCredential=xtunnel-agent.token:/etc/xtunnel/credentials/agent.token
+ExecStart=/usr/local/bin/xtunnel-agent run
 ```
 
-Config Schema 的通用默认值仍为 `/var/lib/xtunnel`。官方 systemd 包装为了隔离 Server 与 Agent，必须把 Agent 的 `data_dir` 覆盖为 `/var/lib/xtunnel-agent`，并同时把 `auth.token_file` 覆盖为 `/var/lib/xtunnel-agent/token`；这属于部署覆盖，不改变 Schema 默认值。
+该 Source 是 Binary 自安装逻辑私有的持久 systemd Credential 输入，不是要求用户预先准备或日常维护的 Token 文件；Linux `run` 只读取 systemd 暴露的运行时 Credential，不知道 Source 路径，也不复制、轮换或覆盖它。Unit 不把 Secret 放入 `ExecStart`、Environment 或 Unit 参数。
+
+Windows Binary 自安装到 `%ProgramFiles%\XTunnel\xtunnel-agent.exe`，并把一次性安装 Token 使用 `CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN` 加密为 `%ProgramData%\XTunnel\credentials\agent.token.dpapi`。SCM Service `XTunnelAgent`（DisplayName `XTunnel Agent`）使用 `NT AUTHORITY\LocalService`，ImagePath 只包含安装 Binary 与 `run`，不包含 Token。该 DPAPI Blob 是安装器内部 Credential，不是用户配置文件或可跨机器复制的明文备份；ACL 只允许管理员、系统和运行服务所必需的身份访问。Token Rotate 后，Linux 或 Windows 管理员都用新的单字符串 Token 重新执行 `service install`，由 Binary 安全替换平台 Credential 并重启 Agent。
+
+OCI/Compose 直接把部署环境中的 Secret 映射为容器内 `XTUNNEL_TOKEN`，不挂 Agent 配置、Token Secret 文件或持久 Volume。
 
 ---
 
-# 145. Agent Install
+# 145. Agent Service Self-install
 
 V0.1 官方支持矩阵固定为：
 
 ```text
 Server: Linux amd64 / arm64
 
-Agent: Linux amd64 / arm64
+Agent: Linux amd64 / arm64；Windows amd64 / arm64
 
-Service Manager: systemd
+Service Manager: Linux systemd >= 249；Windows SCM
 
-Container: OCI 前台进程模式（不执行 install 子命令）+ Compose v2 双栈部署 Profile
+Container: OCI 前台进程模式 + Compose v2 双栈部署 Profile
 ```
 
-Windows Service、macOS launchd、Alpine OpenRC 和其他 Unix Service Manager 不属于 V0.1 支持范围。代码可以保持跨平台抽象，但 Alpha 发布、文件锁、权限、安装脚本和验收只对上述矩阵作承诺；不允许仅因 Go 能编译就宣称平台受支持。
+macOS launchd、Alpine OpenRC 和其他 Unix Service Manager 不属于 V0.1 支持范围。Linux Agent `service install/uninstall` 要求 root、Linux 和 systemd 249 及以上；Windows Agent 要求 amd64/arm64、提升权限的 Administrator 和可用 SCM。平台、架构、权限或 Service Manager 不满足时，必须在创建账户、注册服务或写任何目标文件前快速失败。Alpha 发布和验收只对上述矩阵作承诺。
 
-官方 systemd 包装固定使用两个角色身份：Server 为 `xtunnel-server:xtunnel-server`，Agent 为 `xtunnel-agent:xtunnel-agent`。Server 使用 `/run/xtunnel` 与 `/var/lib/xtunnel`，Agent 使用 `/run/xtunnel-agent` 与 `/var/lib/xtunnel-agent`，Runtime/State Directory 权限均为 `0700`。二进制安装到 `/usr/local/bin/xtunnel-{server,agent}`，权限为 `root:root 0755`；配置安装到 `/etc/xtunnel/{server,agent}.yaml`，权限为 `root:<角色组> 0640`。Agent Unit 负责应用上一节的两个部署路径覆盖。卸载只删除对应 Unit 与二进制，保留配置、凭据、持久化数据及服务用户/组。
+Server 继续使用 `deploy/systemd/install.sh server ...` 与 `uninstall.sh server` Shell 包装。Agent 在 Linux 与 Windows 都不公开或调用用户安装脚本，全部服务生命周期由同一个 Agent Binary 的 `service install/uninstall` 管理。
 
-官方 Compose v2 Profile 使用自定义 Bridge 并启用 IPv6；IPv4 保持 Docker Bridge 默认启用。Server 与 Agent 必须同时获得 IPv4、IPv6 容器地址。Management 仅发布到宿主机 IPv4/IPv6 回环，Agent Gateway 才发布到宿主机全部 IPv4/IPv6 地址；HTTP Ingress、Metrics 和动态 TCP 端口在对应产品任务完成前不由该 Profile 公开。宿主端口发布不替代公网 IPv6 路由、防火墙和反向代理配置。
+`service install` 创建 `xtunnel-agent:xtunnel-agent` 系统用户/组，把当前可执行文件原子安装到 `/usr/local/bin/xtunnel-agent`，创建 root-only Credential Source，写入 Binary 内嵌的 managed Unit，然后执行 daemon-reload、enable、restart 与 is-active 检查。即使服务已经运行，重复安装也必须重启，使新的 Binary、Token 和 Unit 立即生效。Agent 只使用可清理的 `/run/xtunnel-agent` Runtime Directory，不创建 StateDirectory。目标 Unit 不是普通文件，或内容不以 `# Managed by xtunnel-agent service install` 开头时必须拒绝覆盖；更新 Binary、Token 或 Unit 时不得留下部分安装。
 
-Compose 内部将需要双栈的静态入口配置为 `:port`。Server 底层监听原语对空 Host 创建两个独立 Socket：`tcp4 0.0.0.0:port` 与 `tcp6 [::]:port`，第二个地址族绑定失败时关闭第一个并整体失败，不回退单栈；显式 IPv4/IPv6 保持单地址族，Hostname 使用标准库 `tcp` 解析语义。该原语在 M0 只通过单元测试冻结，尚未接入 Server 启动路径；Management、Agent Gateway、Ingress 的启动 Gate、TLS、协议和关闭顺序仍分别由 M0-11、M1-04、M4-06 及后续任务实现和验收。
+Windows `service install` 把当前可执行文件安装到 `%ProgramFiles%\XTunnel\xtunnel-agent.exe`，写入 DPAPI Machine-scope Credential，再通过 SCM 创建或更新 `XTunnelAgent`。Service 使用 `NT AUTHORITY\LocalService`，ImagePath 只执行 `"%ProgramFiles%\XTunnel\xtunnel-agent.exe" run`。Binary 内嵌的 Description managed marker 精确为 `Managed by xtunnel-agent service install`；同名 Service 缺少该 marker 时拒绝覆盖或卸载。重复安装使用 Windows `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)` 语义分别原子替换 Binary/Credential，更新受管 SCM 配置并重启服务；任一步失败必须明确返回，不得静默报告安装成功。
+
+Agent OCI Image 固定 `CMD ["run"]`，容器只运行数据面进程，不允许在镜像内执行服务安装。官方 Compose v2 Profile 使用自定义 Bridge 并启用 IPv6；IPv4 保持 Docker Bridge 默认启用。Server 与 Agent 必须同时获得 IPv4、IPv6 容器地址。Management 仅发布到宿主机 IPv4/IPv6 回环，Agent Gateway 才发布到宿主机全部 IPv4/IPv6 地址。部署者设置 Compose 输入变量 `XTUNNEL_AGENT_TOKEN`，Compose 将它映射为 Agent 容器内的 `XTUNNEL_TOKEN`；Agent 不声明 Secret mount 或持久 Volume。
+
+Linux 安装命令：
 
 ```bash
-xtunnel-agent install \
-    --server tunnel.example.com:7443 \
-    --token-file /run/secrets/xtunnel-agent-token \
-    --server-pin sha256:xxx
+sudo xtunnel-agent service install --token 'xta_...'
+
+sudo xtunnel-agent service uninstall
 ```
 
-安装程序还可以从交互式隐藏输入读取 Token。禁止支持 `--token <明文>`；Token 不得出现在 shell history、进程参数、环境变量或日志中。
+Windows 安装命令（提升权限的 PowerShell）：
 
-Install：
+```powershell
+.\xtunnel-agent.exe service install --token 'xta_...'
+
+& "$env:ProgramFiles\XTunnel\xtunnel-agent.exe" service uninstall
+```
+
+`--token` 是一次性安装输入，不是持久服务参数。Self-installer 校验 Token 形状后写入 Linux root-only Credential Source 或 Windows DPAPI Machine-scope Blob；持久 Unit 与 SCM ImagePath 都只执行平台 Binary 的 `run`。安装与运行路径都不得回显或记录 Token。
 
 ```text
-Create Data Dir
+Preflight root + Linux + running systemd >= 249
  ↓
-Generate Installation ID
+Create service user/group
  ↓
-Store Token
+Atomically install current Binary
  ↓
-Write Config
+Create/Replace root-only LoadCredential Source
  ↓
-Install systemd
+Install embedded managed Unit
  ↓
-Enable
- ↓
-Start
+Enable + Start
 ```
 
-读取 Secret 后，安装程序以原子写方式保存到 `<data-dir>/token`，权限为 `0600`。安装成功后是否删除外部 Secret 文件由部署系统负责，XTunnel 不擅自删除用户提供的文件。
+```text
+Preflight Administrator + Windows amd64/arm64 + SCM
+ ↓
+Install/Replace Binary under ProgramFiles
+ ↓
+Create/Replace ProgramData DPAPI Machine-scope Credential
+ ↓
+Create/Update managed XTunnelAgent SCM Service as LocalService
+ ↓
+Start/Restart + Query Running
+```
+
+Windows SCM 的 Stop/Shutdown 最多等待 30 秒；Agent 运行回调异常必须返回非零 Service Exit，SCM 同时为 non-crash failure 配置恢复重启，避免错误退出被伪装成成功。当前尚未注册 Windows Event Log Source，SCM 模式下的 JSON stderr 不保证持久可见；M6-01 必须补齐可持久检索的 Windows Service 日志入口，当前状态不得视为生产可观测性 Gate 已通过。
+
+Linux `service uninstall` 只在 Unit 带匹配 managed marker 时停止、禁用并删除 Unit 与 `/usr/local/bin/xtunnel-agent`；Windows `service uninstall` 只在 `XTunnelAgent` 带匹配 Description marker 时停止并删除 SCM Service。Windows 随后删除 `%ProgramFiles%\XTunnel\xtunnel-agent.exe`；若卸载命令正由该已安装 EXE 自身执行，文件锁导致无法立即删除时，必须使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排在下次系统重启删除，不能虚假报告已即时消失。未知或人工管理的同名 Unit/Service 必须拒绝删除。两端卸载都保留平台 Credential；Linux 另保留 `xtunnel-agent` 用户/组，Windows 继续使用内建 `NT AUTHORITY\LocalService`。Server Shell 包装及其资产不受影响。
 
 ---
 
-# 146. 多 Replica 安装
+# 146. 多 Replica 运行
 
-同机：
+同一个 Agent Token 可以被多个进程或容器使用：
 
 ```bash
-xtunnel-agent install \
-  --data-dir /var/lib/xtunnel/r1 \
-  --service-name xtunnel-agent-r1 \
-  --token-file /run/secrets/xtunnel-agent-token \
-  ...
+xtunnel-agent run --token 'xta_...'
 
-xtunnel-agent install \
-  --data-dir /var/lib/xtunnel/r2 \
-  --service-name xtunnel-agent-r2 \
-  --token-file /run/secrets/xtunnel-agent-token \
-  ...
+XTUNNEL_TOKEN='xta_...' xtunnel-agent run
 ```
 
-两者属于：
-
-```text
-同一个逻辑 Agent
-```
-
-但：
-
-```text
-不同 Installation
-```
+它们属于同一个逻辑 Agent，但每次启动各自生成独立 `instance_id`，不需要不同 Data Directory。Agent Self-installer 在 V0.1 每台主机只管理一个固定 systemd Unit 或 `XTunnelAgent` SCM Service；同机多进程由容器编排或管理员自建服务模板管理，不额外引入 Agent 本地状态。
 
 ---
-
 # 147. Agent Reconnect
 
 使用：
@@ -6441,7 +6000,9 @@ Reconnect
  ↓
 Authenticate
  ↓
-Sync Revision
+Receive + Apply Full Current Snapshot
+ ↓
+ConfigAck
  ↓
 Refill Work Pool
 ```
@@ -6473,8 +6034,14 @@ Instance ID 改变
 新 Agent Process：
 
 ```text
-自动加入 Logical Agent
+生成新 Instance ID
+ ↓
+认证并完整拉取当前 Snapshot
+ ↓
+Ack 后加入 Logical Agent
 ```
+
+Agent Restart 不读取本地业务配置或历史 Revision。
 
 ---
 
@@ -6789,8 +6356,6 @@ request_id
 
 agent_id
 
-installation_id
-
 instance_id
 
 session_id
@@ -6829,8 +6394,6 @@ Session Secret
 TLS Private Key
 
 Authorization Header
-
-Config Signing Private Key
 ```
 
 共享日志 Handler 会对上述明确的敏感属性名写出 `[REDACTED]`。调用方仍不得把
@@ -6997,6 +6560,7 @@ xtunnel/
 │   │
 │   ├── server/
 │   │   ├── bootstrap/
+│   │   ├── service/
 │   │   ├── app/
 │   │   ├── auth/
 │   │   ├── api/
@@ -7016,10 +6580,10 @@ xtunnel/
 │   │
 │   ├── agent/
 │   │   ├── bootstrap/
+│   │   ├── service/
 │   │   ├── app/
 │   │   ├── identity/
 │   │   ├── control/
-│   │   ├── config/
 │   │   ├── transport/
 │   │   ├── origin/
 │   │   ├── health/
@@ -7042,11 +6606,16 @@ xtunnel/
 │
 ├── deploy/
 │   ├── docker/
-│   └── systemd/
+│   ├── systemd/
+│   │   ├── install.sh              # Server-only
+│   │   ├── uninstall.sh            # Server-only
+│   │   ├── smoke.sh                # Server Shell + Linux Agent Binary Self-install
+│   │   └── xtunnel-server.service
+│   └── windows/
+│       └── smoke.ps1               # Windows Agent SCM Self-install
 │
 ├── configs/
-│   ├── server.schema.json
-│   └── agent.schema.json
+│   └── server.schema.json
 │
 ├── docs/
 │   ├── architecture/
@@ -7062,8 +6631,6 @@ xtunnel/
         └── protocol-v1/
             ├── workhello.json
             ├── snapshot.json
-            ├── config-key-transition.json
-            ├── epoch-transition.json
             └── README.md
 ```
 
@@ -7096,9 +6663,9 @@ git diff --exit-code -- api/proto internal/protocol/gen buf.lock
 
 还必须通过 `git status --porcelain --untracked-files=all` 检测同一范围内的 staged/untracked 漂移，因为 `git diff` 不覆盖这两类文件。M0-06 尚无 `.proto`：`lint` 和 `generate-check` 明确报告无输入，`breaking` 明确报告初始契约尚未冻结；空输入只能作为 Wrapper 机械链路证据。一旦出现 `.proto` 而 M05-04 尚未建立不可变初始 Baseline，`breaking` 必须失败，禁止与当前 Schema 自比较伪造 PASS。
 
-CI 调用同一 Wrapper；不得维护另一套安装或生成命令。签名/HMAC 使用的消息必须继续显式调用 deterministic protobuf Marshal，并用跨平台 Golden Vector 验证；生成代码一致不等于签名字节已经正确。
+CI 调用同一 Wrapper；不得维护另一套安装或生成命令。HMAC 输入与 Snapshot 大小 Gate 必须继续显式调用 deterministic protobuf Marshal，并用跨平台 Golden Vector 验证；生成代码一致不等于安全字节已经正确。
 
-每个 Protocol Golden Vector 必须包含固定 Private/Public Key、`session_secret`、nonce、完整输入字段、deterministic protobuf hex、带 Domain Separator 的 signing input hex、HMAC/Signature hex 和最终 Message hex。测试逐字节比较已有 Fixture；禁止在普通测试运行中自动重写 Fixture。更新 Fixture 必须作为显式 Protocol Review 变更，并同时通过 unknown-field、字段乱序、空字段和签名失败测试。
+WorkHello Golden Vector 必须包含固定 `session_secret`、nonce、完整输入字段、deterministic protobuf hex、带 Domain Separator 的 HMAC input、HMAC 和最终 Message hex；Snapshot Golden Vector 固定完整输入、deterministic protobuf hex 与字节大小。测试逐字节比较已有 Fixture；禁止在普通测试运行中自动重写 Fixture。更新 Fixture 必须作为显式 Protocol Review 变更，并同时通过 unknown-field、字段乱序和空字段测试。
 
 ---
 
@@ -7125,10 +6692,6 @@ Recover / Roll Back Gateway Identity Rotation Journal
  ↓
 Load/Create Gateway TLS Identity
  ↓
-Load Config Signing Key
- ↓
-Load/Create Server Epoch
- ↓
 Load Route Snapshot
  ↓
 Start Management :8080
@@ -7150,9 +6713,9 @@ Start Usage Flusher
 READY
 ```
 
-Server External Lock 必须在读取 Restore Journal、Open SQLite、Migration、PKI/Epoch Load/Create 和任何 Runtime 初始化之前获取，并一直持有到所有 Listener、Agent Session 和 SQLite 都关闭。Lock Identity 只依赖始终存在的父目录和稳定 leaf 名，不依赖 leaf 当前存在，因此两个 rename 之间崩溃后仍能取得同一把锁。Lock 文件不在 Data Directory 内，Restore 替换目录不会改变已锁 inode。第二个指向同一 Stable Data Target 的 Server 必须在触碰数据库或身份文件之前快速失败，不能等端口绑定冲突才退出。
+Server External Lock 必须在读取 Restore Journal、Open SQLite、Migration、Gateway PKI Load/Create 和任何 Runtime 初始化之前获取，并一直持有到所有 Listener、Agent Session 和 SQLite 都关闭。Lock Identity 只依赖始终存在的父目录和稳定 leaf 名，不依赖 leaf 当前存在，因此两个 rename 之间崩溃后仍能取得同一把锁。Lock 文件不在 Data Directory 内，Restore 替换目录不会改变已锁 inode。第二个指向同一 Stable Data Target 的 Server 必须在触碰数据库或身份文件之前快速失败，不能等端口绑定冲突才退出。
 
-Gateway TLS Identity、Config Signing Key 和 Server Epoch 默认只允许在全新 Data Directory 初始化时创建。唯一例外是管理员显式执行第 26 节离线 `gateway rotate-key --maintenance`；普通 Server Start 绝不自动触发该例外。如果数据库或 Installation 历史已经存在但任一文件缺失，且没有可恢复的 Rotation Journal，Server 必须快速失败并要求从一致性备份恢复，禁止静默生成新身份。
+Gateway TLS Identity 默认只允许在全新 Data Directory 初始化时创建。唯一例外是管理员显式执行第 26 节离线 `gateway rotate-key --maintenance`；普通 Server Start 绝不自动触发该例外。如果数据库已经存在但 Gateway Identity 文件缺失，且没有可恢复的 Rotation Journal，Server 必须快速失败并要求从一致性备份恢复，禁止静默生成新身份。
 
 没有 Admin User 时，Management 状态为 `SETUP_REQUIRED`；HTTP/TCP Public Ingress 和 Agent Gateway 在首个管理员完成初始化前不启动。
 
@@ -7161,19 +6724,13 @@ Gateway TLS Identity、Config Signing Key 和 Server Epoch 默认只允许在全
 # 164. Agent Start
 
 ```text
-Load Config
+Resolve `--token` / `XTUNNEL_TOKEN` / OS Service Credential
  ↓
-Acquire Data Dir Lock
+Validate Bootstrap Shape
  ↓
-Load/Create Installation ID
+Parse Connection Token Version / Integrity / Semantics
  ↓
-Load Token
- ↓
-Load Pinned Gateway Identity + AgentTrustState（首次安装可不存在）
- ↓
-Recover snapshot.next / snapshot.pb Commit
- ↓
-Verify Last Snapshot Hash + Signature + Revision + Key + Epoch
+Derive Endpoint + TLS Trust + Agent/Token Credential
  ↓
 Generate Instance ID
  ↓
@@ -7185,9 +6742,11 @@ Agent Token Auth
  ↓
 Create Control Session
  ↓
-Sync Revision
+Receive Full Current Snapshot
  ↓
-Build Origin Resolver
+Validate + Atomic Swap In-memory Resolver
+ ↓
+ConfigAck
  ↓
 Start Health Checker
  ↓
@@ -7257,17 +6816,9 @@ ActiveWork CloseOnce + Counter Exactly-once
 
 Reconcile Generation Monotonicity
 
-Snapshot Signature
+Snapshot Deterministic Bytes + In-memory Atomic Apply
 
-Transition Signature + Journal Recovery
-
-Transition Ack / Exclusion Persistence
-
-Transition Ack ID / Artifact Hash / Observed Next Field Validation
-
-AgentTrustState Transition Idempotency
-
-AgentTrustState / Snapshot Crash Recovery At Every Commit Step
+Full Snapshot On Every New Control Session
 
 SQLite Repository
 
@@ -7283,7 +6834,9 @@ Health Scheduler Rate / Concurrency / Jitter / Batch
 
 Agent / Instance / Service Status Priority
 
-Strict Config Schema + Override Precedence
+Strict Server Config Schema + Override Precedence
+
+Agent Token Bootstrap Source Precedence + Shape Limits
 
 Lease / Health / Drain Monotonic Time Semantics
 
@@ -7315,11 +6868,11 @@ Fake Origin
 覆盖：
 
 ```text
-Token Authentication
+Connection Token Parse / Version / Authentication
 
 Pinned Certificate Same-SPKI Renewal
 
-Offline Gateway Key Rotation: Old Pin Rejected / New Pin Accepted / Omitted Installation Offline
+Offline Gateway Key Rotation: Old Connection Token Rejected / Newly Issued Token Accepted
 
 Gateway Identity Rotation Journal Crash Recovery
 
@@ -7365,7 +6918,7 @@ Token Rotation
 
 SQLite Migration Upgrade + Interrupted Migration
 
-Concurrent Config Write + Usage Flush + Token Rotate + Installation Upsert Without Unhandled SQLITE_BUSY
+Concurrent Config Write + Usage Flush + Token Rotate Without Unhandled SQLITE_BUSY
 
 Backup → Migration → Restore → Agent Reconnect
 
@@ -7383,11 +6936,9 @@ Second Binding For Same Tunnel Rejected By DB + Application Service
 
 Agent Delete With Binding Returns 409 AGENT_IN_USE
 
-Offline Installation Receives Preserved Key/Epoch Transition
+Stateless Agent Restart Receives Full Current Snapshot Before ONLINE
 
-ACK_EXCLUDED Installation Later Catches Up Through Preserved Transition Chain
-
-AgentTrustState Commit-point Crash Before/After Every fsync And rename
+Authorized Server Restore Establishes New Session Baseline Without Agent Local State
 
 Agent/Server Wall Clock Skew ±5min Does Not Expire Lease, Health Or Drain Early
 
@@ -7732,9 +7283,9 @@ Unauthorized Tunnel ID
 
 Config Snapshot Replay
 
-Config Key Transition
+Config Snapshot Wrong Agent ID
 
-Server Epoch Transition
+Config Revision Rollback Within One Session
 
 Admin CSRF
 
@@ -7786,7 +7337,7 @@ Repository
 
 CI
 
-Linux amd64 / arm64 Build Matrix
+Linux Server/Agent amd64/arm64 + Windows Agent amd64/arm64 Build Matrix
 
 Multi-arch OCI Image
 
@@ -7799,9 +7350,9 @@ node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba32756
 golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466
 gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
-systemd Packaging Smoke Harness
+Server Shell Packaging + Linux systemd / Windows SCM Agent Binary Self-install Smoke Harness
 
-Config
+Server Config + Agent Token Bootstrap
 
 Logging
 
@@ -7831,21 +7382,21 @@ go.mod 声明 go 1.27，根 Module/tool Module/CI/OCI Builder 使用同一个稳
 
 Server / Agent 可以启动
 
-Linux amd64 与 arm64 Binary 均可构建；arm64 在原生或受控 Runner 完成进程启动 + Config/Shutdown Smoke
+Linux Server/Agent amd64/arm64 与 Windows Agent amd64/arm64 Binary 均可构建；arm64 在原生或受控 Runner 完成 Agent Token Bootstrap 与 Shutdown Smoke
 
-OCI amd64/arm64 Image 以前台非 root 进程运行，验证只读镜像、持久化 Data Volume 和 SIGTERM 进程退出/资源释放 Smoke（M0 不要求真实 Session Drain）
+OCI amd64/arm64 Image 以前台非 root 进程运行，验证只读镜像、Server 持久化 Data Volume、Agent `XTUNNEL_TOKEN` 注入、Agent 无 Volume 和 SIGTERM 进程退出/资源释放 Smoke（M0 不要求真实 Session Drain）
 
-Compose v2 Profile 为 Server/Agent 分配 IPv4/IPv6 地址，建立 Management 回环和 Agent Gateway 宿主机全部 IPv4/IPv6 地址的端口绑定，并保持非 root、只读根、独立 Data Volume 与 Server Runtime tmpfs 边界
+Compose v2 Profile 为 Server/Agent 分配 IPv4/IPv6 地址，建立 Management 回环和 Agent Gateway 宿主机全部 IPv4/IPv6 地址的端口绑定，并保持非 root、只读根、Server Data Volume、Agent 无持久卷与 Server Runtime tmpfs 边界
 
 双栈监听原语完成原生 tcp4/tcp6 Dial/Accept、同端口、IPV6_V6ONLY 与第二地址族绑定失败清理测试；真实产品 Listener 连通仍留到 M1/M4
 
-systemd 执行 install / start / restart / stop / uninstall Smoke
+Server Shell install/uninstall；Linux Agent `service install/uninstall`、managed marker、systemd >=249、LoadCredential、start/restart/stop Smoke；Windows Agent SCM/LocalService、ProgramFiles Binary、ProgramData DPAPI Machine-scope Credential、Description marker、Replace Existing + Write Through、30s Stop/Shutdown、non-crash recovery、install/reinstall/restart/uninstall 与按需延迟到重启删除 Binary Smoke
 
 全新 checkout 按固定顺序完成 Web Build 和 Go Build
 
 CI 使用 `npm ci`，缺失或与 `package.json` 不一致的 Lockfile 直接失败；CI 不自动生成或改写 Lockfile
 
-Server/Agent Config Schema 校验、Strict YAML、CLI/Env/YAML/Default 优先级测试通过
+Server Config Schema、Strict YAML、CLI/Env/YAML/Default 优先级测试通过；Agent `--token`/`XTUNNEL_TOKEN`/Linux systemd Credential/Windows DPAPI Credential 优先级和输入边界测试通过
 
 OpenAPI Skeleton Validate 通过且不存在未解析占位 Server URL
 
@@ -7860,6 +7411,8 @@ Vite HTTPS Proxy Harness 验证证书失败、`/api/v1` 转发和 Host/Origin �
 
 ```text
 common.proto / control.proto / work.proto
+
+Connection Token v1 精确编码 / 版本 / 完整性 / 解析失败语义
 
 固定 package / go_package
 
@@ -7883,7 +7436,7 @@ Protocol Golden Vector
 
 ./tools/proto.sh generate-check = PASS
 
-Golden Vector 逐 byte PASS
+Connection Token / Protocol Golden Vector 逐 byte PASS
 
 Auth Success / Failure Transcript PASS
 
@@ -7893,9 +7446,9 @@ Control / WorkConn 全部非法方向和非法状态 Case PASS
 
 WorkConn 错误方向/状态/Unknown Field 直接关闭 Case PASS
 
-Transition Ack ID / Artifact Hash / observed Next 组合校验 PASS
+Snapshot Deterministic Bytes / Revision / ConfigAck 组合校验 PASS
 
-Auth、Control、Work、Snapshot 及本地 Last Known Snapshot 的全部结构化 Message 递归 Unknown Field Case 均被拒绝
+Auth、Control、Work、Snapshot 的全部结构化 Message 递归 Unknown Field Case 均被拒绝
 ```
 
 M0.5 是强制 Gate，不是可与 M1 并行补写的文档任务。M0.5 未通过，禁止实现 Server/Agent Protocol Handler；允许继续开发与 Wire Contract 无关的 Lock、Repository、Proxy、Origin Dialer 和测试 Harness。
@@ -7911,9 +7464,9 @@ M1 使用正式身份和安全协议，但产品能力只要求一个 Agent、�
 ```text
 Protocol v1 Generated Contract
 
-Agent Entity + Token Verification
+Agent Entity + Versioned Connection Token Issuance / Verification
 
-Installation ID + Instance ID + Session ID
+Ephemeral Instance ID + Session ID
 
 Runtime Registry + Session Generation Fencing
 
@@ -7979,7 +7532,7 @@ Multi Replica
 
 Instance Selection
 
-Installation History
+Online Instance Lifecycle + Observability
 
 Token Rotation + Revoke
 
@@ -8006,7 +7559,7 @@ Server 能独立识别所有 Instance
 
 ---
 
-# 182. M3：Configuration + Trust + Health
+# 182. M3：Configuration + Health
 
 完成：
 
@@ -8019,11 +7572,9 @@ Revision
 
 Snapshot
 
-Signature
+In-memory Atomic Apply
 
-AgentTrustState
-
-Config Key / Epoch Transition
+Full Snapshot On Start / Reconnect
 
 Origin Resolver
 
@@ -8041,7 +7592,7 @@ Agent 无需重启
 
 自动生效
 
-TrustState / Snapshot 在每个 Commit Crash Point 后可恢复
+Agent 仅凭 Connection Token 启动且不读取本地状态，完整拉取并 Ack 后才 ONLINE
 
 Health Budget 与配置 Interval 均可被自动化验证
 ```
@@ -8198,6 +7749,8 @@ Concurrency
 Large Transfer
 
 Privileged Network Chaos
+
+Token-only Foreground / OCI + Linux systemd / Windows SCM Agent Binary Self-install Deployment Matrix
 ```
 
 M7 不允许第一次实现 Frame、Queue、Auth、Connection、FD 或 Health Budget 上限；这些正确性边界必须从 M1/M3 起存在。M7 只负责压测校准、异常注入、泄漏消除和发布阈值收敛。
@@ -8227,23 +7780,25 @@ go test -race ./... = PASS，零 Data Race
 
 Protocol v1 Golden Vector + Direction/State Matrix = PASS
 
-Server/Agent JSON Schema 与 Go Config Struct Drift Check = PASS
+Server JSON Schema 与 Go Config Struct Drift Check + Agent Token Bootstrap Contract Tests = PASS
 
 OpenAPI Validate + Generated Client/Server Contract Drift Check = PASS
 
 npm ci / npm run build = PASS，Lockfile 零漂移
 
-Linux amd64 / arm64 Build Matrix = PASS，arm64 Protocol Smoke = PASS
+Linux Server/Agent amd64/arm64 + Windows Agent amd64/arm64 Build Matrix = PASS，arm64 Protocol Smoke = PASS
 
-OCI amd64 / arm64 Manifest + Foreground / Volume / SIGTERM Smoke = PASS
+OCI amd64 / arm64 Manifest + Agent `XTUNNEL_TOKEN` / Server Volume / SIGTERM Smoke = PASS
 
-systemd Install / Restart / Uninstall Smoke = PASS
+Linux Agent Binary Self-install / Managed Marker / LoadCredential / Restart / Uninstall Smoke = PASS，Unit ExecStart 仅为 `xtunnel-agent run` 且无 Secret
+
+Windows Agent Binary Self-install / SCM / LocalService / ProgramFiles / DPAPI Machine-scope Credential / Description Marker / Restart / Uninstall Smoke = PASS，SCM ImagePath 仅为安装 Binary + `run` 且无 Secret，运行中 EXE 延迟删除最终收敛
 
 协议 Fuzz Corpus = PASS，零 Panic / OOM
 
 Control Outbox 满载、Session Replace、Drain/OPEN 并发 = PASS，零 Frame 交错
 
-AgentTrustState / Snapshot 全 Commit Point Crash Recovery = PASS
+Stateless Agent Restart / Reconnect Full Snapshot Gate = PASS
 
 Health Scheduler Rate/Concurrency/Batch 与两级 Target Budget = PASS
 
@@ -8295,11 +7850,12 @@ Web Console Available
 ```text
 Create Agent
  ↓
-Copy Token
+Copy one Connection Token
  ↓
-写入 0600 Secret File
+sudo xtunnel-agent service install --token 'xta_...'
+或在提升权限的 Windows PowerShell 中执行 `.\xtunnel-agent.exe service install --token 'xta_...'`
  ↓
-Install Agent
+启动后拉取完整当前 Snapshot
  ↓
 Agent ONLINE
 ```
@@ -8398,7 +7954,7 @@ SSH 正常。
 ```text
 ADR-001-logical-agent-and-replica.md
 
-ADR-002-agent-token-authentication.md
+ADR-002-versioned-connection-token.md
 
 ADR-003-agent-identity-hierarchy.md
 
@@ -8422,7 +7978,7 @@ ADR-012-sqlite-desired-state.md
 
 ADR-013-revision-and-snapshot.md
 
-ADR-014-config-signing.md
+ADR-014-stateless-agent-config-apply.md
 
 ADR-015-agent-instance-selection.md
 
@@ -8432,11 +7988,11 @@ ADR-017-proto-is-wire-contract.md
 
 ADR-018-control-session-and-runtime-ownership.md
 
-ADR-019-agent-trust-state-commit.md
+ADR-019-full-snapshot-on-session-start.md
 
 ADR-020-status-aggregation.md
 
-ADR-021-config-schema-authority.md
+ADR-021-server-config-schema-and-agent-token-bootstrap.md
 
 ADR-022-health-scheduler-and-budget.md
 
@@ -8454,9 +8010,9 @@ ADR-023-openapi-etag-concurrency.md
 
 2. 一个 Agent 可以拥有多个 Replica。
 
-3. Agent Token 属于逻辑 Agent，可以重复用于 Replica。
+3. Connection Token 属于逻辑 Agent，携带 Endpoint、TLS Trust、Agent/Token Identity 与 Secret，并可重复用于 Replica。
 
-4. Installation / Instance / Session 必须独立建模。
+4. Instance / Session 必须是临时运行身份，不得引入 Installation 持久化。
 
 5. Token 默认长期有效，但必须支持 Rotate 和 Revoke。
 
@@ -8467,7 +8023,7 @@ ADR-023-openapi-etag-concurrency.md
 8. OPEN 只能携带 Tunnel ID，
    不能携带 Origin 地址。
 
-9. Origin 只能由 Agent 本地配置解析。
+9. Origin 只能由 Agent 根据 Server 下发的当前内存配置解析。
 
 10. Runtime Socket 只存在内存。
 
@@ -8489,7 +8045,7 @@ ADR-023-openapi-etag-concurrency.md
 
 19. 配置同步必须使用 Revision。
 
-20. Snapshot 必须签名。
+20. Snapshot 只能经已认证的 TLS Control Session 下发，并完整校验后原子替换。
 
 21. `.proto` 是唯一 Wire Contract，M0.5 未通过不得实现协议 Handler。
 
@@ -8497,11 +8053,11 @@ ADR-023-openapi-etag-concurrency.md
 
 23. Runtime State 在 AgentRuntime Lock 下线性化，锁内禁止 IO、阻塞和 Conn.Close。
 
-24. Agent TrustState 与 Snapshot 必须按持久化提交点恢复到同一代。
+24. Agent 不保存本地 Desired State；每个新 Control Session 必须获取完整当前 Snapshot。
 
 25. Agent/Instance 不聚合 Origin Health；Service Status 只由 Server 统一计算。
 
-26. Server/Agent 主配置以 JSON Schema 为唯一机器可读契约并 Strict Decode。
+26. 只有 Server 主配置使用 JSON Schema 与 Strict Decode；Agent 只接受一个版本化 Connection Token。
 
 27. Health Check 必须中心调度、批量上报并服从两级 Target Budget。
 

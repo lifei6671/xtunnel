@@ -15,8 +15,9 @@ type storage interface {
 }
 
 type serverStorage struct {
-	database *sqlite.Store
-	lock     *externallock.Lock
+	database   *sqlite.Store
+	lock       *externallock.Lock
+	targetHash string
 }
 
 // openServerStorage 按冻结顺序取得外部锁、校验数据目录并打开数据库。
@@ -44,7 +45,7 @@ func openServerStorage(ctx context.Context, dataDir, runtimeDir string) (*server
 	if err != nil {
 		return failAfterLock(fmt.Errorf("initialize SQLite: %w", err))
 	}
-	return &serverStorage{database: database, lock: lock}, nil
+	return &serverStorage{database: database, lock: lock, targetHash: target.Hash}, nil
 }
 
 // Close 先关闭 SQLite，再释放覆盖整个数据目录的 External Lock。

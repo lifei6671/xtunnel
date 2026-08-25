@@ -6,9 +6,9 @@ usage() {
 Usage: smoke.sh [--target server|agent] [--platform linux/amd64|linux/arm64] [--image NAME] [--skip-build]
 
 Builds one OCI target and verifies its architecture, dedicated entrypoint,
-non-root identity, read-only root filesystem, data volume, lifecycle logs, and
-clean SIGTERM shutdown. The Server check also verifies its writable runtime
-tmpfs and a second start against the same persistent volume.
+non-root identity, read-only root filesystem, lifecycle logs, and clean SIGTERM
+shutdown. Server uses its persistent data volume and runtime tmpfs; Agent uses
+only an environment-provided non-secret test Token.
 EOF
 }
 
@@ -96,10 +96,17 @@ expected_entrypoint="/usr/local/bin/xtunnel-$target"
 test "$(docker image inspect --format '{{.Architecture}}' "$image")" = "$expected_arch"
 test "$(docker image inspect --format '{{.Config.User}}' "$image")" = '65532:65532'
 test "$(docker image inspect --format '{{join .Config.Entrypoint " "}}' "$image")" = "$expected_entrypoint"
+image_volumes=$(docker image inspect --format '{{json .Config.Volumes}}' "$image")
+if [ "$target" = server ]; then
+	printf '%s' "$image_volumes" | grep -F '"/var/lib/xtunnel"' >/dev/null
+else
+	test "$image_volumes" = null
+fi
 
-volume="xtunnel-$target-smoke-$$"
+volume=
 container=
 boundary_container=
+agent_token=xta_oci_smoke_not_secret
 
 cleanup() {
 	if [ -n "$boundary_container" ]; then
@@ -108,14 +115,19 @@ cleanup() {
 	if [ -n "$container" ]; then
 		docker rm --force "$container" >/dev/null 2>&1 || true
 	fi
-	docker volume rm --force "$volume" >/dev/null 2>&1 || true
+	if [ -n "$volume" ]; then
+		docker volume rm --force "$volume" >/dev/null 2>&1 || true
+	fi
 }
 trap cleanup 0
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-docker volume create "$volume" >/dev/null
+if [ "$target" = server ]; then
+	volume="xtunnel-$target-smoke-$$"
+	docker volume create "$volume" >/dev/null
+fi
 
 # 最终镜像只应包含自己的入口二进制；--help 可避免误存在时启动常驻进程。
 if [ "$target" = server ]; then
@@ -142,10 +154,8 @@ run_target() {
 		docker run --detach \
 			--platform "$platform" \
 			--read-only \
-			--mount "type=volume,source=$volume,target=/var/lib/xtunnel" \
-			"$image" \
-			--set server.endpoint=127.0.0.1:7443 \
-			--set server.tls.mode=public
+			--env "XTUNNEL_TOKEN=$agent_token" \
+			"$image"
 	fi
 }
 
@@ -170,9 +180,13 @@ wait_for_start() {
 
 verify_runtime_mounts() {
 	test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")" = true
-	test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/xtunnel"}}{{.RW}}{{end}}{{end}}' "$container")" = true
 	if [ "$target" = server ]; then
+		test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/xtunnel"}}{{.RW}}{{end}}{{end}}' "$container")" = true
 		test -n "$(docker inspect --format '{{index .HostConfig.Tmpfs "/run/xtunnel"}}' "$container")"
+	else
+		test "$(docker inspect --format '{{len .Mounts}}' "$container")" -eq 0
+		test "$(docker inspect --format '{{join .Config.Cmd " "}}' "$container")" = run
+		docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" | grep -Fx "XTUNNEL_TOKEN=$agent_token" >/dev/null
 	fi
 }
 
@@ -224,8 +238,7 @@ wait_for_start
 verify_runtime_mounts
 stop_target
 
-# Server 的第二次启动会重新打开同一卷中的 SQLite；Agent 当前尚未写入状态，
-# 因而这里只重复验证其前台生命周期，不虚构持久化写入证据。
+# Server 的第二次启动会重新打开同一卷中的 SQLite；Agent 则重复验证无状态前台生命周期。
 container=$(run_target)
 wait_for_start
 verify_runtime_mounts

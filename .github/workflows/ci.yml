@@ -95,7 +95,7 @@ jobs:
             go build -mod=readonly ./...
           )
           go test ./...
-          go test -race ./internal/server/bootstrap ./internal/agent/bootstrap ./internal/server/config ./internal/agent/config
+          go test -race ./internal/server/bootstrap ./internal/agent/bootstrap ./internal/server/config ./internal/agent/service
           go vet ./...
           go build ./cmd/server ./cmd/agent
 
@@ -112,3 +112,85 @@ jobs:
           set -euo pipefail
           git diff --check
           test -z "$(git status --porcelain --untracked-files=all)"
+
+  windows-agent:
+    name: Windows Agent service
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Go 1.27.0
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.0'
+          check-latest: false
+          cache: false
+
+      - name: Verify fixed Go toolchain
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          if ((go env GOVERSION) -ne 'go1.27.0') {
+            throw 'Go version must be go1.27.0'
+          }
+          if ((go env GOTOOLCHAIN) -ne 'local') {
+            throw 'GOTOOLCHAIN must be local'
+          }
+
+      - name: Test Go modules and build Agent
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          go mod verify
+          if ($LASTEXITCODE -ne 0) { throw 'go mod verify failed' }
+          go test ./internal/agent/... ./cmd/agent
+          if ($LASTEXITCODE -ne 0) { throw 'Agent tests failed' }
+          go test -race ./internal/agent/bootstrap ./internal/agent/service
+          if ($LASTEXITCODE -ne 0) { throw 'Agent race tests failed' }
+          go vet ./internal/agent/... ./cmd/agent
+          if ($LASTEXITCODE -ne 0) { throw 'Agent vet failed' }
+          $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent.exe'
+          go build -trimpath -o $agentPath ./cmd/agent
+          if ($LASTEXITCODE -ne 0) { throw 'Agent build failed' }
+
+      - name: Cross-build Windows arm64 Agent
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'arm64'
+          $env:CGO_ENABLED = '0'
+          $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent-arm64.exe'
+          $bootstrapTest = Join-Path $env:RUNNER_TEMP 'agent-bootstrap-arm64.test.exe'
+          $serviceTest = Join-Path $env:RUNNER_TEMP 'agent-service-arm64.test.exe'
+          go build -trimpath -o $agentPath ./cmd/agent
+          if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 Agent build failed' }
+          go test -c -o $bootstrapTest ./internal/agent/bootstrap
+          if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 bootstrap test compile failed' }
+          go test -c -o $serviceTest ./internal/agent/service
+          if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 service test compile failed' }
+
+      - name: Run Windows Service smoke
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent.exe'
+          ./deploy/windows/smoke.ps1 -AgentPath $agentPath
+
+      - name: Verify working tree remains clean
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed' }
+          $status = git status --porcelain --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
+          if ($status) { throw "working tree is dirty after Windows verification`n$status" }

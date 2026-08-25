@@ -32,7 +32,13 @@ func executeWithRun(
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := runner(ctx, program, args, environ, stderr); err != nil {
+	var err error
+	if isAdminCommand(args) {
+		err = runAdminCommand(ctx, program, args, environ, stderr)
+	} else {
+		err = runner(ctx, program, args, environ, stderr)
+	}
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
@@ -45,12 +51,36 @@ func executeWithRun(
 // run 完成 Server 的配置、日志、Web 资源、External Lock 和 SQLite 初始化，并保持前台运行直到收到退出信号。
 // 后续任务会在 SQLite 已就绪且 External Lock 仍被持有时继续接入 PKI 和 Listener。
 func run(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
-	return runWithStorage(ctx, program, args, environ, stderr, func(ctx context.Context, dataDir string) (storage, error) {
+	return runWithStorageAndBootstrap(ctx, program, args, environ, stderr, func(ctx context.Context, dataDir string) (storage, error) {
 		return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
+	}, func(ctx context.Context, resources storage) (io.Closer, error) {
+		serverResources, ok := resources.(*serverStorage)
+		if !ok {
+			return nil, errors.New("unexpected server storage implementation")
+		}
+		hasAdmin, err := serverResources.database.HasAdmin(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("check admin bootstrap state: %w", err)
+		}
+		if hasAdmin {
+			return nil, nil
+		}
+		return openAdminBootstrapSocket(ctx, externallock.RuntimeDirectory, serverResources.targetHash, serverResources.database)
 	})
 }
 
 func runWithStorage(ctx context.Context, program string, args, environ []string, stderr io.Writer, openStorage func(context.Context, string) (storage, error)) error {
+	return runWithStorageAndBootstrap(ctx, program, args, environ, stderr, openStorage, nil)
+}
+
+func runWithStorageAndBootstrap(
+	ctx context.Context,
+	program string,
+	args, environ []string,
+	stderr io.Writer,
+	openStorage func(context.Context, string) (storage, error),
+	openBootstrap func(context.Context, storage) (io.Closer, error),
+) error {
 	options, err := parseConfigOptions(program, args, environ, stderr)
 	if err != nil {
 		return err
@@ -74,9 +104,21 @@ func runWithStorage(ctx context.Context, program string, args, environ []string,
 	if err != nil {
 		return fmt.Errorf("initialize server storage: %w", err)
 	}
+	var bootstrapSocket io.Closer
+	if openBootstrap != nil {
+		bootstrapSocket, err = openBootstrap(ctx, resources)
+		if err != nil {
+			return errors.Join(fmt.Errorf("initialize admin bootstrap socket: %w", err), resources.Close())
+		}
+	}
 
 	logger.InfoContext(ctx, "process_started")
 	<-ctx.Done()
+	if bootstrapSocket != nil {
+		if err := bootstrapSocket.Close(); err != nil {
+			return errors.Join(fmt.Errorf("close admin bootstrap socket: %w", err), resources.Close())
+		}
+	}
 	closeErr := resources.Close()
 	logger.Info("process_stopped")
 	if closeErr != nil {

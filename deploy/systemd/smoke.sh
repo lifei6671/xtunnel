@@ -79,7 +79,11 @@ temp_dir=$(mktemp -d)
 
 cleanup() {
 	sh "$script_dir/uninstall.sh" server >/dev/null 2>&1 || true
-	sh "$script_dir/uninstall.sh" agent >/dev/null 2>&1 || true
+	if [ -x /usr/local/bin/xtunnel-agent ]; then
+		/usr/local/bin/xtunnel-agent service uninstall >/dev/null 2>&1 || true
+	else
+		"$agent_binary" service uninstall >/dev/null 2>&1 || true
+	fi
 	for unit in xtunnel-server.service xtunnel-agent.service; do
 		if systemctl is-active --quiet "$unit"; then
 			printf 'cleanup stopped before deleting files because %s is still active\n' "$unit" >&2
@@ -115,16 +119,32 @@ agent_gateway:
   public_hostname: smoke.invalid
 EOF
 
-# Unit 会把 Agent 的通用 Schema 默认值覆盖到独立的 systemd 状态目录。
-cat >"$temp_dir/agent.yaml" <<'EOF'
-server:
-  endpoint: 127.0.0.1:7443
-  tls:
-    mode: public
-EOF
+smoke_agent_token=xta_systemd_smoke_not_secret
 
 sh "$script_dir/install.sh" server --binary "$server_binary" --config "$temp_dir/server.yaml"
-sh "$script_dir/install.sh" agent --binary "$agent_binary" --config "$temp_dir/agent.yaml"
+if "$agent_binary" service install >/dev/null 2>&1; then
+	printf '%s\n' "agent install unexpectedly accepted a missing --token" >&2
+	exit 1
+fi
+if "$agent_binary" service install --token invalid-smoke-token >/dev/null 2>&1; then
+	printf '%s\n' "agent install unexpectedly accepted an invalid --token" >&2
+	exit 1
+fi
+"$agent_binary" service install --token "$smoke_agent_token"
+first_agent_pid=$(systemctl show --property=MainPID --value xtunnel-agent.service)
+smoke_agent_token=xta_systemd_reinstall_not_secret
+"$agent_binary" service install --token "$smoke_agent_token"
+second_agent_pid=$(systemctl show --property=MainPID --value xtunnel-agent.service)
+case "$first_agent_pid:$second_agent_pid" in
+	*[!0-9:]*|0:*|*:0|:*|*:)
+		printf 'Agent reinstall returned invalid MainPIDs: before=%s after=%s\n' "$first_agent_pid" "$second_agent_pid" >&2
+		exit 1
+		;;
+esac
+if [ "$first_agent_pid" -eq "$second_agent_pid" ]; then
+	printf 'Agent reinstall did not restart the service: MainPID=%s\n' "$first_agent_pid" >&2
+	exit 1
+fi
 
 for unit in xtunnel-server.service xtunnel-agent.service; do
 	systemctl is-enabled --quiet "$unit"
@@ -134,19 +154,43 @@ for unit in xtunnel-server.service xtunnel-agent.service; do
 done
 
 test "$(stat -c '%a:%U:%G' /etc/xtunnel/server.yaml)" = '640:root:xtunnel-server'
-test "$(stat -c '%a:%U:%G' /etc/xtunnel/agent.yaml)" = '640:root:xtunnel-agent'
+test ! -e /etc/xtunnel/agent.yaml
+test ! -e /etc/xtunnel/agent.token
+test "$(stat -c '%a:%U:%G' /etc/xtunnel/credentials)" = '700:root:root'
+test "$(stat -c '%a:%U:%G' /etc/xtunnel/credentials/agent.token)" = '600:root:root'
+test "$(cat /etc/xtunnel/credentials/agent.token)" = "$smoke_agent_token"
 test "$(stat -c '%a:%U:%G' /run/xtunnel)" = '700:xtunnel-server:xtunnel-server'
 test "$(stat -c '%a:%U:%G' /run/xtunnel-agent)" = '700:xtunnel-agent:xtunnel-agent'
 test "$(stat -c '%a:%U:%G' /var/lib/xtunnel)" = '700:xtunnel-server:xtunnel-server'
-test "$(stat -c '%a:%U:%G' /var/lib/xtunnel-agent)" = '700:xtunnel-agent:xtunnel-agent'
+test ! -e /var/lib/xtunnel-agent
 test "$(stat -c '%a:%U:%G' /usr/local/bin/xtunnel-server)" = '755:root:root'
 test "$(stat -c '%a:%U:%G' /usr/local/bin/xtunnel-agent)" = '755:root:root'
+cmp -s "$agent_binary" /usr/local/bin/xtunnel-agent
 test "$(stat -c '%a:%U:%G' /etc/systemd/system/xtunnel-server.service)" = '644:root:root'
 test "$(stat -c '%a:%U:%G' /etc/systemd/system/xtunnel-agent.service)" = '644:root:root'
 test -f /var/lib/xtunnel/xtunnel.db
+test "$(sed -n '1p' /etc/systemd/system/xtunnel-agent.service)" = '# Managed by xtunnel-agent service install'
+grep -Fx 'LoadCredential=xtunnel-agent.token:/etc/xtunnel/credentials/agent.token' /etc/systemd/system/xtunnel-agent.service >/dev/null
+grep -Fx 'ExecStart=/usr/local/bin/xtunnel-agent run' /etc/systemd/system/xtunnel-agent.service >/dev/null
+if grep '^ExecStart=.*--token' /etc/systemd/system/xtunnel-agent.service >/dev/null \
+	|| grep '^ExecStart=.*xta_' /etc/systemd/system/xtunnel-agent.service >/dev/null; then
+	printf '%s\n' "managed Agent unit leaked a Token into ExecStart" >&2
+	exit 1
+fi
 
-# 凭据占位文件只用于证明卸载保留边界，不包含真实 Token。
-install -o xtunnel-agent -g xtunnel-agent -m 0600 /dev/null /var/lib/xtunnel-agent/token
+agent_pid=$(systemctl show --property=MainPID --value xtunnel-agent.service)
+case "$agent_pid" in
+	''|*[!0-9]*|0)
+		printf 'Agent MainPID is invalid: %s\n' "$agent_pid" >&2
+		exit 1
+		;;
+esac
+credentials_directory=/run/credentials/xtunnel-agent.service
+# Unit 没有 Token 参数或环境变量；Agent 成功常驻且运行时 Credential 内容正确，
+# 共同证明它已通过 CREDENTIALS_DIRECTORY 读取 LoadCredential 产物。
+runtime_credential="/proc/$agent_pid/root$credentials_directory/xtunnel-agent.token"
+test -r "$runtime_credential"
+test "$(cat "$runtime_credential")" = "$smoke_agent_token"
 
 for unit in xtunnel-server.service xtunnel-agent.service; do
 	systemctl stop "$unit"
@@ -159,7 +203,7 @@ for unit in xtunnel-server.service xtunnel-agent.service; do
 done
 
 sh "$script_dir/uninstall.sh" server
-sh "$script_dir/uninstall.sh" agent
+/usr/local/bin/xtunnel-agent service uninstall
 
 for path in \
 	/etc/systemd/system/xtunnel-server.service \
@@ -173,10 +217,14 @@ for path in \
 done
 
 test -f /etc/xtunnel/server.yaml
-test -f /etc/xtunnel/agent.yaml
+test ! -e /etc/xtunnel/agent.yaml
+test ! -e /etc/xtunnel/agent.token
+test -f /etc/xtunnel/credentials/agent.token
 test -f /var/lib/xtunnel/xtunnel.db
-test -f /var/lib/xtunnel-agent/token
+test ! -e /var/lib/xtunnel-agent
 id xtunnel-server >/dev/null 2>&1
 id xtunnel-agent >/dev/null 2>&1
+test "$(getent passwd xtunnel-agent | cut -d: -f6)" = /nonexistent
+test "$(cat /etc/xtunnel/credentials/agent.token)" = "$smoke_agent_token"
 
 printf '%s\n' "systemd packaging smoke passed"

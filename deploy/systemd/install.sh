@@ -3,17 +3,17 @@ set -eu
 
 usage() {
 	cat <<'EOF'
-Usage: install.sh server|agent --binary PATH --config PATH
+Usage: install.sh server --binary PATH --config PATH
 
-Installs a packaged XTunnel binary, its configuration, and the matching
-systemd service. The script must run as root. It creates the dedicated
-role-specific system user when it does not already exist.
+Installs the packaged XTunnel Server binary, its configuration, and the systemd
+service. The script must run as root. Agent installation is managed by the
+xtunnel-agent binary itself.
 EOF
 }
 
 component=${1-}
 case "$component" in
-	server|agent)
+	server)
 		shift
 		;;
 	-h|--help|'')
@@ -36,10 +36,12 @@ config=
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--binary)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
 			binary=${2-}
 			shift 2
 			;;
 		--config)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
 			config=${2-}
 			shift 2
 			;;
@@ -65,32 +67,25 @@ if ! command -v systemctl >/dev/null 2>&1 || ! command -v useradd >/dev/null 2>&
 fi
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-unit="xtunnel-$component.service"
+unit=xtunnel-server.service
 unit_source="$script_dir/$unit"
-binary_target="/usr/local/bin/xtunnel-$component"
-config_target="/etc/xtunnel/$component.yaml"
+binary_target=/usr/local/bin/xtunnel-server
 unit_target="/etc/systemd/system/$unit"
-service_user="xtunnel-$component"
+service_user=xtunnel-server
 
 if [ ! -f "$unit_source" ]; then
 	printf 'unit source does not exist: %s\n' "$unit_source" >&2
 	exit 1
 fi
 
-if [ "$component" = server ]; then
-	state_dir=/var/lib/xtunnel
-else
-	state_dir=/var/lib/xtunnel-agent
-fi
-
 if ! id "$service_user" >/dev/null 2>&1; then
-	useradd --system --user-group --home-dir "$state_dir" --shell /usr/sbin/nologin "$service_user"
+	useradd --system --user-group --home-dir /var/lib/xtunnel --shell /usr/sbin/nologin "$service_user"
 fi
 
 install -d -m 0755 /usr/local/bin /etc/xtunnel /etc/systemd/system
 install -m 0755 "$binary" "$binary_target"
-# root 负责更新配置，服务只能通过自己的组读取，避免两个角色互读凭据。
-install -o root -g "$service_user" -m 0640 "$config" "$config_target"
+# root 负责更新 Server 配置，服务只能通过自己的组读取。
+install -o root -g "$service_user" -m 0640 "$config" /etc/xtunnel/server.yaml
 install -m 0644 "$unit_source" "$unit_target"
 
 systemctl daemon-reload

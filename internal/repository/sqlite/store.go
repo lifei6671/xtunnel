@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	libsqlite "github.com/libtnb/sqlite"
 	"gorm.io/gorm"
@@ -25,6 +26,8 @@ const (
 type Store struct {
 	database *gorm.DB
 	pool     *sql.DB
+
+	firstAdminMu sync.Mutex
 }
 
 // Open 打开固定的数据目录数据库、校验逐连接 PRAGMA，并执行显式 Migration。

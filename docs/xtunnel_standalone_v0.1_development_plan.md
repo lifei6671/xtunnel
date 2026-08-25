@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-08-24
+> **进度基线日期**：2026-08-25
 >
 > **当前阶段**：M0 工程初始化
 >
-> **当前结论**：`M0-01` 至 `M0-10` 已完成；下一项为 `M0-11` 首个 Admin Bootstrap，开工前须完成其持久化与权限变更审计；实现与验收记录已推送至 `master`
+> **当前结论**：`M0-01`、`M0-03` 至 `M0-08`、`M0-10` 已完成；`M0-02` 因 Agent 改为 Token-only Bootstrap 而重新进入实施并等待 CI/复审，`M0-09` 的 Linux Agent Binary Self-install 已通过真实 systemd Smoke，Windows SCM 静态测试/构建已通过但提升权限的正向 SCM Smoke 未运行，真实 OCI/Compose Smoke 与新 CI 也尚未完成；`M0-11` 首个 Admin Bootstrap 正在实现并等待 Linux Race 验证范围确认。
 
 ---
 
@@ -18,7 +18,7 @@
 
 1. 产品边界、架构和行为语义：[`docs/xtunnel_standalone_v0.1.md`](./xtunnel_standalone_v0.1.md)。
 2. Protocol v1 Wire Contract：`api/proto/common.proto`、`control.proto`、`work.proto`。
-3. Server/Agent 配置：`configs/server.schema.json`、`configs/agent.schema.json`。
+3. Server 配置：`configs/server.schema.json`；Agent Bootstrap：本文与 `internal/agent/bootstrap` 的单 Connection Token 契约，精确 Token 编码在 M05-02 冻结。
 4. REST API：`api/openapi/openapi.yaml`。
 5. 开发任务与进度：本文档。
 6. 开发工具链与协作约束：根目录 `AGENTS.md`。
@@ -75,7 +75,7 @@ M0.5 Protocol v1 Contract Freeze
  ↓
 M1 Secure TCP Data Plane Baseline
 ├──→ M2 Replica & Credential Lifecycle ──┐
-└──→ M3 Configuration + Trust + Health ─┘
+└──→ M3 Configuration + Health ─────────┘
                     ↓
            M4 Product Data Plane
                                            ↓
@@ -100,16 +100,16 @@ M1 Secure TCP Data Plane Baseline
 
 | 里程碑 | 任务数 | 已完成 | 状态 | 入口依赖 | 退出 Gate |
 | --- | ---: | ---: | --- | --- | --- |
-| M0 工程初始化 | 12 | 10 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
+| M0 工程初始化 | 12 | 8 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
 | M0.5 Protocol Freeze | 10 | 0 | `NOT_STARTED` | M0-06 | M05-10 |
 | M1 Secure TCP Baseline | 14 | 0 | `NOT_STARTED` | M0-12 + M05-10 | M1-14 |
 | M2 Replica/Credential | 8 | 0 | `NOT_STARTED` | M1-14 | M2-08 |
-| M3 Config/Trust/Health | 13 | 0 | `NOT_STARTED` | M1-14 | M3-13 |
+| M3 Config/Health | 13 | 0 | `NOT_STARTED` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 0 | `NOT_STARTED` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 0 | `NOT_STARTED` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **10** |  |  |  |
+| **合计** | **95** | **8** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -122,16 +122,16 @@ M1 Secure TCP Data Plane Baseline
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M0-01 | 建立 Go Module 与目录骨架 | 无 | `go.mod`、`cmd/server`、`cmd/agent`、`internal/*` 骨架 | `go.mod` 声明 `go 1.27` 并由 `toolchain` 记录稳定的精确 `go1.27.x` 版本；提供 `GOTOOLCHAIN=local` 的版本检查入口；`go test ./...`、`go vet ./...`；无空壳公共抽象 | `DONE` |
-| M0-02 | 定义 Config Schema 与加载器 | M0-01 | `configs/server.schema.json`、`agent.schema.json`、Server/Agent Config | Strict YAML；CLI > Env > YAML > Schema Default；未知字段/环境变量失败 | `DONE` |
+| M0-02 | Server Config Schema + Agent Token Bootstrap | M0-01 | `configs/server.schema.json`、Server Config、Agent Token Bootstrap CLI | Server Strict YAML 与 CLI>Env>YAML>Default；Agent 无 Schema/YAML，`run` 仅按 `--token`>`XTUNNEL_TOKEN`>OS Service Credential 取值；Linux 使用 systemd Credential，Windows SCM 使用 ProgramData DPAPI Machine-scope Credential；非空、无首尾空白、`xta_` 前缀、8192-byte 上限；未知 Flag/位置参数失败 | `IN_PROGRESS` |
 | M0-03 | Server/Agent 进程骨架 | M0-01、M0-02 | `cmd/server/main.go`、`cmd/agent/main.go`、启停生命周期 | 两个进程均可启动；SIGTERM 退出且释放资源 | `DONE` |
 | M0-04 | 结构化日志基座 | M0-01 | 共享 Logging 配置与 JSON Handler | 级别、时间、`request_id/trace_id` 字段稳定；无 Secret 输出 | `DONE` |
 | M0-05 | Server Data Target/External Lock + SQLite/Migration | M0-01、M0-02 | Stable Target/External Lock、`migrations/`、`internal/repository/sqlite` | 数据库访问统一使用 GORM；必须先计算 Stable Data Target 并获取 Data Directory 外的同一把 Lock，再检查 Restore Journal/Open SQLite；双进程在触碰 DB/PKI 前拒绝；新库、幂等启动、中断 Migration 测试；引入依赖前先确认 | `DONE` |
 | M0-06 | 锁定 Proto 工具链骨架 | M0-01 | `buf*.yaml`、`tools/versions.env`、`tools/go.mod`、`bootstrap-proto.sh`、`proto.sh` | `tools/go.mod` 与根 Module 使用相同 Go 1.27.x 工具链；`GOTOOLCHAIN=local` 构建 protoc-gen-go；Buf/protoc-gen-go 精确版本与分发包 SHA-256 可校验；不回落 PATH；三个 Wrapper 子命令可运行 | `DONE` |
 | M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `DONE` |
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `DONE` |
-| M0-09 | OCI、Compose 双栈与 systemd 包装骨架 | M0-03、M0-08 | `deploy/docker`、`deploy/systemd`、未接入启动路径的双栈监听原语 | amd64/arm64；非 root；只读镜像 + Data Volume；Compose IPv4/IPv6 Network/Host Binding；原生 tcp4/tcp6 Socket 测试；install/start/restart/stop/uninstall Smoke | `DONE` |
+| M0-09 | OCI/Compose 双栈、Server Shell Packaging 与跨平台 Agent Binary Self-install | M0-03、M0-08 | `deploy/docker`、Server-only `deploy/systemd`、Agent `service install/uninstall`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Agent 在 root/systemd>=249 快速失败，原子安装 Binary、root-only Credential 与 Managed Unit；Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；两端持久启动项只含 Binary + `run` 且无 Secret，均以 managed marker 拒绝覆盖/删除非受管同名服务，卸载保留 Credential；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `IN_PROGRESS` |
 | M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `DONE` |
-| M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `NOT_STARTED` |
+| M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `IN_PROGRESS` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `NOT_STARTED` |
 
 ## 5.2 可并行推进
@@ -155,13 +155,13 @@ M0-01 至 M0-11 + M0-10 ── M0-12
 - [ ] 根 `go.mod` 声明 `go 1.27`，根/工具 Module、CI 和 OCI Builder 使用同一个稳定、精确的 `go1.27.x` 补丁版本；验收设置 `GOTOOLCHAIN=local`，并记录匹配的 `go env GOVERSION`/`GOTOOLCHAIN`。
 - [ ] `go test ./...` 通过。
 - [ ] `go vet ./...` 通过。
-- [ ] Server/Agent Config Schema、Strict Decode 与覆盖优先级测试通过。
+- [ ] Server Config Schema、Strict Decode 与覆盖优先级通过；Agent Token Bootstrap 三种来源、优先级、输入边界与 Secret 不回显测试通过。
 - [ ] Server 在 External Lock 前不触碰 SQLite/PKI，第二进程快速失败。
 - [ ] 全新库进入 `SETUP_REQUIRED`，运行中/离线 `admin create` 与重复拒绝测试通过。
 - [ ] `./tools/proto.sh lint`、`breaking`、`generate-check` 的 M0 骨架流程可执行。
 - [ ] `npm ci` 和 Web Production Build 通过，产物被 Go Embed。
-- [ ] Linux amd64/arm64 Binary 可构建和启动。
-- [ ] OCI 和 systemd Smoke 通过。
+- [ ] Linux Server/Agent amd64/arm64 与 Windows Agent amd64/arm64 Binary 可构建和启动。
+- [ ] OCI/Compose Smoke、Server Shell Packaging Smoke、Linux Agent root/systemd>=249 Self-install 与 Windows Agent Administrator/SCM/LocalService/DPAPI Self-install 的 Managed Marker、权限、Secret、启动、重复安装 Replace Existing + Write Through、30s Stop/Shutdown、non-crash recovery、卸载及运行中 EXE 延迟删除失败边界通过。
 - [ ] 干净 checkout CI 通过。
 
 ---
@@ -177,14 +177,14 @@ M0.5 Gate 通过前，禁止开发 Server/Agent Protocol Handler。可并行开�
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M05-01 | 冻结 Common Types | M0-06 | `api/proto/common.proto` | package/go_package、enum 数值、reserved range、ErrorCode 完整 | `NOT_STARTED` |
-| M05-02 | 冻结 Auth/Control Contract | M05-01 | `api/proto/control.proto` | 裸 Auth Frame、ControlEnvelope、Transition/Ack、Health Batch 完整 | `NOT_STARTED` |
+| M05-02 | 冻结 Connection Token + Auth/Control Contract | M05-01 | Connection Token v1 编码/解析契约、`api/proto/control.proto` | Token 仍是单个不透明 `xta_...`；冻结 Endpoint、TLS Trust、Agent/Token Identity、Secret 的精确编码/完整性/版本分派与失败语义；裸 Auth Frame、ControlEnvelope、Snapshot/ConfigAck、Health Batch 完整 | `NOT_STARTED` |
 | M05-03 | 冻结 Work Contract | M05-01 | `api/proto/work.proto` | WorkHello/Ready/Open/Response；RAW 切换；各状态唯一裸 Message | `NOT_STARTED` |
 | M05-04 | 生成代码与 Breaking Baseline | M05-01至 M05-03 | `internal/protocol/gen`、Buf Initial Baseline | 明确记录“首次冻结无历史前代”的 Baseline 建立方式，禁止与自身比较伪装 Breaking 证据；生成结果提交；`lint/breaking/generate-check` 通过 | `NOT_STARTED` |
 | M05-05 | Frame Codec 契约实现 | M05-04 | `internal/protocol/frame`、`codec` | UVarint 分片/合并、上限、EOF、Auth/Control/Work 分层测试 | `NOT_STARTED` |
-| M05-06 | 递归 Unknown Field 拒绝 | M05-04 | 共享 Validator 与表驱动测试 | Auth、Control、Work、Snapshot、Last Known Snapshot 全覆盖 | `NOT_STARTED` |
-| M05-07 | Deterministic Protobuf 安全字节 | M05-04、M05-06 | HMAC/签名输入构造器 | 清空 MAC/签名字段；重建已知字段；固定 Runtime 版本 | `NOT_STARTED` |
-| M05-08 | Protocol Golden Vectors | M05-07 | `tests/golden/protocol-v1/*` | WorkHello、Snapshot、Key/Epoch Transition 固定字节、Hash、HMAC/签名；测试不自动改 Fixture | `NOT_STARTED` |
-| M05-09 | 状态/方向/幂等契约测试 | M05-02、M05-03、M05-05 | Protocol State Test | Auth 提交点、Control 非法方向、Work 直接关闭、Transition/Drain 幂等 | `NOT_STARTED` |
+| M05-06 | 递归 Unknown Field 拒绝 | M05-04 | 共享 Validator 与表驱动测试 | Auth、Control、Work、Snapshot 全覆盖 | `NOT_STARTED` |
+| M05-07 | Deterministic Protobuf Bytes | M05-04、M05-06 | Snapshot/WorkHello 确定性字节构造器 | Snapshot 稳定排序并包含 Revision；WorkHello 清空 MAC 后重建已知字段；固定 Runtime 版本 | `NOT_STARTED` |
+| M05-08 | Protocol Golden Vectors | M05-02、M05-07 | `tests/golden/protocol-v1/*` | Connection Token v1、WorkHello、Snapshot 固定字节/Hash/HMAC；ConfigAck Revision 关联；测试不自动改 Fixture | `NOT_STARTED` |
+| M05-09 | 状态/方向/幂等契约测试 | M05-02、M05-03、M05-05 | Protocol State Test | Token 未知版本/畸形/超限/完整性失败；Auth 提交点、Control 非法方向、Work 直接关闭、ConfigAck/Drain 幂等 | `NOT_STARTED` |
 | M05-10 | M0.5 Protocol Gate | M0-12、M05-01至 M05-09 | Protocol Freeze 证据 | 下方 Gate Checklist 全部通过 | `NOT_STARTED` |
 
 ## 6.3 M0.5 Gate Checklist
@@ -194,8 +194,9 @@ M0.5 Gate 通过前，禁止开发 Server/Agent Protocol Handler。可并行开�
 - [ ] `./tools/proto.sh generate-check` 通过。
 - [ ] Golden Vector 逐字节比较通过。
 - [ ] Auth Success/Failure Transcript 及 Auth→Established 提交边界通过。
+- [ ] Connection Token v1 编码、解析、版本、完整性和语义字段 Golden Vector 通过。
 - [ ] Control/Work 方向、状态、乱序、重复、Unknown Field 全部测试通过。
-- [ ] Transition Ack 的 ID、Artifact Hash、Current/Next 字段组合通过。
+- [ ] Snapshot Deterministic Bytes、Revision 与 ConfigAck 关联/幂等测试通过。
 - [ ] Proto 变更已完成独立 Protocol Review。
 
 ---
@@ -204,17 +205,19 @@ M0.5 Gate 通过前，禁止开发 Server/Agent Protocol Handler。可并行开�
 
 M1 只要求“一个逻辑 Agent + 一个 Instance + 一个静态 TCP Tunnel”，但必须使用正式身份、安全协议和真实资源上限。
 
+身份链固定为“逻辑 Agent → 每次进程启动生成的 ephemeral Instance → 每次连接建立的 Session”。Agent 不持久化稳定机器身份、Instance 或 Session 身份，也不为这些运行态身份维护本地数据目录或锁。
+
 ## 7.1 任务清单
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M1-01 | Agent/Token 领域模型 | M0-05 | Server Domain/Repository | Agent 状态、Token Hash、Secret 不落库、边界测试 | `NOT_STARTED` |
-| M1-02 | Token 创建与验证 | M1-01 | Application Service + Repository | CSPRNG、常量时间比较、一次性明文返回 | `NOT_STARTED` |
-| M1-03 | Installation/Instance/Session 身份 + Agent Data Lock | M1-01 | Agent Identity 持久化、Agent Data Directory Lock、Server Registry Key | Agent 必须在读写 token/installation/trust/snapshot 前取得整个数据目录独占锁；双进程拒绝；ID 格式、原子落盘、冲突拒绝、重启稳定 | `NOT_STARTED` |
-| M1-04 | Agent Gateway TLS/ALPN + Identity Rotation | M0-05、M0-11、M05-10 | Server Gateway、Agent Dialer、`gateway rotate-key --maintenance`、Rotation Journal | 首个 Admin 完成前 Gateway 不启动；TLS1.3；public/pinned mode；ALPN empty/unknown 拒绝；Handshake 上限；Server 停止并持 External Lock 时才能轮换；Journal write/fsync/rename 恢复；新 Pin 只写 `0600` 独占文件 | `NOT_STARTED` |
-| M1-05 | Auth 与 Control Session 建立 | M1-02至 M1-04 | Auth Handler、Session Secret、Session Registry | Auth Failure 可区分；Success flush 提交点；generation fencing | `NOT_STARTED` |
+| M1-01 | Agent/Connection Token 领域模型 | M0-05、M05-02 | Server Domain/Repository | Agent 状态、Token Identity/Version、Secret Hash、签发时连接描述；完整 Token 不落库；边界测试 | `NOT_STARTED` |
+| M1-02 | Connection Token 创建与验证 | M1-01 | Application Service + Repository | 使用当前 Agent Gateway Endpoint/TLS Trust 签发单个 `xta_...`；CSPRNG、常量时间比较、一次性完整返回 | `NOT_STARTED` |
+| M1-03 | Ephemeral Instance/Session 身份 | M1-01 | Agent 内存身份、Server Registry Key | 身份链为 Agent→ephemeral Instance→Session；Instance 每次进程启动生成且仅驻留内存，Session 每次连接生成；ID 格式、冲突拒绝、重启更换 Instance、Session generation fencing 通过；Agent 不维护本地身份状态或目录锁 | `NOT_STARTED` |
+| M1-04 | Agent Gateway TLS/ALPN + Server Identity Rotation | M0-05、M0-11、M05-10 | Server Gateway、Token-derived Agent Dialer、`gateway rotate-key --maintenance`、Rotation Journal | 首个 Admin 完成前 Gateway 不启动；Agent 只从 Connection Token 取得 Endpoint/public-or-pinned Trust；TLS1.3；ALPN empty/unknown 拒绝；Handshake 上限；Server 停止并持 External Lock 时轮换；新 Pin 只进入后续新 Token；Journal 恢复与私钥 `0600` | `NOT_STARTED` |
+| M1-05 | Connection Token Auth 与 Control Session 建立 | M1-02至 M1-04 | Auth Handler、Session Secret、Session Registry | Token 连接描述/身份/Secret 作为整体校验；Auth Failure 可区分；Success flush 提交点；generation fencing | `NOT_STARTED` |
 | M1-06 | AgentRuntime 所有权与线性化 | M1-03、M1-05 | Runtime Registry、ActiveWork | 固定 Lock 规则；锁内无 IO/Close/阻塞；计数 exactly-once | `NOT_STARTED` |
-| M1-07 | Control Session Owner/Outbox | M1-05、M1-06 | Single Reader/Writer/Owner、有界队列 | 优先级、合并、Transition 有序、队列满关闭、无 goroutine leak | `NOT_STARTED` |
+| M1-07 | Control Session Owner/Outbox | M1-05、M1-06 | Single Reader/Writer/Owner、有界队列 | 优先级、合并、Snapshot/ConfigAck 有序、队列满关闭、无 goroutine leak | `NOT_STARTED` |
 | M1-08 | WorkHello HMAC/Lease/Replay | M1-05、M05-08 | Work Auth Handler + Replay Cache | HMAC Vector；Lease 消费与 Replay 原子；无 wall-clock 依赖 | `NOT_STARTED` |
 | M1-09 | WorkPool 与 Budget Lease | M1-06、M1-08 | Server/Agent Work Pool | Connecting/Idle/Opening/Active 有界；Demand generation 合并；Lease 过期 | `NOT_STARTED` |
 | M1-10 | OPEN 状态机 | M1-09 | OpenRequest/OpenResponse 处理 | IDLE→OPENING→ACTIVE/CLOSED；RAW 前传输失败最多在同一 Instance 换 WorkConn 重试一次，M1 不引入 Replica 重选；已转发业务字节绝不重试；超时/reset/失败资源只释放一次 | `NOT_STARTED` |
@@ -243,10 +246,10 @@ M1 的静态 Tunnel 只能由 Integration Test Harness 注入，不得为过渡�
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M2-01 | Multi-Replica Runtime Registry | M1-14 | 多 Instance Registry | 同 Token 多 Installation/Instance；独立 Session/Pool/Counter | `NOT_STARTED` |
+| M2-01 | Multi-Replica Runtime Registry | M1-14 | 多 Instance Registry | 同一逻辑 Agent/Token 可连接多个 ephemeral Instance；独立 Session/Pool/Counter | `NOT_STARTED` |
 | M2-02 | Instance Selection Baseline | M2-01 | Selection Strategy | 只按 Current Session、非 DRAINING、Idle/Capacity 过滤后 Least Active + RR tie-break；并发公平性测试；Revision/Health Eligible 留给 M3-09 接入 | `NOT_STARTED` |
-| M2-03 | Installation History | M1-03、M2-01 | Installation Repository + Query | first/last seen、machine/host 变化、Security Event 持久化 | `NOT_STARTED` |
-| M2-04 | Token Rotate/Revoke | M1-02、M2-01 | Credential Lifecycle Service | Rotate 时并存期；Revoke 新认证失败；日志不泄密 | `NOT_STARTED` |
+| M2-03 | Online Instance Lifecycle/Observability | M1-03、M2-01 | Runtime Lifecycle Events + Query/Metrics | 连接、Session Replacement、DRAINING、断开状态可查询并有结构化日志/指标；Agent 重启产生新 Instance；不维护机器/主机历史 | `NOT_STARTED` |
+| M2-04 | Token Rotate/Revoke | M1-02、M2-01 | Credential Lifecycle Service | Rotate 使用当前 Endpoint/TLS Trust 签发新 Connection Token 并进入并存期；Revoke 新认证失败；完整 Token 不落库/日志 | `NOT_STARTED` |
 | M2-05 | Agent Revoke | M2-04 | Agent Revoke Workflow | 阻止新 Auth；关闭全代 Session/ActiveWork；幂等 | `NOT_STARTED` |
 | M2-06 | Session Replacement 保留 ActiveWork | M2-01、M1-13 | Tombstone + Cross-generation Cleanup | 旧 Active 自然结束；旧 cleanup 只清 Idle/Opening；`closeOnce` | `NOT_STARTED` |
 | M2-07 | Replica Failover + Pre-RAW Reselect | M2-02、M2-06 | Failover Integration Test | Replica 崩溃后新连接选其他 Instance；RAW 前符合契约的失败可最多跨 Replica 重选一次；已进 RAW 或已转发业务字节不自动重放 | `NOT_STARTED` |
@@ -262,7 +265,7 @@ M1 的静态 Tunnel 只能由 Integration Test Harness 注入，不得为过渡�
 
 ---
 
-# 9. M3：Configuration + Trust + Health
+# 9. M3：Configuration + Health
 
 ## 9.1 任务清单
 
@@ -271,27 +274,27 @@ M1 的静态 Tunnel 只能由 Integration Test Harness 注入，不得为过渡�
 | M3-01 | Tunnel/Binding 领域与存储 | M1-14、M0-05 | Domain + SQLite Repository | 不变量、唯一性、引用关系和容量边界 | `NOT_STARTED` |
 | M3-02 | Application Service + Version Transaction | M3-01 | Server Application Service | Service Aggregate 修改在单事务递增 version/revision；并发写不丢失 | `NOT_STARTED` |
 | M3-03 | Snapshot Builder/Size Gate | M3-02 | AgentSnapshot Builder | 稳定排序、绑定数/字节上限在事务前校验 | `NOT_STARTED` |
-| M3-04 | Snapshot Signing + Transition Journal | M3-03、M05-08 | Signing Service、Transition Repository | Current/Next 双签；Artifact 固定 Hash；Ack/Exclude 事务一致 | `NOT_STARTED` |
-| M3-05 | AgentTrustState/Snapshot 持久化 | M3-04 | `identity/trust-state.pb`、`config/snapshot.pb` | fsync/rename/directory fsync；Hash/Revision/Key/Epoch 恢复同代 | `NOT_STARTED` |
-| M3-06 | Snapshot Reconcile/Observed Revision | M3-03、M3-05、M1-07 | Reconciler + ConfigAck | 过期 Revision 拒绝；高 Revision 合并；Ack 后才 Eligible | `NOT_STARTED` |
-| M3-07 | Origin Resolver | M3-03、M3-05 | Agent Origin Resolver | HTTP/HTTPS/TCP、DNS/IPv4/IPv6、TLS Server Name、SSRF 边界 | `NOT_STARTED` |
+| M3-04 | Agent In-Memory Atomic Apply | M3-03、M05-08、M1-07 | Agent Config Runtime + ConfigAck | 完整 Snapshot 校验成功后原子替换内存配置；Apply 失败保留当前运行 Revision 并返回稳定错误；不写 Agent 配置或信任状态文件 | `NOT_STARTED` |
+| M3-05 | Token-only Startup/Reconnect + Remote Config | M3-04、M1-05 | Agent Bootstrap/Reconnect Integration | Agent 仅凭 Connection Token 建连；每次启动或重连从 Server 获取完整 Desired Snapshot；Apply 成功并 Ack 前不进入 Eligible；Server 不可达时不上线且无本地配置回退 | `NOT_STARTED` |
+| M3-06 | Snapshot Reconcile/Observed Revision | M3-03至 M3-05、M1-07 | Reconciler + ConfigAck | 过期 Revision 拒绝；高 Revision 合并；完整 Apply 的 Ack 后才 Eligible；重连重新获取完整 Snapshot | `NOT_STARTED` |
+| M3-07 | Origin Resolver | M3-03、M3-04 | Agent Origin Resolver | 仅从当前已原子 Apply 的内存 Snapshot 解析 HTTP/HTTPS/TCP、DNS/IPv4/IPv6、TLS Server Name 与 SSRF 边界 | `NOT_STARTED` |
 | M3-08 | 中心 Health Scheduler | M3-07 | Heap/Wheel Scheduler + Semaphores | 全局/per-origin 并发、Rate、initial/interval jitter；无 per-binding ticker | `NOT_STARTED` |
 | M3-09 | Health Batch/Revision Fencing + Eligible Selection | M3-06、M3-08、M2-02 | Pending Accumulator、Batch Reporter、完整 Instance Eligible Filter | `tunnel_id` 合并；出队分配 generation；将 required/observed Revision 和 Per-Tunnel Health 接入 M2 Selection；旧 Revision Health 不放行 | `NOT_STARTED` |
 | M3-10 | Health Target Budget Manager | M3-01、M3-08、M2-06 | Reserve/Commit/Release Manager | `(agent_id,instance_id)` 所有权；固定锁顺序；重连不双计费/误释放 | `NOT_STARTED` |
 | M3-11 | Agent/Instance/Service Status | M3-06、M3-09、M3-10 | `internal/server/status` | 状态优先级唯一；Origin Health 不污染 Agent/Instance；Web 不重算 | `NOT_STARTED` |
-| M3-12 | Durable Operations：Backup/Restore | M0-05、M3-04、M3-05 | `backup create/restore`、Backup Manifest、Restore Journal | 在线 Create 通过本机控制通道建立 Config Write Barrier；离线 Create/Restore 使用同一 Stable Target External Lock；备份 SQLite + Gateway Key + Config Signing Key + Epoch + Transition Journal；Manifest/Hash/Schema 校验；同盘 staging/rollback/journal 可恢复 | `NOT_STARTED` |
-| M3-13 | M3 Gate | M3-01至 M3-12 | Application Service Integration + Crash Tests | 下方 Checklist 全部通过 | `NOT_STARTED` |
+| M3-12 | Durable Operations：Backup/Restore | M0-05、M1-04、M3-02 | `backup create/restore`、Backup Manifest、Restore Journal | 在线 Create 通过本机控制通道建立 Config Write Barrier；离线 Create/Restore 使用同一 Stable Target External Lock；备份 SQLite + Gateway TLS Identity；Manifest/Hash/Schema 校验；同盘 staging/rollback/journal 可恢复 | `NOT_STARTED` |
+| M3-13 | M3 Gate | M3-01至 M3-12 | Application Service Integration + Server Durable Operation Crash Tests | 下方 Checklist 全部通过 | `NOT_STARTED` |
 
 ## 9.2 M3 Gate Checklist
 
 - [ ] 通过 Application Service 修改 Origin，Agent 无需重启即生效。
-- [ ] Snapshot 的 Revision、签名、大小和 Binding 边界均可自动化验证。
-- [ ] TrustState/Snapshot 在每个 write/fsync/rename/directory-fsync 崩溃点可恢复到同一代。
-- [ ] Key/Epoch Transition 重复、冲突 Artifact、离线追赶和 ACK_EXCLUDED 通过。
+- [ ] Snapshot 的 Deterministic Bytes、Revision、大小和 Binding 边界均可自动化验证。
+- [ ] Agent 完整校验后原子替换内存配置；失败保留当前 Revision 并返回明确 ConfigAck。
+- [ ] Agent 启动/重连必须拉取完整 Desired Snapshot；Server 不可达时不上线且无本地配置回退。
 - [ ] Health Rate/Concurrency/Jitter/Batch/Revision Fencing 通过。
 - [ ] 超过 Agent/Global Health Target Budget 的 Config Write 和 Replica Auth 被拒绝。
 - [ ] 满容量 Session Replacement 不 Double Reserve，旧 cleanup 不释放新 Reservation。
-- [ ] `backup create/restore` 在线/离线路径通过，Manifest 覆盖全部长期密钥和 Transition Artifact，Restore 不与旧目录合并。
+- [ ] `backup create/restore` 在线/离线路径通过，Manifest 覆盖 SQLite 与 Gateway TLS Identity，Restore 不与旧目录合并；Server Journal 在各提交点崩溃后可恢复。
 
 ---
 
@@ -364,12 +367,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确 | `NOT_STARTED` |
+| M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `NOT_STARTED` |
 | M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；低基数 Label | `NOT_STARTED` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `NOT_STARTED` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；重启无负数/重复 | `NOT_STARTED` |
 | M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Agent Offline/Replica Offline/Origin Down/No Capacity/Protocol Error 可区分 | `NOT_STARTED` |
-| M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard | 从报警可定位到状态、Metric、Trace 和日志 | `NOT_STARTED` |
+| M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard | 从报警可定位到状态、Metric、Trace 和日志；覆盖 Linux systemd 与 Windows SCM 的启动失败、恢复重启和 30s Stop/Shutdown 超时诊断 | `NOT_STARTED` |
 | M6-07 | M6 Gate | M6-01至 M6-06 | Observability 验收证据 | 故障注入下五类核心问题均可唯一定位 | `NOT_STARTED` |
 
 ## 12.2 M6 Gate Checklist
@@ -379,6 +382,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - [ ] 日志可通过 `trace_id` 回到同一 Trace。
 - [ ] Metrics 不使用 agent/instance/tunnel/connection ID 作高频 Label。
 - [ ] 注入 Offline、Origin Down、No Capacity 和 Protocol Error 时，状态、日志、Metric 和 Trace 一致。
+- [ ] Windows SCM 模式的启动、运行回调异常、恢复重启与 Stop/Shutdown 超时均可从持久日志入口定位；JSON stderr 不能作为唯一证据。
 
 ---
 
@@ -391,23 +395,23 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 只调整 Schema 默认值；不删除预算维度；记录 CPU/RAM/FD 环境 | `NOT_STARTED` |
 | M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 大量 Replica 重连无同步风暴；永久错误不快速重试；旧代无污染 | `NOT_STARTED` |
 | M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 每个 Drain 阶段丢包/延迟/对端消失；deadline 后无残留 FD/goroutine | `NOT_STARTED` |
-| M7-04 | Persistence/Filesystem Failpoints | M0-05、M1-04、M3-05、M3-12 | Crash/EIO/Disk-full Suite | SQLite Migration、Gateway Rotation Journal、Transition Journal、TrustState、Snapshot、Backup/Restore 的 write/fsync/rename 断点；只做异常注入和恢复收敛，不首次实现维护命令 | `NOT_STARTED` |
+| M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `NOT_STARTED` |
 | M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile | `NOT_STARTED` |
 | M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | UVarint/Frame/Envelope/WorkHello/Host/Path/Forwarded Header；Crash/OOM/无界分配为零 | `NOT_STARTED` |
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `NOT_STARTED` |
 | M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `NOT_STARTED` |
-| M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | amd64/arm64 Binary/OCI/systemd；Upgrade/Migration/Backup/Restore/Agent Reconnect；仅验证 M3 已实现的维护命令 | `NOT_STARTED` |
+| M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；两端 Agent Binary `service install/uninstall` 的安装/升级/卸载覆盖 Managed Marker、Binary 替换、Secret 不落 SCM/argv 和非托管 Unit/Service 拒绝边界；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `NOT_STARTED` |
 | M7-10 | XTunnel Standalone Alpha Gate | M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `NOT_STARTED` |
 
 ## 13.2 Alpha Release Gate Checklist
 
 - [ ] 干净 checkout 完整 CI 通过。
 - [ ] Unit、Integration、E2E、Contract、Golden、Race、Fuzz 全部通过。
-- [ ] Privileged Network Chaos 与所有 Crash/Filesystem Failpoint 通过。
-- [ ] amd64/arm64 Binary、OCI、systemd 安装/升级/卸载通过。
-- [ ] SQLite Backup→Migration→Restore→Agent Reconnect 通过。
+- [ ] Privileged Network Chaos 与所有 Server Durable Operation Crash/Filesystem Failpoint 通过。
+- [ ] Linux amd64/arm64 Binary/OCI/Server Shell Packaging/systemd Agent 与 Windows Agent amd64/arm64 SCM Self-install/升级/卸载通过，Windows 延迟到重启的 EXE 删除最终收敛，且非托管 Unit/Service 不被覆盖或删除。
+- [ ] SQLite Backup→Migration→Restore→Agent Reconnect 并重新获取完整配置通过。
 - [ ] 满负载和重连风暴下无负计数、超额资源、FD/goroutine 泄漏。
-- [ ] 日志、镜像、配置、Backup 和测试 Fixture 中无 Secret。
+- [ ] 日志、镜像、Server 配置、systemd Unit/ExecStart、Windows SCM ImagePath/Registry、Backup 和测试 Fixture 中无 Connection Token/Secret；ProgramData 只保留 ACL 受限的 DPAPI Machine-scope 密文。
 - [ ] 已记录 Benchmark 环境、结果、推荐默认值和容量边界。
 - [ ] 发布文档明确 Alpha 限制与 V0.1 不支持能力。
 
@@ -415,11 +419,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01` 至 `M0-10` 已完成。按逐任务推进约定，当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10` 已完成。按逐任务推进约定，当前待办为：
 
-1. `M0-11` — 首个 Admin Bootstrap。
+1. `M0-02` — Server Config Schema + Agent Token Bootstrap，等待新契约 CI 与复审证据。
+2. `M0-09` — Token-only Agent 的 OCI/Compose 与跨平台 Binary Self-install；Linux systemd 已有真实 Smoke，Windows SCM 静态测试/构建已通过但提升权限的正向 Smoke 未运行，OCI/Compose Runtime 与新 CI 证据也未完成。
+3. `M0-11` — 首个 Admin Bootstrap。
 
-`M0-09` 与 `M0-10` 均已于 2026-08-25 经用户 Code Review 通过并标记 `DONE`。`M0-11` 的技术依赖已满足；开工前仍须按项目 Ask First 边界确认其数据库 Schema、权限与对外 CLI 影响。
+`M0-10` 已于 2026-08-25 经用户 Code Review 通过并标记 `DONE`。`M0-02` 因删除 Agent Schema/Loader 并改写 Bootstrap 输入而回退为 `IN_PROGRESS`；`M0-09` 因 Token-only 与跨平台 Service 部署契约调整保持 `IN_PROGRESS`；二者都需要更新后的 CI/复审，`M0-09` 还需要 Windows SCM 与真实 OCI/Compose 证据。`M0-11` 仍按已确认边界实施。
 
 推进规则：
 
@@ -442,7 +448,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | Buf/protoc-gen-go 精确版本 | M0-06 完成前 | 记录版本、下载源、分发包 SHA-256 和生成结果 |
 | OpenAPI Validator/Generator | M0-07/M5-01 开工前 | M0-07 已批准并锁定 vacuum `v0.30.0` 官方 Linux amd64/arm64 归档与二进制 SHA-256，唯一入口为 `tools/openapi.sh validate`；M5-01 首次引入 Generator 前仍需单独确认，CI 不维护第二套方式 |
 | Web 依赖与 Node 版本 | M0-08 开工前 | 已批准 Node `24.19.0`、npm `11.17.0`、React/React DOM `19.2.8`、Vite `8.2.2`、Plugin React `6.1.0`、TypeScript `6.0.2` 与对应类型包；用户在管理菜单出现真实图标需求后追加批准 `lucide-react 1.34.0`；直接依赖精确锁定，npm 11 生成并提交 Lockfile，CI 只运行 `npm ci`；Tailwind/shadcn/Router/Query 等继续等待 M5 真实使用点 |
-| OCI 基础镜像、Compose 双栈与 systemd 权限模型 | M0-09 开工前 | 已批准 Node、Go、Distroless 三个多架构索引摘要分别固定为 `sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03`、`sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466`、`sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab`；OCI 使用 `65532:65532`、只读根、Data Volume，Server 另挂 `/run/xtunnel` tmpfs；用户追加批准 Compose 双栈 Profile、WSL Compose v2 验收环境和未接入产品启动路径的原生 tcp4/tcp6 监听原语，空 Host `:port` 才表示双栈，显式 IP 保持单地址族；systemd 使用 `xtunnel-server`/`xtunnel-agent` 双用户、角色独立 Runtime/State Directory、`root:<角色组> 0640` 配置，Agent Unit 覆盖角色数据/Token 路径；卸载保留配置、凭据、数据和服务身份 |
+| OCI 基础镜像、Compose 双栈与跨平台 Agent Service 权限模型 | M0-09 开工前 | 已批准三个固定多架构基础镜像摘要、Compose 双栈 Profile 与原生 tcp4/tcp6 监听原语；OCI 使用 `65532:65532` 与只读根，只有 Server 挂载 Data Volume 和 `/run/xtunnel` tmpfs，Agent 无 Volume，从 `XTUNNEL_TOKEN` 取得 Token 并默认执行 `run`；Compose 输入 `XTUNNEL_AGENT_TOKEN` 映射到容器环境；Server 保留 Shell 包装。Agent 在 Linux/Windows 统一使用 Binary `service install --token` 与 `service uninstall`，不提供用户安装脚本。Linux 要求 root/systemd>=249，原子安装到 `/usr/local/bin/xtunnel-agent`，Credential 目录/Source 为 `root:root 0700/0600`，Unit 首行为 `# Managed by xtunnel-agent service install` 且 `ExecStart=/usr/local/bin/xtunnel-agent run`。Windows 支持 amd64/arm64，要求提升权限的 Administrator 与 SCM；ServiceName=`XTunnelAgent`、DisplayName=`XTunnel Agent`、账户=`NT AUTHORITY\LocalService`，Binary=`%ProgramFiles%\XTunnel\xtunnel-agent.exe`，Credential=`%ProgramData%\XTunnel\credentials\agent.token.dpapi` 并使用 `CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN`，SCM ImagePath 仅含安装 Binary + `run`，Description marker 精确为 `Managed by xtunnel-agent service install`；重复安装使用 `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)`，Stop/Shutdown 最多 30s，运行异常返回非零并配置 non-crash recovery。两端均拒绝覆盖/删除非受管同名服务，卸载删除受管服务并保留平台 Credential；Windows 从运行中已安装 EXE 自卸载时使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排重启删除 Binary，Linux 另保留服务用户 |
 | 首次 Buf Breaking Baseline | M05-04 完成前 | 显式记录“无历史前代”，禁止与当前文件自比较 |
 | CI/arm64/Privileged Runner | M0-10/M7-08 开工前 | 记录 Runner 架构和权限；特权 Chaos 不得静默跳过 |
 
@@ -582,3 +588,33 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 验收结果：Run `32799308530` 的 `verify (amd64)` 与 `verify (arm64)` 均成功；两种原生架构都完成全部 11 个主验证步骤，OCI Smoke、生成文件清洁检查和退出清理均通过。
 - 剩余风险：本任务不运行需要 root 和真实 systemd 的 `deploy/systemd/smoke.sh`，该证据保留在 M0-09；Compose 双栈 Smoke 不作为公网 IPv6、应用 Listener 或生产连通性证据。M0 Gate 仍等待 M0-11、M0-12 及其全部 Checklist。
 - 解锁的后续任务：`M0-11` 的技术依赖已满足；开工前先完成数据库 Schema、权限与对外 CLI 影响审计并取得所需确认。
+
+## 2026-08-25 · M0-02/M0-09 · Agent 轻状态基线，M0-09 IN_PROGRESS
+
+- 负责人：Codex；用户已明确确认公共 Protocol、Config Schema、数据库长期设计和 systemd/OCI 部署边界调整；本轮未提交、未推送。
+- 产物：Agent Config Schema/Go Struct 缩减为 `server`、`auth.token_file`、`logging`；删除 Agent `data_dir` 与本地 WorkPool/Reconnect/Control/Health 策略；systemd Agent 删除 StateDirectory 并从 `/etc/xtunnel/agent.token` 只读凭据；Agent OCI/Compose 删除持久 Volume 并改用只读 Secret；总方案、README 与 M0.5/M1/M2/M3/M7 后续任务同步为 Ephemeral Instance + Full Remote Snapshot + In-memory Atomic Apply。
+- 验收命令：`go env GOVERSION`、`go env GOTOOLCHAIN`；`gofmt`；定向与全包 `go test`、定向 `go test -race`、全包 `go vet`；Linux amd64 Agent Bootstrap Test Binary 交叉编译；`sh -n`、`dash -n`、`bash --posix -n`、ShellCheck；`docker compose ... config --quiet`；WSL 真实 `deploy/systemd/smoke.sh`；`git diff --check` 和术语/任务计数一致性检查。
+- 验收结果：Go `go1.27.0` / `GOTOOLCHAIN=local` 匹配；Agent 配置定向/全包测试、Race、Vet 与 Linux 交叉编译通过；旧本地策略字段由 Strict Schema 拒绝；三种 POSIX Shell 语法、ShellCheck、Compose Config 与 Diff Check 通过；WSL systemd install/start/restart/stop/uninstall Smoke 通过且无残留。M0-02 的 Config Loader/Schema 能力仍满足既有验收，不改变其 `DONE` 状态。
+- 状态影响：Agent 部署产物已改变，但当前 Docker Socket 无访问权限，未运行更新后的真实 Agent OCI 生命周期与 Compose 双栈 Smoke，因此 M0-09 从 `DONE` 重新标记为 `IN_PROGRESS`，仪表盘减为 `9/12`；本记录不勾选 M0 Gate，也不改变用户正在实施的 M0-11 状态。
+- 剩余风险与解除条件：在可访问 Docker Engine 的 Linux amd64/arm64 或 CI 环境运行更新后的 Server/Agent OCI Smoke 与 Compose 双栈 Smoke，并取得 M0-10 后要求的 CI Run 证据；通过独立复审且无未处理问题后，M0-09 才能回到 `DONE`。
+
+## 2026-08-25 · M0-02/M0-09 · Token-only Agent 契约，IN_PROGRESS
+
+- 负责人：Codex；用户最终确认 Agent 只接收一个版本化 Connection Token，授权删除 Agent Schema/Loader、用户准备的 Token 文件与 Agent YAML，并同步部署契约；本轮未提交、未推送。
+- 契约与产物：本记录明确取代上一条“Agent Bootstrap Config + Token File”目标模型，但不篡改其历史证据。用户只复制单个不透明 `xta_...`；其语义携带 Endpoint、TLS Trust、Agent/Token Identity 与 Secret，精确编码/解析/Golden Vector 留给 `M05-02`。前台使用 `--token`，OCI 使用 `XTUNNEL_TOKEN`，systemd 安装器接收一次 `--token` 并内部创建 root-only LoadCredential Source；持久 Unit 无 Secret/参数。Agent 无 Schema/YAML、无用户管理的 Token 文件、无本地业务/配置状态；旧 `docs/XTunnel.md` 增加历史稿警示并指向当前两份权威文档。
+- 验收命令：`go env GOVERSION/GOTOOLCHAIN`；`gofmt`；Agent Bootstrap 定向/全包 `go test`、`go test -race ./...`、`go vet ./...`；Linux amd64 Agent Binary 与 Bootstrap Test Binary 交叉编译；三种 POSIX Shell 语法与 ShellCheck；`docker compose ... config --quiet`；WSL 真实 systemd install/start/restart/stop/uninstall Smoke；`git diff --check`；旧 Agent YAML/Schema/Token File/独立 Endpoint/TLS 输入残留扫描和任务计数重算。
+- 验收结果：Go `go1.27.0` / `GOTOOLCHAIN=local` 匹配；Token 来源优先级、Shape 校验、旧参数拒绝、Secret 不泄露、SIGTERM、全包 Test/Race/Vet 和 Linux amd64 交叉编译通过；Shell/Compose Config 通过；systemd 249 下 Token 字符串安装、root-only Credential Source、LoadCredential 运行时读取、无参数 Agent、重启/卸载保留与无残留 Smoke 通过。整合复审发现并删除 Compose/OCI 遗留 Agent `--set` 参数，新增 Container Cmd 为空断言；真实 Docker Runtime Smoke 未运行。
+- 状态影响：删除 Agent Schema/Loader 并重写 Bootstrap 输入实质改变 `M0-02` 产物和验收契约；M0-10 完成后尚无覆盖新契约的 CI Run/复审，因此 `M0-02` 从 `DONE` 回退为 `IN_PROGRESS`。`M0-09` 继续 `IN_PROGRESS`，等待更新后的真实 OCI/Compose Smoke。仪表盘为 M0 `8/12`、总计 `8/95`；本记录不勾选 M0 Gate，也不改变 `M0-11` 状态。
+- 剩余风险与解除条件：`M0-02` 仍需 Linux amd64/arm64 CI Run 与合并前复审；`M0-09` 仍需真实 Agent OCI `XTUNNEL_TOKEN` 生命周期、Compose 双栈 Smoke 和 CI Run。当前 Docker Socket 权限拒绝。`service install --token` 按用户选择直接接收字符串，调用方应避免把真实 Token 留在共享终端历史或进程采集系统中；安装器自身不回显或记录 Token。Docker Gate 未通过前不得恢复 `M0-09=DONE`。
+- Self-install 追补产物：本轮进一步以 Agent Binary `service install/uninstall` 取代上一版 Agent Shell 安装入口；公开命令统一为 `xtunnel-agent run --token 'xta_...'`、`sudo xtunnel-agent service install --token 'xta_...'` 与 `sudo xtunnel-agent service uninstall`。Binary 自身原子安装到 `/usr/local/bin/xtunnel-agent`，内嵌首行为 `# Managed by xtunnel-agent service install` 的托管 Unit，`ExecStart=/usr/local/bin/xtunnel-agent run`；Credential Source 仍为 `/etc/xtunnel/credentials/agent.token`。Agent 卸载删除托管 Unit 与已安装 Binary，保留 Credential 和服务用户；Server Shell 包装保持不变，Agent OCI 默认执行 `run`。本条追补明确取代上一条验收结果中 Agent Shell 安装与“无参数 Agent”的现行契约，但保留其历史证据。
+- Self-install 验收状态：Go `go1.27.0` / `GOTOOLCHAIN=local` 下，CLI/Token/内嵌 Unit/Managed Marker/原子写入/非 Linux 拒绝等定向测试、全包 Test/Vet/Race，以及 Linux amd64/arm64 Binary 与 Test Binary 交叉编译通过；三种 POSIX Shell 语法、ShellCheck、Compose Config 与 Diff Check 通过。最终 Linux amd64 Binary 在 WSL systemd 249 中完成首次安装、重复安装、启动、重启、停止、再启动与安装后 Binary 自卸载 Smoke；重复安装前后 MainPID 不同，证明新 Binary/Token 会经 restart 生效。Smoke 同时验证 root-only Credential、运行时 LoadCredential、无 Agent YAML/State、Unit 无 Secret、卸载保留 Credential/用户，且清理后无 Unit、目录、用户或临时构建残留。Docker Socket 仍因权限拒绝，真实 OCI/Compose Runtime Smoke 未执行；本记录不勾选 M0 Gate。
+- Self-install 状态影响：Agent Binary Self-install 证据已补齐，但 `M0-02`、`M0-09` 继续为 `IN_PROGRESS`，M0 仍为 `8/12`、总计仍为 `8/95`，未新增 `DONE`。`M0-09` 仍等待真实 Agent OCI/Compose 与 CI Run；Docker Gate 未通过。
+
+## 2026-08-25 · M0-02/M0-09 · Windows Agent SCM 契约，IN_PROGRESS
+
+- 负责人：Codex；用户已确认 Windows Agent Service 属于 V0.1 支持范围，并授权同步平台、Credential 与安装契约；本轮同步修改 Go 实现、Windows Smoke、CI、README 与权威技术文档，不提交、不推送、不改变暂存区。
+- 冻结契约：Windows Agent 支持 amd64/arm64，使用同一 Binary 的 `run`、`service install --token` 与 `service uninstall`，不提供用户安装脚本。SCM ServiceName=`XTunnelAgent`、DisplayName=`XTunnel Agent`、账户=`NT AUTHORITY\LocalService`；Binary 安装到 `%ProgramFiles%\XTunnel\xtunnel-agent.exe`；Token 使用 `CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN` 加密到 `%ProgramData%\XTunnel\credentials\agent.token.dpapi`。SCM ImagePath 只含安装 Binary + `run`，Description marker 精确为 `Managed by xtunnel-agent service install`；非受管同名 Service 拒绝覆盖/删除；卸载立即删除受管 Service，Binary 可立即删除时直接删除，从运行中已安装 EXE 自卸载时安排下次系统重启删除，DPAPI Credential 及目录始终保留。Linux systemd 契约保持不变。
+- 静态产物：当前工作区已实现 Windows SCM/DPAPI Service、同平台测试、`deploy/windows/smoke.ps1` 与 `windows-2022` CI Job。运行行为包含 ProgramFiles/ProgramData Known Folder、受保护 ACL、Machine-scope DPAPI、固定 Description marker、LocalService、30s Stop/Shutdown、非零异常退出、non-crash recovery、重复安装 Replace Existing + Write Through，以及从已安装 EXE 自卸载时 `DELAY_UNTIL_REBOOT` 删除。Event Log Source 尚未实现，SCM 模式 JSON stderr 不保证持久可见；该缺口进入 `M6-01/M6-06`，不能按 M0 日志存在推断生产可观测性通过。
+- 已验证证据：`go1.27.0` / `GOTOOLCHAIN=local`；全包 `go test ./...`、`go vet ./...`、`go test -race ./...`，Agent Service/Bootstrap 定向 Test/Vet/Race，Linux amd64/arm64 Agent Build，Windows arm64 Agent Build 与 Bootstrap/Service Test Binary 编译均通过；本机 Windows DPAPI LocalMachine Roundtrip 真实执行通过。Windows CI/Harness 侧 `go mod verify`、Agent 定向 Test/Race/Vet、Windows arm64 Build/Test Compile 通过；`smoke.ps1` 在 Windows PowerShell 5.1 与 PowerShell 7 Parser、ASCII-only、Diff Check 通过，非管理员 Binary/Harness 均在写目标目录前快速拒绝，Harness 能同时报告主失败与 Cleanup 失败。
+- 未验证边界：当前 Windows 宿主不是管理员，正向 SCM install/reinstall/stop/start/uninstall Smoke 未运行；新增 GitHub `windows-2022` CI Job 尚未触发。运行中已安装 EXE 的 `DELAY_UNTIL_REBOOT` 路径只有注入单元测试，尚未真实触发；真实 Agent OCI/Compose Runtime Smoke 仍因 Docker Socket 权限未执行。本条不记录 Windows SCM/Docker/CI Gate PASS。
+- 状态影响：`M0-02`、`M0-09` 继续为 `IN_PROGRESS`；M0 保持 `8/12`、总计保持 `8/95`，未新增 `DONE`。`M0-09` 仍等待提升权限的真实 Windows SCM Smoke、真实 Agent OCI/Compose Runtime Smoke 及 M0-10 后的新 CI Run/复审证据。

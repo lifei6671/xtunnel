@@ -3,17 +3,17 @@ set -eu
 
 usage() {
 	cat <<'EOF'
-Usage: uninstall.sh server|agent
+Usage: uninstall.sh server
 
-Stops and disables the matching XTunnel systemd service, then removes only the
-service unit and installed binary. Configuration and persistent data remain in
-place so that uninstall never deletes credentials or user data.
+Stops and disables XTunnel Server, then removes only its service unit and
+installed binary. Configuration and persistent data remain in place. Agent
+uninstallation is managed by the xtunnel-agent binary itself.
 EOF
 }
 
 component=${1-}
 case "$component" in
-	server|agent) ;;
+	server) ;;
 	-h|--help|'')
 		usage
 		exit 0
@@ -34,11 +34,11 @@ if ! command -v systemctl >/dev/null 2>&1; then
 	exit 1
 fi
 
-unit="xtunnel-$component.service"
+unit=xtunnel-server.service
 if [ -e "/etc/systemd/system/$unit" ] || [ -L "/etc/systemd/system/$unit" ]; then
 	systemctl disable --now "$unit"
 fi
-rm -f -- "/etc/systemd/system/$unit" "/usr/local/bin/xtunnel-$component"
+rm -f -- "/etc/systemd/system/$unit" /usr/local/bin/xtunnel-server
 systemctl daemon-reload
 
 printf 'uninstalled %s; configuration, credentials, data, and service users were preserved\n' "$unit"

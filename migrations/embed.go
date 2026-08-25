@@ -5,7 +5,7 @@ import (
 	_ "embed"
 )
 
-// SchemaMigrations 包含随 Server Binary 发布的首个 SQL Migration。
+// SchemaMigrations 包含随 Server Binary 发布的首个 SQL Migration 和 V0.1 初始 Schema。
 //
 //go:embed 000001_schema_migrations.sql
 var SchemaMigrations string

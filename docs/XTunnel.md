@@ -1,5 +1,8 @@
 # XTunnel 自研集中式反向隧道平台技术方案 V1.0
 
+> [!WARNING]
+> 本文是历史架构评审稿，不是当前实现或开发契约。Agent Bootstrap、Connection Token、Protocol、部署和里程碑均以 [`xtunnel_standalone_v0.1.md`](./xtunnel_standalone_v0.1.md) 与 [`xtunnel_standalone_v0.1_development_plan.md`](./xtunnel_standalone_v0.1_development_plan.md) 为准；本文中的旧 Connector/Agent 本地配置、Token 描述、`xtunnel-agent install` 等旧安装命令以及“Windows Service 后续再集成”的判断不得用于实现或验收。当前公开入口为 `xtunnel-agent run`、`xtunnel-agent service install` 与 `xtunnel-agent service uninstall`，V0.1 Agent 支持 Linux systemd 与 Windows SCM。
+
 > 文档状态：架构评审稿
 > 目标状态：可进入 POC 与工程开发
 > 核心语言：Go

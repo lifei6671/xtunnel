@@ -30,8 +30,7 @@ COPY --from=web-build /src/web/dist ./web/dist
 FROM go-source AS agent-build
 ARG TARGETOS
 ARG TARGETARCH
-RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -p=1 -mod=readonly -trimpath -ldflags='-s -w' -o /out/xtunnel-agent ./cmd/agent \
-    && install -d -o 65532 -g 65532 -m 0700 /out/runtime/var/lib/xtunnel
+RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -p=1 -mod=readonly -trimpath -ldflags='-s -w' -o /out/xtunnel-agent ./cmd/agent
 
 FROM go-source AS server-build
 ARG TARGETOS
@@ -40,12 +39,11 @@ RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -p=1 -mod=readonly -trimpath 
     && install -d -o 65532 -g 65532 -m 0700 /out/runtime/run/xtunnel /out/runtime/var/lib/xtunnel
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS agent
-COPY --chown=65532:65532 --from=agent-build /out/runtime/var/lib/xtunnel /var/lib/xtunnel
 COPY --chown=65532:65532 --from=agent-build /out/xtunnel-agent /usr/local/bin/xtunnel-agent
 
 USER 65532:65532
-VOLUME ["/var/lib/xtunnel"]
 ENTRYPOINT ["/usr/local/bin/xtunnel-agent"]
+CMD ["run"]
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS server
 
