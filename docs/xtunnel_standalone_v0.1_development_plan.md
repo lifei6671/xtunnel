@@ -695,3 +695,10 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 既有验证：Windows `go1.27.0` / `GOTOOLCHAIN=local` 下的全包 Test、Protocol Race、Vet、Golden 逐字节比较和 `git diff --check` 均通过；Auth/Control/Work 状态与方向、Unknown Field、Token 完整性/版本、Snapshot/ConfigAck 契约均由对应表驱动测试覆盖。
 - 状态影响：M05-01 至 M05-09 转为 `REVIEW`，M05-10 转为 `IN_PROGRESS`；M0.5 与全局 `DONE` 计数仍为 0，本轮不勾选任何产品任务，M1 仍被 M05-10 锁定。
 - 剩余风险与解除条件：M0-10 已要求后续 `DONE` 附真实 CI Run 证据。需先对当前工作区最新版本进行正式提交并触发 CI；CI 全绿后才能将 M05-10 置为 `DONE` 并开始 M1。当前存在 staged 与 unstaged 混合变更，提交前必须重新暂存最新文件。
+
+## 2026-08-25 · M05-10 · 本地提交与干净 Checkout 证据
+
+- Commit/PR：`0294999edc07a24bc7d29d5efd71e9aadf218ba7`（本地提交，未推送）。提交范围为 M0.5 Protocol v1 的 Proto、初始 Baseline、生成代码、协议实现/测试、Golden Vector、工具脚本和开发计划；没有包含无关文件。
+- 验收命令：Windows `go1.27.0` / `GOTOOLCHAIN=local` 下执行 `go mod verify`、`go test -count=1 ./...`、`go test -race -count=1 ./internal/protocol/...`、`go vet ./...`、`git diff --cached --check` 均通过。以该 Commit 创建原生 WSL 干净 Git 克隆，复制受管但被忽略的 `.tools/bin` 后确认工作树为空，并执行 `./tools/proto.sh lint`、`breaking`、`generate-check`，均通过；临时克隆已删除。
+- CI 与 Gate：本提交未推送，GitHub Actions 无法取得该 Commit，故没有新的 CI Run；按 M0-10 的全局证据规则，M05-10 仍保持 `IN_PROGRESS`，M05-01 至 M05-09 仍保持 `REVIEW`，M0.5 与全局 `DONE` 计数不变，M1 继续锁定。本轮不勾选任何产品任务。
+- 解锁条件：用户若授权推送此提交，待 GitHub Actions 对 `0294999` 的 CI 全绿后，再将 M05-10 置为 `DONE`；随后按用户的阶段 Review 规则停下，等待继续 M1 的明确指令。
