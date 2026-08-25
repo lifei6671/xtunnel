@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M0 工程初始化
 >
-> **当前结论**：`M0-01` 至 `M0-09` 已完成；`M0-10` CI 和跨平台构建矩阵正在实施；本轮仅本地提交、不推送
+> **当前结论**：`M0-01` 至 `M0-09` 已完成；`M0-10` 实现与 CI 验收已完成，当前处于 `REVIEW` 并等待用户 Code Review；本轮仅本地提交、不推送
 
 ---
 
@@ -130,7 +130,7 @@ M1 Secure TCP Data Plane Baseline
 | M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `DONE` |
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `DONE` |
 | M0-09 | OCI、Compose 双栈与 systemd 包装骨架 | M0-03、M0-08 | `deploy/docker`、`deploy/systemd`、未接入启动路径的双栈监听原语 | amd64/arm64；非 root；只读镜像 + Data Volume；Compose IPv4/IPv6 Network/Host Binding；原生 tcp4/tcp6 Socket 测试；install/start/restart/stop/uninstall Smoke | `DONE` |
-| M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `IN_PROGRESS` |
+| M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `REVIEW` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `NOT_STARTED` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `NOT_STARTED` |
 
@@ -419,7 +419,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 1. `M0-10` — CI 和跨平台构建矩阵。
 
-`M0-09` 已于 2026-08-25 经用户 Code Review 通过并标记 `DONE`。`M0-10` 的依赖已全部满足，用户已确认 CI 配置变更；当前等待首个真实 GitHub Actions Run 提供跨架构验收证据。
+`M0-09` 已于 2026-08-25 经用户 Code Review 通过并标记 `DONE`。`M0-10` 的原生 Linux amd64/arm64 CI、OCI Smoke 与工作区清洁检查均已通过，当前等待用户 Code Review；用户确认前不得标记 `DONE`，也不得进入下一项。
 
 推进规则：
 
@@ -572,3 +572,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 验收结果：原 OCI/systemd 证据保持有效。WSL 安装并实测 Docker Compose `2.40.3+ds1-0ubuntu1~22.04.1`，官方 Config 校验通过；amd64 原生与 arm64 QEMU 的 Compose Smoke 均验证 Server/Agent 获得 IPv4/IPv6 地址、Management/Agent Gateway 四组 Host Binding 分配非零端口、独立 Data Volume、Server Runtime tmpfs、`65532:65532`、只读 RootFS、`CapDrop=ALL`、No New Privileges、独立入口和 SIGTERM 退出。Go 1.27.0 本地工具链下全包测试、定向 Race、Vet 通过；Linux 固定 Go 1.27 镜像实际验证 tcp4/tcp6 同端口 Dial/Accept、`IPV6_V6ONLY=1`、第二地址族绑定失败后第一地址族端口释放。ShellCheck、三种 POSIX 语法、Compose Config 与 Diff Check 通过；Smoke 临时容器、网络、Volume、镜像标签和测试 Cache 均已清理。
 - 剩余风险：默认 Compose 冷构建两次在 WSL BuildKit Go 编译阶段超过 360 秒后终止，`--skip-build` 使用本轮前已验收的 amd64/arm64 镜像完成运行层验证；同一 WSL 的 Linux Race 冷编译也超过 360 秒，未记录为通过。arm64 仍是 QEMU 仿真，不等同于原生 Runner；原生干净 Checkout、Registry Manifest 和该环境冷编译问题由 `M0-10` 补齐。当前双栈监听原语没有生产调用者，Management、Agent Gateway、Ingress、TLS、Session 和公网 IPv6 E2E 均未实现；Host Binding 不是应用连通或公网可达证据。本记录不勾选 M0 Gate。
 - 解锁的后续任务：`M0-10` 的依赖已满足并进入 `READY`；实施前须取得 CI 配置变更的用户明确确认。
+
+## 2026-08-25 · M0-10 · REVIEW
+
+- 负责人：Codex。
+- Commit/PR：`7c89a002c8ca7729442b2619f28a47654105f899`（已推送至 `master`）；GitHub Actions Run [`32799308530`](https://github.com/lifei6671/xtunnel/actions/runs/32799308530) 成功。
+- 产物：`.github/workflows/ci.yml`。Workflow 固定 `actions/checkout`、`actions/setup-go`、`actions/setup-node` 的提交 SHA，固定 Go `1.27.0`、Node `24.19.0`、npm `11.17.0` 与 `GOTOOLCHAIN=local`，在原生 Linux amd64/arm64 Runner 上复用 Proto、OpenAPI、Web、Go 和 OCI Smoke 入口。
+- 验收命令：两种架构均执行 `tools/check-go-version.sh`；`bootstrap-proto.sh` 与 `proto.sh lint|breaking|generate-check`；`bootstrap-openapi.sh`、`openapi.sh validate`、`test-openapi.sh`；`npm ci/check/build`；根/工具 Module 校验、`go test ./...`、定向 `go test -race`、`go vet ./...`、Server/Agent Build；Server/Agent 的 `deploy/docker/smoke.sh`；`git diff --check` 与工作区清洁检查。
+- 验收结果：Run `32799308530` 的 `verify (amd64)` 与 `verify (arm64)` 均成功；两种原生架构都完成全部 11 个主验证步骤，OCI Smoke、生成文件清洁检查和退出清理均通过。
+- 剩余风险：本任务不运行需要 root 和真实 systemd 的 `deploy/systemd/smoke.sh`，该证据保留在 M0-09；Compose 双栈 Smoke 不作为公网 IPv6、应用 Listener 或生产连通性证据。M0 Gate 仍等待 M0-11、M0-12 及其全部 Checklist。
+- 解锁的后续任务：等待用户 Code Review；通过后 `M0-10` 可标记 `DONE`，再按逐项约定选择下一任务。
