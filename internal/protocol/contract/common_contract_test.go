@@ -24,7 +24,8 @@ func TestCommonProtoFreezesSharedEnums(t *testing.T) {
 		"work_id=work_<ULID>",
 		"connection_id=conn_<ULID>",
 		"budget_lease_id=lease_<ULID>",
-		"drain_id=drain_<ULID>.",
+		"drain_id=drain_<ULID>",
+		"token_id=tok_<ULID>.",
 	} {
 		if !strings.Contains(text, declaration) {
 			t.Fatalf("common.proto missing %q", declaration)

@@ -11,7 +11,7 @@ option go_package = "github.com/lifei6671/xtunnel/internal/protocol/gen;protocol
 //
 // agent_id=ag_<ULID>; instance_id=ai_<ULID>; session_id=sess_<ULID>;
 // work_id=work_<ULID>; connection_id=conn_<ULID>;
-// budget_lease_id=lease_<ULID>; drain_id=drain_<ULID>.
+// budget_lease_id=lease_<ULID>; drain_id=drain_<ULID>; token_id=tok_<ULID>.
 
 // ErrorCode is the stable Protocol v1 outcome vocabulary.
 // Numeric values are never reused. Values deleted in a later protocol revision

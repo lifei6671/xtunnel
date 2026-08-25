@@ -61,7 +61,7 @@
 1. 更新对应任务状态。
 2. 在“执行记录”中增加一条证据。
 3. 重算里程碑的 `DONE/总任务数`。
-4. 只有里程碑 Gate 任务 `DONE` 才可启动下一个强依赖里程碑。
+4. 按任务级强依赖推进：只有被后续任务明确列为入口 Gate 的 Gate 任务 `DONE`，才可启动该后续里程碑；完整里程碑的最终 Gate 仍必须在最终发布前完成。
 5. 阻塞项不得只写“待确认”，必须写清需要谁、提供什么、解锁哪些任务。
 
 ---
@@ -69,7 +69,7 @@
 # 3. 总体关键路径
 
 ```text
-M0 工程初始化
+M0 核心基础项（M0-01 至 M0-08、M0-10、M0-11）
  ↓
 M0.5 Protocol v1 Contract Freeze
  ↓
@@ -84,11 +84,14 @@ M1 Secure TCP Data Plane Baseline
                                   M6 Observability
                                            ↓
                                   M7 Hardening + Alpha Gate
+
+M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 ```
 
 依赖规则：
 
 - M0.5 是 M1 Protocol Handler 的强制入口 Gate。
+- M0-09 的 OCI/Compose、systemd 和 SCM 部署验收可在核心功能完成后推进；它不阻塞 M0.5 或 M1，但 M0-12 必须在 Alpha 发布 Gate 前完成。
 - M2 和 M3 在 M1 Gate 后可并行，但 M4 产品数据面必须同时等待 M2 的 Replica Selection/Failover 和 M3 的 Tunnel/Binding/Snapshot 契约。
 - M5 的 OpenAPI Entry Gate 可在 M4 后半段提前准备，Handler 和 Web 实现必须等 Gate 通过。
 - M6 的 Logging/Metrics 骨架可从 M0/M1 纵向渗透，但 M6 Gate 要求完整产品链路可观测。
@@ -102,14 +105,14 @@ M1 Secure TCP Data Plane Baseline
 | --- | ---: | ---: | --- | --- | --- |
 | M0 工程初始化 | 12 | 9 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
 | M0.5 Protocol Freeze | 10 | 0 | `IN_PROGRESS` | M0-06 | M05-10 |
-| M1 Secure TCP Baseline | 14 | 0 | `NOT_STARTED` | M0-12 + M05-10 | M1-14 |
+| M1 Secure TCP Baseline | 14 | 0 | `NOT_STARTED` | M05-10（各任务仍遵守其 M0 核心前置） | M1-14 |
 | M2 Replica/Credential | 8 | 0 | `NOT_STARTED` | M1-14 | M2-08 |
 | M3 Config/Health | 13 | 0 | `NOT_STARTED` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 0 | `NOT_STARTED` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 0 | `NOT_STARTED` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **8** |  |  |  |
+| **合计** | **95** | **9** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -130,7 +133,7 @@ M1 Secure TCP Data Plane Baseline
 | M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `DONE` |
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `DONE` |
 | M0-09 | OCI/Compose 双栈、Server Shell Packaging 与跨平台 Agent Binary Self-install | M0-03、M0-08 | `deploy/docker`、Server-only `deploy/systemd`、Agent `service install/uninstall`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Agent 在 root/systemd>=249 快速失败，原子安装 Binary、root-only Credential 与 Managed Unit；Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；两端持久启动项只含 Binary + `run` 且无 Secret，均以 managed marker 拒绝覆盖/删除非受管同名服务，卸载保留 Credential；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `IN_PROGRESS` |
-| M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `DONE` |
+| M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-08 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke。M0-09 的 Compose Runtime Smoke 仍由 M0-09 单独验收 | `DONE` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `DONE` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `NOT_STARTED` |
 
@@ -146,8 +149,8 @@ M0-01
 
 M0-03 + M0-08 ── M0-09
 M0-03 + M0-05 ── M0-11
-M0-02 至 M0-09 ── M0-10
-M0-01 至 M0-11 + M0-10 ── M0-12
+M0-02 至 M0-08 ── M0-10
+M0-01 至 M0-11 + M0-10 ── M0-12（完整 M0 / 发布前 Gate）
 ```
 
 ## 5.3 M0 Gate Checklist
@@ -177,27 +180,27 @@ M0.5 Gate 通过前，禁止开发 Server/Agent Protocol Handler。可并行开�
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M05-01 | 冻结 Common Types | M0-06 | `api/proto/common.proto` | package/go_package、enum 数值、reserved range、ErrorCode 完整 | `REVIEW` |
-| M05-02 | 冻结 Connection Token + Auth/Control Contract | M05-01 | Connection Token v1 编码/解析契约、`api/proto/control.proto` | Token 仍是单个不透明 `xta_...`；冻结 Endpoint、TLS Trust、Agent/Token Identity、Secret 的精确编码/完整性/版本分派与失败语义；裸 Auth Frame、ControlEnvelope、Snapshot/ConfigAck、Health Batch 完整 | `NOT_STARTED` |
-| M05-03 | 冻结 Work Contract | M05-01 | `api/proto/work.proto` | WorkHello/Ready/Open/Response；RAW 切换；各状态唯一裸 Message | `NOT_STARTED` |
-| M05-04 | 生成代码与 Breaking Baseline | M05-01至 M05-03 | `internal/protocol/gen`、Buf Initial Baseline | 明确记录“首次冻结无历史前代”的 Baseline 建立方式，禁止与自身比较伪装 Breaking 证据；生成结果提交；`lint/breaking/generate-check` 通过 | `NOT_STARTED` |
-| M05-05 | Frame Codec 契约实现 | M05-04 | `internal/protocol/frame`、`codec` | UVarint 分片/合并、上限、EOF、Auth/Control/Work 分层测试 | `NOT_STARTED` |
-| M05-06 | 递归 Unknown Field 拒绝 | M05-04 | 共享 Validator 与表驱动测试 | Auth、Control、Work、Snapshot 全覆盖 | `NOT_STARTED` |
-| M05-07 | Deterministic Protobuf Bytes | M05-04、M05-06 | Snapshot/WorkHello 确定性字节构造器 | Snapshot 稳定排序并包含 Revision；WorkHello 清空 MAC 后重建已知字段；固定 Runtime 版本 | `NOT_STARTED` |
-| M05-08 | Protocol Golden Vectors | M05-02、M05-07 | `tests/golden/protocol-v1/*` | Connection Token v1、WorkHello、Snapshot 固定字节/Hash/HMAC；ConfigAck Revision 关联；测试不自动改 Fixture | `NOT_STARTED` |
-| M05-09 | 状态/方向/幂等契约测试 | M05-02、M05-03、M05-05 | Protocol State Test | Token 未知版本/畸形/超限/完整性失败；Auth 提交点、Control 非法方向、Work 直接关闭、ConfigAck/Drain 幂等 | `NOT_STARTED` |
-| M05-10 | M0.5 Protocol Gate | M0-12、M05-01至 M05-09 | Protocol Freeze 证据 | 下方 Gate Checklist 全部通过 | `NOT_STARTED` |
+| M05-02 | 冻结 Connection Token + Auth/Control Contract | M05-01 | Connection Token v1 编码/解析契约、`api/proto/control.proto` | Token 仍是单个不透明 `xta_...`；冻结 Endpoint、TLS Trust、Agent/Token Identity、Secret 的精确编码/完整性/版本分派与失败语义；裸 Auth Frame、ControlEnvelope、Snapshot/ConfigAck、Health Batch 完整 | `REVIEW` |
+| M05-03 | 冻结 Work Contract | M05-01 | `api/proto/work.proto` | WorkHello/Ready/Open/Response；RAW 切换；各状态唯一裸 Message | `REVIEW` |
+| M05-04 | 生成代码与 Breaking Baseline | M05-01至 M05-03 | `internal/protocol/gen`、Buf Initial Baseline | 明确记录“首次冻结无历史前代”的 Baseline 建立方式，禁止与自身比较伪装 Breaking 证据；生成结果提交；`lint/breaking/generate-check` 通过 | `REVIEW` |
+| M05-05 | Frame Codec 契约实现 | M05-04 | `internal/protocol/frame`、`codec` | UVarint 分片/合并、上限、EOF、Auth/Control/Work 分层测试 | `REVIEW` |
+| M05-06 | 递归 Unknown Field 拒绝 | M05-04 | 共享 Validator 与表驱动测试 | Auth、Control、Work、Snapshot 全覆盖 | `REVIEW` |
+| M05-07 | Deterministic Protobuf Bytes | M05-04、M05-06 | Snapshot/WorkHello 确定性字节构造器 | Snapshot 稳定排序并包含 Revision；WorkHello 清空 MAC 后重建已知字段；固定 Runtime 版本 | `REVIEW` |
+| M05-08 | Protocol Golden Vectors | M05-02、M05-07 | `tests/golden/protocol-v1/*` | Connection Token v1、WorkHello、Snapshot 固定字节/Hash/HMAC；ConfigAck Revision 关联；测试不自动改 Fixture | `REVIEW` |
+| M05-09 | 状态/方向/幂等契约测试 | M05-02、M05-03、M05-05 | Protocol State Test | Token 未知版本/畸形/超限/完整性失败；Auth 提交点、Control 非法方向、Work 直接关闭、ConfigAck/Drain 幂等 | `REVIEW` |
+| M05-10 | M0.5 Protocol Gate | M05-01至 M05-09 | Protocol Freeze 证据 | 下方 Gate Checklist 全部通过；M0-09 部署验收和 M0-12 完整 M0 Gate 不阻塞本 Gate | `IN_PROGRESS` |
 
 ## 6.3 M0.5 Gate Checklist
 
-- [ ] `./tools/proto.sh lint` 通过。
-- [ ] `./tools/proto.sh breaking` 通过。
-- [ ] `./tools/proto.sh generate-check` 通过。
-- [ ] Golden Vector 逐字节比较通过。
-- [ ] Auth Success/Failure Transcript 及 Auth→Established 提交边界通过。
-- [ ] Connection Token v1 编码、解析、版本、完整性和语义字段 Golden Vector 通过。
-- [ ] Control/Work 方向、状态、乱序、重复、Unknown Field 全部测试通过。
-- [ ] Snapshot Deterministic Bytes、Revision 与 ConfigAck 关联/幂等测试通过。
-- [ ] Proto 变更已完成独立 Protocol Review。
+- [x] `./tools/proto.sh lint` 通过。
+- [x] `./tools/proto.sh breaking` 通过。
+- [x] `./tools/proto.sh generate-check` 通过。
+- [x] Golden Vector 逐字节比较通过。
+- [x] Auth Success/Failure Transcript 及 Auth→Established 提交边界通过。
+- [x] Connection Token v1 编码、解析、版本、完整性和语义字段 Golden Vector 通过。
+- [x] Control/Work 方向、状态、乱序、重复、Unknown Field 全部测试通过。
+- [x] Snapshot Deterministic Bytes、Revision 与 ConfigAck 关联/幂等测试通过。
+- [x] Proto 变更已完成独立 Protocol Review。
 
 ---
 
@@ -401,7 +404,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `NOT_STARTED` |
 | M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `NOT_STARTED` |
 | M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；两端 Agent Binary `service install/uninstall` 的安装/升级/卸载覆盖 Managed Marker、Binary 替换、Secret 不落 SCM/argv 和非托管 Unit/Service 拒绝边界；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `NOT_STARTED` |
-| M7-10 | XTunnel Standalone Alpha Gate | M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `NOT_STARTED` |
+| M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `NOT_STARTED` |
 
 ## 13.2 Alpha Release Gate Checklist
 
@@ -419,12 +422,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10` 已完成。按逐任务推进约定，当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10` 已完成。按“核心功能先行、部署验收后置”的任务级依赖约定，当前待办为：
 
-1. `M0-02` — Server Config Schema + Agent Token Bootstrap，新的跨平台 CI 已通过，等待用户复审。
-2. `M0-09` — Token-only Agent 的 OCI/Compose 与跨平台 Binary Self-install；Linux systemd、Windows SCM 及 Linux amd64/arm64 OCI Smoke 已通过，仍等待 Compose IPv4/IPv6 Runtime Smoke 与复审。
+1. `M05-01` — Common Types 已完成验收，等待用户 Protocol Review；通过后进入 `M05-02` 和 `M05-03`。
+2. `M0-02` — Server Config Schema + Agent Token Bootstrap，新的跨平台 CI 已通过，等待用户复审；它仍是完整 M0 Gate 与 M1 资源配置接入的核心前置。
+3. `M0-09` — Token-only Agent 的 OCI/Compose 与跨平台 Binary Self-install；Linux systemd、Windows SCM 及 Linux amd64/arm64 OCI Smoke 已通过，仍等待 Compose IPv4/IPv6 Runtime Smoke 与复审。该部署专项不阻塞 M0.5/M1。
 
-`M0-10` 已于 2026-08-25 经用户 Code Review 通过并标记 `DONE`。`M0-11` 已取得用户复审及原生 Linux CI Race 证据，现为 `DONE`。`M0-02` 因删除 Agent Schema/Loader 并改写 Bootstrap 输入而保持 `IN_PROGRESS`，只等待用户复审；`M0-09` 保持 `IN_PROGRESS`，只等待 Compose 双栈 Runtime Smoke 与复审。
+`M0-10` 已于 2026-08-25 经用户 Code Review 通过并标记 `DONE`。`M0-11` 已取得用户复审及原生 Linux CI Race 证据，现为 `DONE`。`M0-02` 因删除 Agent Schema/Loader 并改写 Bootstrap 输入而保持 `IN_PROGRESS`，只等待用户复审；`M0-09` 保持 `IN_PROGRESS`，只等待 Compose 双栈 Runtime Smoke 与复审。完整 M0 的 `M0-12` 维持为发布前 Gate；M0.5 和 M1 仅遵守各自表格中列出的核心任务依赖。
 
 推进规则：
 
@@ -665,3 +669,29 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - Lint 契约：总方案明确 `ERROR_CODE_OK=0` 与 `HEALTH_STATUS_UNKNOWN=0` 是仅有的有意零值例外。Buf STANDARD 默认要求 `_UNSPECIFIED`，因此 `buf.yaml` 只对 `api/proto/common.proto` 的 `ENUM_ZERO_VALUE_SUFFIX` 设置 `ignore_only`；`internal/protocol/contract/common_contract_test.go` 完整锁定七个 enum 的成员、顺序与数值，以及七种 ID 前缀说明，防止该例外放宽 Protocol 约束。
 - 验收命令：Windows 本机在 `go1.27.0` / `GOTOOLCHAIN=local` 下执行 `gofmt`、`go test -count=1 ./internal/protocol/contract` 与 `go test -count=1 ./...` 均通过；WSL Ubuntu 22.04 root 使用仓库受管 Buf 执行 `./tools/proto.sh lint` 通过。`./tools/proto.sh breaking` 在 Proto 已存在而 M05-04 初始不可变 Baseline 尚未配置时明确失败，已作为预期失败分支验证，不得视为 Breaking PASS；WSL root 没有 Go，因此未在该环境运行 Go 版本检查。
 - 状态影响：`M05-01` 转为 `REVIEW`，M0.5 里程碑转为 `IN_PROGRESS`；M0.5 和全局 `DONE` 计数均不增加，M0 Gate、M05-10 与所有 Protocol Handler 仍不得开始。待用户复审、提交后取得相应 CI 证据，再按任务依赖推进 M05-02/M05-03 与 M05-04 初始 Baseline。
+
+## 2026-08-25 · PLAN-ORDER · 核心功能先行
+
+- 决策：用户明确授权将部署相关工作后置，先完成核心功能；本记录只调整开发顺序，不删除或弱化 V0.1 的部署、权限与发布验收契约。
+- 计划调整：M0-09 的 OCI/Compose、systemd 与 Windows SCM 部署验收不再阻塞 M0.5 Protocol Gate 或 M1。M05-10 仅依赖 M05-01 至 M05-09；M1 入口改为 M05-10，并继续遵守每个 M1 任务表中列出的 M0-05、M0-11 等核心前置。M0-12 仍包含 M0-09，且已成为 M7-10 Alpha 发布 Gate 的显式前置。
+- 验收命令：`git diff --check`；计划依赖、任务状态和仪表盘逐项复核。
+- 验收结果：本轮未修改代码、Proto、Schema、OpenAPI、配置或部署产物；未改变任何产品任务状态、计数或 Gate 结论。
+- 剩余风险：M05-01 仍在用户 Protocol Review 中，未获得复审结论前不得开始 M05-02/M05-03；M0-02 和 M0-09 仍保留各自的复审/验收缺口。
+- 解锁的后续任务：用户通过 M05-01 Review 后，可按 M05-02/M05-03 的冻结依赖推进；M1 仍须等待 M05-10 `DONE`。
+
+## 2026-08-25 · M05-02 至 M05-09 · IN_PROGRESS
+
+- 负责人：Codex；用户授权继续完成 M0.5 核心 Protocol 实现，并明确确认新增直接依赖 `google.golang.org/protobuf v1.36.12`。本轮未提交、未推送，也未改变既有暂存区。
+- 契约与产物：新增 `api/proto/control.proto`、`api/proto/work.proto` 和不可变初始 Buf Baseline；生成 `internal/protocol/gen`；实现分层 UVarint Frame Codec、递归 Unknown Field 拒绝、确定性 Protobuf 编码、Connection Token 编码与校验、固定 Golden Vectors，以及 Auth/Control/Work 状态、方向与幂等性契约测试。`ConfigAck` 的 Revision 另以 `config-ack-v1.hex` 固定，所有新增手写代码与 Proto 注释均使用简体中文。
+- 验收命令：在 Windows `go1.27.0` / `GOTOOLCHAIN=local` 下执行 `go mod verify`、`go test -count=1 ./...`、`go test -race -count=1 ./internal/protocol/...`、`go vet ./...` 均通过；WSL Ubuntu 22.04 使用受管 Buf 执行 `./tools/proto.sh lint`、`./tools/proto.sh breaking` 均通过。首次 Breaking 使用已落盘 Baseline，而非与当前 Proto 自比较。
+- 未通过或未运行项：`./tools/proto.sh generate-check` 需要干净 Linux Git checkout；当前工作区存在本轮未提交/未跟踪产物，且 Windows `.git` 在 WSL 下不可作为 Git 工作树使用，因此不能作为通过证据。CI 尚无本次提交可运行；Protocol 独立复审和 M05-10 Gate Checklist 也尚未完成。
+- 状态影响：M05-02 至 M05-09 保持 `IN_PROGRESS`，M05-10 仍为 `NOT_STARTED`；M0.5 仪表盘和全局 `DONE` 计数均不增加，M1 不得开始。本轮不勾选任何产品任务。
+- 剩余风险与解除条件：提交前需重新暂存所有最新 Proto、Baseline、生成文件和测试；在干净 Linux checkout/CI 通过 `generate-check` 后，连同用户的 M0.5 Protocol Review 完成 Gate 复审，才可将 M05-10 置为 `DONE` 并解锁 M1。
+
+## 2026-08-25 · M05-10 · IN_PROGRESS
+
+- 负责人：Codex；用户完成 M0.5 Protocol Review 后授权继续下一步。本记录只将已完成实现与验证推进至 `REVIEW`，不把临时验证快照伪装成项目提交或 CI 证据。
+- 干净快照验证：从当前 `HEAD=6a594c242608070ff90693586ee98f256a4bd501` 创建原生 WSL Git 克隆，将当前已跟踪变更和未跟踪的 Protocol 源码/测试复制到隔离目录；仅在该临时目录创建一次性快照提交 `a97fa75ff2e145f30e645ef7ffa6d697c005e018`，随后执行 `./tools/proto.sh lint`、`breaking`、`generate-check`，全部通过且快照工作树干净。临时目录已删除；该快照不修改项目工作区、暂存区、提交历史或远端。
+- 既有验证：Windows `go1.27.0` / `GOTOOLCHAIN=local` 下的全包 Test、Protocol Race、Vet、Golden 逐字节比较和 `git diff --check` 均通过；Auth/Control/Work 状态与方向、Unknown Field、Token 完整性/版本、Snapshot/ConfigAck 契约均由对应表驱动测试覆盖。
+- 状态影响：M05-01 至 M05-09 转为 `REVIEW`，M05-10 转为 `IN_PROGRESS`；M0.5 与全局 `DONE` 计数仍为 0，本轮不勾选任何产品任务，M1 仍被 M05-10 锁定。
+- 剩余风险与解除条件：M0-10 已要求后续 `DONE` 附真实 CI Run 证据。需先对当前工作区最新版本进行正式提交并触发 CI；CI 全绿后才能将 M05-10 置为 `DONE` 并开始 M1。当前存在 staged 与 unstaged 混合变更，提交前必须重新暂存最新文件。

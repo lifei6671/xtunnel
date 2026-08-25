@@ -10,6 +10,7 @@ buf_bin="$bin_dir/buf"
 plugin_bin="$bin_dir/protoc-gen-go"
 proto_dir="$repo_root/api/proto"
 generated_dir="$repo_root/internal/protocol/gen"
+baseline_file="$repo_root/api/proto/baseline/v1.binpb"
 
 fail() {
     printf 'proto: %s\n' "$1" >&2
@@ -90,8 +91,11 @@ case "$1" in
             printf 'SKIP: initial Protocol contract is not frozen; no Proto files exist.\n'
             exit 0
         fi
-        # 首个不可变 Baseline 属于 M05-04；在此之前禁止与当前 Schema 自比较。
-        fail 'Protocol files exist but the initial Breaking baseline is not configured'
+        # 首个不可变 Baseline 在 M05-04 由已冻结的三份 Proto 一次性构建并提交。
+        # 之后始终比较该已提交二进制，禁止与当前 Schema 自比较伪造通过。
+        [ -f "$baseline_file" ] || \
+            fail "Protocol files exist but the initial Breaking baseline is missing: $baseline_file"
+        "$buf_bin" breaking --against "$baseline_file"
         ;;
     generate-check)
         if ! has_proto_input; then
