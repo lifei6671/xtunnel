@@ -1,0 +1,84 @@
+name: xtunnel
+
+services:
+  server:
+    image: ${XTUNNEL_SERVER_IMAGE:-xtunnel-server:local}
+    platform: ${XTUNNEL_PLATFORM:-linux/amd64}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: server
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run/xtunnel:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=65532,gid=65532
+    volumes:
+      - server-data:/var/lib/xtunnel
+    command:
+      - --set
+      - management.listen=:8080
+      - --set
+      - management.public_url=${XTUNNEL_MANAGEMENT_PUBLIC_URL:?set XTUNNEL_MANAGEMENT_PUBLIC_URL}
+      - --set
+      - agent_gateway.listen=:7443
+      - --set
+      - agent_gateway.public_hostname=${XTUNNEL_AGENT_GATEWAY_HOSTNAME:?set XTUNNEL_AGENT_GATEWAY_HOSTNAME}
+    ports:
+      # Management 只发布到宿主机回环；容器内使用通配地址接收 Docker 转发。
+      - target: 8080
+        published: "${XTUNNEL_MANAGEMENT_PORT:-8080}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+      - target: 8080
+        published: "${XTUNNEL_MANAGEMENT_PORT:-8080}"
+        host_ip: "::1"
+        protocol: tcp
+      # Agent Gateway 是公开入口，显式发布宿主机 IPv4 和 IPv6。
+      - target: 7443
+        published: "${XTUNNEL_AGENT_GATEWAY_PORT:-7443}"
+        host_ip: 0.0.0.0
+        protocol: tcp
+      - target: 7443
+        published: "${XTUNNEL_AGENT_GATEWAY_PORT:-7443}"
+        host_ip: "::"
+        protocol: tcp
+    networks:
+      - dualstack
+    stop_grace_period: 30s
+
+  agent:
+    image: ${XTUNNEL_AGENT_IMAGE:-xtunnel-agent:local}
+    platform: ${XTUNNEL_PLATFORM:-linux/amd64}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: agent
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - agent-data:/var/lib/xtunnel
+    command:
+      - --set
+      - server.endpoint=${XTUNNEL_AGENT_SERVER_ENDPOINT:-server:7443}
+      - --set
+      - server.tls.mode=public
+    networks:
+      - dualstack
+    stop_grace_period: 30s
+
+networks:
+  dualstack:
+    driver: bridge
+    enable_ipv6: true
+
+volumes:
+  server-data:
+  agent-data:

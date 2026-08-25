@@ -4795,7 +4795,7 @@ Server External Lock 位于 Data Directory 替换边界之外：
 /run/xtunnel/server-lock-<sha256(stable-data-target)>.lock
 ```
 
-`/run/xtunnel` 权限为 `0700` 并归 XTunnel Runtime UID 所有。systemd 通过 `RuntimeDirectory=xtunnel` 创建；OCI Image 预创建同一目录并以固定非 root UID 运行。离线维护命令由 root 创建或访问该目录。禁止要求非 root Server 直接写 `/run/lock`。
+`/run/xtunnel` 权限为 `0700` 并归 XTunnel Runtime UID 所有。systemd 通过 `RuntimeDirectory=xtunnel` 创建；OCI Image 预创建同一目录并固定以 `UID:GID 65532:65532` 运行。OCI 使用只读根文件系统时，运行器必须把 `/run/xtunnel` 挂载为该 UID/GID 可写、权限 `0700` 的 tmpfs。离线维护命令由 root 创建或访问该目录。禁止要求非 root Server 直接写 `/run/lock`。
 
 `server.data_dir` 必须是绝对路径。Stable Data Target 的计算只依赖 `realpath(parent_dir) + basename(data_dir)`：父目录必须已存在且不是符号链接，leaf 名称必须合法；leaf 可以在 Restore 的中间崩溃状态下暂时不存在。Lock 使用非阻塞 OS 独占锁、禁止跟随符号链接、权限 `0600`，由进程全生命周期持有，残留文件本身不代表已加锁。离线 Admin、Backup、Restore 和 Recovery 命令必须用完全相同的 Stable Target/Hash 算法复用同一把锁。
 
@@ -6190,7 +6190,7 @@ logging:
 # 144. Agent Local Files
 
 ```text
-/var/lib/xtunnel/
+<agent.data_dir>/
 ├── config.yaml
 ├── token
 ├── installation.id
@@ -6216,6 +6216,8 @@ trust-state.pb 0600
 snapshot.pb / snapshot.next 0600
 ```
 
+Config Schema 的通用默认值仍为 `/var/lib/xtunnel`。官方 systemd 包装为了隔离 Server 与 Agent，必须把 Agent 的 `data_dir` 覆盖为 `/var/lib/xtunnel-agent`，并同时把 `auth.token_file` 覆盖为 `/var/lib/xtunnel-agent/token`；这属于部署覆盖，不改变 Schema 默认值。
+
 ---
 
 # 145. Agent Install
@@ -6229,10 +6231,16 @@ Agent: Linux amd64 / arm64
 
 Service Manager: systemd
 
-Container: OCI 前台进程模式（不执行 install 子命令）
+Container: OCI 前台进程模式（不执行 install 子命令）+ Compose v2 双栈部署 Profile
 ```
 
 Windows Service、macOS launchd、Alpine OpenRC 和其他 Unix Service Manager 不属于 V0.1 支持范围。代码可以保持跨平台抽象，但 Alpha 发布、文件锁、权限、安装脚本和验收只对上述矩阵作承诺；不允许仅因 Go 能编译就宣称平台受支持。
+
+官方 systemd 包装固定使用两个角色身份：Server 为 `xtunnel-server:xtunnel-server`，Agent 为 `xtunnel-agent:xtunnel-agent`。Server 使用 `/run/xtunnel` 与 `/var/lib/xtunnel`，Agent 使用 `/run/xtunnel-agent` 与 `/var/lib/xtunnel-agent`，Runtime/State Directory 权限均为 `0700`。二进制安装到 `/usr/local/bin/xtunnel-{server,agent}`，权限为 `root:root 0755`；配置安装到 `/etc/xtunnel/{server,agent}.yaml`，权限为 `root:<角色组> 0640`。Agent Unit 负责应用上一节的两个部署路径覆盖。卸载只删除对应 Unit 与二进制，保留配置、凭据、持久化数据及服务用户/组。
+
+官方 Compose v2 Profile 使用自定义 Bridge 并启用 IPv6；IPv4 保持 Docker Bridge 默认启用。Server 与 Agent 必须同时获得 IPv4、IPv6 容器地址。Management 仅发布到宿主机 IPv4/IPv6 回环，Agent Gateway 才发布到宿主机全部 IPv4/IPv6 地址；HTTP Ingress、Metrics 和动态 TCP 端口在对应产品任务完成前不由该 Profile 公开。宿主端口发布不替代公网 IPv6 路由、防火墙和反向代理配置。
+
+Compose 内部将需要双栈的静态入口配置为 `:port`。Server 底层监听原语对空 Host 创建两个独立 Socket：`tcp4 0.0.0.0:port` 与 `tcp6 [::]:port`，第二个地址族绑定失败时关闭第一个并整体失败，不回退单栈；显式 IPv4/IPv6 保持单地址族，Hostname 使用标准库 `tcp` 解析语义。该原语在 M0 只通过单元测试冻结，尚未接入 Server 启动路径；Management、Agent Gateway、Ingress 的启动 Gate、TLS、协议和关闭顺序仍分别由 M0-11、M1-04、M4-06 及后续任务实现和验收。
 
 ```bash
 xtunnel-agent install \
@@ -7782,6 +7790,15 @@ Linux amd64 / arm64 Build Matrix
 
 Multi-arch OCI Image
 
+Compose v2 IPv4/IPv6 Bridge Profile + Host Port Binding Smoke
+
+双栈静态监听底层原语（M0 未接入产品启动路径）
+
+OCI Builder/Runtime Base 使用以下不可变多架构索引摘要：
+node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
+golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466
+gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+
 systemd Packaging Smoke Harness
 
 Config
@@ -7817,6 +7834,10 @@ Server / Agent 可以启动
 Linux amd64 与 arm64 Binary 均可构建；arm64 在原生或受控 Runner 完成进程启动 + Config/Shutdown Smoke
 
 OCI amd64/arm64 Image 以前台非 root 进程运行，验证只读镜像、持久化 Data Volume 和 SIGTERM 进程退出/资源释放 Smoke（M0 不要求真实 Session Drain）
+
+Compose v2 Profile 为 Server/Agent 分配 IPv4/IPv6 地址，建立 Management 回环和 Agent Gateway 宿主机全部 IPv4/IPv6 地址的端口绑定，并保持非 root、只读根、独立 Data Volume 与 Server Runtime tmpfs 边界
+
+双栈监听原语完成原生 tcp4/tcp6 Dial/Accept、同端口、IPV6_V6ONLY 与第二地址族绑定失败清理测试；真实产品 Listener 连通仍留到 M1/M4
 
 systemd 执行 install / start / restart / stop / uninstall Smoke
 

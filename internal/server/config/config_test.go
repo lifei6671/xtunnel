@@ -125,3 +125,36 @@ func TestLoadRejectsInvalidTrustedProxy(t *testing.T) {
 		t.Fatalf("Load() error = %v, want invalid CIDR error", err)
 	}
 }
+
+func TestLoadAcceptsDualStackAndIPv6ListenAddresses(t *testing.T) {
+	result, err := Load(baseconfig.Options{
+		YAML: []byte("management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: tunnel.example.com\n"),
+		CLI: map[string]string{
+			"server.data_dir":      t.TempDir(),
+			"management.listen":    ":8080",
+			"http_ingress.listen":  "[::]:8081",
+			"agent_gateway.listen": ":7443",
+			"tcp_ingress.bind":     "::",
+			"metrics.listen":       "[::]:9090",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if result.AgentGateway.Listen != ":7443" || result.TCPIngress.Bind != "::" {
+		t.Fatalf("AgentGateway.Listen = %q, TCPIngress.Bind = %q", result.AgentGateway.Listen, result.TCPIngress.Bind)
+	}
+}
+
+func TestLoadRejectsUnbracketedIPv6ListenAddress(t *testing.T) {
+	_, err := Load(baseconfig.Options{
+		YAML: []byte("management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: tunnel.example.com\n"),
+		CLI: map[string]string{
+			"server.data_dir":      t.TempDir(),
+			"agent_gateway.listen": ":::7443",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "too many colons") {
+		t.Fatalf("Load() error = %v, want bracketed IPv6 error", err)
+	}
+}

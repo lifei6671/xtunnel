@@ -1,0 +1,15 @@
+**
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!configs/
+!configs/**
+!internal/
+!internal/**
+!migrations/
+!migrations/**
+!web/
+!web/**
+web/node_modules/
+web/dist/

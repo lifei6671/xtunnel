@@ -1,0 +1,34 @@
+[Unit]
+Description=XTunnel Server
+Documentation=https://github.com/lifei6671/xtunnel
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/xtunnel/server.yaml
+
+[Service]
+Type=simple
+User=xtunnel-server
+Group=xtunnel-server
+UMask=0077
+RuntimeDirectory=xtunnel
+RuntimeDirectoryMode=0700
+StateDirectory=xtunnel
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/xtunnel-server --config /etc/xtunnel/server.yaml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

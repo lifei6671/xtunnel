@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M0 工程初始化
 >
-> **当前结论**：`M0-01` 至 `M0-08` 已完成；`M0-08` 的本地实现提交为 `c20393f`，未推送；下一任务 `M0-09` 尚未开始
+> **当前结论**：`M0-01` 至 `M0-08` 已完成；`M0-09` 实现与本地验收已完成，当前处于 `REVIEW` 并等待用户 Code Review；本轮仅本地提交、不推送
 
 ---
 
@@ -129,7 +129,7 @@ M1 Secure TCP Data Plane Baseline
 | M0-06 | 锁定 Proto 工具链骨架 | M0-01 | `buf*.yaml`、`tools/versions.env`、`tools/go.mod`、`bootstrap-proto.sh`、`proto.sh` | `tools/go.mod` 与根 Module 使用相同 Go 1.27.x 工具链；`GOTOOLCHAIN=local` 构建 protoc-gen-go；Buf/protoc-gen-go 精确版本与分发包 SHA-256 可校验；不回落 PATH；三个 Wrapper 子命令可运行 | `DONE` |
 | M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `DONE` |
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `DONE` |
-| M0-09 | OCI 与 systemd 包装骨架 | M0-03、M0-08 | `deploy/docker`、`deploy/systemd` | amd64/arm64；非 root；只读镜像 + Data Volume；install/start/restart/stop/uninstall Smoke | `NOT_STARTED` |
+| M0-09 | OCI、Compose 双栈与 systemd 包装骨架 | M0-03、M0-08 | `deploy/docker`、`deploy/systemd`、未接入启动路径的双栈监听原语 | amd64/arm64；非 root；只读镜像 + Data Volume；Compose IPv4/IPv6 Network/Host Binding；原生 tcp4/tcp6 Socket 测试；install/start/restart/stop/uninstall Smoke | `REVIEW` |
 | M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-09 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke | `NOT_STARTED` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `NOT_STARTED` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `NOT_STARTED` |
@@ -415,11 +415,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01` 至 `M0-08` 已完成。按逐任务推进约定，下一候选任务为：
+当前 `M0-01` 至 `M0-08` 已完成。按逐任务推进约定，当前待办为：
 
-1. `M0-09` — OCI 与 systemd 包装骨架。
+1. `M0-09` — 用户 Code Review。
 
-`M0-09` 尚未开始，必须等待用户明确要求继续。
+`M0-09` 已完成实现与本地验收并停在 `REVIEW`；用户确认前不得标记 `DONE`，也不得进入 `M0-10`。
 
 推进规则：
 
@@ -442,6 +442,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | Buf/protoc-gen-go 精确版本 | M0-06 完成前 | 记录版本、下载源、分发包 SHA-256 和生成结果 |
 | OpenAPI Validator/Generator | M0-07/M5-01 开工前 | M0-07 已批准并锁定 vacuum `v0.30.0` 官方 Linux amd64/arm64 归档与二进制 SHA-256，唯一入口为 `tools/openapi.sh validate`；M5-01 首次引入 Generator 前仍需单独确认，CI 不维护第二套方式 |
 | Web 依赖与 Node 版本 | M0-08 开工前 | 已批准 Node `24.19.0`、npm `11.17.0`、React/React DOM `19.2.8`、Vite `8.2.2`、Plugin React `6.1.0`、TypeScript `6.0.2` 与对应类型包；用户在管理菜单出现真实图标需求后追加批准 `lucide-react 1.34.0`；直接依赖精确锁定，npm 11 生成并提交 Lockfile，CI 只运行 `npm ci`；Tailwind/shadcn/Router/Query 等继续等待 M5 真实使用点 |
+| OCI 基础镜像、Compose 双栈与 systemd 权限模型 | M0-09 开工前 | 已批准 Node、Go、Distroless 三个多架构索引摘要分别固定为 `sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03`、`sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466`、`sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab`；OCI 使用 `65532:65532`、只读根、Data Volume，Server 另挂 `/run/xtunnel` tmpfs；用户追加批准 Compose 双栈 Profile、WSL Compose v2 验收环境和未接入产品启动路径的原生 tcp4/tcp6 监听原语，空 Host `:port` 才表示双栈，显式 IP 保持单地址族；systemd 使用 `xtunnel-server`/`xtunnel-agent` 双用户、角色独立 Runtime/State Directory、`root:<角色组> 0640` 配置，Agent Unit 覆盖角色数据/Token 路径；卸载保留配置、凭据、数据和服务身份 |
 | 首次 Buf Breaking Baseline | M05-04 完成前 | 显式记录“无历史前代”，禁止与当前文件自比较 |
 | CI/arm64/Privileged Runner | M0-10/M7-08 开工前 | 记录 Runner 架构和权限；特权 Chaos 不得静默跳过 |
 
@@ -561,3 +562,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 验收结果：Node/npm 精确版本匹配；`lucide-react 1.34.0` 的 Peer Dependency 明确支持 React 19；`npm ci` 审计 0 漏洞，类型检查与 Vite `8.2.2` Production Build 通过，Lockfile SHA-256 保持 `904BB3F144C1AC2ECA513FDD2626EFA524AF0CD7E33F240A8C11C19E2AE7A909`；Harness 自动覆盖缺证书、缺私钥的非零快速失败，HTTPS `/api/v1` 转发及 Host/Origin/Path 保持，并验证调用者环境变量恢复。Go 1.27.0 本地工具链下定向测试、Race、全包测试、Vet、Server Build 均通过；最终 Binary 可检出内嵌页面标记；缺失 `dist` 时 `go:embed` 编译期失败。Linux amd64 Binary 在 WSL 中以权限 `0700` 的 Runtime Directory 启动并正常停止；Linux arm64 交叉构建通过。桌面与移动视口管理菜单均使用独立语义图标，页面无横向溢出，浏览器控制台 0 Error/0 Warning。三路独立复审发现的问题均已修正，无未处理 P0/P1/P2。
 - 剩余风险：`dist` 按设计不提交，干净 Checkout 必须先执行 `npm ci`/Web Build 再执行 Go Test/Build，该顺序由 `M0-10` CI 固化；Linux arm64 只有交叉构建、没有原生运行证据；PowerShell Harness 已通过 Parser 和真实执行，当前环境未运行 PSScriptAnalyzer；真实 Login、Secure Cookie、CSRF POST 与 Logout E2E 依赖 `M5-03`，由 `M5-10` 完成。本记录不勾选 M0 Gate。
 - 解锁的后续任务：`M0-09` 的 M0-08 依赖已完成，但尚未开始并继续等待用户明确指令；`M5-03` 继续等待其他前置任务。
+
+## 2026-08-24 · M0-09 · REVIEW
+
+- 负责人：Codex。
+- Commit/PR：本地提交见本任务交付回复，未推送；等待用户 Code Review。
+- 产物：按多架构索引摘要固定 Node `24.19.0`、Go `1.27.0` 与 Distroless Nonroot 的多阶段 Dockerfile；Server/Agent 独立 Binary Stage 和最终镜像；Dockerfile 专属 allowlist Context；覆盖 amd64/arm64、非 root、只读根、Data Volume、Server Runtime tmpfs、镜像隔离、同卷二次启动与 SIGTERM 的 OCI Smoke；新增 Compose v2 双栈 Profile 与隔离镜像/网络/Volume 的 Smoke，Management 只发布到宿主回环，Agent Gateway 显式发布 IPv4/IPv6；新增未接入启动路径的双栈监听原语与 Config IPv6 测试；使用 `xtunnel-server`/`xtunnel-agent` 双用户、独立 Runtime/State Directory、角色配置权限和保留式卸载的 systemd Unit、安装/卸载与隔离 Smoke；同步 README 与长期部署契约。
+- 验收命令：`shellcheck --shell=sh deploy/docker/*.sh deploy/systemd/*.sh`；`sh -n`、`dash -n`、`bash --posix -n`；四组 `deploy/docker/smoke.sh --target <server|agent> --platform <linux/amd64|linux/arm64>`；`docker compose version`、`docker compose --file deploy/docker/compose.dualstack.yaml config --quiet`；amd64/arm64(QEMU) `sh deploy/docker/dualstack-smoke.sh --skip-build`；Docker CLI 等价双栈 Network/容器地址检查；三个固定基础摘要的 `docker buildx imagetools inspect`；`deploy/systemd/smoke.sh`；`$env:GOTOOLCHAIN='local'; ./tools/check-go-version.ps1`；Windows `go test ./...`、`go test -race ./internal/server/bootstrap ./internal/server/config`、`go vet ./...`；Linux 固定 Go 1.27 镜像定向 Listener Test；`npm --prefix web run check`；`npm --prefix web run build`；`git diff --check`。
+- 验收结果：原 OCI/systemd 证据保持有效。WSL 安装并实测 Docker Compose `2.40.3+ds1-0ubuntu1~22.04.1`，官方 Config 校验通过；amd64 原生与 arm64 QEMU 的 Compose Smoke 均验证 Server/Agent 获得 IPv4/IPv6 地址、Management/Agent Gateway 四组 Host Binding 分配非零端口、独立 Data Volume、Server Runtime tmpfs、`65532:65532`、只读 RootFS、`CapDrop=ALL`、No New Privileges、独立入口和 SIGTERM 退出。Go 1.27.0 本地工具链下全包测试、定向 Race、Vet 通过；Linux 固定 Go 1.27 镜像实际验证 tcp4/tcp6 同端口 Dial/Accept、`IPV6_V6ONLY=1`、第二地址族绑定失败后第一地址族端口释放。ShellCheck、三种 POSIX 语法、Compose Config 与 Diff Check 通过；Smoke 临时容器、网络、Volume、镜像标签和测试 Cache 均已清理。
+- 剩余风险：默认 Compose 冷构建两次在 WSL BuildKit Go 编译阶段超过 360 秒后终止，`--skip-build` 使用本轮前已验收的 amd64/arm64 镜像完成运行层验证；同一 WSL 的 Linux Race 冷编译也超过 360 秒，未记录为通过。arm64 仍是 QEMU 仿真，不等同于原生 Runner；原生干净 Checkout、Registry Manifest 和该环境冷编译问题由 `M0-10` 补齐。当前双栈监听原语没有生产调用者，Management、Agent Gateway、Ingress、TLS、Session 和公网 IPv6 E2E 均未实现；Host Binding 不是应用连通或公网可达证据。本记录不勾选 M0 Gate。
+- 解锁的后续任务：等待用户 Code Review；通过后 `M0-09` 可标记 `DONE`，随后才可进入 `M0-10`。

@@ -1,0 +1,34 @@
+[Unit]
+Description=XTunnel Agent
+Documentation=https://github.com/lifei6671/xtunnel
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/xtunnel/agent.yaml
+
+[Service]
+Type=simple
+User=xtunnel-agent
+Group=xtunnel-agent
+UMask=0077
+RuntimeDirectory=xtunnel-agent
+RuntimeDirectoryMode=0700
+StateDirectory=xtunnel-agent
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/xtunnel-agent --config /etc/xtunnel/agent.yaml --set data_dir=/var/lib/xtunnel-agent --set auth.token_file=/var/lib/xtunnel-agent/token
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

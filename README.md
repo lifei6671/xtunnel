@@ -85,3 +85,47 @@ Resolve Stable Data Target
 `server.data_dir` 必须是绝对路径，父目录和正式数据目录都需预先存在；Server 不会自动创建数据目录。Linux 运行环境还需预先创建归 Runtime UID 所有、权限为 `0700` 的 `/run/xtunnel`。数据库固定为 `<server.data_dir>/xtunnel.db`，连接使用 WAL、Foreign Keys、5 秒 Busy Timeout 和 Normal Synchronous。发现待处理 Restore Journal 时，当前版本会在打开数据库前拒绝启动；正式恢复状态机由后续 M3-12 实现。
 
 收到 `SIGINT` 或 `SIGTERM` 后，Server 先关闭 SQLite 再释放 External Lock，Agent 也会正常退出。XTunnel V0.1 的生产运行边界为 Linux amd64/arm64；Windows 当前用于构建和单元测试，不提供生产 External Lock。完整 Listener、Session 和 Drain 流程将在后续任务中接入。
+
+## OCI 与 systemd 包装
+
+当前提供 Linux `amd64`/`arm64` 的 OCI 构建骨架，以及 Server/Agent 的 systemd 包装。Builder 与 Runtime Base 均以不可变摘要固定。OCI 容器只运行前台进程，不执行安装子命令；镜像固定使用非 root `UID:GID 65532:65532`，持久化目录为 `/var/lib/xtunnel`。生产运行时需要为该目录提供该 UID/GID 可写的 Volume；Server 在只读根文件系统下还必须挂载该 UID/GID 可写、权限 `0700` 的 `/run/xtunnel` tmpfs。
+
+```sh
+docker buildx build --load --platform linux/amd64 --target server --tag xtunnel-server:local -f deploy/docker/Dockerfile .
+docker buildx build --load --platform linux/amd64 --target agent --tag xtunnel-agent:local -f deploy/docker/Dockerfile .
+
+./deploy/docker/smoke.sh --target server --platform linux/amd64
+./deploy/docker/smoke.sh --target agent --platform linux/amd64
+```
+
+项目同时提供 `deploy/docker/compose.dualstack.yaml`。该 Profile 为 Server/Agent 创建同时分配 IPv4、IPv6 地址的 Bridge Network；Management 只发布到宿主机 `127.0.0.1`/`::1`，Agent Gateway 显式发布到 `0.0.0.0`/`::`。启动前必须提供 Management 的真实外部 HTTPS Origin 和 Agent Gateway 公网主机名：
+
+```sh
+export XTUNNEL_MANAGEMENT_PUBLIC_URL=https://admin.example.com
+export XTUNNEL_AGENT_GATEWAY_HOSTNAME=tunnel.example.com
+
+docker compose --file deploy/docker/compose.dualstack.yaml up --build --detach
+docker compose --file deploy/docker/compose.dualstack.yaml down
+
+sh deploy/docker/dualstack-smoke.sh --platform linux/amd64
+```
+
+Compose 内部使用 `:8080`、`:7443` 表示双栈通配监听。Server 的底层监听原语会为这种空 Host 地址分别创建原生 `tcp4`、`tcp6` Socket；显式 IPv4 或 IPv6 地址仍保持单一地址族。当前原语尚未接入 Server 启动路径，Management、Agent Gateway 和 Ingress 仍未实现，因此现阶段的 Compose Smoke 只证明双栈网络、宿主端口绑定、OCI 安全边界与进程生命周期，不代表这些端口已可建立应用连接，也不证明公网 IPv6 路由或防火墙已经就绪。
+
+systemd 包装只支持 Linux systemd。安装脚本分别创建 `xtunnel-server` 与 `xtunnel-agent` 系统用户/组；Server 状态目录为 `/var/lib/xtunnel`，Agent 状态目录为 `/var/lib/xtunnel-agent`。Agent Unit 会把 `data_dir` 和 `auth.token_file` 覆盖到 `/var/lib/xtunnel-agent` 及其 `token` 文件。二进制、配置和 Unit 分别安装到 `/usr/local/bin`、`/etc/xtunnel`、`/etc/systemd/system`；配置权限为 `root:<角色组> 0640`。卸载仅移除对应 Unit 和二进制，保留配置、凭据、持久化数据及服务用户/组。
+
+```sh
+sudo ./deploy/systemd/install.sh server --binary ./xtunnel-server --config ./server.yaml
+sudo ./deploy/systemd/install.sh agent --binary ./xtunnel-agent --config ./agent.yaml
+
+sudo ./deploy/systemd/uninstall.sh server
+sudo ./deploy/systemd/uninstall.sh agent
+```
+
+`deploy/systemd/smoke.sh` 会创建并清理专用的测试用户、配置和数据目录。它只能在隔离 Linux 主机上以 root 身份执行，且在发现已有 XTunnel Unit、配置或数据目录时会拒绝运行：
+
+```sh
+sudo ./deploy/systemd/smoke.sh \
+  --server-binary ./xtunnel-server \
+  --agent-binary ./xtunnel-agent
+```
