@@ -37,6 +37,57 @@ func TestWindowsServiceConfigContract(t *testing.T) {
 	}
 }
 
+func TestWindowsServiceStoppedBeforeTargetReportsExitCodes(t *testing.T) {
+	tests := []struct {
+		name   string
+		status svc.Status
+		target svc.State
+		want   string
+	}{
+		{
+			name: "启动失败",
+			status: svc.Status{
+				State:                   svc.Stopped,
+				Win32ExitCode:           1066,
+				ServiceSpecificExitCode: 1,
+				ProcessId:               42,
+			},
+			target: svc.Running,
+			want:   "win32_exit_code=1066 service_specific_exit_code=1 process_id=42",
+		},
+		{
+			name:   "仍在启动",
+			status: svc.Status{State: svc.StartPending},
+			target: svc.Running,
+		},
+		{
+			name:   "正常停止",
+			status: svc.Status{State: svc.Stopped},
+			target: svc.Stopped,
+		},
+		{
+			name:   "尚未记录退出码",
+			status: svc.Status{State: svc.Stopped},
+			target: svc.Running,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := windowsServiceStoppedBeforeTarget(test.status, test.target)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("windowsServiceStoppedBeforeTarget() error = %v，want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("windowsServiceStoppedBeforeTarget() error = %v，want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestWindowsDPAPIRoundTrip(t *testing.T) {
 	plainText := []byte("xta_dpapi_round_trip_secret")
 	protected, err := protectWindowsCredential(plainText)

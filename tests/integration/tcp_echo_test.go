@@ -40,6 +40,7 @@ const (
 func TestTCPEchoEndToEnd(t *testing.T) {
 	baselineGoroutines := runtime.NumGoroutine()
 	baselineFDs := openFDCount()
+	baselineFDTargets := openFDTargets()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -228,10 +229,10 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	}
 	_ = publicListener.Close()
 	_ = store.Close()
-	waitForResourceBaseline(t, baselineGoroutines, baselineFDs)
+	waitForResourceBaseline(t, baselineGoroutines, baselineFDs, baselineFDTargets)
 }
 
-func waitForResourceBaseline(t *testing.T, baselineGoroutines, baselineFDs int) {
+func waitForResourceBaseline(t *testing.T, baselineGoroutines, baselineFDs int, baselineFDTargets map[string]string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -244,8 +245,23 @@ func waitForResourceBaseline(t *testing.T, baselineGoroutines, baselineFDs int) 
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("resources did not return to baseline: goroutines=%d baseline=%d fds=%d baseline_fds=%d",
-		runtime.NumGoroutine(), baselineGoroutines, openFDCount(), baselineFDs)
+	t.Fatalf("resources did not return to baseline: goroutines=%d baseline=%d fds=%d baseline_fds=%d baseline_targets=%v current_targets=%v",
+		runtime.NumGoroutine(), baselineGoroutines, openFDCount(), baselineFDs, baselineFDTargets, openFDTargets())
+}
+
+func openFDTargets() map[string]string {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return nil
+	}
+	targets := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		target, err := os.Readlink("/proc/self/fd/" + entry.Name())
+		if err == nil {
+			targets[entry.Name()] = target
+		}
+	}
+	return targets
 }
 
 func openFDCount() int {
@@ -311,16 +327,35 @@ func startEchoOrigin(t *testing.T, ctx context.Context) (net.Addr, <-chan error)
 	}
 	done := make(chan error, 1)
 	go func() {
+		var resultErr error
+		// done 同时是资源释放完成信号。必须先关闭连接和 Listener，再通知测试主流程，
+		// 否则 FD 基线断言可能与 defer 并发，既产生假失败，也掩盖真实的 Listener 泄漏。
+		defer func() {
+			if closeErr := listener.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+				resultErr = errors.Join(resultErr, closeErr)
+			}
+			done <- resultErr
+		}()
+
 		stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
 		defer stop()
 		connection, err := listener.Accept()
 		if err != nil {
-			done <- err
+			resultErr = err
 			return
 		}
-		defer connection.Close()
-		_, err = io.Copy(connection, connection)
-		done <- err
+		defer func() {
+			if closeErr := connection.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+				resultErr = errors.Join(resultErr, closeErr)
+			}
+		}()
+		// TCPConn 同时实现 ReaderFrom/WriterTo，直接 io.Copy 会在 Linux 首次调用时
+		// 启用 splice，并把一对 pipe 缓存在标准库的进程级 sync.Pool 中。Echo 夹具
+		// 不需要验证零拷贝；隐藏这两个可选接口后走普通缓冲复制，资源基线便只统计
+		// 当前 Tunnel 生命周期真正拥有且必须关闭的 FD。
+		reader := struct{ io.Reader }{Reader: connection}
+		writer := struct{ io.Writer }{Writer: connection}
+		_, resultErr = io.Copy(writer, reader)
 	}()
 	return listener.Addr(), done
 }

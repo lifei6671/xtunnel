@@ -15,6 +15,7 @@ $productDataDirectory = Join-Path $env:ProgramData 'XTunnel'
 $credentialDirectory = Join-Path $productDataDirectory 'credentials'
 $credentialPath = Join-Path $credentialDirectory 'agent.token.dpapi'
 $agentFullPath = [IO.Path]::GetFullPath($AgentPath)
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $installAttempted = $false
 $uninstallCompleted = $false
 $primaryFailure = $null
@@ -85,15 +86,16 @@ function Invoke-Agent {
 }
 
 function New-SmokeToken {
-    $bytes = New-Object byte[] 32
-    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
-    try {
-        $generator.GetBytes($bytes)
+    # The Connection Token wire format belongs to the Go protocol package. Reuse its
+    # production encoder instead of duplicating Protobuf and HMAC rules in PowerShell.
+    $token = & go -C $repositoryRoot run ./deploy/windows/smoketoken
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to generate Windows smoke Connection Token (exit code $LASTEXITCODE)"
     }
-    finally {
-        $generator.Dispose()
+    if (($null -eq $token) -or ([string]::IsNullOrWhiteSpace($token.ToString()))) {
+        throw 'Windows smoke Connection Token generator returned no Token'
     }
-    return 'xta_' + [Convert]::ToBase64String($bytes)
+    return $token.ToString().Trim()
 }
 
 function Assert-ServiceContract {

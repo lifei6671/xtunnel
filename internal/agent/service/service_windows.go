@@ -401,12 +401,32 @@ func waitForWindowsServiceState(ctx context.Context, installedService *mgr.Servi
 		if status.State == target {
 			return nil
 		}
+		if err := windowsServiceStoppedBeforeTarget(status, target); err != nil {
+			return err
+		}
 		select {
 		case <-waitContext.Done():
 			return fmt.Errorf("wait for Windows service state %d: %w", target, waitContext.Err())
 		case <-ticker.C:
 		}
 	}
+}
+
+func windowsServiceStoppedBeforeTarget(status svc.Status, target svc.State) error {
+	if target == svc.Stopped || status.State != svc.Stopped ||
+		(status.Win32ExitCode == 0 && status.ServiceSpecificExitCode == 0) {
+		return nil
+	}
+	// Start() 成功只表示 SCM 已接受启动请求。若服务随后以非零码停止，继续轮询
+	// Running 只会把真实启动错误隐藏成 30 秒超时；这里保留 SCM 的两个退出码，
+	// 让 CI 和管理员无需依赖尚未接入的 Windows Event Log 也能定位失败类型。
+	return fmt.Errorf(
+		"Windows service stopped before state %d: win32_exit_code=%d service_specific_exit_code=%d process_id=%d",
+		target,
+		status.Win32ExitCode,
+		status.ServiceSpecificExitCode,
+		status.ProcessId,
+	)
 }
 
 func stopWindowsService(ctx context.Context, installedService *mgr.Service) error {
