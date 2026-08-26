@@ -86,9 +86,9 @@ function Invoke-Agent {
 }
 
 function New-SmokeToken {
-    # The Connection Token wire format belongs to the Go protocol package. Reuse its
-    # production encoder instead of duplicating Protobuf and HMAC rules in PowerShell.
-    $token = & go -C $repositoryRoot run ./deploy/windows/smoketoken
+    # Connection Token Wire 归 Go Protocol Package 所有。这里复用生产编码器，
+    # 不在 PowerShell 中复制 Protobuf、HMAC 或 Base64URL 规则。
+    $token = & go -C $repositoryRoot run ./deploy/smoketoken
     if ($LASTEXITCODE -ne 0) {
         throw "failed to generate Windows smoke Connection Token (exit code $LASTEXITCODE)"
     }

@@ -17,7 +17,10 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/lifei6671/xtunnel/internal/protocol/validate"
 )
 
 const (
@@ -45,7 +48,26 @@ var (
 	ErrPinnedIdentityMismatch = errors.New("gateway pinned TLS key and certificate do not match")
 	// ErrPublicRotation 表示 public 模式的私钥由外部证书管理系统负责，不能使用本命令轮换。
 	ErrPublicRotation = errors.New("gateway key rotation is only available in pinned TLS mode")
+	// ErrRotationAuditPending 表示上一次离线换钥已经进入提交阶段，但权威审计尚未确认落库。
+	ErrRotationAuditPending = errors.New("gateway key rotation has a pending security audit event")
+	// ErrRotationAuditCleanupUncertain 表示事件已耐久提交且 Journal 已删除，但目录同步失败。
+	ErrRotationAuditCleanupUncertain = errors.New("gateway rotation audit cleanup durability is uncertain")
 )
+
+// RotationAuditMetadata 是离线换钥开始前必须持久化的审计标识。
+type RotationAuditMetadata struct {
+	EventID     string
+	OperationID string
+	OccurredAt  int64
+	ResourceID  string
+}
+
+// PendingRotationAudit 是身份文件已提交后等待写入权威审计库的不可变证据。
+type PendingRotationAudit struct {
+	RotationAuditMetadata
+	BeforeStateDigest [sha256.Size]byte
+	AfterStateDigest  [sha256.Size]byte
+}
 
 // Identity 是已经校验完毕、可供 Gateway 构造 TLS 配置的服务端身份。
 type Identity struct {
@@ -167,15 +189,24 @@ func LoadOrCreatePinnedIdentity(dataDir, hostname string, mayCreate bool, now ti
 
 // RotatePinnedIdentity 在已持有 Server External Lock 的离线维护窗口内轮换 SPKI。
 // Journal 在两个原子替换之间保持存在，使崩溃后的启动能够完成同一组替换而非加载错配文件。
-func RotatePinnedIdentity(dataDir, hostname string, now time.Time) (Identity, error) {
+func RotatePinnedIdentity(dataDir, hostname string, now time.Time, audit RotationAuditMetadata) (Identity, error) {
 	if hostname == "" {
 		return Identity{}, errors.New("gateway public hostname must not be empty")
+	}
+	if err := validateRotationAuditMetadata(audit); err != nil || audit.ResourceID != hostname {
+		return Identity{}, errors.New("gateway rotation audit metadata is invalid")
 	}
 	paths := identityPaths(dataDir)
 	if err := RecoverRotation(dataDir); err != nil {
 		return Identity{}, err
 	}
-	if _, err := LoadPinnedIdentity(dataDir); err != nil {
+	if _, exists, err := PendingRotationAuditEvent(dataDir); err != nil {
+		return Identity{}, err
+	} else if exists {
+		return Identity{}, ErrRotationAuditPending
+	}
+	before, err := LoadPinnedIdentity(dataDir)
+	if err != nil {
 		return Identity{}, fmt.Errorf("load existing gateway identity before rotation: %w", err)
 	}
 	certificate, err := newSelfSignedCertificate(hostname, now)
@@ -185,11 +216,19 @@ func RotatePinnedIdentity(dataDir, hostname string, now time.Time) (Identity, er
 	if err := writeKeyPair(paths.keyTemp, paths.certTemp, certificate); err != nil {
 		return Identity{}, err
 	}
-	journal := rotationJournal{Version: 1, KeyTemporary: paths.keyTemp, CertificateTemporary: paths.certTemp}
+	journal := rotationJournal{
+		Version: 2, KeyTemporary: paths.keyTemp, CertificateTemporary: paths.certTemp,
+		Audit: &rotationAuditJournal{
+			EventID: audit.EventID, OperationID: audit.OperationID,
+			OccurredAt: audit.OccurredAt, ResourceID: audit.ResourceID,
+			BeforeStateDigest: before.SPKIHash(),
+			AfterStateDigest:  sha256.Sum256(certificate.leaf.RawSubjectPublicKeyInfo),
+		},
+	}
 	if err := writeJournal(paths.journal, journal); err != nil {
 		return Identity{}, err
 	}
-	if err := completeRotation(paths, journal); err != nil {
+	if err := completeRotation(paths, journal, false); err != nil {
 		return Identity{}, err
 	}
 	return LoadPinnedIdentity(dataDir)
@@ -202,10 +241,72 @@ func RecoverRotation(dataDir string) error {
 	if err != nil || !exists {
 		return err
 	}
-	if journal.Version != 1 || journal.KeyTemporary != paths.keyTemp || journal.CertificateTemporary != paths.certTemp {
+	if journal.KeyTemporary != paths.keyTemp || journal.CertificateTemporary != paths.certTemp {
 		return errors.New("gateway rotation journal is invalid")
 	}
-	return completeRotation(paths, journal)
+	switch journal.Version {
+	case 1:
+		return completeRotation(paths, journal, true)
+	case 2:
+		if err := validateRotationAuditJournal(journal.Audit); err != nil {
+			return err
+		}
+		return completeRotation(paths, journal, false)
+	default:
+		return errors.New("gateway rotation journal is invalid")
+	}
+}
+
+// PendingRotationAuditEvent 返回已经完成或可恢复完成的 v2 换钥审计证据。
+func PendingRotationAuditEvent(dataDir string) (PendingRotationAudit, bool, error) {
+	journal, exists, err := readJournal(identityPaths(dataDir).journal)
+	if err != nil || !exists {
+		return PendingRotationAudit{}, false, err
+	}
+	if journal.Version != 2 {
+		return PendingRotationAudit{}, false, nil
+	}
+	if err := validateRotationAuditJournal(journal.Audit); err != nil {
+		return PendingRotationAudit{}, true, err
+	}
+	return PendingRotationAudit{
+		RotationAuditMetadata: RotationAuditMetadata{
+			EventID: journal.Audit.EventID, OperationID: journal.Audit.OperationID,
+			OccurredAt: journal.Audit.OccurredAt, ResourceID: journal.Audit.ResourceID,
+		},
+		BeforeStateDigest: journal.Audit.BeforeStateDigest,
+		AfterStateDigest:  journal.Audit.AfterStateDigest,
+	}, true, nil
+}
+
+// CompleteRotationAudit 删除已经幂等落库的换钥 Journal。调用方必须持有 External Lock。
+func CompleteRotationAudit(dataDir, eventID, operationID string) error {
+	return completeRotationAudit(dataDir, eventID, operationID, syncDirectory)
+}
+
+func completeRotationAudit(
+	dataDir, eventID, operationID string,
+	syncPKIDirectory func(string) error,
+) error {
+	paths := identityPaths(dataDir)
+	journal, exists, err := readJournal(paths.journal)
+	if err != nil {
+		return err
+	}
+	if !exists || journal.Version != 2 || journal.Audit == nil ||
+		journal.Audit.EventID != eventID || journal.Audit.OperationID != operationID {
+		return errors.New("gateway rotation audit journal does not match the committed event")
+	}
+	if err := os.Remove(paths.journal); err != nil {
+		return fmt.Errorf("remove gateway rotation audit journal: %w", err)
+	}
+	if err := syncPKIDirectory(paths.directory); err != nil {
+		return errors.Join(
+			ErrRotationAuditCleanupUncertain,
+			fmt.Errorf("sync completed gateway rotation audit: %w", err),
+		)
+	}
+	return nil
 }
 
 type identityFilePaths struct {
@@ -451,9 +552,38 @@ func writeKeyPair(keyPath, certPath string, certificate tlsCertificate) error {
 }
 
 type rotationJournal struct {
-	Version              int    `json:"version"`
-	KeyTemporary         string `json:"key_temporary"`
-	CertificateTemporary string `json:"certificate_temporary"`
+	Version              int                   `json:"version"`
+	KeyTemporary         string                `json:"key_temporary"`
+	CertificateTemporary string                `json:"certificate_temporary"`
+	Audit                *rotationAuditJournal `json:"audit,omitempty"`
+}
+
+type rotationAuditJournal struct {
+	EventID           string            `json:"event_id"`
+	OperationID       string            `json:"operation_id"`
+	OccurredAt        int64             `json:"occurred_at"`
+	ResourceID        string            `json:"resource_id"`
+	BeforeStateDigest [sha256.Size]byte `json:"before_state_digest"`
+	AfterStateDigest  [sha256.Size]byte `json:"after_state_digest"`
+}
+
+func validateRotationAuditJournal(audit *rotationAuditJournal) error {
+	if audit == nil || validateRotationAuditMetadata(RotationAuditMetadata{
+		EventID: audit.EventID, OperationID: audit.OperationID,
+		OccurredAt: audit.OccurredAt, ResourceID: audit.ResourceID,
+	}) != nil {
+		return errors.New("gateway rotation audit journal is invalid")
+	}
+	return nil
+}
+
+func validateRotationAuditMetadata(audit RotationAuditMetadata) error {
+	if !validate.ValidID(audit.EventID, "evt_") || !validate.ValidID(audit.OperationID, "op_") ||
+		audit.OccurredAt <= 0 || len(audit.ResourceID) == 0 || len(audit.ResourceID) > 256 ||
+		strings.TrimSpace(audit.ResourceID) != audit.ResourceID {
+		return errors.New("gateway rotation audit metadata is invalid")
+	}
+	return nil
 }
 
 func writeJournal(path string, journal rotationJournal) error {
@@ -485,7 +615,7 @@ func readJournal(path string) (rotationJournal, bool, error) {
 	return journal, true, nil
 }
 
-func completeRotation(paths identityFilePaths, journal rotationJournal) error {
+func completeRotation(paths identityFilePaths, journal rotationJournal, removeJournal bool) error {
 	for _, replacement := range []struct{ temporary, destination string }{
 		{journal.KeyTemporary, paths.key},
 		{journal.CertificateTemporary, paths.cert},
@@ -504,11 +634,13 @@ func completeRotation(paths identityFilePaths, journal rotationJournal) error {
 	if _, err := LoadPinnedIdentity(filepath.Dir(paths.directory)); err != nil {
 		return fmt.Errorf("validate recovered gateway identity: %w", err)
 	}
-	if err := os.Remove(paths.journal); err != nil {
-		return fmt.Errorf("remove gateway rotation journal: %w", err)
-	}
-	if err := syncDirectory(paths.directory); err != nil {
-		return fmt.Errorf("sync completed gateway rotation: %w", err)
+	if removeJournal {
+		if err := os.Remove(paths.journal); err != nil {
+			return fmt.Errorf("remove gateway rotation journal: %w", err)
+		}
+		if err := syncDirectory(paths.directory); err != nil {
+			return fmt.Errorf("sync completed gateway rotation: %w", err)
+		}
 	}
 	return nil
 }

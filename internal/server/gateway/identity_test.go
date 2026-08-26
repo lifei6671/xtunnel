@@ -186,22 +186,166 @@ func TestRenewPinnedIdentityPropagatesFailureWithoutChangingExistingIdentity(t *
 	}
 }
 
-func TestRotatePinnedIdentityChangesSPKIAndLeavesNoJournal(t *testing.T) {
+func TestRotatePinnedIdentityKeepsJournalUntilAuditCommit(t *testing.T) {
 	dataDir := t.TempDir()
 	now := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
 	before, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, now)
 	if err != nil {
 		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
 	}
-	after, err := RotatePinnedIdentity(dataDir, "gateway.example.test", now.Add(time.Hour))
+	audit := RotationAuditMetadata{
+		EventID: "evt_01K00000000000000000000000", OperationID: "op_01K00000000000000000000000",
+		OccurredAt: now.Add(time.Hour).Unix(), ResourceID: "gateway.example.test",
+	}
+	after, err := RotatePinnedIdentity(dataDir, "gateway.example.test", now.Add(time.Hour), audit)
 	if err != nil {
 		t.Fatalf("RotatePinnedIdentity() error = %v", err)
 	}
 	if before.SPKIHash() == after.SPKIHash() {
 		t.Fatal("RotatePinnedIdentity() did not change SPKI")
 	}
+	pending, exists, err := PendingRotationAuditEvent(dataDir)
+	if err != nil || !exists {
+		t.Fatalf("PendingRotationAuditEvent() = %#v, %t, %v", pending, exists, err)
+	}
+	if pending.EventID != audit.EventID || pending.OperationID != audit.OperationID ||
+		pending.BeforeStateDigest != before.SPKIHash() || pending.AfterStateDigest != after.SPKIHash() {
+		t.Fatalf("pending rotation audit = %#v", pending)
+	}
+	if _, err := RotatePinnedIdentity(dataDir, "gateway.example.test", now.Add(2*time.Hour), audit); !errors.Is(err, ErrRotationAuditPending) {
+		t.Fatalf("second RotatePinnedIdentity() error = %v, want ErrRotationAuditPending", err)
+	}
+	if err := CompleteRotationAudit(dataDir, audit.EventID, audit.OperationID); err != nil {
+		t.Fatalf("CompleteRotationAudit() error = %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(dataDir, pkiDirectoryName, journalFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("rotation journal remains after successful rotation: %v", err)
+		t.Fatalf("rotation journal remains after audit commit: %v", err)
+	}
+}
+
+func TestRotatePinnedIdentityRejectsInvalidAuditBeforeMutation(t *testing.T) {
+	dataDir := t.TempDir()
+	now := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	before, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, now)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
+	}
+	valid := RotationAuditMetadata{
+		EventID: "evt_01K00000000000000000000010", OperationID: "op_01K00000000000000000000010",
+		OccurredAt: now.Add(time.Hour).Unix(), ResourceID: "gateway.example.test",
+	}
+	tests := []struct {
+		name     string
+		hostname string
+		audit    RotationAuditMetadata
+	}{
+		{name: "invalid event id", hostname: valid.ResourceID, audit: func() RotationAuditMetadata {
+			value := valid
+			value.EventID = "evt_invalid"
+			return value
+		}()},
+		{name: "invalid operation id", hostname: valid.ResourceID, audit: func() RotationAuditMetadata {
+			value := valid
+			value.OperationID = "op_invalid"
+			return value
+		}()},
+		{name: "oversize resource", hostname: strings.Repeat("a", 257), audit: func() RotationAuditMetadata {
+			value := valid
+			value.ResourceID = strings.Repeat("a", 257)
+			return value
+		}()},
+		{name: "resource whitespace", hostname: " gateway.example.test", audit: func() RotationAuditMetadata {
+			value := valid
+			value.ResourceID = " gateway.example.test"
+			return value
+		}()},
+		{name: "resource mismatch", hostname: "other.example.test", audit: valid},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := RotatePinnedIdentity(dataDir, test.hostname, now.Add(time.Hour), test.audit); err == nil {
+				t.Fatal("RotatePinnedIdentity() error = nil, want invalid audit metadata")
+			}
+			after, err := LoadPinnedIdentity(dataDir)
+			if err != nil {
+				t.Fatalf("LoadPinnedIdentity() error = %v", err)
+			}
+			if after.SPKIHash() != before.SPKIHash() {
+				t.Fatal("invalid audit metadata changed the pinned identity")
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, pkiDirectoryName, journalFileName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("invalid audit metadata created a rotation journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestCompleteRotationAuditReportsUncertainDirectorySyncAfterRemovingJournal(t *testing.T) {
+	dataDir := t.TempDir()
+	now := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	if _, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, now); err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
+	}
+	audit := RotationAuditMetadata{
+		EventID: "evt_01K00000000000000000000011", OperationID: "op_01K00000000000000000000011",
+		OccurredAt: now.Add(time.Hour).Unix(), ResourceID: "gateway.example.test",
+	}
+	if _, err := RotatePinnedIdentity(dataDir, audit.ResourceID, now.Add(time.Hour), audit); err != nil {
+		t.Fatalf("RotatePinnedIdentity() error = %v", err)
+	}
+	injected := errors.New("injected directory sync failure")
+	err := completeRotationAudit(dataDir, audit.EventID, audit.OperationID, func(string) error { return injected })
+	if !errors.Is(err, ErrRotationAuditCleanupUncertain) || !errors.Is(err, injected) {
+		t.Fatalf("completeRotationAudit() error = %v, want cleanup uncertainty and injected error", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, pkiDirectoryName, journalFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rotation journal remains after successful unlink: %v", err)
+	}
+}
+
+func TestRecoverAuditedRotationKeepsEvidenceAfterPartialReplacement(t *testing.T) {
+	dataDir := t.TempDir()
+	now := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	before, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, now)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
+	}
+	paths := identityPaths(dataDir)
+	replacement, err := newSelfSignedCertificate("gateway.example.test", now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("newSelfSignedCertificate() error = %v", err)
+	}
+	if err := writeKeyPair(paths.keyTemp, paths.certTemp, replacement); err != nil {
+		t.Fatalf("writeKeyPair() error = %v", err)
+	}
+	journal := rotationJournal{
+		Version: 2, KeyTemporary: paths.keyTemp, CertificateTemporary: paths.certTemp,
+		Audit: &rotationAuditJournal{
+			EventID: "evt_01K00000000000000000000001", OperationID: "op_01K00000000000000000000001",
+			OccurredAt: now.Add(time.Hour).Unix(), ResourceID: "gateway.example.test",
+			BeforeStateDigest: before.SPKIHash(),
+			AfterStateDigest:  sha256.Sum256(replacement.leaf.RawSubjectPublicKeyInfo),
+		},
+	}
+	if err := writeJournal(paths.journal, journal); err != nil {
+		t.Fatalf("writeJournal() error = %v", err)
+	}
+	if err := os.Rename(paths.keyTemp, paths.key); err != nil {
+		t.Fatalf("os.Rename(key) error = %v", err)
+	}
+	if err := RecoverRotation(dataDir); err != nil {
+		t.Fatalf("RecoverRotation() error = %v", err)
+	}
+	pending, exists, err := PendingRotationAuditEvent(dataDir)
+	if err != nil || !exists {
+		t.Fatalf("PendingRotationAuditEvent() = %#v, %t, %v", pending, exists, err)
+	}
+	loaded, err := LoadPinnedIdentity(dataDir)
+	if err != nil {
+		t.Fatalf("LoadPinnedIdentity() error = %v", err)
+	}
+	if loaded.SPKIHash() != pending.AfterStateDigest {
+		t.Fatal("recovered identity does not match the pending audit after-state")
 	}
 }
 

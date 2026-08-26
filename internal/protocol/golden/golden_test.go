@@ -1,9 +1,11 @@
 package golden
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -18,7 +20,17 @@ func TestProtocolV1GoldenVectors(t *testing.T) {
 		t.Fatalf("编码 Token 失败: %v", err)
 	}
 	assertGoldenText(t, "connection-token-v1.txt", tokenText)
+	secondaryToken := goldenToken()
+	secondaryToken.TokenId = "tok_01J00000000000000000000001"
+	secondaryToken.AuthenticationSecret = bytes32(0x12)
+	secondaryTokenText, err := token.Encode(secondaryToken)
+	if err != nil {
+		t.Fatalf("编码第二个部署 Smoke Token 失败: %v", err)
+	}
+	assertGoldenText(t, "connection-token-v1-secondary.txt", secondaryTokenText)
 
+	sessionSecret := bytes32(0x11)
+	assertGoldenText(t, "work-hello-session-secret-v1.hex", hex.EncodeToString(sessionSecret))
 	workHello := &protocolv1.WorkHello{
 		TunnelId:      "tun_01J00000000000000000000000",
 		ConnectorId:   "con_01J00000000000000000000000",
@@ -27,10 +39,18 @@ func TestProtocolV1GoldenVectors(t *testing.T) {
 		BudgetLeaseId: "lease_01J00000000000000000000000",
 		Nonce:         bytes32(0x42),
 	}
-	mac, err := deterministic.ComputeWorkHelloMAC(bytes32(0x11), workHello)
+	workPayload, err := deterministic.WorkHelloBytesWithoutMAC(workHello)
+	if err != nil {
+		t.Fatalf("编码无 MAC WorkHello 失败: %v", err)
+	}
+	assertGoldenText(t, "work-hello-without-mac-v1.hex", hex.EncodeToString(workPayload))
+	hmacInput := append([]byte(deterministic.WorkMACDomain), workPayload...)
+	assertGoldenText(t, "work-hello-hmac-input-v1.hex", hex.EncodeToString(hmacInput))
+	mac, err := deterministic.ComputeWorkHelloMAC(sessionSecret, workHello)
 	if err != nil {
 		t.Fatalf("计算 WorkHello MAC 失败: %v", err)
 	}
+	assertGoldenText(t, "work-hello-mac-v1.hex", hex.EncodeToString(mac))
 	workHello.Mac = mac
 	workBytes, err := deterministic.Marshal(workHello)
 	if err != nil {
@@ -51,6 +71,9 @@ func TestProtocolV1GoldenVectors(t *testing.T) {
 		t.Fatalf("编码 Snapshot 失败: %v", err)
 	}
 	assertGoldenText(t, "snapshot-v1.hex", hex.EncodeToString(snapshotBytes))
+	snapshotHash := sha256.Sum256(snapshotBytes)
+	assertGoldenText(t, "snapshot-v1.sha256", hex.EncodeToString(snapshotHash[:]))
+	assertGoldenText(t, "snapshot-v1.size", strconv.Itoa(len(snapshotBytes)))
 
 	// ConfigAck 的 Revision 必须与固定字节关联，防止后续字段调整让确认消息
 	// 意外丢失已观测版本号。

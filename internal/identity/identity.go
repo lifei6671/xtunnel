@@ -17,6 +17,8 @@ const (
 	leasePrefix      = "lease_"
 	connectionPrefix = "conn_"
 	drainPrefix      = "drain_"
+	auditEventPrefix = "evt_"
+	operationPrefix  = "op_"
 	ulidLength       = 26
 	maxULIDMillis    = (1 << 48) - 1
 
@@ -103,6 +105,24 @@ func NewDrainID() (string, error) {
 	id, err := newID(drainPrefix, time.Now(), rand.Reader)
 	if err != nil {
 		return "", fmt.Errorf("generate drain identifier: %w", err)
+	}
+	return id, nil
+}
+
+// NewAuditEventID 为一条不可变安全审计证据生成独立身份。
+func NewAuditEventID() (string, error) {
+	id, err := newID(auditEventPrefix, time.Now(), rand.Reader)
+	if err != nil {
+		return "", fmt.Errorf("generate security audit event identifier: %w", err)
+	}
+	return id, nil
+}
+
+// NewOperationID 为一次安全操作生成跨审计写入重试复用的身份。
+func NewOperationID() (string, error) {
+	id, err := newID(operationPrefix, time.Now(), rand.Reader)
+	if err != nil {
+		return "", fmt.Errorf("generate security operation identifier: %w", err)
 	}
 	return id, nil
 }

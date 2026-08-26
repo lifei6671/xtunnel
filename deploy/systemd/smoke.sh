@@ -75,6 +75,7 @@ for service_user in xtunnel-server xtunnel-agent; do
 done
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 temp_dir=$(mktemp -d)
 
 cleanup() {
@@ -119,7 +120,18 @@ agent_gateway:
   public_hostname: smoke.invalid
 EOF
 
-smoke_agent_token=xta_systemd_smoke_not_secret
+first_token_path="$repo_dir/tests/golden/protocol-v1/connection-token-v1.txt"
+second_token_path="$repo_dir/tests/golden/protocol-v1/connection-token-v1-secondary.txt"
+if [ ! -r "$first_token_path" ] || [ ! -r "$second_token_path" ]; then
+	printf '%s\n' "systemd smoke Connection Token fixtures are not readable" >&2
+	exit 1
+fi
+IFS= read -r smoke_agent_token <"$first_token_path" || true
+IFS= read -r reinstall_agent_token <"$second_token_path" || true
+if [ -z "$smoke_agent_token" ] || [ -z "$reinstall_agent_token" ] || [ "$smoke_agent_token" = "$reinstall_agent_token" ]; then
+	printf '%s\n' "systemd smoke Connection Token fixtures must be non-empty and distinct" >&2
+	exit 1
+fi
 
 sh "$script_dir/install.sh" server --binary "$server_binary" --config "$temp_dir/server.yaml"
 if "$agent_binary" service install >/dev/null 2>&1; then
@@ -132,7 +144,7 @@ if "$agent_binary" service install --token invalid-smoke-token >/dev/null 2>&1; 
 fi
 "$agent_binary" service install --token "$smoke_agent_token"
 first_agent_pid=$(systemctl show --property=MainPID --value xtunnel-agent.service)
-smoke_agent_token=xta_systemd_reinstall_not_secret
+smoke_agent_token=$reinstall_agent_token
 "$agent_binary" service install --token "$smoke_agent_token"
 second_agent_pid=$(systemctl show --property=MainPID --value xtunnel-agent.service)
 case "$first_agent_pid:$second_agent_pid" in

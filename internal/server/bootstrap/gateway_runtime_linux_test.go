@@ -15,7 +15,11 @@ import (
 	"testing"
 	"time"
 
+	libsqlite "github.com/libtnb/sqlite"
+	"gorm.io/gorm"
+
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
+	"github.com/lifei6671/xtunnel/internal/repository"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	"github.com/lifei6671/xtunnel/internal/server/datadir"
@@ -24,6 +28,66 @@ import (
 )
 
 const gatewayLockHelperEnvironment = "XTUNNEL_GATEWAY_ROTATE_LOCK_HELPER"
+
+func TestServerStartupReconcilesGatewayRotationAuditBeforeBootstrap(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runtimeDir := newRuntimeDirectory(t)
+	dataDir := t.TempDir()
+	store, err := sqlite.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	now := time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC)
+	if _, err := gateway.LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, now); err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
+	}
+	audit := gateway.RotationAuditMetadata{
+		EventID: "evt_01J00000000000000000000021", OperationID: "op_01J00000000000000000000021",
+		OccurredAt: now.Add(time.Hour).Unix(), ResourceID: "gateway.example.test",
+	}
+	if _, err := gateway.RotatePinnedIdentity(dataDir, "gateway.example.test", now.Add(time.Hour), audit); err != nil {
+		t.Fatalf("RotatePinnedIdentity() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Store.Close() error = %v", err)
+	}
+	configPath := writeConfig(t, "management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: gateway.example.test\n")
+	bootstrapCalled := false
+	err = runWithStorageAndBootstrap(
+		ctx,
+		"xtunnel-server",
+		[]string{"--config", configPath, "--set", "server.data_dir=" + dataDir},
+		nil,
+		&bytes.Buffer{},
+		func(ctx context.Context, dataDir string) (storage, error) {
+			return openServerStorage(ctx, dataDir, runtimeDir)
+		},
+		func(context.Context, serverconfig.Config, storage) (io.Closer, error) {
+			bootstrapCalled = true
+			if _, exists, err := gateway.PendingRotationAuditEvent(dataDir); err != nil || exists {
+				t.Fatalf("PendingRotationAuditEvent() in bootstrap = exists %t, error %v", exists, err)
+			}
+			database := openGatewayAuditDatabase(t, dataDir)
+			defer closeGatewayAuditDatabase(t, database)
+			var count int64
+			if err := database.Table(sqlite.SecurityAuditEventTable).Count(&count).Error; err != nil {
+				t.Fatalf("count reconciled audit events error = %v", err)
+			}
+			if count != 1 {
+				t.Fatalf("audit event count before bootstrap = %d, want 1", count)
+			}
+			cancel()
+			return nil, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("runWithStorageAndBootstrap() error = %v", err)
+	}
+	if !bootstrapCalled {
+		t.Fatal("bootstrap callback was not called")
+	}
+}
 
 // TestFirstAdminCreationStartsGateway 验证首个管理员提交成功之后才真正开始监听 Gateway。
 // 测试使用允许任意本机连接的测试授权器，避免把运行时 root 对等校验误当作生命周期结论。
@@ -314,7 +378,9 @@ func TestGatewayRotateKeyExternalLock(t *testing.T) {
 	}
 	// 进程已回收，Cleanup 不再重复 Wait，只保留路径清理由 TempDir 负责。
 
-	if err := runGatewayRotateKey(context.Background(), "xtunnel-server", commandArgs, nil, &bytes.Buffer{}, runtimeDir, time.Now().Add(time.Second)); err != nil {
+	rotationOutput := &bytes.Buffer{}
+	rotationTime := time.Now().Add(time.Second)
+	if err := runGatewayRotateKey(context.Background(), "xtunnel-server", commandArgs, nil, rotationOutput, runtimeDir, rotationTime); err != nil {
 		t.Fatalf("runGatewayRotateKey() after lock release error = %v", err)
 	}
 	afterRotation, err := gateway.LoadPinnedIdentity(dataDir)
@@ -323,6 +389,124 @@ func TestGatewayRotateKeyExternalLock(t *testing.T) {
 	}
 	if afterRotation.SPKIHash() == before.SPKIHash() {
 		t.Fatal("successful gateway rotation did not change pinned identity")
+	}
+	database := openGatewayAuditDatabase(t, dataDir)
+	var audit struct {
+		EventID           string
+		OperationID       string
+		Action            string
+		ActorType         string
+		ResourceID        string
+		Result            string
+		BeforeStateDigest []byte
+		AfterStateDigest  []byte
+		OccurredAt        int64
+	}
+	if err := database.Table(sqlite.SecurityAuditEventTable).Take(&audit).Error; err != nil {
+		t.Fatalf("read gateway rotation audit event error = %v", err)
+	}
+	beforeDigest := before.SPKIHash()
+	afterDigest := afterRotation.SPKIHash()
+	if audit.EventID == "" || audit.OperationID == "" || audit.Action != repository.SecurityAuditActionGatewayKeyRotate ||
+		audit.ActorType != repository.SecurityAuditActorLocalOperator || audit.ResourceID != "gateway.example.test" ||
+		audit.Result != repository.SecurityAuditResultSucceeded || audit.OccurredAt != rotationTime.UTC().Unix() ||
+		!bytes.Equal(audit.BeforeStateDigest, beforeDigest[:]) || !bytes.Equal(audit.AfterStateDigest, afterDigest[:]) {
+		t.Fatalf("gateway rotation audit event = %#v", audit)
+	}
+	if !strings.Contains(rotationOutput.String(), `"event":"security_audit_event"`) {
+		t.Fatalf("gateway rotation output %q does not contain structured security log", rotationOutput.String())
+	}
+
+	if err := database.Exec(`
+		CREATE TRIGGER reject_gateway_rotation_audit
+		BEFORE INSERT ON security_audit_events
+		BEGIN
+			SELECT RAISE(ABORT, 'injected audit failure');
+		END;
+	`).Error; err != nil {
+		t.Fatalf("create injected audit failure trigger error = %v", err)
+	}
+	closeGatewayAuditDatabase(t, database)
+	beforeAuditFailure := afterRotation
+	auditFailureOutput := &bytes.Buffer{}
+	err = runGatewayRotateKey(context.Background(), "xtunnel-server", commandArgs, nil, auditFailureOutput, runtimeDir, rotationTime.Add(time.Second))
+	if !errors.Is(err, errGatewayRotationAuditAfterCommit) {
+		t.Fatalf("runGatewayRotateKey() audit failure error = %v, want errGatewayRotationAuditAfterCommit", err)
+	}
+	if !strings.Contains(auditFailureOutput.String(), `"error_code":"AUDIT_WRITE_FAILED_AFTER_COMMIT"`) {
+		t.Fatalf("gateway rotation audit failure output = %q", auditFailureOutput.String())
+	}
+	if strings.Contains(auditFailureOutput.String(), `"event":"security_audit_event"`) {
+		t.Fatalf("failed gateway rotation audit emitted success event: %q", auditFailureOutput.String())
+	}
+	afterAuditFailure, err := gateway.LoadPinnedIdentity(dataDir)
+	if err != nil {
+		t.Fatalf("LoadPinnedIdentity() after audit failure error = %v", err)
+	}
+	if afterAuditFailure.SPKIHash() == beforeAuditFailure.SPKIHash() {
+		t.Fatal("audit failure incorrectly reported that gateway rotation did not commit")
+	}
+	if _, exists, err := gateway.PendingRotationAuditEvent(dataDir); err != nil || !exists {
+		t.Fatalf("PendingRotationAuditEvent() after audit failure = exists %t, error %v", exists, err)
+	}
+	database = openGatewayAuditDatabase(t, dataDir)
+	var count int64
+	if err := database.Table(sqlite.SecurityAuditEventTable).Count(&count).Error; err != nil {
+		t.Fatalf("count audit events after injected failure error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit event count after injected failure = %d, want 1", count)
+	}
+	if err := database.Exec(`DROP TRIGGER reject_gateway_rotation_audit`).Error; err != nil {
+		t.Fatalf("drop injected audit failure trigger error = %v", err)
+	}
+	closeGatewayAuditDatabase(t, database)
+
+	recoveryOutput := &bytes.Buffer{}
+	if err := runGatewayRotateKey(context.Background(), "xtunnel-server", commandArgs, nil, recoveryOutput, runtimeDir, rotationTime.Add(2*time.Second)); err != nil {
+		t.Fatalf("runGatewayRotateKey() audit recovery error = %v", err)
+	}
+	if !strings.Contains(recoveryOutput.String(), `"event":"gateway_rotation_audit_reconciled"`) ||
+		!strings.Contains(recoveryOutput.String(), `"rotation_performed":false`) {
+		t.Fatalf("gateway rotation audit recovery output = %q", recoveryOutput.String())
+	}
+	afterRecovery, err := gateway.LoadPinnedIdentity(dataDir)
+	if err != nil {
+		t.Fatalf("LoadPinnedIdentity() after audit recovery error = %v", err)
+	}
+	if afterRecovery.SPKIHash() != afterAuditFailure.SPKIHash() {
+		t.Fatal("audit recovery unexpectedly performed another gateway rotation")
+	}
+	if _, exists, err := gateway.PendingRotationAuditEvent(dataDir); err != nil || exists {
+		t.Fatalf("PendingRotationAuditEvent() after recovery = exists %t, error %v", exists, err)
+	}
+	database = openGatewayAuditDatabase(t, dataDir)
+	defer closeGatewayAuditDatabase(t, database)
+	if err := database.Table(sqlite.SecurityAuditEventTable).Count(&count).Error; err != nil {
+		t.Fatalf("count audit events after recovery error = %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("audit event count after recovery = %d, want 2", count)
+	}
+}
+
+func openGatewayAuditDatabase(t *testing.T, dataDir string) *gorm.DB {
+	t.Helper()
+	database, err := gorm.Open(libsqlite.Open(filepath.Join(dataDir, "xtunnel.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open gateway audit database error = %v", err)
+	}
+	return database
+}
+
+func closeGatewayAuditDatabase(t *testing.T, database *gorm.DB) {
+	t.Helper()
+	pool, err := database.DB()
+	if err != nil {
+		t.Fatalf("get gateway audit database pool error = %v", err)
+	}
+	if err := pool.Close(); err != nil {
+		t.Fatalf("close gateway audit database error = %v", err)
 	}
 }
 

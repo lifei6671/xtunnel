@@ -14,3 +14,8 @@ var SchemaMigrations string
 //
 //go:embed 000002_tunnels.sql
 var TunnelDomain string
+
+// SecurityAuditEvents 包含 M1-04 的 append-only 最小安全审计事件契约。
+//
+//go:embed 000003_security_audit_events.sql
+var SecurityAuditEvents string

@@ -77,6 +77,22 @@ fi
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 
+agent_token=
+if [ "$target" = agent ]; then
+	agent_token_path="$repo_dir/tests/golden/protocol-v1/connection-token-v1.txt"
+	if [ ! -r "$agent_token_path" ]; then
+		printf 'Agent smoke Connection Token fixture is not readable: %s\n' "$agent_token_path" >&2
+		exit 1
+	fi
+	# Protocol Golden 由生产编码器生成并逐字节锁定。复用该公开测试向量可让
+	# OCI Smoke 保持“只依赖 Docker”，同时避免 Shell 复制 Wire 编码规则。
+	IFS= read -r agent_token <"$agent_token_path" || true
+	if [ -z "$agent_token" ]; then
+		printf '%s\n' "Agent smoke Connection Token fixture is empty" >&2
+		exit 1
+	fi
+fi
+
 if [ "$build_image" -eq 1 ]; then
 	if ! docker buildx version >/dev/null 2>&1; then
 		printf '%s\n' "docker buildx is required to build the OCI smoke image" >&2
@@ -106,7 +122,6 @@ fi
 volume=
 container=
 boundary_container=
-agent_token=xta_oci_smoke_not_secret
 # Server 默认容量的 FD 预算为 87188。OCI Runtime 必须显式提供更高的
 # soft/hard limit；镜像内的非 root 进程无法自行提升宿主施加的硬上限。
 server_nofile_limit=1048576
@@ -167,7 +182,17 @@ wait_for_start() {
 	attempt=0
 	while [ "$attempt" -lt 30 ]; do
 		if docker logs "$container" 2>&1 | grep -F '"event":"process_started"' >/dev/null; then
-			return 0
+			# process_started 是历史日志，不等于进程此刻仍然存活。额外观察一个
+			# 调度周期，避免把“启动后立即因永久错误退出”误判为健康启动。
+			if [ "$(docker inspect --format '{{.State.Running}}' "$container")" = true ]; then
+				sleep 1
+				if [ "$(docker inspect --format '{{.State.Running}}' "$container")" = true ]; then
+					return 0
+				fi
+			fi
+			docker logs "$container" >&2 || true
+			printf '%s\n' "container exited after process_started" >&2
+			return 1
 		fi
 		if [ "$(docker inspect --format '{{.State.Running}}' "$container")" != true ]; then
 			docker logs "$container" >&2 || true
@@ -196,7 +221,14 @@ verify_runtime_mounts() {
 }
 
 stop_target() {
-	docker kill --signal TERM "$container" >/dev/null
+	# 容器在收到本次 SIGTERM 前退出属于生命周期失败，不能用 `|| true`
+	# 掩盖；捕获 Docker 错误并附带最终状态，便于 CI 直接定位根因。
+	if ! kill_error=$(docker kill --signal TERM "$container" 2>&1); then
+		container_state=$(docker inspect --format 'status={{.State.Status}} exit={{.State.ExitCode}}' "$container" 2>/dev/null || printf '%s' unavailable)
+		docker logs "$container" >&2 || true
+		printf 'container was not running when SIGTERM was sent: %s (%s)\n' "$container_state" "$kill_error" >&2
+		return 1
+	fi
 	status=$(docker wait "$container")
 	if [ "$status" -ne 0 ]; then
 		docker logs "$container" >&2 || true

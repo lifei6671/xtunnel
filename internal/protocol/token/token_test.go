@@ -1,6 +1,7 @@
 package token
 
 import (
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -54,6 +55,38 @@ func TestParseRejectsTamperingBeforeUse(t *testing.T) {
 	}
 	if _, err := Parse(strings.Replace(text, Prefix, "xta=", 1)); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("Parse() prefix error = %v, want ErrMalformed", err)
+	}
+}
+
+func TestEncodeAndParseRejectUnknownFormatVersion(t *testing.T) {
+	connectionToken := testToken()
+	connectionToken.FormatVersion = FormatVersionV1 + 1
+	if _, err := Encode(connectionToken); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("Encode() unknown format version error = %v, want ErrMalformed", err)
+	}
+
+	encoded, err := Encode(testToken())
+	if err != nil {
+		t.Fatalf("Encode() v1 error = %v", err)
+	}
+	parsed, err := Parse(encoded)
+	if err != nil {
+		t.Fatalf("Parse() v1 error = %v", err)
+	}
+	parsed.FormatVersion = FormatVersionV1 + 1
+	parsed.IntegrityTag = nil
+	tag, err := integrityTag(parsed)
+	if err != nil {
+		t.Fatalf("integrityTag() unknown-version fixture error = %v", err)
+	}
+	parsed.IntegrityTag = tag
+	raw, err := marshalDeterministic(parsed)
+	if err != nil {
+		t.Fatalf("marshalDeterministic() unknown-version fixture error = %v", err)
+	}
+	unknownVersionText := Prefix + base64.RawURLEncoding.EncodeToString(raw)
+	if _, err := Parse(unknownVersionText); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("Parse() unknown format version error = %v, want ErrMalformed", err)
 	}
 }
 

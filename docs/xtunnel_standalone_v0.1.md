@@ -1597,7 +1597,7 @@ heartbeat_interval = 10s
 heartbeat_timeout = 30s
 ```
 
-`AgentAuthSuccess.heartbeat_interval_ms` 是该 Control Session 的 Server 权威值，必须满足 `0 < heartbeat_interval <= heartbeat_timeout / 3`。Agent 认证成功后立即采用，不能继续使用本地旧默认值。Server 以本地单调时钟记录“最后一次成功收到 Heartbeat”的时间并判断 Timeout，不使用客户端 `timestamp_ms` 计算存活，避免时钟漂移造成误下线。
+`ConnectorAuthSuccess.heartbeat_interval_ms` 是该 Control Session 的 Server 权威值，必须满足 `0 < heartbeat_interval <= heartbeat_timeout / 3`。Agent 认证成功后立即采用，不能继续使用本地旧默认值。Server 以本地单调时钟记录“最后一次成功收到 Heartbeat”的时间并判断 Timeout，不使用客户端 `timestamp_ms` 计算存活，避免时钟漂移造成误下线。
 
 Agent：
 
@@ -6180,15 +6180,47 @@ Authorization Header
 Secret 拼入 `event`、错误文本或任意非敏感字段，也不得直接记录完整 Config、
 HTTP Header、Cookie、请求体或认证对象。
 
-Security Audit Event 是持久化安全证据，不等同于可丢弃的普通运行日志。M1-04 收口前
-必须把最小 Event 冻结为机器可校验契约：明确 bounded/nullable、幂等 `event_id`/
-`operation_id`、`event`/`action` 枚举、Actor、Source IP、Resource、Result、稳定 Error Code、
-`request_id/trace_id`、可选前后状态 Digest，以及 Writer 失败是否令安全操作失败的语义。
-Metadata 必须有界且使用允许字段，绝不能保存业务正文、Secret、Private Key、Cookie 或
-Credential 原文。事件通过统一 Application Audit Writer 追加写入 SQLite
-`security_audit_events`，并派生结构化 Security Log；Management API 不提供 UPDATE/DELETE。
-M1 写事件，M5 实现只读查询 API，M6 实现导出、告警和 Dashboard；Migration 落地前仍
-必须取得数据库 Schema 变更确认。
+Security Audit Event 是持久化安全证据，不等同于可丢弃的普通运行日志。M1-04 的最小
+机器契约由 `migrations/000003_security_audit_events.sql` 与 Repository 校验共同执行：
+
+- `event_id=evt_<ULID>` 是主键，`operation_id=op_<ULID>` 全局唯一；相同两个 ID 且全部
+  字段一致的重放视为成功，任一 ID 已绑定到不同内容时以冲突失败，绝不覆盖旧证据。
+- M1 枚举只允许 `event=SECURITY_OPERATION_RESULT`、`action=GATEWAY_KEY_ROTATE`、
+  `actor_type=LOCAL_OPERATOR`、`resource_type=GATEWAY_IDENTITY`，以及
+  `result=SUCCEEDED|FAILED`。离线维护命令没有已认证个人身份或网络来源，`actor_id` 与
+  `source_ip` 必须为 `NULL`；`resource_id` 为 1—256 字节的 Gateway Public Hostname。
+- `error_code` 最多 64 字节，成功时必须为 `NULL`，失败时必须非空；`request_id` 与
+  `trace_id` 可空，非空时最多 128 字节。`before_state_digest` 与
+  `after_state_digest` 可空，非空时必须精确为 32 字节；`occurred_at` 是大于零的 UTC
+  Unix 秒。
+- M1 不提供通用 Metadata 列，因而不存在可写的任意 Metadata 字段。未来增加 Metadata
+  必须先冻结字段允许列表、单值长度和总大小，且绝不能保存业务正文、Secret、Private
+  Key、Cookie 或 Credential 原文。
+- Application Audit Writer 只暴露 `Append`。SQLite Trigger 拒绝 UPDATE/DELETE；提交
+  使用固定物理连接在 `BEGIN IMMEDIATE` 前临时切换 `synchronous=FULL`，只有耐久 COMMIT
+  成功并恢复普通 `NORMAL` 模式后才派生结构化 `security_audit_event` 日志；普通 Observer
+  不得替代持久化写入。
+
+`gateway rotate-key --maintenance` 在换钥前完成 Migration、Writer 初始化、旧 SPKI 读取及
+`event_id/operation_id` 生成；上述步骤失败时不得换钥。v2 Rotation Journal 在替换 Identity
+文件前持久化事件/操作 ID、发生时间、资源标识及前后 SPKI SHA-256 Digest，不保存 Private
+Key、Token 或其他 Credential。崩溃恢复可以继续完成同一组文件替换，但在权威审计事件幂等
+追加成功前必须保留 Journal。
+
+普通 Server 启动在 Admin Bootstrap 或 Gateway Listener 启动前执行 Reconciliation：先恢复
+Identity 文件，再验证当前 SPKI 等于 Journal 的 after-state，随后使用原事件/操作 ID 幂等追加
+SQLite 事件，最后才删除并同步 Journal。若写入失败，Server 启动失败；若维护命令在 Identity
+提交后写入失败，Identity 不回滚，命令以非零退出并记录稳定错误码
+`AUDIT_WRITE_FAILED_AFTER_COMMIT`。再次执行维护命令时必须先完成旧事件的 Reconciliation
+并直接结束，不得在待审计操作上再轮换一次；数据库已提交但 Journal 尚未清理的重放只能生成
+同一条持久化事件。
+
+若事件已经耐久提交且 Journal unlink 成功，但最后一次 PKI 目录同步失败，当前操作记录
+`AUDIT_JOURNAL_DIRECTORY_SYNC_FAILED` Warning 后仍按成功结束，避免把 cleanup durability 的
+不确定性误报成审计写失败并诱导第二次换钥。断电后 Journal 如果重新出现，启动流程仍以原
+ID 幂等重放并再次清理。
+
+M1 写事件，M5 只实现查询 API且不提供 UPDATE/DELETE，M6 实现导出、告警和 Dashboard。
 
 ---
 

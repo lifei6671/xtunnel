@@ -95,6 +95,11 @@ func runWithStorageAndBootstrap(
 	if err != nil {
 		return fmt.Errorf("initialize server storage: %w", err)
 	}
+	if serverResources, ok := resources.(*serverStorage); ok {
+		if _, err := reconcileGatewayRotationAudit(ctx, serverResources.dataDir, serverResources.database, logger); err != nil {
+			return errors.Join(fmt.Errorf("reconcile gateway rotation security audit before startup: %w", err), resources.Close())
+		}
+	}
 	var bootstrapSocket io.Closer
 	if openBootstrap != nil {
 		bootstrapSocket, err = openBootstrap(ctx, config, resources)

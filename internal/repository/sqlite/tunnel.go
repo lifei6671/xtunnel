@@ -120,11 +120,33 @@ func (store *Store) Read(ctx context.Context, fn func(repository.RepositoryView)
 // GORM 没有公开的 SQLite 事务模式参数，因此在独占连接上显式执行 BEGIN IMMEDIATE。
 // 已经由外层开启事务后，还必须关闭 GORM Create 的默认事务，避免嵌套 BEGIN 破坏边界。
 func (store *Store) WithTx(ctx context.Context, fn func(repository.TxStore) error) error {
+	return store.withTx(ctx, false, fn)
+}
+
+// WithDurableTx 在当前连接上临时使用 synchronous=FULL，使成功 COMMIT 在返回前同步 WAL。
+// 该路径只用于必须先于外部 Journal 清理完成耐久提交的低频安全操作。
+func (store *Store) WithDurableTx(ctx context.Context, fn func(repository.TxStore) error) error {
+	return store.withTx(ctx, true, fn)
+}
+
+func (store *Store) withTx(ctx context.Context, durable bool, fn func(repository.TxStore) error) error {
 	if fn == nil {
 		return errors.New("repository transaction callback must not be nil")
 	}
 
 	return store.database.WithContext(ctx).Connection(func(connection *gorm.DB) (resultErr error) {
+		if durable {
+			if err := connection.Exec("PRAGMA synchronous = FULL").Error; err != nil {
+				return fmt.Errorf("enable durable SQLite transaction: %w", err)
+			}
+			defer func() {
+				restoreContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+				defer cancel()
+				if err := connection.WithContext(restoreContext).Exec("PRAGMA synchronous = NORMAL").Error; err != nil {
+					resultErr = errors.Join(resultErr, fmt.Errorf("restore normal SQLite synchronous mode: %w", err))
+				}
+			}()
+		}
 		if err := connection.Exec("BEGIN IMMEDIATE").Error; err != nil {
 			return fmt.Errorf("begin immediate repository transaction: %w", err)
 		}

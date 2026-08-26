@@ -114,6 +114,14 @@ func TestConnectorAndSessionIdentity(t *testing.T) {
 	if err != nil || !validID(drainID, drainPrefix) {
 		t.Fatalf("NewDrainID() = %q, %v, want drain_ ULID", drainID, err)
 	}
+	auditEventID, err := NewAuditEventID()
+	if err != nil || !validID(auditEventID, auditEventPrefix) {
+		t.Fatalf("NewAuditEventID() = %q, %v, want evt_ ULID", auditEventID, err)
+	}
+	operationID, err := NewOperationID()
+	if err != nil || !validID(operationID, operationPrefix) {
+		t.Fatalf("NewOperationID() = %q, %v, want op_ ULID", operationID, err)
+	}
 }
 
 func TestValidateIDs(t *testing.T) {

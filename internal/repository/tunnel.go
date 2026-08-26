@@ -133,6 +133,7 @@ type RepositoryView interface {
 // TxStore 是一次写事务内共享的 Repository 视图。
 type TxStore interface {
 	RepositoryView
+	SecurityAuditEvents() SecurityAuditEventRepository
 }
 
 // Store 定义跨表不变量使用的事务边界。
@@ -140,4 +141,5 @@ type TxStore interface {
 type Store interface {
 	Read(context.Context, func(RepositoryView) error) error
 	WithTx(context.Context, func(TxStore) error) error
+	WithDurableTx(context.Context, func(TxStore) error) error
 }

@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-08-25
+> **进度基线日期**：2026-08-26
 >
-> **当前阶段**：M1 Secure TCP Data Plane Baseline（用户授权在 M05-10 未 DONE 时提前开发；Gate 不视为通过）
+> **当前阶段**：M1 Secure TCP Data Plane Baseline · REVIEW（用户授权在 M05-10 未 DONE 时提前开发；Gate 不视为通过）
 >
-> **当前结论**：M1 核心能力已按 Tunnel→Connector→Service 模型实现并进入 Review：Tunnel 持有可重复取回的 ACTIVE Token，同一 Token 可启动多个 ephemeral Connector；Service 直接归属 Tunnel；新连接只在未排空且有 Idle Work 的 Connector 中按 Least Active + Round Robin 选择。本地全包 Test/Race/Vet、TCP Echo E2E 和 Linux FD 分支交叉编译已通过。M1-04 的 TLS/ALPN、证书续签、热加载与离线 Rotation 主路径已实现；证书到期 Metric 与 30/7/1 天告警归属 M6-02/M6-06，不再作为 M1-04 的完成前置。M1-04 只剩 Minimal Security Audit Event 契约及 append-only 写入路径；M05-10 仍等待最新契约的 CI/独立复审，因此 M1 Gate 不标记 `DONE`，M2 保持 `NOT_STARTED`。
+> **当前结论**：M1-01 至 M1-14 的实现均已进入 `REVIEW`。M1-04 已补齐 Minimal Security Audit Event Migration、GORM append-only Repository、`synchronous=FULL` 耐久 Writer，以及带事件/操作 ID 和前后 SPKI Digest 的 v2 Rotation Journal；数据库失败会保留 Journal，普通 Server 在 Bootstrap/监听前幂等补写。Windows 全包 Test/Race/Vet、TCP Echo E2E 和 Linux amd64/arm64 交叉测试编译已通过。M05-04 的最新契约 `lint/breaking/generate-check` 已在 CI #10 的两个 Linux Job 通过并进入 `REVIEW`，独立 Protocol Review 也已完成；但 CI #10 整体仍因后续 Agent OCI Smoke 失败而非全绿，修复尚无新 CI Run。因此 M05-10 与 M1 Gate 均不标记 `DONE`，等待用户阶段 Review，M2 保持 `NOT_STARTED`。
 
 ---
 
@@ -182,7 +182,7 @@ M0.5 Gate 通过前，禁止开发 Server/Agent Protocol Handler。可并行开�
 | M05-01 | 冻结 Common Types | M0-06 | `api/proto/common.proto` | package/go_package、enum 数值、reserved range、ErrorCode 完整 | `REVIEW` |
 | M05-02 | 冻结 Connection Token + Auth/Control Contract | M05-01 | Connection Token v1 编码/解析契约、`api/proto/control.proto` | Token 仍是单个不透明 `xta_...`；冻结 Endpoint、TLS Trust、Tunnel/Token Identity、Secret 的精确编码/完整性/版本分派与失败语义；Connector 裸 Auth Frame、ControlEnvelope、TunnelSnapshot/ConfigAck、ServiceHealth Batch 完整 | `REVIEW` |
 | M05-03 | 冻结 Work Contract | M05-01 | `api/proto/work.proto` | WorkHello/Ready/Open/Response；RAW 切换；各状态唯一裸 Message | `REVIEW` |
-| M05-04 | 生成代码与 Breaking Baseline | M05-01至 M05-03 | `internal/protocol/gen`、Buf Initial Baseline | 明确记录“首次冻结无历史前代”的 Baseline 建立方式，禁止与自身比较伪装 Breaking 证据；生成结果提交；`lint/breaking/generate-check` 通过 | `IN_PROGRESS` |
+| M05-04 | 生成代码与 Breaking Baseline | M05-01至 M05-03 | `internal/protocol/gen`、Buf Initial Baseline | 明确记录“首次冻结无历史前代”的 Baseline 建立方式，禁止与自身比较伪装 Breaking 证据；生成结果提交；`lint/breaking/generate-check` 通过 | `REVIEW` |
 | M05-05 | Frame Codec 契约实现 | M05-04 | `internal/protocol/frame`、`codec` | UVarint 分片/合并、Canonical 最短编码、overflow、未终止、Frame 上限和 EOF；在分配 Payload 前拒绝超限 Length；Auth/Control/Work 分层测试完整 | `REVIEW` |
 | M05-06 | 递归 Unknown Field 拒绝 | M05-04 | 共享 Validator 与表驱动测试 | Auth、Control、Work、Snapshot 全覆盖 | `REVIEW` |
 | M05-07 | Deterministic Protobuf Bytes | M05-04、M05-06 | Snapshot/WorkHello 确定性字节构造器 | Snapshot 稳定排序并包含 Revision；WorkHello 清空 MAC 后重建已知字段；固定 Runtime 版本 | `REVIEW` |
@@ -194,13 +194,13 @@ M0.5 Gate 通过前，禁止开发 Server/Agent Protocol Handler。可并行开�
 
 - [x] `./tools/proto.sh lint` 通过。
 - [x] `./tools/proto.sh breaking` 通过。
-- [ ] 新 Tunnel/Connector/Service Contract 在干净 checkout 执行 `./tools/proto.sh generate-check` 通过；当前脏工作区仅完成同版本连续生成 Hash 一致性校验，不冒充正式 Gate。
+- [x] 新 Tunnel/Connector/Service Contract 在 CI #10 的 Linux amd64/arm64 干净 checkout 执行 `./tools/proto.sh generate-check` 通过；CI 整体在后续 OCI Smoke 失败，不冒充全绿 Run。
 - [x] Golden Vector 逐字节比较通过。
 - [x] Auth Success/Failure Transcript 及 Auth→Established 提交边界通过。
 - [x] Connection Token v1 编码、解析、版本、完整性和语义字段 Golden Vector 通过。
 - [x] Canonical UVarint、overflow、未终止、Frame 超限，以及 Control/Work 方向、状态、乱序、重复、Unknown Field 全部测试通过。
 - [x] Snapshot Deterministic Bytes、Revision 与 ConfigAck 关联/幂等测试通过。
-- [ ] 新 Tunnel/Connector/Service Contract 已完成独立 Protocol Review。
+- [x] 新 Tunnel/Connector/Service Contract、Golden Vector 和未知 Token 版本拒绝已完成独立 Protocol Review。
 
 ---
 
@@ -217,7 +217,7 @@ M1 只要求“一个 Tunnel + 一个 Connector + 一个静态 TCP Service”，
 | M1-01 | Tunnel/Connection Token 领域模型 | M0-05、M05-02 | Server Domain/Repository + Token Master Key | Tunnel 与唯一 ACTIVE Token；完整 Token AES-256-GCM 密文、Secret Hash；Connector/Session/实时状态不落库；独立主密钥权限、丢失快速失败与边界测试 | `REVIEW` |
 | M1-02 | Stable Connection Token 创建、获取与验证 | M1-01 | Application Service + Repository | 首次签发单个 `xta_...`；添加 Connector 重复获取逐字节相同 Token且不新增行/版本；CSPRNG、AEAD AAD、常量时间比较、篡改失败 | `REVIEW` |
 | M1-03 | Ephemeral Connector/Session 身份 | M1-01 | Agent 内存身份、Server Registry Key | 身份链为 Tunnel→ephemeral Connector→Session；Connector 每次进程启动生成且仅驻留内存，Session 每次连接生成；同一 Tunnel 多 Connector 并存、同 Connector 重连 generation fencing；无 Connector 持久化 | `REVIEW` |
-| M1-04 | Agent Gateway TLS/ALPN + Server Identity Rotation | M0-05、M0-11、M05-10 | Server Gateway、Token-derived Agent Dialer、`gateway rotate-key --maintenance`、Rotation Journal | 首个 Admin 完成前 Gateway 不启动；Agent 只从 Connection Token 取得 Endpoint/public-or-pinned Trust；TLS1.3；ALPN empty/unknown 拒绝；Handshake 上限；Pinned 证书启动及周期检查、剩余 `<=30` 天复用同一 SPKI 续签、已过期证书在监听前恢复、当前时钟早于 `NotBefore` 时显式失败；共享 `*tls.Config` 发布后不原地修改，按 fresh/immutable/`Clone` 或原子回调发布；Server 停止并持 External Lock 时轮换；新 Pin 只进入后续新 Token；Journal 恢复与私钥 `0600`；Rotation 成功追加 Minimal Security Audit Event；Race 覆盖 Pinned/Public 与续签热加载 | `IN_PROGRESS` |
+| M1-04 | Agent Gateway TLS/ALPN + Server Identity Rotation | M0-05、M0-11、M05-10 | Server Gateway、Token-derived Agent Dialer、`gateway rotate-key --maintenance`、Rotation Journal | 首个 Admin 完成前 Gateway 不启动；Agent 只从 Connection Token 取得 Endpoint/public-or-pinned Trust；TLS1.3；ALPN empty/unknown 拒绝；Handshake 上限；Pinned 证书启动及周期检查、剩余 `<=30` 天复用同一 SPKI 续签、已过期证书在监听前恢复、当前时钟早于 `NotBefore` 时显式失败；共享 `*tls.Config` 发布后不原地修改，按 fresh/immutable/`Clone` 或原子回调发布；Server 停止并持 External Lock 时轮换；新 Pin 只进入后续新 Token；Journal 恢复与私钥 `0600`；Rotation 成功追加 Minimal Security Audit Event；Race 覆盖 Pinned/Public 与续签热加载 | `REVIEW` |
 | M1-05 | Tunnel Token Auth 与 Control Session 建立 | M1-02至 M1-04 | Connector Auth Handler、Session Secret、Session Registry | Token 连接描述/Tunnel 身份/Secret 作为整体校验；Auth Failure 可区分；Success flush 提交点；generation fencing | `REVIEW` |
 | M1-06 | TunnelRuntime 所有权与线性化 | M1-03、M1-05 | Runtime Registry、ActiveWork | 固定 Lock 规则；锁内无 IO/Close/阻塞；计数 exactly-once | `REVIEW` |
 | M1-07 | Control Session Owner/Outbox | M1-05、M1-06 | Single Reader/Writer/Owner、有界队列 | 优先级、合并、Snapshot/ConfigAck 有序、队列满关闭、无 goroutine leak | `REVIEW` |
@@ -231,13 +231,13 @@ M1 只要求“一个 Tunnel + 一个 Connector + 一个静态 TCP Service”，
 
 ## 7.2 M1 Gate Checklist
 
-- [ ] 逐字节分片、多 Frame 合并、`OPEN_OK + RAW` 同 Read 通过。
-- [ ] Half-Close、Context Cancel、Origin Reset/Timeout 测试通过。
-- [ ] Control Reconnect 与旧 Session Cleanup 不影响新 generation。
-- [ ] Outbox 合并、优先级和满载关闭通过。
-- [ ] 所有 M1 资源上限在真实分配路径被拒绝，计数不为负。
-- [ ] 测试结束后 FD 和 goroutine 回到基线。
-- [ ] `go test ./...` 和 M1 Integration Suite 通过。
+- [x] 逐字节分片、多 Frame 合并、`OPEN_OK + RAW` 同 Read 通过。
+- [x] Half-Close、Context Cancel、Origin Reset/Timeout 测试通过。
+- [x] Control Reconnect 与旧 Session Cleanup 不影响新 generation。
+- [x] Outbox 合并、优先级和满载关闭通过。
+- [x] 所有 M1 资源上限在真实分配路径被拒绝，计数不为负。
+- [x] 测试结束后 FD 和 goroutine 回到基线。
+- [x] `go test ./...` 和 M1 Integration Suite 通过。
 
 M1 的静态 Service 只能由 Integration Test Harness 注入，不得为过渡测试新增一套临时生产配置，也不得提前制造绕开 M3 Application Service 的持久化接口。
 
@@ -424,13 +424,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11` 已完成。按“先收口 Review/Gate，不继续打开 M2”的任务级依赖约定，当前待办为：
 
-1. `M05-10` — 等待最新 Tunnel/Connector/Service Contract 的干净 checkout/CI `generate-check` 与独立 Protocol Review。
-2. `M1-04` — 只剩 Minimal Security Audit Event 契约与 append-only 写入；其 SQLite Migration 属数据库 Schema 变更，实施前必须另行确认，本轮不提前开发。
-3. `M1-01` 至 `M1-14` — 完成用户代码/架构复审与 CI 证据收口；当前不得推进 M2。
+1. `M1-01` 至 `M1-14` — 全部处于 `REVIEW`，等待用户完成本阶段代码/架构复审；当前不得推进 M2。
+2. `M05-10` — Protocol Wrapper 与独立 Review 已完成，但仍等待包含 OCI 修复的全绿 CI Run，不能标记 `DONE`。
+3. `M0-09` — Agent OCI Token/存活判定修复等待正式 Dockerfile 双架构与新 CI 复验。
 4. `M0-02` — Token-only Bootstrap 等待用户复审。
-5. `M0-09` — 等待 Compose IPv4/IPv6 Runtime Smoke 与用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate；本次文档修订不改变任何现有 Task 或 Gate 状态。M0.5 和 M1 继续只遵守各自表格中列出的核心任务依赖。
+`M0-12` 仍是 Alpha 前 Gate；本次只把已有产物及已执行证据同步为 `REVIEW`，不把任何新任务或 Gate 标记为 `DONE`。M0.5 和 M1 继续只遵守各自表格中列出的核心任务依赖。
 
 推进规则：
 
@@ -454,7 +453,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | OpenAPI Validator/Generator | M0-07/M5-01 开工前 | M0-07 已批准并锁定 vacuum `v0.30.0` 官方 Linux amd64/arm64 归档与二进制 SHA-256，唯一入口为 `tools/openapi.sh validate`；M5-01 首次引入 Generator 前仍需单独确认，CI 不维护第二套方式 |
 | Web 依赖与 Node 版本 | M0-08 开工前 | 已批准 Node `24.19.0`、npm `11.17.0`、React/React DOM `19.2.8`、Vite `8.2.2`、Plugin React `6.1.0`、TypeScript `6.0.2` 与对应类型包；用户在管理菜单出现真实图标需求后追加批准 `lucide-react 1.34.0`；直接依赖精确锁定，npm 11 生成并提交 Lockfile，CI 只运行 `npm ci`；Tailwind/shadcn/Router/Query 等继续等待 M5 真实使用点 |
 | OCI 基础镜像、Compose 双栈与跨平台 Agent Service 权限模型 | M0-09 开工前 | 已批准三个固定多架构基础镜像摘要、Compose 双栈 Profile 与原生 tcp4/tcp6 监听原语；OCI 使用 `65532:65532` 与只读根，只有 Server 挂载 Data Volume 和 `/run/xtunnel` tmpfs，Agent 无 Volume，从 `XTUNNEL_TOKEN` 取得 Token 并默认执行 `run`；Compose 输入 `XTUNNEL_AGENT_TOKEN` 映射到容器环境；Server 保留 Shell 包装。Agent 在 Linux/Windows 统一使用 Binary `service install --token` 与 `service uninstall`，不提供用户安装脚本。Linux 要求 root/systemd>=249，原子安装到 `/usr/local/bin/xtunnel-agent`，Credential 目录/Source 为 `root:root 0700/0600`，Unit 首行为 `# Managed by xtunnel-agent service install` 且 `ExecStart=/usr/local/bin/xtunnel-agent run`。Windows 支持 amd64/arm64，要求提升权限的 Administrator 与 SCM；ServiceName=`XTunnelAgent`、DisplayName=`XTunnel Agent`、账户=`NT AUTHORITY\LocalService`，Binary=`%ProgramFiles%\XTunnel\xtunnel-agent.exe`，Credential=`%ProgramData%\XTunnel\credentials\agent.token.dpapi` 并使用 `CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN`，SCM ImagePath 仅含安装 Binary + `run`，Description marker 精确为 `Managed by xtunnel-agent service install`；重复安装使用 `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)`，Stop/Shutdown 最多 30s，运行异常返回非零并配置 non-crash recovery。两端均拒绝覆盖/删除非受管同名服务，卸载删除受管服务并保留平台 Credential；Windows 从运行中已安装 EXE 自卸载时使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排重启删除 Binary，Linux 另保留服务用户 |
-| Minimal Security Audit Event Contract | M1-04 收口前 | 冻结 bounded/nullable、`event_id`/`operation_id`、`event`/`action` 枚举、actor/resource/result、稳定失败语义和幂等边界；Security Audit 必须 append-only，禁止 UPDATE/DELETE，Secret/Credential/Private Key/Cookie 禁止入库。M1 写事件，M5 提供只读查询，M6 提供结构化导出、Dashboard 和 Runbook；新增 Migration 前仍须确认 |
+| Minimal Security Audit Event Contract | M1-04 收口前 | 用户于 2026-08-26 明确确认数据库 Schema 变更；已冻结 bounded/nullable、`event_id`/`operation_id`、`event`/`action` 枚举、actor/resource/result、稳定失败语义和幂等边界，并以 `000003_security_audit_events.sql`、Repository 校验和 v2 Rotation Journal 落地。Security Audit append-only，禁止 UPDATE/DELETE，Secret/Credential/Private Key/Cookie 禁止入库；M1 写事件，M5 提供只读查询，M6 提供结构化导出、Dashboard 和 Runbook |
 | 首次 Buf Breaking Baseline | M05-04 完成前 | 显式记录“无历史前代”，禁止与当前文件自比较 |
 | CI/arm64/Privileged Runner | M0-10/M7-08 开工前 | 记录 Runner 架构和权限；特权 Chaos 不得静默跳过 |
 
@@ -768,8 +767,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 ## 2026-08-26 · M0-09/M1 Windows CI 回归修复 · REVIEW
 
 - 根因：M1 接入完整 Connection Token 后，Windows Service Smoke 仍使用旧式 `xta_` 加标准 Base64 随机串作为占位 Token。服务安装阶段的轻量校验只确认前缀，因此 SCM 可以接受启动请求；Agent 进入拨号流程后由 Protocol v1 Parser 判定 Token 畸形并永久退出。安装命令随后只能观察到服务未达到 `Running`，最终以 30 秒超时报错，掩盖了真实的进程退出原因。
-- 修复：新增 `deploy/windows/smoketoken`，直接复用生产 `connectiontoken.Encode` 生成独立、合法且不会落盘的 Smoke Token，避免在 PowerShell 中复制 Protobuf、HMAC 或 Base64URL Wire 规则。Token 指向 `127.0.0.1:1` 且使用 Public CA 信任模式；该端点按预期连接失败后会进入正常重连路径，使服务保持运行以完成 SCM 生命周期验证。Windows Service 状态等待同时增加提前失败诊断：当目标不是 `Stopped`、服务已经停止且 SCM 提供非零退出码时，立即返回 Win32 Exit Code、Service-specific Exit Code 和 PID，不再把确定性启动失败隐藏为超时。
-- 本地验收：Windows `go1.27.0` / `GOTOOLCHAIN=local` 下执行 `go test ./deploy/windows/smoketoken ./internal/agent/service`、`go test ./...`、`go test -race ./...`、`go vet ./...`、`go mod verify`、`git diff --check` 均通过；PowerShell 5.1/7 脚本解析和 ASCII 检查通过；Windows arm64 的 Service 测试二进制与 Smoke Token Helper 交叉编译通过。另以非管理员前台进程验证合法 Smoke Token 在不可达端点下保持重连运行，没有再次永久退出。
+- 修复：新增共享的 `deploy/smoketoken`，直接复用生产 `connectiontoken.Encode` 生成独立、合法且不会落盘的 Smoke Token，避免在 PowerShell 中复制 Protobuf、HMAC 或 Base64URL Wire 规则。Token 指向 `127.0.0.1:1` 且使用 Public CA 信任模式；该端点按预期连接失败后会进入正常重连路径，使服务保持运行以完成 SCM 生命周期验证。Windows Service 状态等待同时增加提前失败诊断：当目标不是 `Stopped`、服务已经停止且 SCM 提供非零退出码时，立即返回 Win32 Exit Code、Service-specific Exit Code 和 PID，不再把确定性启动失败隐藏为超时。
+- 本地验收：Windows `go1.27.0` / `GOTOOLCHAIN=local` 下执行 `go test ./deploy/smoketoken ./internal/agent/service`、`go test ./...`、`go test -race ./...`、`go vet ./...`、`go mod verify`、`git diff --check` 均通过；PowerShell 5.1/7 脚本解析和 ASCII 检查通过；Windows arm64 的 Service 测试二进制与 Smoke Token Helper 交叉编译通过。另以非管理员前台进程验证合法 Smoke Token 在不可达端点下保持重连运行，没有再次永久退出。
 - 证据边界：当前宿主不是管理员，未执行真实 SCM 的 install/start/stop/uninstall Smoke；本记录随修复代码一并提交，Commit SHA 以本次 Git 历史为准，但尚无对应 GitHub Actions 重跑结果。本轮不修改公开命令、Protocol、配置、数据库、依赖或部署支持矩阵，因此无需改 README/技术方案；M0-09、M05-10、M1 及全部 Gate 状态保持不变，不标记任何任务 `DONE`，等待用户 Review 和后续 CI 证据。
 
 ## 2026-08-26 · M1 Linux Half-Close CI 回归修复 · REVIEW
@@ -794,3 +793,19 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 边界加固：原 Server 边界容器同时缺少 `/run/xtunnel` 和足够 FD，却只断言非零退出，可能因 FD 先失败而把 Runtime Directory 校验误记为通过。修复后边界容器先满足 FD 预算，并要求日志明确包含 `/run/xtunnel` 且不包含 `file descriptor budget`，从而证明测试到达预期失败点。README 同步直接运行 Server OCI 镜像时的 `--ulimit nofile=1048576:1048576` 要求；总方案已经冻结“预算不足必须快速失败”的行为，Server Schema、CI Workflow、Proto、OpenAPI、Migration 和依赖均未修改。
 - 本地验收：WSL root Docker `29.1.3` 下，`sh -n`、`dash -n`、`bash --posix -n`、ShellCheck、`docker compose config --quiet` 全部通过；解析 Compose JSON 确认 Server soft/hard 均为 `1048576`，Docker 临时探针容器的 HostConfig 同样为 `1048576:1048576` 且已清理。`systemd-analyze verify` 未报告 Unit 语法或 `LimitNOFILE` 错误，仅报告 WSL 挂载权限、宿主 snapd 新字段和未安装正式 Binary；Windows `go1.27.0` / `GOTOOLCHAIN=local` 下整仓 `go test -count=1 ./...`、`go vet ./...`、`go mod verify`、`git diff --check` 通过。
 - 证据边界：本机 Server OCI Smoke 的 BuildKit 冷编译在 360 秒内未完成，按既有阈值中止，未取得真实 Server 容器生命周期、负向 Runtime Directory 或 amd64/arm64 Smoke PASS；中止后确认没有遗留 Smoke Container、Volume 或 Image。真实 systemd Smoke 与新的 GitHub Actions Run 也尚未执行，因此 M0-09、M1-12 和全部 Gate 状态保持不变，本次未勾选任何产品任务。本记录随当前完整工作区提交，Commit SHA 以本次 Git 历史为准；提交不等于 CI/Gate 通过，也不会执行推送。
+
+## 2026-08-26 · M0-09/M1 Agent OCI Token 与存活判定回归修复 · REVIEW
+
+- Actions 根因：Agent OCI Smoke 仍注入旧占位值 `xta_oci_smoke_not_secret`。Agent 先记录 `process_started`，随后由 Protocol v1 Parser 将该值判定为畸形 Token 并永久退出；`wait_for_start` 只查询历史启动日志，没有确认容器当前仍为 `Running`，因此错误进入 `stop_target`，最终由 `docker kill` 报出 `container is not running`。EXIT Trap 的 `docker rm --force ... || true` 仅执行幂等清理，不是本次失败来源。
+- 修复：OCI 与 Compose 双栈 Smoke 改为读取由生产编码器生成、受 Golden Test 逐字节锁定的 `tests/golden/protocol-v1/connection-token-v1.txt`，不在 Shell 中复制 Wire 规则，也不为原本只依赖 Docker 的 Smoke 新增宿主 Go 工具链要求。启动等待在发现 `process_started` 后继续确认容器存活并观察一个稳定周期；容器若在 SIGTERM 前退出仍判为失败，`docker kill` 错误会附带容器最终状态与日志，而不是用 `|| true` 掩盖。Windows Smoke Token Helper 同步移动到平台无关的 `deploy/smoketoken`，继续由生产编码器生成独立随机 Token。
+- 本地验收：Windows `go1.27.0` / `GOTOOLCHAIN=local` 下 `go mod verify`、`go test -count=1 ./...`、`go vet ./...` 与 Windows arm64 Smoke Token Helper 交叉编译通过；PowerShell 脚本解析通过。WSL root Docker 下，修改后的 Agent OCI Runtime Smoke 使用同一源码交叉编译 Binary 与正式 distroless Runtime Base 连续执行 10 次通过，均完成两轮启动、SIGTERM 与退出码 0；Compose 双栈 `--skip-build` Smoke 通过。`sh -n`、`dash -n`、`bash --posix -n`、ShellCheck 与 `git diff --check` 均通过，验证后已清理临时 Binary、Container 与 Image。
+- 证据边界：本机正式多阶段 Dockerfile 的 Agent 冷构建在 360 秒内未完成，按阈值终止；因此临时 Runtime Image 结果不能替代正式 Dockerfile 构建，也没有 Linux arm64 或新的 GitHub Actions Run 证据。M0-09、M0-10、M1 及全部 Gate 状态保持不变，本次未勾选任何产品任务；当前工作区同时存在其他已暂存、未暂存和未跟踪的 M1 改动，本记录不将其纳入本次修复证据，提交前必须重新核对完整 Index。
+
+## 2026-08-26 · M1-04 / M1 阶段收口 · REVIEW
+
+- 授权与范围：用户明确确认 M1-04 所需数据库 Schema 变更，并继续要求“每完成一个大阶段停下 Review”。本轮只收口 M1 与其实际阻塞的 Protocol/部署回归，不进入 M2，不修改 OpenAPI、Server 配置、第三方依赖或生产权限模型。
+- 审计契约：新增 `000003_security_audit_events.sql` 与 GORM Repository。事件使用 `evt_<ULID>`/`op_<ULID>`，冻结 M1 的 event/action/actor/resource/result 枚举、UTF-8 字节边界、Nullable 与 32-byte Digest；`operation_id` 唯一，完全相同重放幂等成功，任一 ID 冲突失败。SQLite Trigger 拒绝 UPDATE/DELETE；Application Writer 在固定物理连接上以 `synchronous=FULL` 耐久 COMMIT，恢复普通 `NORMAL` 模式后才派生结构化日志，不提供 lossy fallback。
+- 崩溃一致性：离线换钥使用 v2 Rotation Journal 在文件替换前持久化事件/操作 ID、时间、资源与前后 SPKI Digest；部分替换恢复只完成同一组文件，审计耐久落库前不删除 Journal。普通 Server 在 Admin Bootstrap/Gateway Listener 前执行 Reconciliation；数据库写失败会阻止启动或让维护命令以 `AUDIT_WRITE_FAILED_AFTER_COMMIT` 非零退出并保留 Journal，重试只补写旧事件，不再次换钥。Journal 已 unlink 后的目录同步失败使用独立 Warning 并按成功结束，避免误导重试；重启若重新出现 Journal，仍只幂等重放。测试覆盖半替换恢复、写入失败不产成功日志、Journal 保留、启动前补写、FULL/NORMAL 模式切换、cleanup uncertainty、无效元数据不改 SPKI、完全相同并发重放、两个唯一 ID 的独立冲突以及多字节 SQL 边界。
+- Protocol 与部署回归：CI Run #10 的 Linux amd64/arm64 Job 已通过最新 Tunnel/Connector/Service 契约的 `lint/breaking/generate-check`；补齐 WorkHello session secret/无 MAC bytes/HMAC input/MAC、Snapshot size/SHA-256、第二枚 Connection Token 与未知 `format_version` 拒绝证据，独立 Protocol Review 通过。Agent OCI/Compose Smoke 改用合法 Golden Token，并在历史 `process_started` 后继续确认容器存活；共享 Smoke Token Helper 移至 `deploy/smoketoken`。CI #10 整体仍在旧 Agent OCI Smoke 失败，当前修复没有新 CI Run，不能宣称 CI 已修复或 Gate PASS。
+- 验收结果：Windows `go1.27.0` / `GOTOOLCHAIN=local` 下 `go test -count=1 ./...`、`go test -race -count=1 ./...`、`go vet ./...`、`go mod verify`、双 Diff Check 通过；审计相关包另执行普通测试 `-count=20`、Race `-count=2` 和独立复审。`internal/repository/sqlite` 与 `internal/server/bootstrap` 在 Linux amd64/arm64 交叉测试编译通过，Linux amd64 交叉 Vet 通过。Shell/PowerShell 解析和 ShellCheck 已通过。最终 Linux 原生 Docker 定向复跑因 Docker/WSL 挂载运行失去进展而终止，不记为 PASS；正式 Dockerfile 双架构 Runtime Smoke、真实 systemd/Windows SCM Smoke 与包含当前修复的全绿 CI 尚未取得。
+- 状态与 Review 边界：M05-04、M1-04 转为 `REVIEW`，M1-01 至 M1-14 现均处于 `REVIEW`；M05-10、M1 Gate 仍因全绿 CI 和用户阶段 Review 未满足而不标记 `DONE`。M2 保持 `NOT_STARTED`，本轮到此停止。工作树仍混有 staged、unstaged 和 untracked 变更；新增 Golden Fixture 及 Smoke Helper 移动必须在提交前整体重新暂存核对，禁止直接提交当前 Index。本轮未暂存、提交或推送。

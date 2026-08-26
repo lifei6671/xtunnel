@@ -20,6 +20,7 @@ type storage interface {
 type serverStorage struct {
 	database        *sqlite.Store
 	lock            *externallock.Lock
+	dataDir         string
 	targetHash      string
 	databaseExisted bool
 	tokenMasterKey  tokenkey.Key
@@ -70,7 +71,7 @@ func openServerStorage(ctx context.Context, dataDir, runtimeDir string) (*server
 		return failAfterDatabase(fmt.Errorf("load Tunnel Token master key: %w", err))
 	}
 	return &serverStorage{
-		database: database, lock: lock, targetHash: target.Hash, databaseExisted: databaseExisted,
+		database: database, lock: lock, dataDir: target.Path, targetHash: target.Hash, databaseExisted: databaseExisted,
 		tokenMasterKey: tokenMasterKey,
 	}, nil
 }

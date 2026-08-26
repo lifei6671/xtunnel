@@ -49,6 +49,7 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
 fi
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 compose_file="$script_dir/compose.dualstack.yaml"
 project="xtunnel-dualstack-smoke-$(date +%s)-$$"
 export COMPOSE_PROJECT_NAME="$project"
@@ -59,7 +60,19 @@ export XTUNNEL_AGENT_GATEWAY_HOSTNAME=localhost
 # 端口 0 让 Docker 为四个宿主监听分别选择空闲端口，避免 Smoke 与现有服务冲突。
 export XTUNNEL_MANAGEMENT_PORT=0
 export XTUNNEL_AGENT_GATEWAY_PORT=0
-export XTUNNEL_AGENT_TOKEN=xta_compose_smoke_not_secret
+agent_token_path="$repo_dir/tests/golden/protocol-v1/connection-token-v1.txt"
+if [ ! -r "$agent_token_path" ]; then
+	printf 'Agent smoke Connection Token fixture is not readable: %s\n' "$agent_token_path" >&2
+	exit 1
+fi
+# Protocol Golden 由生产编码器生成并逐字节锁定；Compose Smoke 直接复用
+# 公开测试向量，不增加宿主 Go 工具链依赖，也不在 Shell 中复制 Wire 规则。
+IFS= read -r XTUNNEL_AGENT_TOKEN <"$agent_token_path" || true
+if [ -z "$XTUNNEL_AGENT_TOKEN" ]; then
+	printf '%s\n' "Agent smoke Connection Token fixture is empty" >&2
+	exit 1
+fi
+export XTUNNEL_AGENT_TOKEN
 if [ "$build" -eq 1 ]; then
 	export XTUNNEL_SERVER_IMAGE="xtunnel-server-$project:local"
 	export XTUNNEL_AGENT_IMAGE="xtunnel-agent-$project:local"
@@ -96,7 +109,22 @@ wait_for_start() {
 	attempt=0
 	while [ "$attempt" -lt 30 ]; do
 		if compose logs "$service" 2>&1 | grep -F '"event":"process_started"' >/dev/null; then
-			return 0
+			container_id=$(compose ps --all --quiet "$service")
+			if [ -n "$container_id" ] && [ "$(docker inspect --format '{{.State.Running}}' "$container_id")" = true ]; then
+				sleep 1
+				if [ "$(docker inspect --format '{{.State.Running}}' "$container_id")" = true ]; then
+					return 0
+				fi
+			fi
+			compose logs "$service" >&2 || true
+			printf '%s\n' "$service exited after process_started" >&2
+			return 1
+		fi
+		container_id=$(compose ps --all --quiet "$service")
+		if [ -n "$container_id" ] && [ "$(docker inspect --format '{{.State.Running}}' "$container_id")" != true ]; then
+			compose logs "$service" >&2 || true
+			printf '%s\n' "$service exited before process_started" >&2
+			return 1
 		fi
 		attempt=$((attempt + 1))
 		sleep 1

@@ -27,6 +27,12 @@ var productionMigrations = []migration{
 			migrations.TunnelDomain,
 		},
 	},
+	{
+		version: 3,
+		statements: []string{
+			migrations.SecurityAuditEvents,
+		},
+	},
 }
 
 func migrate(ctx context.Context, database *gorm.DB) error {
