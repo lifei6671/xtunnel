@@ -95,6 +95,8 @@ Resolve Stable Data Target
 
 当前提供 Linux `amd64`/`arm64` 的 OCI 构建骨架，以及 Server Shell 包装和 Agent Binary 自管理的 systemd 服务。Builder 与 Runtime Base 均以不可变摘要固定。Agent OCI Image 的默认命令是 `run`，容器不执行 `service install/uninstall`；镜像固定使用非 root `UID:GID 65532:65532`。只有 Server 使用 `/var/lib/xtunnel` 持久 Volume 和 `/run/xtunnel` 可写 tmpfs；Agent 不声明持久 Volume，通过 `XTUNNEL_TOKEN` 环境变量接收 Token。
 
+Server 默认配置的启动 FD 预算为 `87188`。仓库提供的 Compose 和 systemd Unit 将 `nofile` soft/hard limit 固定为 `1048576`；若绕过这些入口直接运行 Server OCI 镜像，也必须向容器提供同等上限，例如 `--ulimit nofile=1048576:1048576`。应用仍按配置预算限制实际连接数，不会因为提高进程上限而无界占用 FD。
+
 ```sh
 docker buildx build --load --platform linux/amd64 --target server --tag xtunnel-server:local -f deploy/docker/Dockerfile .
 docker buildx build --load --platform linux/amd64 --target agent --tag xtunnel-agent:local -f deploy/docker/Dockerfile .

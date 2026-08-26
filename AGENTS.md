@@ -67,6 +67,7 @@ export GOTOOLCHAIN=local
 - 每个 goroutine 必须有明确 owner、停止条件和等待退出路径；禁止 fire-and-forget 和 orphan goroutine。
 - `TunnelRuntime`、Session、WorkPool、Listener、Config Write 和 Usage Flush 等共享状态必须遵循技术方案规定的唯一所有权、固定锁顺序和 exactly-once 计数语义。
 - 技术方案规定的 Runtime/Owner 锁内禁止网络/磁盘 IO、`Close`、等待 Channel 或其他不可控阻塞；跨 owner 操作先在锁内生成不可变输入，释放锁后再执行外部动作。
+- 可能跨连接并发共享的 `*tls.Config` 发布后视为不可变；需要修改连接级字段时必须先 `Clone` 或为该连接构造新配置，证书热加载只通过不可变对象或原子回调发布。
 - Control Session 保持 Single Reader、Single Writer、Single Owner 和有界队列；其他 goroutine 只通过 Owner/Outbox 交互，队列满或无法保证顺序时关闭 Session，不得无限等待或静默丢弃；旧 generation 的 cleanup 不得破坏新 generation 状态。
 - 仅取消 Context 不足以解除阻塞中的 `net.Conn.Read`/`Write`。取消、Fatal Error 或 Shutdown 必须按协议通过 `Close`、`CloseWrite` 或 Deadline 主动解除 IO，并等待相关 goroutine、FD 和计数归零。
 - 普通单边 EOF 不是 Fatal Error，应按 Half-Close 规则允许反方向继续完成；不得为简化退出逻辑直接关闭双向连接。
@@ -78,6 +79,7 @@ export GOTOOLCHAIN=local
 - 只在真实上下文存在时记录 `request_id`、`trace_id` 和业务 ID；不得在日志层生成替代 ID或输出空字段。
 - Tunnel Token、Admin Password、Session Cookie、Session Secret、TLS Private Key 和 Authorization Header 绝不能进入日志、错误文本、测试输出或提交内容。
 - 共享 Handler 的脱敏不能替代调用方约束：不得把 Secret 拼入 `event` 或其他非敏感字段，也不得直接记录完整 Config、HTTP Header、Cookie、请求体或认证对象。
+- 仅非权威遥测允许通过有界 Observer 丢弃，并必须记录 Drop Metric；Security Audit、Usage exactly-once Delta 和 Runtime Mutation 禁止进入 lossy Observer 路径。
 - 改变日志字段名、语义或级别会影响检索、告警和审计，执行前必须获得明确确认。
 
 ## 测试与生成物

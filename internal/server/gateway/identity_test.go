@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -109,6 +110,57 @@ func TestLoadOrCreatePinnedIdentityRenewsOnlyAtThirtyDayBoundary(t *testing.T) {
 	}
 	if !bytes.Equal(certificate.Certificate[0], renewed.Leaf().Raw) {
 		t.Fatal("Gateway TLS config did not load the renewed certificate")
+	}
+}
+
+func TestLoadOrCreatePinnedIdentityRenewsExpiredCertificateWithSameSPKI(t *testing.T) {
+	dataDir := t.TempDir()
+	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	created, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity(create) error = %v", err)
+	}
+
+	renewedAt := createdAt.Add(398 * 24 * time.Hour)
+	renewed, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", false, renewedAt)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity(expired) error = %v", err)
+	}
+	if bytes.Equal(created.Leaf().Raw, renewed.Leaf().Raw) {
+		t.Fatal("expired pinned certificate was not renewed")
+	}
+	if created.SPKIHash() != renewed.SPKIHash() {
+		t.Fatal("expired pinned certificate renewal changed the SPKI")
+	}
+	if !renewed.Leaf().NotAfter.Equal(renewedAt.Add(397 * 24 * time.Hour)) {
+		t.Fatalf("renewed certificate NotAfter = %s, want %s", renewed.Leaf().NotAfter, renewedAt.Add(397*24*time.Hour))
+	}
+}
+
+func TestLoadOrCreatePinnedIdentityRejectsClockBeforeCertificateNotBefore(t *testing.T) {
+	dataDir := t.TempDir()
+	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	created, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity(create) error = %v", err)
+	}
+
+	rolledBackAt := createdAt.Add(-2 * time.Minute)
+	_, err = LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", false, rolledBackAt)
+	if err == nil {
+		t.Fatal("LoadOrCreatePinnedIdentity(clock rollback) error = nil")
+	}
+	if !strings.Contains(err.Error(), rolledBackAt.Format(time.RFC3339)) ||
+		!strings.Contains(err.Error(), created.Leaf().NotBefore.Format(time.RFC3339)) {
+		t.Fatalf("LoadOrCreatePinnedIdentity(clock rollback) error = %q, want current time and NotBefore", err)
+	}
+
+	persisted, err := LoadPinnedIdentity(dataDir)
+	if err != nil {
+		t.Fatalf("LoadPinnedIdentity() after clock rollback error = %v", err)
+	}
+	if !bytes.Equal(persisted.Leaf().Raw, created.Leaf().Raw) {
+		t.Fatal("clock rollback changed the persisted pinned certificate")
 	}
 }
 

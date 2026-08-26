@@ -40,8 +40,9 @@ rg --files
    - M0.5 后 Protocol v1 的唯一 Wire Contract。
    - 字段、enum、reserved 和 message 方向先改 Proto，通过 Protocol Review、Buf Gate 和 Golden Vector 后，再同步总方案的语义镜像。
 
-3. `configs/server.schema.json`、`configs/agent.schema.json`
-   - 配置字段、类型、默认值、范围、Secret 和热加载属性的唯一机器权威。
+3. `configs/server.schema.json`
+   - Server 配置字段、类型、默认值、范围、Secret 和热加载属性的唯一机器权威。
+   - Agent 没有本地业务 Schema/YAML；Connection Token Wire 以 Proto 为权威，Bootstrap Source Precedence 与输入形状由实现和契约测试证明。
    - 总方案的 YAML/限制表只能作为人类可读镜像。
 
 4. `api/openapi/openapi.yaml`
@@ -80,10 +81,11 @@ rg --files
 | 改动范围 | 同步目标 |
 | --- | --- |
 | `api/proto/`、`internal/protocol/`、`tests/golden/protocol-v1/` | Proto 权威、总方案 Protocol 语义镜像、M0.5/M1/M3 任务 |
-| `configs/`、Config Loader、Limit/Timeout | JSON Schema 权威、Go Config/示例、总方案镜像、M0/M1/M3/M4/M7 任务 |
+| `configs/server.schema.json`、Server Config Loader、Limit/Timeout | Server JSON Schema 权威、Go Config/示例、总方案镜像、M0/M1/M3/M4/M7 任务 |
+| Agent Bootstrap、Connection Token Input | Proto 权威、Bootstrap 实现/契约测试、总方案 Token-only 语义、M0/M1/M7 任务 |
 | `migrations/`、`internal/repository/`、Lock/Journal/Backup/Restore | 总方案持久化/恢复语义、M0/M1/M3/M7 任务 |
 | Agent Gateway、Session、WorkPool、Tunnel Proxy | 总方案 M1/M2 语义、并发/泄漏证据、M1/M2 任务 |
-| Snapshot、TrustState、Transition、Origin、Health | 总方案 M3 语义、Crash/Health 证据、M3 任务 |
+| Snapshot、Revision、ConfigAck、Origin、Health | 总方案 M3 语义、Crash/Health 证据、M3 任务 |
 | Route、HTTP/TCP Ingress、WebSocket、Listener | 总方案 M4 语义、产品数据面 E2E、M4 任务 |
 | `api/openapi/`、Server API、`web/src/api/`、`web/src/` | OpenAPI 权威、Generated Contract、REST/Web 语义、M5 任务 |
 | Logging/Metrics/Trace/Usage | 总方案可观测性语义、M6 任务 |

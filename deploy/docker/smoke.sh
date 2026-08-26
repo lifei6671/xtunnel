@@ -107,6 +107,9 @@ volume=
 container=
 boundary_container=
 agent_token=xta_oci_smoke_not_secret
+# Server 默认容量的 FD 预算为 87188。OCI Runtime 必须显式提供更高的
+# soft/hard limit；镜像内的非 root 进程无法自行提升宿主施加的硬上限。
+server_nofile_limit=1048576
 
 cleanup() {
 	if [ -n "$boundary_container" ]; then
@@ -145,6 +148,7 @@ run_target() {
 		docker run --detach \
 			--platform "$platform" \
 			--read-only \
+			--ulimit "nofile=$server_nofile_limit:$server_nofile_limit" \
 			--tmpfs /run/xtunnel:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=65532,gid=65532 \
 			--mount "type=volume,source=$volume,target=/var/lib/xtunnel" \
 			"$image" \
@@ -183,6 +187,7 @@ verify_runtime_mounts() {
 	if [ "$target" = server ]; then
 		test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/xtunnel"}}{{.RW}}{{end}}{{end}}' "$container")" = true
 		test -n "$(docker inspect --format '{{index .HostConfig.Tmpfs "/run/xtunnel"}}' "$container")"
+		test "$(docker inspect --format '{{range .HostConfig.Ulimits}}{{if eq .Name "nofile"}}{{.Soft}}:{{.Hard}}{{end}}{{end}}' "$container")" = "$server_nofile_limit:$server_nofile_limit"
 	else
 		test "$(docker inspect --format '{{len .Mounts}}' "$container")" -eq 0
 		test "$(docker inspect --format '{{join .Config.Cmd " "}}' "$container")" = run
@@ -208,6 +213,7 @@ verify_server_runtime_boundary() {
 	boundary_container=$(docker run --detach \
 		--platform "$platform" \
 		--read-only \
+		--ulimit "nofile=$server_nofile_limit:$server_nofile_limit" \
 		--mount "type=volume,source=$volume,target=/var/lib/xtunnel" \
 		"$image" \
 		--set management.public_url=https://smoke.invalid \
@@ -225,6 +231,17 @@ verify_server_runtime_boundary() {
 	status=$(docker inspect --format '{{.State.ExitCode}}' "$boundary_container")
 	if [ "$status" -eq 0 ]; then
 		printf '%s\n' "server exited successfully without its required runtime tmpfs" >&2
+		return 1
+	fi
+	boundary_logs=$(docker logs "$boundary_container" 2>&1 || true)
+	if ! printf '%s' "$boundary_logs" | grep -F '/run/xtunnel' >/dev/null; then
+		printf '%s\n' "server boundary failure did not identify the missing /run/xtunnel runtime directory" >&2
+		printf '%s\n' "$boundary_logs" >&2
+		return 1
+	fi
+	if printf '%s' "$boundary_logs" | grep -F 'file descriptor budget' >/dev/null; then
+		printf '%s\n' "server boundary check failed at the FD budget before validating /run/xtunnel" >&2
+		printf '%s\n' "$boundary_logs" >&2
 		return 1
 	fi
 	docker rm "$boundary_container" >/dev/null

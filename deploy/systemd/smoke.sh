@@ -168,6 +168,7 @@ test "$(stat -c '%a:%U:%G' /usr/local/bin/xtunnel-agent)" = '755:root:root'
 cmp -s "$agent_binary" /usr/local/bin/xtunnel-agent
 test "$(stat -c '%a:%U:%G' /etc/systemd/system/xtunnel-server.service)" = '644:root:root'
 test "$(stat -c '%a:%U:%G' /etc/systemd/system/xtunnel-agent.service)" = '644:root:root'
+test "$(systemctl show --property=LimitNOFILE --value xtunnel-server.service)" = 1048576
 test -f /var/lib/xtunnel/xtunnel.db
 test "$(sed -n '1p' /etc/systemd/system/xtunnel-agent.service)" = '# Managed by xtunnel-agent service install'
 grep -Fx 'LoadCredential=xtunnel-agent.token:/etc/xtunnel/credentials/agent.token' /etc/systemd/system/xtunnel-agent.service >/dev/null

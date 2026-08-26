@@ -295,7 +295,15 @@ func newSelfSignedCertificateWithPrivateKey(hostname string, now time.Time, priv
 // renewPinnedIdentity 在证书剩余有效期不超过 30 天时原子替换证书文件。
 // 私钥文件不会参与续签，也不会写入轮换 Journal；Journal 仅用于显式离线 SPKI 轮换。
 func renewPinnedIdentity(paths identityFilePaths, hostname string, identity Identity, now time.Time) (Identity, error) {
-	if identity.Leaf().NotAfter.Sub(now) > pinnedRenewalWindow {
+	leaf := identity.Leaf()
+	if now.Before(leaf.NotBefore) {
+		return Identity{}, fmt.Errorf(
+			"gateway pinned certificate is not yet valid: current time %s is before NotBefore %s",
+			now.UTC().Format(time.RFC3339),
+			leaf.NotBefore.UTC().Format(time.RFC3339),
+		)
+	}
+	if leaf.NotAfter.Sub(now) > pinnedRenewalWindow {
 		return identity, nil
 	}
 	privateKey, ok := identity.PrivateKey().(*ecdsa.PrivateKey)

@@ -10,6 +10,11 @@ services:
       target: server
     user: "65532:65532"
     read_only: true
+    # Server 默认 FD 预算为 87188；容器内的非 root 进程不能自行提升硬上限。
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     cap_drop:
       - ALL
     security_opt:

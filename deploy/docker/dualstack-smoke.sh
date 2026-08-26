@@ -12,6 +12,7 @@ EOF
 
 platform=linux/amd64
 build=1
+server_nofile_limit=1048576
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--platform)
@@ -130,6 +131,7 @@ verify_container() {
 	docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container_id" | grep -F 'no-new-privileges:true' >/dev/null
 	if [ "$service" = server ]; then
 		test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/xtunnel"}}{{.RW}}{{end}}{{end}}' "$container_id")" = true
+		test "$(docker inspect --format '{{range .HostConfig.Ulimits}}{{if eq .Name "nofile"}}{{.Soft}}:{{.Hard}}{{end}}{{end}}' "$container_id")" = "$server_nofile_limit:$server_nofile_limit"
 	else
 		test "$(docker inspect --format '{{len .Mounts}}' "$container_id")" -eq 0
 		test "$(docker inspect --format '{{join .Config.Cmd " "}}' "$container_id")" = run

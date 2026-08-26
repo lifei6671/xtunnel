@@ -327,9 +327,9 @@ xtunnel-agent
 =
 Identity
 +
-Config
-
-Server / Agent JSON Schema + Config Drift Check
+Token Bootstrap
++
+In-memory Remote Config Runtime
 +
 Control Session
 +
@@ -727,7 +727,13 @@ SPKI Fingerprint
 Certificate Validity Window
 ```
 
-自签证书默认有效期为 397 天。Server 在剩余 30 天时使用原有 Private Key 自动续签新证书，因此 SPKI 不变，Agent 无需更新 Pin。续签必须原子写入并热加载；失败时继续使用仍有效的旧证书，同时产生 ERROR 日志和告警 Metric。
+自签证书默认有效期为 397 天。Server 每次启动以及常驻期间的周期检查中，在剩余
+`<=30` 天时使用原有 Private Key 自动续签新证书，因此 SPKI 不变，Agent 无需更新
+Pin。已经过期但 Key 仍有效的证书也必须在 Agent Gateway Listen 前按同一 SPKI 续签，
+避免 Server 离线跨过续签窗口后无法恢复。续签必须原子写入并热加载；失败时继续使用
+仍有效的旧证书，同时产生 ERROR 日志和告警 Metric。若当前 Wall Clock 早于已加载证书
+的 `NotBefore`，Server 必须以包含当前时间和有效期边界的明确错误拒绝启动/续签，不得
+静默签发新证书掩盖明显的系统时钟回退。
 
 计算：
 
@@ -1246,6 +1252,10 @@ ConfigApplyStatus: UNSPECIFIED=0, APPLIED=1, REJECTED=2
 WebSocket 属于 HTTP/1.1 Upgrade，HTTPS 已由前置代理终止，都不增加独立 IngressType。第 99 节列出的 Error Code 数值必须原样进入 `common.proto`；新增值只能使用未占用编号，删除值必须 `reserved`。
 
 每个 Frame 必须使用严格 bounded reader。读取结构化 Frame 时不得预读 Frame 边界外的数据。
+
+Frame Length 必须使用表示该值的最短 Canonical UVarint。非最短编码、超过
+`uint64` 表示范围、十字节后仍未终止或声明长度超过当前阶段上限，必须在分配
+Payload 前按 `PROTOCOL_ERROR` 拒绝。
 
 收到 `OPEN_OK` 后，已经位于 socket/buffer 中但不属于 OpenResponse Frame 的剩余字节，必须作为 RAW 数据原样交给代理层，禁止丢弃或重复。
 
@@ -1978,6 +1988,11 @@ tcp
 
 `Origin.Host` 接受规范化的 IP Literal 或 DNS Hostname。禁止在 Snapshot Apply 时把 DNS 永久解析并保存为单一 IP。
 
+Agent 会按照 Server Desired State 主动访问 Origin，因此拥有 Tunnel 管理权限的 Server
+和管理员属于 Connector 内网访问的受信控制面。V0.1 不默认禁止 Loopback、RFC1918 或
+其他私网 Origin，否则会破坏内网穿透的核心用途；可选 CIDR、Link-local、Metadata IP
+或 DNS Suffix Egress Policy 留到后续版本，不在 V0.1 提前实现。
+
 ---
 
 # 52. Origin Connection
@@ -2374,13 +2389,16 @@ C active = 12
 但所有 idle = 0
 ```
 
-Server 按 Connector 聚合所有 Pending OPEN 的需求，只保留一个最新绝对目标。需求上升时更新 Demand；Pending 减少或取消时同步降低目标，禁止每个公网请求分别广播一条 Demand。
+Server 按 Tunnel 聚合所有 Pending OPEN，只维护一个共享 Pending Group 和一个最新
+绝对目标。首个等待者按既有 Least Active + Round Robin 规则选择一个当前最佳且未
+Draining 的 Connector；后续等待者加入同一 Group，不为每个公网请求单独建立 Demand。
+需求上升时更新绝对目标，Pending 减少或取消时同步降低目标。
 
 Server：
 
 ```text
-向最多 2 个最佳 Connector
-发送 WorkDemand
+只向该 Pending Group 当前选中的一个 Connector
+发送绝对目标 WorkDemand
 ```
 
 等待：
@@ -2389,13 +2407,12 @@ Server：
 work_acquire_timeout
 ```
 
-谁先提供 WorkConn：
+如果选中 Connector 的 Session 被替换、进入 Draining、关闭或无法再提交 Lease，等待者
+必须 exactly-once 释放旧 Group membership，并在同一个 `work_acquire_timeout` 剩余
+时间内回到 Tunnel 级选择。此处属于尚未提交 WorkConn 的 Acquire 重选，不等于发送
+`OpenRequest` 后的跨 Connector 业务重试；后者仍由 M2 的 Pre-RAW Failover 契约负责。
 
-```text
-谁承担连接
-```
-
-避免一次请求广播所有 Connector。
+V0.1 禁止把一次 Pending OPEN 广播给全部 Connector，也不并行维护多个投机 Demand。
 
 ---
 
@@ -2575,22 +2592,33 @@ Auth Success
  ↓
 Server build current full Snapshot
  ↓
-Agent validate + build candidate Resolver
+Agent validate + prepare/start gated immutable candidate Runtime
  ↓
 Atomic Swap in memory
  ↓
-ConfigAck
+ConfigAck → Connector becomes revision-eligible
  ↓
-Connector becomes revision-eligible
+Bounded Retire previous Runtime
 ```
 
 Server 可以合并尚未开始 Apply 的旧 Revision，只保留最新完整 Snapshot；一旦某个 Revision 开始 Apply，后续 Snapshot 必须串行处理，禁止并发修改 Resolver。
+
+Candidate 在发布前必须完成所有可能失败的字段校验、Resolver 构建和 Health 资源启动，
+但启动后的资源保持 unpublished/gated，不得上报 Health 或参与 Connector Selection。
+Atomic Swap 与 ConfigAck 成功后才有界 Retire 旧配置和 Health 资源；Retire 不得关闭旧
+Revision 已进入 ACTIVE 的 WorkConn，也不得阻塞数据面。Candidate 在 Atomic Swap 前失败时，
+必须释放自身资源并保持旧 Runtime 完整可用。
 
 ---
 
 # 69. Revision 语义
 
-`desired_revision` 由 Server 持久化并随 Desired State 事务递增。Agent 的 `observed_revision` 只代表当前进程、当前 Control Session 已成功应用的内存配置。
+`desired_revision` 由 Server 持久化并随 Desired State 事务递增。Agent 的
+`observed_revision` 只代表当前进程、当前 Control Session 已成功应用的内存配置。
+Agent 在递归 Unknown Field 拒绝后，按 Deterministic TunnelSnapshot Bytes 计算并在内存
+记录 `snapshot_digest = SHA-256(deterministic TunnelSnapshot bytes)`，用于判断同一
+Session 内相同 Revision 的 Payload 是否等价。Digest 不进入 Agent 本地文件，也不新增
+Protocol v1 Wire 字段；新 Control Session 建立基线时，必须连同 `observed_revision` 重置。
 
 同一 Control Session 内：
 
@@ -2600,6 +2628,9 @@ incoming revision > observed revision
 
 incoming revision == observed revision 且内容完全相同
 → 幂等 Ack
+
+incoming revision == observed revision 且 snapshot_digest 不同
+→ PROTOCOL_ERROR
 
 incoming revision < observed revision
 → PROTOCOL_ERROR
@@ -2624,9 +2655,13 @@ Validate every Service and its Origin / Health Policy
  ↓
 Build immutable Resolver + Health Plan
  ↓
-Atomic Swap Runtime Config
+Start Candidate Resources
+ ↓
+Atomic Swap Runtime Config + observed_revision + snapshot_digest
  ↓
 ConfigAck
+ ↓
+Bounded Retire Previous Runtime
 ```
 
 ```protobuf
@@ -2637,7 +2672,11 @@ message ConfigAck {
 }
 ```
 
-Apply 必须先完整构建不可变 Candidate，再通过单一原子交换发布。任何字段、Origin、Health、资源边界或构建错误都不得发布部分结果。
+Apply 必须先完整构建并启动不可变但 gated 的 Candidate，再通过单一原子交换发布。
+任何字段、Origin、Health、资源边界或构建错误都不得发布部分结果。Candidate 发布前不得
+上报 Health 或参与选择。旧 Runtime 的取消和资源回收在 ConfigAck 后触发，具有独立
+Deadline 和等待路径；不得先拆旧 Resolver/Health Runtime 再构建新 Runtime，也不得关闭
+已进入 ACTIVE 的旧 WorkConn。
 
 - 有旧内存配置时：保留旧配置，发送 `CONFIG_REJECTED`，等待更高 Revision。
 - 首份配置失败时：Connector 保持不可选择，发送 `CONFIG_REJECTED`；Server 不得把它标记 ONLINE/Eligible。
@@ -2771,7 +2810,19 @@ UNHEALTHY
 ```text
 UNKNOWN 不参与 Connector Selection
 
-至少一次成功后才进入 HEALTHY
+UNKNOWN 首次成功
+→ HEALTHY
+
+UNKNOWN 连续 failure_threshold 次失败
+→ UNHEALTHY
+
+HEALTHY 连续 failure_threshold 次失败
+→ UNHEALTHY
+
+UNHEALTHY 连续 success_threshold 次成功
+→ HEALTHY
+
+任一相反结果都会清零当前连续计数
 
 Server 本地 received_at 超过 2 × interval
 且未收到同 service_revision 的新 Health Report
@@ -2876,6 +2927,14 @@ Agent 应用新 Snapshot 时，必须先取消受影响 Service 的旧 Health Ch
 
 Agent 不逐条发送 Health Frame。Report Batcher 在 `report_flush_interval` 到达、累计达到 `report_batch_size`，或进入 Drain 前生成 `ServiceHealthBatch`；同一批次内每个 Service 只保留最新结果。`generation` 在当前 Control Session 内严格递增，Server 丢弃重复或倒退 Batch，但仍以每个 Item 的 `service_revision` 作为配置新旧的最终裁决。Batch 序列化后仍必须小于 MaxControlFrameSize；超限时按不超过 `report_batch_size` 的子批次拆分，并为每个 Frame 使用新 generation。
 
+同一 Agent 进程在 Control Session 重连后，如果完整 Snapshot Apply/幂等确认成功，必须在
+`ConfigAck` 后立即把当前 Revision 下所有 Service 的最新 Health 状态，通过 Owner/Outbox
+按新 Session 的 generation 序列做一次完整 Batch Flush，不能等待下一次 Health Interval。
+受 Snapshot 影响而已经重置为 `UNKNOWN` 的
+Service 上报 `UNKNOWN`；未变化 Service 可以上报进程内仍有效且 Revision 匹配的状态。
+这样 Server Restart 后可以恢复 Runtime Health，但绝不能把 `UNKNOWN` 临时当作
+`HEALTHY`。
+
 Server 在 Service `required_revision` 变化时也必须立即把所属 Tunnel 的所有 Connector 对该 Service 的 Runtime Health 重置为 `UNKNOWN`。Connector Selection 除检查状态为 HEALTHY 外，还必须检查已存 Health 的 `service_revision == Service required_revision`，因此 ConfigAck 先于新 Health Report 到达也不会短暂放行旧 HEALTHY。
 
 ---
@@ -2909,6 +2968,11 @@ Agent
   ↓
 Origin
 ```
+
+生产支持边界固定为：HTTP Ingress 默认只监听 Loopback，并由 Caddy/Nginx 等 HTTPS
+前置代理访问。若部署者显式绑定非 Loopback 地址，Server 必须输出明确 Security
+Warning，且 `http_ingress.trusted_proxies` 必须与真实拓扑一致。V0.1 不把明文 HTTP
+Ingress 直接暴露到公网作为受支持部署方式。
 
 ---
 
@@ -3085,7 +3149,7 @@ Path Prefix 写入和匹配前必须使用同一套规范：
 
 拒绝控制字符、反斜杠和非法 percent-encoding
 
-先移除 dot segment，再执行匹配
+拒绝明文或编码后的 dot segment、encoded slash 和 encoded backslash
 
 Prefix 必须按路径段边界匹配
 ```
@@ -3094,7 +3158,12 @@ Canonical Path Prefix 规则：根路径只能存为 `/`；非根 Prefix 移除�
 
 例如 `/admin` 只匹配 `/admin` 和 `/admin/...`，不得匹配 `/administrator`。
 
-对编码斜杠 `%2F`、重复斜杠和保留字符不做隐式等价折叠；Router 与转发给 Origin 的路径必须来自同一个规范化结果。无法保证 Router 与 Origin 解释一致的请求应返回 `400 INVALID_PATH`。
+Router 对公网请求不得使用 `path.Clean` 或文件系统路径规则自动改写。对重复斜杠、
+Trailing Slash 和保留字符不做隐式等价折叠；`/foo`、`/foo/`、`/foo//bar` 可以具有
+不同的 Origin 语义。Router 与转发给 Origin 的路径必须来自同一次 Parse/Validate 的
+结果。`RawPath` 为空是 Go HTTP 请求的正常输入；仅非法 percent-encoding，或非空
+`RawPath` 与 `URL.Path`/`RequestURI` 无法保持一致解释时返回 `400 INVALID_PATH`，不得
+normalize-and-hope。
 
 ---
 
@@ -3180,6 +3249,10 @@ Atomic Swap（仅当 generation 仍是最新）
 
 所有 Management 配置写入必须通过同一个 `ConfigWriteCoordinator` 串行进入事务；Handler 不得绕过它直接提交。事务前的 Candidate 只能校验本次输入和增量，绝不能成为发布产物。提交后的唯一发布路径由单 Reconcile Loop 从权威 SQLite 重建完整 Snapshot，避免并发请求都从旧 Runtime 基线构建 Candidate 而丢失对方已提交的 Route。
 
+多个 dirty wakeup 只合并为一次最新 generation 的构建；Build 期间 generation 前进时，
+必须丢弃旧结果并立即按最新 generation 重建，旧 Candidate 不得覆盖更新的 Desired State。
+V0.1 不为此提前增加 `coalesce_window` 等用户配置项。
+
 输入格式、Canonical Host、端口和增量冲突等可预判错误必须在提交前返回。完整 Snapshot 构建若因数据库内部不一致失败，Desired State 保留并进入 `APPLY_FAILED`，Reconcile 不得发布部分结果；修复后按最新 generation 重试。最终 Atomic Swap 本身必须是不可失败操作。
 
 TCP `Listen` 等无法与 SQLite 原子提交的外部副作用使用 Desired/Actual 状态：
@@ -3242,6 +3315,11 @@ http://<tunnel_id>.xtunnel.invalid
 ```
 
 该内部 Host 只用于 `http.Transport` 的连接池 Key 和 DialContext 解析，不发送给 Origin。不得只把 Tunnel ID 放进 `context.Context`，因为 KeepAlive 复用连接时不会再次调用 DialContext。
+
+一个 WorkConn 对应一条 HTTP/1.1 TCP Connection，而不是一个 HTTP
+Request。同一 Tunnel 的顺序请求可以由 `http.Transport` KeepAlive 复用已经建立的
+WorkConn；V0.1 的限制是单条 HTTP/1.1 Connection 不支持并发 Multiplex。E2E
+必须验证连续请求复用，且任何情况下不得跨 Tunnel 复用连接。
 
 请求的实际 `Host` Header 按 `preserve_host` 规则单独设置。任何情况下都禁止不同 Tunnel 共用同一个 Transport Pool Key。
 
@@ -4200,6 +4278,14 @@ DO UPDATE SET value = value + excluded.value;
 
 写入失败时把尚未持久化的增量合并回内存 Counter。V0.1 Usage 属于 best-effort 统计：进程 `kill -9` 最多允许丢失当前 60 秒内存桶，但不得重复累计已经确认提交的批次。该误差必须在 Dashboard 和文档中说明。
 
+M6 实现 Usage 时必须同时提供有界数据生命周期：Minute 明细只短期保留，完成的
+Minute Bucket 幂等汇总为 Hour，Hour 再幂等汇总为 Day；只有汇总事务确认提交后才能
+删除已覆盖的低层 Bucket。重复执行和 Crash 后重跑不得重复统计。具体保留天数必须由
+M6-04 SQLite 容量 Benchmark 后冻结；若决定提供配置项，必须先修改
+`configs/server.schema.json` 这一唯一 Server 配置权威，不能把评审材料中的示例值直接
+写死。Compaction 还必须定义 Incremental Vacuum 或等价文件回收策略，禁止只删 Row
+却让数据库文件无限增长。
+
 禁止：
 
 ```text
@@ -4233,6 +4319,8 @@ Periodic 5s
 ```
 
 所有触发只向单一 Reconcile Loop 标记 dirty，不得并发执行多个 Runtime Build。
+多个 dirty wakeup 必须合并；Build 期间 `reconcile_generation` 前进时，丢弃旧结果并立即
+按最新 generation 重建，不增加面向用户的 coalesce 配置。
 
 每次构建记录：
 
@@ -4340,6 +4428,10 @@ cooldown
 ```
 
 只统计失败登录；成功登录不会清除同 IP 的全局攻击计数。所有限流 Key 必须使用 Management Trusted Proxy 规则得到的客户端 IP，禁止直接使用 loopback Peer 或未经验证的 X-Forwarded-For。
+
+Login、Gateway 和 Public Ingress 的 Token Bucket/LRU 状态只存在于当前单 Server 内存，
+Server Restart 后会重置。这是 Standalone V0.1 的明确限制；本阶段不引入 Redis、持久化
+Bucket 或分布式 Rate Limit。
 
 ---
 
@@ -5678,6 +5770,19 @@ Refill Work Pool
 
 SQLite 配置全部保留。
 
+V0.1 不实现 Hot Restart、Listener FD 继承或 Active Session 跨进程迁移。M7 必须在
+固定测试环境记录以下恢复测量值，而不是未经 Benchmark 预先承诺固定 SLO：
+
+```text
+T_control_reconnect
+T_config_ready
+T_workpool_ready
+T_first_success
+```
+
+测试从 Server Restart 开始，直到 Connector 重连、完整 Snapshot Ack、WorkPool 恢复
+以及首条新业务连接成功；已有业务连接在单 Server Crash 时中断属于 V0.1 明确限制。
+
 ---
 
 # 151. Agent Restart
@@ -5731,9 +5836,11 @@ Mark Draining
 
 Wait Active Connections
 
-Flush Usage
+Deadline 后主动关闭剩余 Public / Origin / WorkConn
 
 Close Agent Sessions
+
+Flush Usage
 
 Close SQLite
 ```
@@ -5811,6 +5918,10 @@ sync.Pool
 ```
 
 复用。
+
+`32KB` 是 V0.1 当前 `io.Copy` 路径的默认工作缓冲基线，不是从其他项目继承的固定最优值。M7 必须在相同
+硬件、连接数和负载下比较至少 `16KB`、`32KB`、`64KB` 的 Throughput、CPU、Syscall、
+RSS、Heap 和 GC，再决定是否调整；不得为未测量的“最佳值”修改协议或增加配置项。
 
 禁止：
 
@@ -6069,6 +6180,16 @@ Authorization Header
 Secret 拼入 `event`、错误文本或任意非敏感字段，也不得直接记录完整 Config、
 HTTP Header、Cookie、请求体或认证对象。
 
+Security Audit Event 是持久化安全证据，不等同于可丢弃的普通运行日志。M1-04 收口前
+必须把最小 Event 冻结为机器可校验契约：明确 bounded/nullable、幂等 `event_id`/
+`operation_id`、`event`/`action` 枚举、Actor、Source IP、Resource、Result、稳定 Error Code、
+`request_id/trace_id`、可选前后状态 Digest，以及 Writer 失败是否令安全操作失败的语义。
+Metadata 必须有界且使用允许字段，绝不能保存业务正文、Secret、Private Key、Cookie 或
+Credential 原文。事件通过统一 Application Audit Writer 追加写入 SQLite
+`security_audit_events`，并派生结构化 Security Log；Management API 不提供 UPDATE/DELETE。
+M1 写事件，M5 实现只读查询 API，M6 实现导出、告警和 Dashboard；Migration 落地前仍
+必须取得数据库 Schema 变更确认。
+
 ---
 
 # 160. Metrics
@@ -6101,6 +6222,20 @@ xtunnel_health_targets
 xtunnel_health_budget_rejections_total
 
 xtunnel_gateway_certificate_expiry_seconds
+
+xtunnel_open_duration_seconds
+
+xtunnel_origin_connect_duration_seconds
+
+xtunnel_reconcile_duration_seconds
+
+xtunnel_reconcile_errors_total
+
+xtunnel_route_snapshot_bytes
+
+xtunnel_route_snapshot_routes
+
+xtunnel_reconcile_coalesced_total
 ```
 
 Agent：
@@ -6170,6 +6305,21 @@ Service 级统计进入：
 ```text
 Usage Aggregator
 ```
+
+Runtime、Session Registry、WorkPool、Route Snapshot 和 Health Runtime 是唯一运行态权威。
+Logs、Metrics、Trace 和 Diagnostics 可通过有界、非阻塞 Observer 派生；Web Runtime View
+可以直接读取不可变 Runtime Snapshot，或消费明确标注 staleness 的 Observer View，但
+Observer 永不成为权威。Observer 阻塞或普通遥测队列满不得反向阻塞数据面。允许丢弃的
+仅是非权威遥测事件，并必须累计 Drop Metric；Security Audit、Usage exactly-once Delta
+和任何 Runtime Mutation 不得通过这一丢弃路径实现。
+
+M6 提供 Agent Connectivity Diagnostic。它必须复用生产 Token Parser、Endpoint Parser、
+DNS Resolver、TCP Dialer、TLS Builder、SPKI Verifier 和 ALPN 配置，禁止另写一套“诊断
+专用”连接栈。默认 Precheck 只验证 Token 结构、DNS、TCP、TLS、证书/Pin 和 ALPN，
+不得建立会替换正式 Connector Session 的隐藏认证；若未来增加真实 Auth/Snapshot
+诊断，必须先冻结不会污染在线 Session 的独立协议语义。输出至少区分 `PASS`、
+`WARNING`、`FAIL`，汇总为 `READY`、`READY_DEGRADED`、`NOT_READY`。Token 输入复用
+正式 Bootstrap 的安全来源，不在示例中鼓励把真实 Token 放入共享 Shell History。
 
 ---
 

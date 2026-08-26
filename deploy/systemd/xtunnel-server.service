@@ -14,6 +14,8 @@ RuntimeDirectory=xtunnel
 RuntimeDirectoryMode=0700
 StateDirectory=xtunnel
 StateDirectoryMode=0700
+# 默认连接容量需要 87188 个 FD；预留到 Linux 常用上限，应用仍受自身预算约束。
+LimitNOFILE=1048576
 ExecStart=/usr/local/bin/xtunnel-server --config /etc/xtunnel/server.yaml
 Restart=on-failure
 RestartSec=5s
