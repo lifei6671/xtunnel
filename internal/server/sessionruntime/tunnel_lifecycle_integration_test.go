@@ -9,10 +9,12 @@ import (
 
 	"github.com/lifei6671/xtunnel/internal/application"
 	"github.com/lifei6671/xtunnel/internal/logging"
+	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	"github.com/lifei6671/xtunnel/internal/server/sessionruntime"
+	serversnapshot "github.com/lifei6671/xtunnel/internal/server/snapshot"
 )
 
 const (
@@ -41,6 +43,7 @@ func TestTunnelLifecycleDurableCommitConvergesSameSessionManager(t *testing.T) {
 		HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 		WriteTimeout: time.Second, MaxReplayEntries: 8,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
+		SnapshotProvider: lifecycleSnapshotProvider{},
 	})
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)
@@ -69,6 +72,12 @@ func TestTunnelLifecycleDurableCommitConvergesSameSessionManager(t *testing.T) {
 	if _, err := registry.ReserveAuthenticated(lifecycleTunnelID, lifecycleConnectorID); !errors.Is(err, serverruntime.ErrTunnelRuntimeRevoked) {
 		t.Fatalf("ReserveAuthenticated() after durable revoke error = %v, want ErrTunnelRuntimeRevoked", err)
 	}
+}
+
+type lifecycleSnapshotProvider struct{}
+
+func (lifecycleSnapshotProvider) Current(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
+	return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{TunnelId: tunnelID}}, nil
 }
 
 type durableCheckingManagerRevoker struct {

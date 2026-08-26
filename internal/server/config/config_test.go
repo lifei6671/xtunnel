@@ -36,8 +36,34 @@ logging:
 	if result.Limits.MaxTunnels != 1000 {
 		t.Fatalf("Limits.MaxTunnels = %d, want 1000", result.Limits.MaxTunnels)
 	}
+	if result.Limits.MaxServicesPerTunnel != 1000 {
+		t.Fatalf("Limits.MaxServicesPerTunnel = %d, want 1000", result.Limits.MaxServicesPerTunnel)
+	}
 	if result.Transport.TCP.WorkAcquireTimeout.String() != "2s" {
 		t.Fatalf("WorkAcquireTimeout = %s, want 2s", result.Transport.TCP.WorkAcquireTimeout)
+	}
+}
+
+func TestLoadMaxServicesPerTunnelAbsoluteLimit(t *testing.T) {
+	baseYAML := "management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: tunnel.example.com\n"
+
+	result, err := Load(baseconfig.Options{
+		YAML: []byte(baseYAML + "limits:\n  max_services_per_tunnel: 1000\n"),
+		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+	})
+	if err != nil {
+		t.Fatalf("Load() at absolute limit error = %v", err)
+	}
+	if result.Limits.MaxServicesPerTunnel != 1000 {
+		t.Fatalf("Limits.MaxServicesPerTunnel = %d, want 1000", result.Limits.MaxServicesPerTunnel)
+	}
+
+	_, err = Load(baseconfig.Options{
+		YAML: []byte(baseYAML + "limits:\n  max_services_per_tunnel: 1001\n"),
+		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "max_services_per_tunnel") {
+		t.Fatalf("Load() above absolute limit error = %v, want max_services_per_tunnel", err)
 	}
 }
 

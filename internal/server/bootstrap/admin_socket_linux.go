@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
+	"github.com/lifei6671/xtunnel/internal/safego"
 	"golang.org/x/sys/unix"
 )
 
@@ -82,33 +83,36 @@ func requestAdminBootstrap(ctx context.Context, socketPath, dataTargetHash, user
 }
 
 type adminBootstrapSocket struct {
-	listener    *net.UnixListener
-	path        string
-	store       *sqlite.Store
-	targetHash  string
-	authorize   func(*net.UnixConn) error
-	afterCreate func() error
+	listener           *net.UnixListener
+	path               string
+	store              *sqlite.Store
+	targetHash         string
+	authorize          func(*net.UnixConn) error
+	afterCreate        func() error
+	reportRuntimeError func(error)
 
-	stopOnce sync.Once
-	done     chan struct{}
-	wait     sync.WaitGroup
+	stopOnce   sync.Once
+	done       chan struct{}
+	wait       sync.WaitGroup
+	runtimeMu  sync.Mutex
+	runtimeErr error
 }
 
 func openAdminBootstrapSocket(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store) (*adminBootstrapSocket, error) {
-	return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, requireRootBootstrapPeer, nil)
+	return openAdminBootstrapSocketWithRuntime(ctx, runtimeDir, targetHash, store, requireRootBootstrapPeer, nil, nil)
 }
 
 func openAdminBootstrapSocketWith(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, authorize func(*net.UnixConn) error) (*adminBootstrapSocket, error) {
-	return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, authorize, nil)
+	return openAdminBootstrapSocketWithRuntime(ctx, runtimeDir, targetHash, store, authorize, nil, nil)
 }
 
 // openAdminBootstrapSocketAfter 在首个管理员事务提交后启动依赖 Admin 的运行资源。
 // 回调只会由成功创建管理员的请求调用一次；失败会显式反馈给请求方，绝不默认忽略。
-func openAdminBootstrapSocketAfter(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (*adminBootstrapSocket, error) {
-	return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, requireRootBootstrapPeer, afterCreate)
+func openAdminBootstrapSocketAfter(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (*adminBootstrapSocket, error) {
+	return openAdminBootstrapSocketWithRuntime(ctx, runtimeDir, targetHash, store, requireRootBootstrapPeer, afterCreate, reportRuntimeError)
 }
 
-func openAdminBootstrapSocketWithAfter(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, authorize func(*net.UnixConn) error, afterCreate func() error) (*adminBootstrapSocket, error) {
+func openAdminBootstrapSocketWithRuntime(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, authorize func(*net.UnixConn) error, afterCreate func() error, reportRuntimeError func(error)) (*adminBootstrapSocket, error) {
 	path := runtimeDir + "/" + adminBootstrapSocketName
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
@@ -132,22 +136,26 @@ func openAdminBootstrapSocketWithAfter(ctx context.Context, runtimeDir, targetHa
 	}
 
 	socket := &adminBootstrapSocket{
-		listener:    listener,
-		path:        path,
-		store:       store,
-		targetHash:  targetHash,
-		authorize:   authorize,
-		afterCreate: afterCreate,
-		done:        make(chan struct{}),
+		listener:           listener,
+		path:               path,
+		store:              store,
+		targetHash:         targetHash,
+		authorize:          authorize,
+		afterCreate:        afterCreate,
+		reportRuntimeError: reportRuntimeError,
+		done:               make(chan struct{}),
 	}
 	socket.wait.Add(2)
-	go socket.serve(ctx)
-	go socket.watchContext(ctx)
+	safego.Go(socket.handlePanic("admin bootstrap accept loop"), socket.wait.Done, func() {
+		socket.serve(ctx)
+	})
+	safego.Go(socket.handlePanic("admin bootstrap context watcher"), socket.wait.Done, func() {
+		socket.watchContext(ctx)
+	})
 	return socket, nil
 }
 
 func (socket *adminBootstrapSocket) serve(ctx context.Context) {
-	defer socket.wait.Done()
 	for {
 		connection, err := socket.listener.AcceptUnix()
 		if err != nil {
@@ -157,15 +165,13 @@ func (socket *adminBootstrapSocket) serve(ctx context.Context) {
 			return
 		}
 		socket.wait.Add(1)
-		go func() {
-			defer socket.wait.Done()
+		safego.Go(socket.handlePanic("admin bootstrap request"), socket.wait.Done, func() {
 			socket.handle(ctx, connection)
-		}()
+		})
 	}
 }
 
 func (socket *adminBootstrapSocket) watchContext(ctx context.Context) {
-	defer socket.wait.Done()
 	select {
 	case <-ctx.Done():
 		socket.stop()
@@ -227,7 +233,29 @@ func (socket *adminBootstrapSocket) stop() {
 func (socket *adminBootstrapSocket) Close() error {
 	socket.stop()
 	socket.wait.Wait()
-	return nil
+	socket.runtimeMu.Lock()
+	defer socket.runtimeMu.Unlock()
+	return socket.runtimeErr
+}
+
+func (socket *adminBootstrapSocket) handlePanic(operation string) func(error) {
+	return func(err error) {
+		runtimeErr := fmt.Errorf("%s: %w", operation, err)
+		socket.runtimeMu.Lock()
+		first := socket.runtimeErr == nil
+		if first {
+			socket.runtimeErr = runtimeErr
+		}
+		report := socket.reportRuntimeError
+		socket.runtimeMu.Unlock()
+		if !first {
+			return
+		}
+		socket.stop()
+		if report != nil {
+			report(runtimeErr)
+		}
+	}
 }
 
 func requireRootBootstrapPeer(connection *net.UnixConn) error {

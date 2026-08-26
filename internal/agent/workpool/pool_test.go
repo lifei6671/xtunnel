@@ -21,6 +21,7 @@ import (
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
 	connectiontoken "github.com/lifei6671/xtunnel/internal/protocol/token"
+	"github.com/lifei6671/xtunnel/internal/safego"
 	servergateway "github.com/lifei6671/xtunnel/internal/server/gateway"
 )
 
@@ -109,6 +110,78 @@ func TestPoolPerformsRealWorkAuthenticationBeforeHandler(t *testing.T) {
 	stats := pool.Stats()
 	if stats.Connecting != 0 || stats.Idle != 0 || stats.Total != 0 {
 		t.Fatalf("关闭后 Stats = %+v", stats)
+	}
+}
+
+func TestPoolWorkerPanicShutsDownAndReturnsFailure(t *testing.T) {
+	sessionDone := make(chan struct{})
+	budget := NewBudget()
+	pool, err := newPoolWithBudget(testConfig(t, sessionDone), dependencies{
+		dial: func(context.Context, string, string) (net.Conn, error) {
+			panic("WorkConn Dial panic must not escape its goroutine")
+		},
+		authenticate: func(context.Context, net.Conn, workauth.Config) (*workauth.Ready, error) {
+			return nil, errors.New("authenticate must not run after Dial panic")
+		},
+		now: time.Now,
+	}, budget)
+	if err != nil {
+		t.Fatalf("newPoolWithBudget() error = %v", err)
+	}
+	if err := pool.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, err := pool.ApplyDemand(demand(testLeaseID, 1, 1, 1, 1_000)); err != nil {
+		t.Fatalf("ApplyDemand() error = %v", err)
+	}
+
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- pool.Wait() }()
+	select {
+	case err := <-waitResult:
+		if !errors.Is(err, safego.ErrPanic) {
+			t.Fatalf("Wait() error = %v, want safego.ErrPanic", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Wait() blocked after WorkConn worker panic")
+	}
+	select {
+	case <-pool.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done() did not close after WorkConn worker panic")
+	}
+	stats := pool.Stats()
+	if stats.Total != 0 || stats.Connecting != 0 || stats.Idle != 0 || stats.Opening != 0 || stats.Active != 0 {
+		t.Fatalf("Stats after WorkConn worker panic = %+v", stats)
+	}
+	if used := budget.usedCount(); used != 0 {
+		t.Fatalf("shared Budget used = %d, want 0", used)
+	}
+}
+
+func TestPoolLifetimePanicShutsDownAndReturnsFailure(t *testing.T) {
+	pool, err := newPool(testConfig(t, make(chan struct{})), dependencies{
+		dial: func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("unused") },
+		authenticate: func(context.Context, net.Conn, workauth.Config) (*workauth.Ready, error) {
+			return nil, errors.New("unused")
+		},
+		now: time.Now,
+	})
+	if err != nil {
+		t.Fatalf("newPool() error = %v", err)
+	}
+	// 注入一个构造后不可能出现的内部状态，验证生命周期 goroutine 的 panic 仍走 Pool shutdown。
+	pool.budget = nil
+	if err := pool.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := pool.Wait(); !errors.Is(err, safego.ErrPanic) {
+		t.Fatalf("Wait() error = %v, want safego.ErrPanic", err)
+	}
+	select {
+	case <-pool.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done() did not close after lifetime panic")
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
 	servercontrolauth "github.com/lifei6671/xtunnel/internal/server/controlauth"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
+	serversnapshot "github.com/lifei6671/xtunnel/internal/server/snapshot"
 	serverworkauth "github.com/lifei6671/xtunnel/internal/server/workauth"
 	serverworkpool "github.com/lifei6671/xtunnel/internal/server/workpool"
 )
@@ -30,6 +31,376 @@ const (
 	testWriteTimeout  = 250 * time.Millisecond
 	testReplayEntries = 32
 )
+
+type testSnapshotProvider struct{}
+
+func (testSnapshotProvider) Current(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
+	return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{TunnelId: tunnelID}}, nil
+}
+
+type snapshotProviderFunc func(context.Context, string) (serversnapshot.Result, error)
+
+func (function snapshotProviderFunc) Current(ctx context.Context, tunnelID string) (serversnapshot.Result, error) {
+	return function(ctx, tunnelID)
+}
+
+func TestNewRequiresSnapshotProvider(t *testing.T) {
+	for _, provider := range []SnapshotProvider{nil, snapshotProviderFunc(nil)} {
+		_, err := New(serverruntime.NewRegistry(), Options{
+			HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
+			WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
+			MaxWorkTotal: 64, MaxWorkConnecting: 16, SnapshotProvider: provider,
+		})
+		if !errors.Is(err, ErrInvalidOptions) {
+			t.Fatalf("New(with SnapshotProvider %#v) error = %v, want ErrInvalidOptions", provider, err)
+		}
+	}
+}
+
+func TestCleanupOwnerErrorOnlyDropsCancellation(t *testing.T) {
+	closeErr := errors.New("close failed")
+	tests := []struct {
+		name    string
+		input   error
+		wantNil bool
+		want    error
+	}{
+		{name: "nil", wantNil: true},
+		{name: "pure cancellation", input: context.Canceled, wantNil: true},
+		{name: "cancellation with close failure", input: errors.Join(context.Canceled, closeErr), want: closeErr},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := cleanupOwnerError(test.input)
+			if test.wantNil {
+				if result != nil {
+					t.Fatalf("cleanupOwnerError() = %v, want nil", result)
+				}
+				return
+			}
+			if !errors.Is(result, test.want) {
+				t.Fatalf("cleanupOwnerError() = %v, want %v", result, test.want)
+			}
+			if errors.Is(result, context.Canceled) {
+				t.Fatalf("cleanupOwnerError() retained context cancellation: %v", result)
+			}
+		})
+	}
+}
+
+func TestServeConfigGateBlocksDataPlaneUntilAppliedAck(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	session := commitSession(t, registry, testTunnelID, testConnectorID)
+	manager := newTestManager(t, registry)
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	established := establishedSession(t, session, 0x20)
+	established.DesiredRevision = 7
+	manager.options.SnapshotProvider = snapshotProviderFunc(func(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
+		return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{TunnelId: tunnelID, Revision: 7}}, nil
+	})
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- manager.Serve(context.Background(), server, &established) }()
+
+	snapshot := readConfigSnapshot(t, client)
+	if snapshot.GetTunnelId() != testTunnelID || snapshot.GetRevision() != 7 {
+		t.Fatalf("initial ConfigSnapshot identity = (%q, %d)", snapshot.GetTunnelId(), snapshot.GetRevision())
+	}
+	if _, exists := manager.Resolve(session.SessionID); exists {
+		t.Fatal("Resolve() exposed syncing Session before ConfigAck")
+	}
+	if _, exists := manager.Pool(session); exists {
+		t.Fatal("Pool() exposed syncing Session before ConfigAck")
+	}
+	if err := manager.GrantLease(session.SessionID, "lease_01J00000000000000000000000", 1, time.Second); !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("GrantLease(syncing) error = %v, want ErrSessionUnavailable", err)
+	}
+	if err := manager.SetPendingOpens(session, 1); !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("SetPendingOpens(syncing) error = %v, want ErrSessionUnavailable", err)
+	}
+	workServer, workPeer := net.Pipe()
+	t.Cleanup(func() { _ = workPeer.Close() })
+	if _, err := manager.RegisterIdle(workServer, serverIdle(t, session)); !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("RegisterIdle(syncing) error = %v, want ErrSessionUnavailable", err)
+	}
+	_ = workServer.Close()
+	for _, connector := range manager.ConnectorSnapshots() {
+		if connector.Session == session && connector.WorkPool.Total != 0 {
+			t.Fatalf("ConnectorSnapshots() overlaid syncing WorkPool = %#v", connector.WorkPool)
+		}
+	}
+	if metrics := manager.MetricsSnapshot(); metrics.XTunnelConnectorsOnline != 0 || metrics.XTunnelControlSessionsOnline != 0 {
+		t.Fatalf("MetricsSnapshot() before ConfigAck = %#v", metrics)
+	}
+
+	writeHeartbeat(t, client, 7)
+	assertNoControlMessage(t, client, 40*time.Millisecond)
+	writeConfigAck(t, client, appliedConfigAck(7))
+	readWorkDemand(t, client)
+	waitFor(t, func() bool {
+		_, exists := manager.Resolve(session.SessionID)
+		return exists
+	})
+
+	_ = client.Close()
+	select {
+	case <-serveResult:
+	case <-time.After(testWait):
+		t.Fatal("Serve() did not stop after config gate test")
+	}
+}
+
+func TestServeRejectedAckStaysSyncingAndRemainsRevocable(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	session := commitSession(t, registry, testTunnelID, testConnectorID)
+	manager := newTestManager(t, registry)
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	established := establishedSession(t, session, 0x21)
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- manager.Serve(context.Background(), server, &established) }()
+
+	readConfigSnapshot(t, client)
+	writeConfigAck(t, client, &protocolv1.ConfigAck{
+		ObservedRevision: 0,
+		ApplyStatus:      protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED,
+		ErrorCode:        protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR,
+	})
+	assertNoControlMessage(t, client, 40*time.Millisecond)
+	if _, exists := manager.Resolve(session.SessionID); exists {
+		t.Fatal("Resolve() exposed Session after REJECTED ConfigAck")
+	}
+	if err := manager.RevokeTunnel(testTunnelID); err != nil {
+		t.Fatalf("RevokeTunnel(syncing) error = %v", err)
+	}
+	select {
+	case <-serveResult:
+	case <-time.After(testWait):
+		t.Fatal("Serve() waiting after REJECTED Ack was not revoked")
+	}
+}
+
+func TestServeDuplicateAppliedAckIsIdempotent(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	session := commitSession(t, registry, testTunnelID, testConnectorID)
+	manager := newTestManager(t, registry)
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	established := establishedSession(t, session, 0x24)
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- manager.Serve(context.Background(), server, &established) }()
+
+	snapshot := readConfigSnapshot(t, client)
+	ack := appliedConfigAck(snapshot.GetRevision())
+	writeConfigAck(t, client, ack)
+	readWorkDemand(t, client)
+	writeConfigAck(t, client, ack)
+	assertNoControlMessage(t, client, 40*time.Millisecond)
+	if _, exists := manager.Resolve(session.SessionID); !exists {
+		t.Fatal("duplicate applied ConfigAck closed ready Session")
+	}
+
+	_ = client.Close()
+	select {
+	case <-serveResult:
+	case <-time.After(testWait):
+		t.Fatal("Serve() did not stop after duplicate ConfigAck test")
+	}
+}
+
+func TestServeAckDemandReconcileIsIdempotentWhenHookEmitsFirst(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	session := commitSession(t, registry, testTunnelID, testConnectorID)
+	manager := newTestManager(t, registry)
+	hookResult := make(chan error, 1)
+	manager.beforeInitialDemandForTest = func(*managedSession) {
+		hookResult <- manager.SetPendingOpens(session, initialDesiredNonActive+1)
+	}
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	established := establishedSession(t, session, 0x27)
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- manager.Serve(context.Background(), server, &established) }()
+	snapshot := readConfigSnapshot(t, client)
+	writeConfigAck(t, client, appliedConfigAck(snapshot.GetRevision()))
+	demand := readWorkDemand(t, client)
+	if demand.GetDesiredNonActive() != initialDesiredNonActive+1 {
+		t.Fatalf("hook WorkDemand desired_non_active = %d, want %d", demand.GetDesiredNonActive(), initialDesiredNonActive+1)
+	}
+	select {
+	case err := <-hookResult:
+		if err != nil {
+			t.Fatalf("hook SetPendingOpens() error = %v", err)
+		}
+	case <-time.After(testWait):
+		t.Fatal("beforeInitialDemand hook did not complete")
+	}
+	assertNoControlMessage(t, client, 40*time.Millisecond)
+	if _, exists := manager.Resolve(session.SessionID); !exists {
+		t.Fatal("idempotent post-Ack reconcile closed Session")
+	}
+
+	_ = client.Close()
+	select {
+	case <-serveResult:
+	case <-time.After(testWait):
+		t.Fatal("Serve() did not stop after idempotent reconcile test")
+	}
+}
+
+func TestServeReplacementRemainsUnavailableUntilReplacementAck(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	manager := newTestManager(t, registry)
+	oldSession := commitSession(t, registry, testTunnelID, testConnectorID)
+	oldServer, oldClient := net.Pipe()
+	t.Cleanup(func() { _ = oldClient.Close() })
+	oldEstablished := establishedSession(t, oldSession, 0x25)
+	oldResult := make(chan error, 1)
+	go func() { oldResult <- manager.Serve(context.Background(), oldServer, &oldEstablished) }()
+	readInitialDemand(t, oldClient)
+
+	newSession := commitSession(t, registry, testTunnelID, testConnectorID)
+	newServer, newClient := net.Pipe()
+	t.Cleanup(func() { _ = newClient.Close() })
+	newEstablished := establishedSession(t, newSession, 0x26)
+	newResult := make(chan error, 1)
+	go func() { newResult <- manager.Serve(context.Background(), newServer, &newEstablished) }()
+	newSnapshot := readConfigSnapshot(t, newClient)
+	if _, exists := manager.Resolve(oldSession.SessionID); exists {
+		t.Fatal("replacement left old Session resolvable")
+	}
+	if _, exists := manager.Resolve(newSession.SessionID); exists {
+		t.Fatal("replacement Session became resolvable before ConfigAck")
+	}
+	select {
+	case <-oldResult:
+	case <-time.After(testWait):
+		t.Fatal("old Serve() did not stop after replacement install")
+	}
+	writeConfigAck(t, newClient, appliedConfigAck(newSnapshot.GetRevision()))
+	readWorkDemand(t, newClient)
+	waitFor(t, func() bool {
+		_, exists := manager.Resolve(newSession.SessionID)
+		return exists
+	})
+
+	_ = newClient.Close()
+	select {
+	case <-newResult:
+	case <-time.After(testWait):
+		t.Fatal("replacement Serve() did not stop")
+	}
+}
+
+func TestShutdownFindsSessionWaitingForConfigAck(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	session := commitSession(t, registry, testTunnelID, testConnectorID)
+	manager := newTestManager(t, registry)
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	established := establishedSession(t, session, 0x22)
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- manager.Serve(context.Background(), server, &established) }()
+	readConfigSnapshot(t, client)
+
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), testWait)
+	defer cancelShutdown()
+	if err := manager.Shutdown(shutdownContext); err != nil {
+		t.Fatalf("Shutdown(syncing) error = %v", err)
+	}
+	select {
+	case <-serveResult:
+	case <-time.After(testWait):
+		t.Fatal("Serve() waiting for ConfigAck was not shut down")
+	}
+}
+
+func TestServeRejectsInvalidInitialSnapshot(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider SnapshotProvider
+	}{
+		{name: "provider error", provider: snapshotProviderFunc(func(context.Context, string) (serversnapshot.Result, error) {
+			return serversnapshot.Result{}, errors.New("snapshot unavailable")
+		})},
+		{name: "nil snapshot", provider: snapshotProviderFunc(func(context.Context, string) (serversnapshot.Result, error) {
+			return serversnapshot.Result{}, nil
+		})},
+		{name: "wrong tunnel", provider: snapshotProviderFunc(func(context.Context, string) (serversnapshot.Result, error) {
+			return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{TunnelId: testTunnelID + "x", Revision: 8}}, nil
+		})},
+		{name: "stale revision", provider: snapshotProviderFunc(func(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
+			return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{TunnelId: tunnelID, Revision: 6}}, nil
+		})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := serverruntime.NewRegistry()
+			session := commitSession(t, registry, testTunnelID, testConnectorID)
+			manager := newTestManager(t, registry)
+			manager.options.SnapshotProvider = test.provider
+			server, client := net.Pipe()
+			t.Cleanup(func() { _ = client.Close() })
+			established := establishedSession(t, session, 0x23)
+			established.DesiredRevision = 7
+			err := manager.Serve(context.Background(), server, &established)
+			if err == nil {
+				t.Fatal("Serve() accepted invalid initial snapshot")
+			}
+			if _, exists := manager.Resolve(session.SessionID); exists {
+				t.Fatal("invalid initial snapshot left Session resolvable")
+			}
+			manager.mu.Lock()
+			live := len(manager.liveSessions)
+			manager.mu.Unlock()
+			if live != 0 {
+				t.Fatalf("invalid initial snapshot left %d live Sessions", live)
+			}
+		})
+	}
+}
+
+func TestManagedSessionRejectsConfigAckBusinessMismatch(t *testing.T) {
+	tests := []struct {
+		name string
+		ack  *protocolv1.ConfigAck
+	}{
+		{name: "applied wrong revision", ack: appliedConfigAck(6)},
+		{name: "applied non-ok", ack: &protocolv1.ConfigAck{
+			ObservedRevision: 7,
+			ApplyStatus:      protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED,
+			ErrorCode:        protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR,
+		}},
+		{name: "rejected changes observed", ack: &protocolv1.ConfigAck{
+			ObservedRevision: 1,
+			ApplyStatus:      protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED,
+			ErrorCode:        protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR,
+		}},
+		{name: "rejected ok", ack: &protocolv1.ConfigAck{
+			ObservedRevision: 0,
+			ApplyStatus:      protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED,
+			ErrorCode:        protocolv1.ErrorCode_ERROR_CODE_OK,
+		}},
+		{name: "unspecified", ack: &protocolv1.ConfigAck{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			managed := &managedSession{}
+			if err := managed.installOutstandingSnapshot(7); err != nil {
+				t.Fatalf("installOutstandingSnapshot() error = %v", err)
+			}
+			if applied, err := managed.acceptConfigAck(test.ack); err == nil || applied {
+				t.Fatalf("acceptConfigAck() = (%t, %v), want business mismatch", applied, err)
+			}
+			if !managed.hasOutstandingSnapshot() {
+				t.Fatal("invalid ConfigAck cleared outstanding Snapshot")
+			}
+		})
+	}
+	if applied, err := (&managedSession{}).acceptConfigAck(appliedConfigAck(7)); err == nil || applied {
+		t.Fatalf("acceptConfigAck(without outstanding) = (%t, %v), want error", applied, err)
+	}
+}
 
 func TestServePublishesAndCleansCurrentSession(t *testing.T) {
 	registry := serverruntime.NewRegistry()
@@ -414,6 +785,8 @@ func TestServeHeartbeatReconcilesExpiredDemandWithoutRequestStorm(t *testing.T) 
 	established := establishedSession(t, session, 0x77)
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- manager.Serve(context.Background(), controlServer, &established) }()
+	snapshot := readConfigSnapshot(t, controlClient)
+	writeConfigAck(t, controlClient, appliedConfigAck(snapshot.GetRevision()))
 	first := readWorkDemand(t, controlClient)
 	if first.GetDemandGeneration() != 1 {
 		t.Fatalf("initial demand generation = %d, want 1", first.GetDemandGeneration())
@@ -460,6 +833,8 @@ func TestServeHeartbeatRefillsAfterInitialDemandIsConsumed(t *testing.T) {
 	established := establishedSession(t, session, 0x78)
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- manager.Serve(context.Background(), controlServer, &established) }()
+	snapshot := readConfigSnapshot(t, controlClient)
+	writeConfigAck(t, controlClient, appliedConfigAck(snapshot.GetRevision()))
 	initial := readWorkDemand(t, controlClient)
 
 	for range initialDesiredNonActive {
@@ -514,6 +889,8 @@ func TestPendingDemandDecreaseImmediatelyCancelsLeaseAndCanRiseAgain(t *testing.
 	established := establishedSession(t, session, secretByte)
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- manager.Serve(context.Background(), controlServer, &established) }()
+	snapshot := readConfigSnapshot(t, controlClient)
+	writeConfigAck(t, controlClient, appliedConfigAck(snapshot.GetRevision()))
 	initial := readWorkDemand(t, controlClient)
 
 	for range initialDesiredNonActive {
@@ -592,6 +969,7 @@ func TestServeHeartbeatTimeoutUsesLocalReceiptTimeAndCleansSession(t *testing.T)
 		HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 		WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 100 * time.Millisecond,
+		SnapshotProvider: testSnapshotProvider{},
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -634,6 +1012,7 @@ func newTestManager(t *testing.T, registry *serverruntime.Registry) *Manager {
 		HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 		WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
+		SnapshotProvider: testSnapshotProvider{},
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -792,11 +1171,50 @@ func waitFor(t *testing.T, condition func() bool) {
 
 func readInitialDemand(t *testing.T, connection net.Conn) {
 	t.Helper()
+	snapshot := readConfigSnapshot(t, connection)
+	writeConfigAck(t, connection, appliedConfigAck(snapshot.GetRevision()))
 	demand := readWorkDemand(t, connection)
 	if demand.GetDesiredNonActive() != initialDesiredNonActive ||
 		demand.GetMaxNewConnections() != initialDesiredNonActive || demand.GetDemandGeneration() != 1 ||
 		demand.GetLeaseTtlMs() != uint32(initialLeaseTTL/time.Millisecond) {
 		t.Fatalf("initial WorkDemand = %#v", demand)
+	}
+}
+
+func appliedConfigAck(revision uint64) *protocolv1.ConfigAck {
+	return &protocolv1.ConfigAck{
+		ObservedRevision: revision,
+		ApplyStatus:      protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED,
+		ErrorCode:        protocolv1.ErrorCode_ERROR_CODE_OK,
+	}
+}
+
+func readConfigSnapshot(t *testing.T, connection net.Conn) *protocolv1.TunnelSnapshot {
+	t.Helper()
+	if err := connection.SetReadDeadline(time.Now().Add(testWait)); err != nil {
+		t.Fatalf("set ConfigSnapshot deadline: %v", err)
+	}
+	envelope := &protocolv1.ControlEnvelope{}
+	if err := frame.ReadControl(connection, envelope); err != nil {
+		t.Fatalf("read ConfigSnapshot: %v", err)
+	}
+	if err := connection.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear ConfigSnapshot deadline: %v", err)
+	}
+	snapshot := envelope.GetConfigSnapshot()
+	if snapshot == nil {
+		t.Fatalf("first Control message = %#v, want ConfigSnapshot", envelope)
+	}
+	return snapshot
+}
+
+func writeConfigAck(t *testing.T, connection net.Conn, ack *protocolv1.ConfigAck) {
+	t.Helper()
+	if err := frame.WriteControl(connection, &protocolv1.ControlEnvelope{
+		ProtocolVersion: testProtocol,
+		Payload:         &protocolv1.ControlEnvelope_ConfigAck{ConfigAck: ack},
+	}); err != nil {
+		t.Fatalf("write ConfigAck: %v", err)
 	}
 }
 
@@ -817,6 +1235,24 @@ func readWorkDemand(t *testing.T, connection net.Conn) *protocolv1.WorkDemand {
 		t.Fatalf("Control message = %#v, want WorkDemand", envelope)
 	}
 	return demand
+}
+
+func assertNoControlMessage(t *testing.T, connection net.Conn, timeout time.Duration) {
+	t.Helper()
+	if err := connection.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("set no-message deadline: %v", err)
+	}
+	err := frame.ReadControl(connection, &protocolv1.ControlEnvelope{})
+	if err == nil {
+		t.Fatal("received unexpected Control message")
+	}
+	var networkError net.Error
+	if !errors.As(err, &networkError) || !networkError.Timeout() {
+		t.Fatalf("read without expected Control message error = %v, want timeout", err)
+	}
+	if err := connection.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear no-message deadline: %v", err)
+	}
 }
 
 func writeHeartbeat(t *testing.T, connection net.Conn, timestamp uint64) {

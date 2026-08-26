@@ -13,6 +13,7 @@ import (
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
+	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
 var (
@@ -141,9 +142,33 @@ func (owner *Owner) Start(parent context.Context) error {
 	owner.enqueueMu.Unlock()
 
 	owner.ioWait.Add(2)
-	go owner.readLoop(ctx)
-	go owner.writeLoop(ctx)
-	go owner.ownerLoop(ctx)
+	safego.Go(
+		func(err error) {
+			owner.signalFatal(fmt.Errorf("control session read loop: %w", err))
+		},
+		owner.ioWait.Done,
+		func() {
+			owner.readLoop(ctx)
+		},
+	)
+	safego.Go(
+		func(err error) {
+			owner.signalFatal(fmt.Errorf("control session write loop: %w", err))
+		},
+		owner.ioWait.Done,
+		func() {
+			owner.writeLoop(ctx)
+		},
+	)
+	safego.Go(
+		func(err error) {
+			owner.finish(fmt.Errorf("control session owner loop: %w", err))
+		},
+		nil,
+		func() {
+			owner.ownerLoop(ctx)
+		},
+	)
 	return nil
 }
 
@@ -210,7 +235,13 @@ func (owner *Owner) ownerLoop(ctx context.Context) {
 		}
 
 		if !writeInFlight {
-			envelope, ok := owner.outbox.Dequeue()
+			var envelope *protocolv1.ControlEnvelope
+			var ok bool
+			if owner.control.SnapshotOutstanding() {
+				envelope, ok = owner.outbox.dequeueBeforeConfigAck()
+			} else {
+				envelope, ok = owner.outbox.Dequeue()
+			}
 			if ok {
 				if _, err := owner.control.AcceptOutbound(envelope); err != nil {
 					terminal = fmt.Errorf("%w: outbound: %w", ErrControlProtocol, err)
@@ -277,7 +308,6 @@ func (owner *Owner) acceptInbound(event readEvent) error {
 }
 
 func (owner *Owner) readLoop(ctx context.Context) {
-	defer owner.ioWait.Done()
 	for {
 		envelope := &protocolv1.ControlEnvelope{}
 		err := frame.ReadControlLimit(owner.connection, envelope, owner.options.MaxFrameBytes)
@@ -294,7 +324,6 @@ func (owner *Owner) readLoop(ctx context.Context) {
 }
 
 func (owner *Owner) writeLoop(ctx context.Context) {
-	defer owner.ioWait.Done()
 	for {
 		select {
 		case <-ctx.Done():

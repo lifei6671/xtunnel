@@ -18,6 +18,7 @@ import (
 	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	"github.com/lifei6671/xtunnel/internal/server/sessionruntime"
+	serversnapshot "github.com/lifei6671/xtunnel/internal/server/snapshot"
 	serverworkauth "github.com/lifei6671/xtunnel/internal/server/workauth"
 	serverworkpool "github.com/lifei6671/xtunnel/internal/server/workpool"
 )
@@ -30,6 +31,12 @@ const (
 	testWorkID       = "work_01J00000000000000000000000"
 	testTimeout      = 3 * time.Second
 )
+
+type tunnelSnapshotProvider struct{}
+
+func (tunnelSnapshotProvider) Current(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
+	return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{TunnelId: tunnelID}}, nil
+}
 
 func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	registry := serverruntime.NewRegistry()
@@ -44,7 +51,7 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
 		HighPriorityCapacity: 8, NormalCapacity: 16, InboundCapacity: 8,
 		WriteTimeout: time.Second, MaxReplayEntries: 64,
-		MaxWorkTotal: 64, MaxWorkConnecting: 16,
+		MaxWorkTotal: 64, MaxWorkConnecting: 16, SnapshotProvider: tunnelSnapshotProvider{},
 	})
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)
@@ -54,13 +61,7 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	established := establishedControl(t, session)
 	controlResult := make(chan error, 1)
 	go func() { controlResult <- sessions.Serve(context.Background(), controlServer, &established) }()
-	initialDemand := &protocolv1.ControlEnvelope{}
-	if err := frame.ReadControl(controlAgent, initialDemand); err != nil {
-		t.Fatalf("read initial WorkDemand: %v", err)
-	}
-	if initialDemand.GetWorkDemand() == nil {
-		t.Fatal("initial Control message is not WorkDemand")
-	}
+	readDemand(t, controlAgent)
 
 	serverWork, agentWork := tcpPair(t)
 	idle := authenticatedIdle(t, session)
@@ -138,6 +139,7 @@ func TestProxyAggregatesConcurrentPendingOpensAndRefillsBeyondInitialDemand(t *t
 		HighPriorityCapacity: 16, NormalCapacity: 32, InboundCapacity: 16,
 		WriteTimeout: time.Second, MaxReplayEntries: 128,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, LimitManager: limits,
+		SnapshotProvider: tunnelSnapshotProvider{},
 	})
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)
@@ -288,6 +290,7 @@ func TestProxyPendingOpenTimeoutAndCancelReleaseQuota(t *testing.T) {
 				HighPriorityCapacity: 8, NormalCapacity: 16, InboundCapacity: 8,
 				WriteTimeout: time.Second, MaxReplayEntries: 64,
 				MaxWorkTotal: 64, MaxWorkConnecting: 16, LimitManager: limits,
+				SnapshotProvider: tunnelSnapshotProvider{},
 			})
 			if err != nil {
 				t.Fatalf("sessionruntime.New() error = %v", err)
@@ -354,6 +357,7 @@ func TestProxyPendingGroupReselectsWhenSelectedSessionDrains(t *testing.T) {
 		HighPriorityCapacity: 8, NormalCapacity: 16, InboundCapacity: 8,
 		WriteTimeout: time.Second, MaxReplayEntries: 64,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, LimitManager: limits,
+		SnapshotProvider: tunnelSnapshotProvider{},
 	})
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)
@@ -486,6 +490,7 @@ func TestAcquireWorkRetriesStalePendingSessionAfterGenerationReplacement(t *test
 		HighPriorityCapacity: 8, NormalCapacity: 16, InboundCapacity: 8,
 		WriteTimeout: time.Second, MaxReplayEntries: 64,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, LimitManager: limits,
+		SnapshotProvider: tunnelSnapshotProvider{},
 	})
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)
@@ -710,7 +715,24 @@ func readDemand(t *testing.T, connection net.Conn) *protocolv1.WorkDemand {
 	}
 	envelope := &protocolv1.ControlEnvelope{}
 	if err := frame.ReadControl(connection, envelope); err != nil {
-		t.Fatalf("read WorkDemand: %v", err)
+		t.Fatalf("read initial Control message: %v", err)
+	}
+	if snapshot := envelope.GetConfigSnapshot(); snapshot != nil {
+		ack := &protocolv1.ControlEnvelope{
+			ProtocolVersion: envelope.GetProtocolVersion(),
+			Payload: &protocolv1.ControlEnvelope_ConfigAck{ConfigAck: &protocolv1.ConfigAck{
+				ObservedRevision: snapshot.GetRevision(),
+				ApplyStatus:      protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED,
+				ErrorCode:        protocolv1.ErrorCode_ERROR_CODE_OK,
+			}},
+		}
+		if err := frame.WriteControl(connection, ack); err != nil {
+			t.Fatalf("write ConfigAck: %v", err)
+		}
+		envelope.Reset()
+		if err := frame.ReadControl(connection, envelope); err != nil {
+			t.Fatalf("read WorkDemand after ConfigAck: %v", err)
+		}
 	}
 	if err := connection.SetReadDeadline(time.Time{}); err != nil {
 		t.Fatalf("clear WorkDemand deadline: %v", err)

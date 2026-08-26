@@ -16,6 +16,7 @@ import (
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
 	connectiontoken "github.com/lifei6671/xtunnel/internal/protocol/token"
+	"github.com/lifei6671/xtunnel/internal/safego"
 	servergateway "github.com/lifei6671/xtunnel/internal/server/gateway"
 )
 
@@ -104,6 +105,16 @@ func TestRunnerReusesConnectorAcrossSequentialControlSessions(t *testing.T) {
 	}
 	if err := first.Enqueue(&protocolv1.ControlEnvelope{
 		ProtocolVersion: 1,
+		Payload: &protocolv1.ControlEnvelope_ConfigAck{ConfigAck: &protocolv1.ConfigAck{
+			ObservedRevision: 7,
+			ApplyStatus:      protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED,
+			ErrorCode:        protocolv1.ErrorCode_ERROR_CODE_OK,
+		}},
+	}); err != nil {
+		t.Fatalf("Session.Enqueue(ConfigAck) error = %v", err)
+	}
+	if err := first.Enqueue(&protocolv1.ControlEnvelope{
+		ProtocolVersion: 1,
 		Payload: &protocolv1.ControlEnvelope_Heartbeat{Heartbeat: &protocolv1.Heartbeat{
 			ObservedRevision: 7,
 		}},
@@ -152,6 +163,35 @@ func TestRunnerReusesConnectorAcrossSequentialControlSessions(t *testing.T) {
 	}
 	if dialCount != 2 {
 		t.Fatalf("顺序重连后的 Dial 次数 = %d, want 2", dialCount)
+	}
+}
+
+func TestCompletionObserverPanicStillClosesSessionAndReleasesRunner(t *testing.T) {
+	runner := &Runner{busy: true, attemptGeneration: 7}
+	lifetimeContext, cancelLifetime := context.WithCancel(context.Background())
+	session := &Session{
+		cancel: cancelLifetime,
+		authentication: controlauth.Session{
+			SessionSecret: [32]byte{0x41},
+		},
+		done: make(chan struct{}),
+	}
+	session.startCompletionObserver(runner, 7)
+
+	if err := session.Wait(); !errors.Is(err, safego.ErrPanic) {
+		t.Fatalf("Session.Wait() error = %v, want safego.ErrPanic", err)
+	}
+	if lifetimeContext.Err() == nil {
+		t.Fatal("completion panic did not cancel Session lifetime")
+	}
+	if !session.closed || !allZero(session.authentication.SessionSecret[:]) {
+		t.Fatalf("completion panic cleanup: closed=%v secret=%x", session.closed, session.authentication.SessionSecret)
+	}
+	if runner.busy {
+		t.Fatal("completion panic did not release Runner generation")
+	}
+	if _, err := session.WorkAuthSession(); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("WorkAuthSession() error = %v, want ErrSessionClosed", err)
 	}
 }
 
@@ -403,6 +443,13 @@ func serveControlAttempt(
 		}},
 	}); err != nil {
 		return err
+	}
+	ack := &protocolv1.ControlEnvelope{}
+	if err := frame.ReadControl(connection, ack); err != nil {
+		return err
+	}
+	if ack.GetConfigAck() == nil {
+		return errors.New("server expected ConfigAck before Heartbeat")
 	}
 	heartbeat := &protocolv1.ControlEnvelope{}
 	if err := frame.ReadControl(connection, heartbeat); err != nil {

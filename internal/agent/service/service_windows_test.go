@@ -4,11 +4,14 @@ package service
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/lifei6671/xtunnel/internal/safego"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -252,6 +255,46 @@ func TestWindowsServiceHandlerReportsRuntimeFailure(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("service handler did not propagate runtime failure")
+	}
+}
+
+func TestWindowsServiceHandlerReportsRuntimePanic(t *testing.T) {
+	handler := &windowsServiceHandler{
+		load:     func() (string, error) { return "xta_panic_secret", nil },
+		stopWait: time.Second,
+		callback: func(context.Context, string) error {
+			panic("service callback panic must not escape its goroutine")
+		},
+	}
+	requests := make(chan svc.ChangeRequest)
+	changes := make(chan svc.Status)
+	result := make(chan struct {
+		serviceSpecific bool
+		exitCode        uint32
+	}, 1)
+	go func() {
+		serviceSpecific, exitCode := handler.Execute(nil, requests, changes)
+		result <- struct {
+			serviceSpecific bool
+			exitCode        uint32
+		}{serviceSpecific, exitCode}
+	}()
+	if state := receiveWindowsServiceState(t, changes); state != svc.StartPending {
+		t.Fatalf("first state = %d, want StartPending", state)
+	}
+	if state := receiveWindowsServiceState(t, changes); state != svc.Running {
+		t.Fatalf("second state = %d, want Running", state)
+	}
+	if state := receiveWindowsServiceState(t, changes); state != svc.StopPending {
+		t.Fatalf("third state = %d, want StopPending", state)
+	}
+	select {
+	case got := <-result:
+		if !got.serviceSpecific || got.exitCode == 0 || !errors.Is(handler.err, safego.ErrPanic) {
+			t.Fatalf("Execute() = (%v, %d), error=%v; want safego panic failure", got.serviceSpecific, got.exitCode, handler.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service handler did not report callback panic")
 	}
 }
 

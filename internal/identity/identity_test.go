@@ -58,6 +58,11 @@ func TestNewID(t *testing.T) {
 }
 
 func TestConnectorAndSessionIdentity(t *testing.T) {
+	serviceID, err := NewServiceID()
+	if err != nil || !ValidServiceID(serviceID) {
+		t.Fatalf("NewServiceID() = %q, %v, want svc_ ULID", serviceID, err)
+	}
+
 	connector, err := NewConnector()
 	if err != nil {
 		t.Fatalf("NewConnector() error = %v", err)
@@ -134,6 +139,10 @@ func TestValidateIDs(t *testing.T) {
 	}{
 		{name: "合法 Tunnel", validate: ValidateTunnelID, value: "tun_" + validBody},
 		{name: "错误 Tunnel 前缀", validate: ValidateTunnelID, value: "con_" + validBody, wantErr: ErrInvalidTunnelID},
+		{name: "合法 Service", validate: ValidateServiceID, value: "svc_" + validBody},
+		{name: "错误 Service 前缀", validate: ValidateServiceID, value: "tun_" + validBody, wantErr: ErrInvalidServiceID},
+		{name: "小写 Service", validate: ValidateServiceID, value: "svc_01j00000000000000000000000", wantErr: ErrInvalidServiceID},
+		{name: "Service 首字符超出 ULID 范围", validate: ValidateServiceID, value: "svc_81J00000000000000000000000", wantErr: ErrInvalidServiceID},
 		{name: "合法 Connector", validate: ValidateConnectorID, value: "con_" + validBody},
 		{name: "错误 Connector 前缀", validate: ValidateConnectorID, value: "sess_" + validBody, wantErr: ErrInvalidConnectorID},
 		{name: "小写 Connector", validate: ValidateConnectorID, value: "con_01j00000000000000000000000", wantErr: ErrInvalidConnectorID},

@@ -8,6 +8,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
 const (
@@ -48,6 +50,9 @@ type ServerOptions struct {
 	// Handle 在 TLS/ALPN 边界完成后接收连接。M1-04 不提供任何 Auth 或 Work 处理器；
 	// 生产生命周期传入 nil 时连接会立即关闭，避免错误地把流量回落到某个默认协议。
 	Handle func(context.Context, *tls.Conn, Protocol)
+	// ReportRuntimeError 接收后台 goroutine 的致命错误。回调必须保持非阻塞；
+	// Gateway 会先停止接收新连接并取消仍在运行的连接处理器，再调用该回调。
+	ReportRuntimeError func(error)
 
 	// 下列未导出字段仅用于包内测试：生产路径固定使用默认检查周期和系统时钟，
 	// 不新增用户配置项，也避免测试因真实时间等待而不稳定。
@@ -59,15 +64,16 @@ type ServerOptions struct {
 type Server struct {
 	options ServerOptions
 
-	mu        sync.Mutex
-	listener  net.Listener
-	cancel    context.CancelFunc
-	wait      sync.WaitGroup
-	stopped   bool
-	stopOnce  sync.Once
-	closeOnce sync.Once
-	stopErr   error
-	closeErr  error
+	mu         sync.Mutex
+	listener   net.Listener
+	cancel     context.CancelFunc
+	wait       sync.WaitGroup
+	stopped    bool
+	stopOnce   sync.Once
+	closeOnce  sync.Once
+	stopErr    error
+	closeErr   error
+	runtimeErr error
 
 	// identity 受 identityMu 保护。握手只读锁读取当前证书；续签在磁盘操作结束后
 	// 才短暂持写锁替换它，因此已完成 TLS 握手的连接不会受到影响。
@@ -124,10 +130,14 @@ func (server *Server) Start(parent context.Context) error {
 	server.listener = listener
 	server.cancel = cancel
 	server.wait.Add(1)
-	go server.accept(ctx)
+	safego.Go(server.handlePanic("gateway accept loop"), server.wait.Done, func() {
+		server.accept(ctx)
+	})
 	if server.hasPinnedRenewalSource() {
 		server.wait.Add(1)
-		go server.renewalLoop(ctx)
+		safego.Go(server.handlePanic("gateway certificate renewal loop"), server.wait.Done, func() {
+			server.renewalLoop(ctx)
+		})
 	}
 	return nil
 }
@@ -168,13 +178,15 @@ func (server *Server) Close() error {
 			cancel()
 		}
 		server.wait.Wait()
-		server.closeErr = stopErr
+		server.mu.Lock()
+		runtimeErr := server.runtimeErr
+		server.mu.Unlock()
+		server.closeErr = errors.Join(stopErr, runtimeErr)
 	})
 	return server.closeErr
 }
 
 func (server *Server) accept(ctx context.Context) {
-	defer server.wait.Done()
 	limit := make(chan struct{}, server.options.MaxPendingTLSHandshakes)
 	for {
 		connection, err := server.listener.Accept()
@@ -187,19 +199,20 @@ func (server *Server) accept(ctx context.Context) {
 		select {
 		case limit <- struct{}{}:
 			server.wait.Add(1)
-			go func() {
-				defer server.wait.Done()
+			safego.Go(server.handlePanic("gateway connection"), server.wait.Done, func() {
+				defer connection.Close()
 				// TLS 握手预算只覆盖 Handshake，不能覆盖认证后的整个 Control/Work
 				// 生命周期。Control Session 和 ACTIVE Work 可能持续数小时；若一直
 				// 占用该槽位，少量长连接就会永久阻止新 Connector 完成 TLS 握手。
-				tlsConnection, protocol, ok := server.handshake(ctx, connection)
-				<-limit
+				tlsConnection, protocol, ok := func() (*tls.Conn, Protocol, bool) {
+					defer func() { <-limit }()
+					return server.handshake(ctx, connection)
+				}()
 				if !ok {
-					_ = connection.Close()
 					return
 				}
 				server.handle(ctx, tlsConnection, protocol)
-			}()
+			})
 		default:
 			// 预算耗尽时不读取 TLS 或 Protocol 字节，直接关掉新连接。
 			_ = connection.Close()
@@ -222,7 +235,6 @@ func (server *Server) handshake(ctx context.Context, connection net.Conn) (*tls.
 }
 
 func (server *Server) handle(ctx context.Context, connection *tls.Conn, protocol Protocol) {
-	defer connection.Close()
 	if server.options.Handle == nil {
 		return
 	}
@@ -266,7 +278,6 @@ func (server *Server) hasPinnedRenewalSource() bool {
 }
 
 func (server *Server) renewalLoop(ctx context.Context) {
-	defer server.wait.Done()
 	ticker := time.NewTicker(server.renewalInterval)
 	defer ticker.Stop()
 	for {
@@ -275,6 +286,30 @@ func (server *Server) renewalLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			server.renewPinnedIdentity()
+		}
+	}
+}
+
+func (server *Server) handlePanic(operation string) func(error) {
+	return func(err error) {
+		runtimeErr := fmt.Errorf("%s: %w", operation, err)
+		server.mu.Lock()
+		first := server.runtimeErr == nil
+		if first {
+			server.runtimeErr = runtimeErr
+		}
+		cancel := server.cancel
+		report := server.options.ReportRuntimeError
+		server.mu.Unlock()
+		if !first {
+			return
+		}
+		_ = server.StopAccepting()
+		if cancel != nil {
+			cancel()
+		}
+		if report != nil {
+			report(runtimeErr)
 		}
 	}
 }

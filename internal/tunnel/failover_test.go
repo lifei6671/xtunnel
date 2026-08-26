@@ -747,6 +747,7 @@ func newFailoverFixture(t *testing.T, connectorIDs ...string) *failoverFixture {
 		HighPriorityCapacity: 16, NormalCapacity: 32, InboundCapacity: 16,
 		WriteTimeout: time.Second, MaxReplayEntries: 128,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, LimitManager: limits,
+		SnapshotProvider: tunnelSnapshotProvider{},
 	})
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)

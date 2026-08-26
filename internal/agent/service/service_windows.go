@@ -17,6 +17,8 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
 const (
@@ -479,9 +481,11 @@ func (handler *windowsServiceHandler) Execute(
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() {
+	safego.Go(func(err error) {
+		done <- fmt.Errorf("run Agent Windows service callback: %w", err)
+	}, nil, func() {
 		done <- handler.callback(ctx, token)
-	}()
+	})
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 
 	for {

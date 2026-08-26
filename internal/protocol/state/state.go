@@ -33,12 +33,14 @@ var (
 	ErrRepeatedMessage = errors.New("protocol state: repeated non-idempotent message")
 	// ErrConflictingDrain 表示同一 Drain ID 携带了不同的内容。
 	ErrConflictingDrain = errors.New("protocol state: conflicting drain message")
-	// ErrRevisionRollback 表示 ConfigAck 的 revision 倒退。
-	ErrRevisionRollback = errors.New("protocol state: config ack revision rollback")
-	// ErrConflictingConfigAck 表示同一 revision 的 ConfigAck 给出了不同状态。
-	ErrConflictingConfigAck = errors.New("protocol state: conflicting config ack")
 	// ErrInvalidConfigAck 表示 ConfigAck 使用了未指定的应用状态。
 	ErrInvalidConfigAck = errors.New("protocol state: invalid config ack")
+	// ErrConfigAckWithoutSnapshot 表示当前 Session 没有可关联的 outstanding Snapshot。
+	ErrConfigAckWithoutSnapshot = errors.New("protocol state: config ack has no outstanding snapshot")
+	// ErrConfigSnapshotOutstanding 表示前一份 Snapshot 尚未 Ack，不能开始下一份。
+	ErrConfigSnapshotOutstanding = errors.New("protocol state: config snapshot is already outstanding")
+	// ErrConfigSnapshotRollback 表示同一 Session 收到的 Snapshot revision 倒退。
+	ErrConfigSnapshotRollback = errors.New("protocol state: config snapshot revision rollback")
 	// ErrConnectionIDMismatch 表示 OpenResponse 没有回应正在打开的连接。
 	ErrConnectionIDMismatch = errors.New("protocol state: connection id mismatch")
 	// ErrWorkIDMismatch 表示 WorkReady 没有回应当前 WorkHello。
@@ -100,11 +102,15 @@ type Result struct {
 // Control 是一个 Control Session 的纯内存协议状态。
 // 它不是并发安全对象；所属 SessionOwner 必须以单一事件序列调用它。
 type Control struct {
-	endpoint        Endpoint
-	phase           ControlPhase
-	protocolVersion uint32
-	drains          map[drainKey]drainRecord
-	configAck       *configAckRecord
+	endpoint         Endpoint
+	phase            ControlPhase
+	protocolVersion  uint32
+	drains           map[drainKey]drainRecord
+	observedRevision uint64
+	lastSnapshot     uint64
+	hasLastSnapshot  bool
+	outstanding      *snapshotRecord
+	lastConfigAck    *configAckRecord
 }
 
 type drainKind uint8
@@ -127,8 +133,14 @@ type drainKey struct {
 }
 
 type configAckRecord struct {
+	targetRevision   uint64
+	observedRevision uint64
+	status           protocolv1.ConfigApplyStatus
+	errorCode        protocolv1.ErrorCode
+}
+
+type snapshotRecord struct {
 	revision uint64
-	status   protocolv1.ConfigApplyStatus
 }
 
 // NewControl 建立处于 AUTH 的 Control Session 状态。
@@ -148,6 +160,12 @@ func NewControl(endpoint Endpoint, protocolVersion uint32) (*Control, error) {
 // Phase 返回当前 Control Session 阶段。
 func (control *Control) Phase() ControlPhase {
 	return control.phase
+}
+
+// SnapshotOutstanding 报告当前 Session 是否已发送或收到一份尚未 Ack 的 Snapshot。
+// Control 由 Session Owner 串行调用，本方法同样不提供并发安全保证。
+func (control *Control) SnapshotOutstanding() bool {
+	return control != nil && control.outstanding != nil
 }
 
 // AcceptInbound 校验并记录由对端发送的消息。
@@ -256,7 +274,14 @@ func (control *Control) acceptEnvelope(sender Endpoint, envelope *protocolv1.Con
 	case *protocolv1.ControlEnvelope_Heartbeat:
 		return control.acceptEstablishedMessage(sender, EndpointAgent, control.phase != ControlClosed)
 	case *protocolv1.ControlEnvelope_ConfigSnapshot:
-		return control.acceptEstablishedMessage(sender, EndpointServer, control.phase == ControlEstablished)
+		_, err := control.acceptEstablishedMessage(sender, EndpointServer, control.phase == ControlEstablished)
+		if err != nil || payload.ConfigSnapshot == nil {
+			if err != nil {
+				return Result{}, err
+			}
+			return Result{}, ErrInvalidControlEnvelope
+		}
+		return control.acceptConfigSnapshot(payload.ConfigSnapshot)
 	case *protocolv1.ControlEnvelope_ConfigAck:
 		_, err := control.acceptEstablishedMessage(sender, EndpointAgent, control.phase != ControlClosed)
 		if err != nil || payload.ConfigAck == nil {
@@ -352,24 +377,54 @@ func (control *Control) acceptDrain(id string, next drainRecord) (Result, bool, 
 }
 
 func (control *Control) acceptConfigAck(ack *protocolv1.ConfigAck) (Result, error) {
-	if ack.GetApplyStatus() == protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_UNSPECIFIED {
+	status := ack.GetApplyStatus()
+	code := ack.GetErrorCode()
+	if status == protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_UNSPECIFIED ||
+		(status == protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED && code != protocolv1.ErrorCode_ERROR_CODE_OK) ||
+		(status == protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED &&
+			(code == protocolv1.ErrorCode_ERROR_CODE_OK || !validErrorCode(code))) {
 		return Result{}, ErrInvalidConfigAck
 	}
-	next := configAckRecord{revision: ack.GetObservedRevision(), status: ack.GetApplyStatus()}
-	if control.configAck == nil {
-		control.configAck = &next
-		return Result{}, nil
-	}
-	if next.revision < control.configAck.revision {
-		return Result{}, ErrRevisionRollback
-	}
-	if next.revision == control.configAck.revision {
-		if next.status != control.configAck.status {
-			return Result{}, ErrConflictingConfigAck
+	if control.outstanding == nil {
+		if control.lastConfigAck != nil && control.lastConfigAck.observedRevision == ack.GetObservedRevision() &&
+			control.lastConfigAck.status == status && control.lastConfigAck.errorCode == code {
+			return Result{Duplicate: true}, nil
 		}
-		return Result{Duplicate: true}, nil
+		return Result{}, ErrConfigAckWithoutSnapshot
 	}
-	control.configAck = &next
+	targetRevision := control.outstanding.revision
+	switch status {
+	case protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED:
+		if ack.GetObservedRevision() != targetRevision {
+			return Result{}, ErrInvalidConfigAck
+		}
+		control.observedRevision = targetRevision
+	case protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED:
+		if ack.GetObservedRevision() != control.observedRevision {
+			return Result{}, ErrInvalidConfigAck
+		}
+	default:
+		return Result{}, ErrInvalidConfigAck
+	}
+	control.lastConfigAck = &configAckRecord{
+		targetRevision: targetRevision, observedRevision: ack.GetObservedRevision(),
+		status: status, errorCode: code,
+	}
+	control.outstanding = nil
+	return Result{}, nil
+}
+
+func (control *Control) acceptConfigSnapshot(snapshot *protocolv1.TunnelSnapshot) (Result, error) {
+	if control.outstanding != nil {
+		return Result{}, ErrConfigSnapshotOutstanding
+	}
+	revision := snapshot.GetRevision()
+	if control.hasLastSnapshot && revision < control.lastSnapshot {
+		return Result{}, ErrConfigSnapshotRollback
+	}
+	control.lastSnapshot = revision
+	control.hasLastSnapshot = true
+	control.outstanding = &snapshotRecord{revision: revision}
 	return Result{}, nil
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/identity"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
+	"github.com/lifei6671/xtunnel/internal/safego"
 	servergateway "github.com/lifei6671/xtunnel/internal/server/gateway"
 )
 
@@ -222,7 +223,7 @@ func (runner *Runner) start(
 	// 结构体复制会产生第二份固定数组；保留 Session 内受锁保护的一份后立即擦除临时值。
 	clear(authentication.SessionSecret[:])
 	succeeded = true
-	go session.observeCompletion(runner, generation)
+	session.startCompletionObserver(runner, generation)
 	return session, nil
 }
 
@@ -270,8 +271,17 @@ func (session *Session) WorkAuthSession() (controlauth.Session, error) {
 	return session.authentication, nil
 }
 
-func (session *Session) observeCompletion(runner *Runner, generation uint64) {
-	session.result = session.owner.Wait()
+func (session *Session) startCompletionObserver(runner *Runner, generation uint64) {
+	safego.Go(func(err error) {
+		session.result = fmt.Errorf("observe connector control session completion: %w", err)
+	}, func() {
+		session.finishCompletion(runner, generation)
+	}, func() {
+		session.result = session.owner.Wait()
+	})
+}
+
+func (session *Session) finishCompletion(runner *Runner, generation uint64) {
 	session.cancel()
 
 	session.authMu.Lock()

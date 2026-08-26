@@ -88,8 +88,8 @@ func TestControlDirectionAndDrainingMatrix(t *testing.T) {
 	}{
 		{name: "Agent 接收 Heartbeat", endpoint: EndpointAgent, inbound: true, message: controlEnvelope(&protocolv1.ControlEnvelope_Heartbeat{}), wantErr: ErrIllegalDirection},
 		{name: "Server 接收 Heartbeat", endpoint: EndpointServer, inbound: true, message: controlEnvelope(&protocolv1.ControlEnvelope_Heartbeat{})},
-		{name: "Agent 接收 Snapshot", endpoint: EndpointAgent, inbound: true, message: controlEnvelope(&protocolv1.ControlEnvelope_ConfigSnapshot{})},
-		{name: "Server 接收 Snapshot", endpoint: EndpointServer, inbound: true, message: controlEnvelope(&protocolv1.ControlEnvelope_ConfigSnapshot{}), wantErr: ErrIllegalDirection},
+		{name: "Agent 接收 Snapshot", endpoint: EndpointAgent, inbound: true, message: configSnapshot(1)},
+		{name: "Server 接收 Snapshot", endpoint: EndpointServer, inbound: true, message: configSnapshot(1), wantErr: ErrIllegalDirection},
 		{name: "Agent 接收 WorkDemand", endpoint: EndpointAgent, inbound: true, message: controlEnvelope(&protocolv1.ControlEnvelope_WorkDemand{})},
 		{name: "Server 接收 WorkDemand", endpoint: EndpointServer, inbound: true, message: controlEnvelope(&protocolv1.ControlEnvelope_WorkDemand{}), wantErr: ErrIllegalDirection},
 		{name: "双方接收 Error", endpoint: EndpointAgent, inbound: true, message: controlEnvelope(&protocolv1.ControlEnvelope_Error{})},
@@ -120,7 +120,7 @@ func TestControlDirectionAndDrainingMatrix(t *testing.T) {
 	if got := server.Phase(); got != ControlDraining {
 		t.Fatalf("Server Phase() after DrainRequest = %v, want DRAINING", got)
 	}
-	if _, err := server.AcceptOutbound(controlEnvelope(&protocolv1.ControlEnvelope_ConfigSnapshot{})); !errors.Is(err, ErrIllegalState) {
+	if _, err := server.AcceptOutbound(configSnapshot(1)); !errors.Is(err, ErrIllegalState) {
 		t.Fatalf("DRAINING AcceptOutbound(ConfigSnapshot) error = %v, want ErrIllegalState", err)
 	}
 	if _, err := server.AcceptOutbound(controlEnvelope(&protocolv1.ControlEnvelope_WorkDemand{})); !errors.Is(err, ErrIllegalState) {
@@ -154,6 +154,9 @@ func TestControlDrainAndConfigAckIdempotency(t *testing.T) {
 	}
 
 	acks := establishedControl(t, EndpointServer)
+	if _, err := acks.AcceptOutbound(configSnapshot(7)); err != nil {
+		t.Fatalf("ConfigSnapshot(7) error = %v", err)
+	}
 	ack := configAck(7, protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED)
 	if result, err := acks.AcceptInbound(ack); err != nil || result.Duplicate {
 		t.Fatalf("first ConfigAck = (%+v, %v), want non-duplicate success", result, err)
@@ -161,14 +164,46 @@ func TestControlDrainAndConfigAckIdempotency(t *testing.T) {
 	if result, err := acks.AcceptInbound(ack); err != nil || !result.Duplicate {
 		t.Fatalf("duplicate ConfigAck = (%+v, %v), want duplicate success", result, err)
 	}
-	if _, err := acks.AcceptInbound(configAck(7, protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED)); !errors.Is(err, ErrConflictingConfigAck) {
-		t.Fatalf("conflicting ConfigAck error = %v, want ErrConflictingConfigAck", err)
+	if _, err := acks.AcceptInbound(configAck(7, protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED)); !errors.Is(err, ErrConfigAckWithoutSnapshot) {
+		t.Fatalf("unassociated ConfigAck error = %v, want ErrConfigAckWithoutSnapshot", err)
 	}
-	if _, err := acks.AcceptInbound(configAck(6, protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED)); !errors.Is(err, ErrRevisionRollback) {
-		t.Fatalf("rollback ConfigAck error = %v, want ErrRevisionRollback", err)
+	if _, err := acks.AcceptOutbound(configSnapshot(8)); err != nil {
+		t.Fatalf("ConfigSnapshot(8) error = %v", err)
 	}
-	if _, err := acks.AcceptInbound(configAck(8, protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED)); err != nil {
-		t.Fatalf("higher ConfigAck error = %v", err)
+	rejected := configAck(7, protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED)
+	if result, err := acks.AcceptInbound(rejected); err != nil || result.Duplicate {
+		t.Fatalf("rejected ConfigAck = (%+v, %v), want associated success", result, err)
+	}
+	if result, err := acks.AcceptInbound(rejected); err != nil || !result.Duplicate {
+		t.Fatalf("duplicate rejected ConfigAck = (%+v, %v), want duplicate success", result, err)
+	}
+	if _, err := acks.AcceptOutbound(configSnapshot(9)); err != nil {
+		t.Fatalf("ConfigSnapshot(9) error = %v", err)
+	}
+	if result, err := acks.AcceptInbound(rejected); err != nil || result.Duplicate {
+		t.Fatalf("same-wire rejection for new target = (%+v, %v), want new associated Ack", result, err)
+	}
+	if _, err := acks.AcceptOutbound(configSnapshot(8)); !errors.Is(err, ErrConfigSnapshotRollback) {
+		t.Fatalf("rollback Snapshot error = %v, want ErrConfigSnapshotRollback", err)
+	}
+}
+
+func TestControlConfigAckKeepsOutstandingAfterInvalidAck(t *testing.T) {
+	control := establishedControl(t, EndpointAgent)
+	if _, err := control.AcceptInbound(configSnapshot(5)); err != nil || !control.SnapshotOutstanding() {
+		t.Fatalf("AcceptInbound(snapshot) = %v, outstanding=%v", err, control.SnapshotOutstanding())
+	}
+	if _, err := control.AcceptOutbound(configAck(4, protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED)); !errors.Is(err, ErrInvalidConfigAck) {
+		t.Fatalf("wrong observed ConfigAck error = %v, want ErrInvalidConfigAck", err)
+	}
+	if !control.SnapshotOutstanding() {
+		t.Fatal("invalid Ack cleared outstanding Snapshot")
+	}
+	if _, err := control.AcceptOutbound(configAck(5, protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED)); err != nil {
+		t.Fatalf("correct ConfigAck after invalid error = %v", err)
+	}
+	if control.SnapshotOutstanding() {
+		t.Fatal("successful Ack retained outstanding Snapshot")
 	}
 }
 
@@ -464,8 +499,18 @@ func authSuccess() *protocolv1.ConnectorAuthResult {
 
 // configAck 返回来自 Agent 的 ConfigAck Envelope。
 func configAck(revision uint64, status protocolv1.ConfigApplyStatus) *protocolv1.ControlEnvelope {
+	code := protocolv1.ErrorCode_ERROR_CODE_OK
+	if status == protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED {
+		code = protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR
+	}
 	return controlEnvelope(&protocolv1.ControlEnvelope_ConfigAck{
-		ConfigAck: &protocolv1.ConfigAck{ObservedRevision: revision, ApplyStatus: status},
+		ConfigAck: &protocolv1.ConfigAck{ObservedRevision: revision, ApplyStatus: status, ErrorCode: code},
+	})
+}
+
+func configSnapshot(revision uint64) *protocolv1.ControlEnvelope {
+	return controlEnvelope(&protocolv1.ControlEnvelope_ConfigSnapshot{
+		ConfigSnapshot: &protocolv1.TunnelSnapshot{Revision: revision},
 	})
 }
 

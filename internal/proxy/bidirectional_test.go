@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
 const proxyTestTimeout = 3 * time.Second
@@ -161,6 +163,27 @@ func TestProxyBidirectionalOriginResetUnblocksOppositeDirection(t *testing.T) {
 	}
 }
 
+func TestProxyBidirectionalPanicInterruptsOppositeDirection(t *testing.T) {
+	leftProxy, leftPeer := tcpPair(t)
+	rightProxy, rightPeer := tcpPair(t)
+	defer leftPeer.Close()
+	defer rightPeer.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- ProxyBidirectional(context.Background(), &panicReadTCPConn{Conn: leftProxy, tcp: leftProxy}, rightProxy)
+	}()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, safego.ErrPanic) {
+			t.Fatalf("ProxyBidirectional(panic) error = %v, want safego.ErrPanic", err)
+		}
+	case <-time.After(proxyTestTimeout):
+		t.Fatal("ProxyBidirectional(panic) left the opposite copy blocked")
+	}
+}
+
 func TestProxyBidirectionalRejectsConnectionWithoutHalfClose(t *testing.T) {
 	left, leftPeer := net.Pipe()
 	right, rightPeer := net.Pipe()
@@ -285,6 +308,19 @@ func TestProxyOneWayReportsCloseWriteFailureAsFatal(t *testing.T) {
 type failingCloseReader struct {
 	net.Conn
 	err error
+}
+
+type panicReadTCPConn struct {
+	net.Conn
+	tcp *net.TCPConn
+}
+
+func (*panicReadTCPConn) Read([]byte) (int, error) {
+	panic("injected proxy read panic")
+}
+
+func (connection *panicReadTCPConn) CloseWrite() error {
+	return connection.tcp.CloseWrite()
 }
 
 func (connection *failingCloseReader) CloseRead() error { return connection.err }

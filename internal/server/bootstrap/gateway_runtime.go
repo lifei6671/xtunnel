@@ -19,6 +19,7 @@ import (
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	"github.com/lifei6671/xtunnel/internal/server/sessionruntime"
+	"github.com/lifei6671/xtunnel/internal/server/snapshot"
 	serverworkauth "github.com/lifei6671/xtunnel/internal/server/workauth"
 )
 
@@ -41,7 +42,7 @@ const (
 
 // openGatewayLifecycle 在 Server 已持有 External Lock 且 SQLite 已完成 Migration 后加载身份。
 // 它只装配 Listener，不在这里监听；首个 Admin 成功前不得调用 Start。
-func openGatewayLifecycle(config serverconfig.Config, resources storage, logger *slog.Logger) (*gateway.Server, *sessionruntime.Manager, error) {
+func openGatewayLifecycle(config serverconfig.Config, resources storage, logger *slog.Logger, reportRuntimeError func(error)) (*gateway.Server, *sessionruntime.Manager, error) {
 	serverResources, ok := resources.(*serverStorage)
 	if !ok {
 		return nil, nil, errors.New("unexpected server storage implementation")
@@ -98,6 +99,19 @@ func openGatewayLifecycle(config serverconfig.Config, resources storage, logger 
 		return nil, nil, fmt.Errorf("construct Tunnel Token protector for gateway authentication: %w", err)
 	}
 	tokenService := application.NewConnectionTokenService(serverResources.database, protector)
+	snapshotBuilder, err := snapshot.New(snapshot.Config{
+		ProtocolVersion:      snapshotProtocolVersion,
+		MaxServices:          config.Limits.MaxServicesPerTunnel,
+		MaxSnapshotBytes:     config.Limits.MaxTunnelSnapshotBytes,
+		MaxControlFrameBytes: config.Limits.MaxControlFrameBytes,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("construct gateway Snapshot builder: %w", err)
+	}
+	snapshotSource, err := snapshot.NewSource(serverResources.database, snapshotBuilder)
+	if err != nil {
+		return nil, nil, fmt.Errorf("construct gateway Snapshot source: %w", err)
+	}
 	registry := serverruntime.NewRegistryWithLimits(limitManager)
 	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
 		HighPriorityCapacity: config.Control.HighPriorityQueue,
@@ -111,6 +125,7 @@ func openGatewayLifecycle(config serverconfig.Config, resources storage, logger 
 		MaxWorkConnecting:    uint32(config.Limits.MaxConnectingWorkConnections),
 		MaxControlFrameBytes: uint64(config.Limits.MaxControlFrameBytes),
 		LimitManager:         limitManager,
+		SnapshotProvider:     snapshotSource,
 		HeartbeatTimeout:     config.ConnectorRuntime.HeartbeatTimeout.Duration,
 		Logger:               logger,
 	})
@@ -144,6 +159,7 @@ func openGatewayLifecycle(config serverconfig.Config, resources storage, logger 
 		Identity:                identity,
 		MaxPendingTLSHandshakes: config.Limits.MaxPendingTLSHandshakes,
 		Handle:                  protocolHandler.handle,
+		ReportRuntimeError:      reportRuntimeError,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("construct agent gateway: %w", err)
@@ -256,15 +272,15 @@ func (closer *gatewayBootstrapCloser) Close() error {
 	return closer.result
 }
 
-// RuntimeErrors 返回需要终止当前 Server 进程的异步启动错误。
-// 该通道只覆盖 Admin 事务提交后无法回滚的 Gateway 启动失败。
+// RuntimeErrors 返回需要终止当前 Server 进程的异步运行错误，包括 Admin 事务
+// 提交后的 Gateway 启动失败以及受保护 goroutine 的 panic。
 func (closer *gatewayBootstrapCloser) RuntimeErrors() <-chan error {
 	return closer.runtimeErrors
 }
 
 func openGatewayAndBootstrap(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
-	return openGatewayAndBootstrapWith(ctx, config, resources, logger, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (io.Closer, error) {
-		return openAdminBootstrapSocketAfter(ctx, runtimeDir, targetHash, store, afterCreate)
+	return openGatewayAndBootstrapWith(ctx, config, resources, logger, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
+		return openAdminBootstrapSocketAfter(ctx, runtimeDir, targetHash, store, afterCreate, reportRuntimeError)
 	})
 }
 
@@ -276,26 +292,35 @@ func openGatewayAndBootstrapWith(
 	resources storage,
 	logger *slog.Logger,
 	runtimeDir string,
-	openBootstrapSocket func(context.Context, string, string, *sqlite.Store, func() error) (io.Closer, error),
+	openBootstrapSocket func(context.Context, string, string, *sqlite.Store, func() error, func(error)) (io.Closer, error),
 ) (io.Closer, error) {
 	serverResources, ok := resources.(*serverStorage)
 	if !ok {
 		return nil, errors.New("unexpected server storage implementation")
 	}
-	gatewayServer, sessions, err := openGatewayLifecycle(config, resources, logger)
+	// SQLite 已在 openServerStorage 中完成 Migration。任何 Listener 或本机
+	// Bootstrap Socket 建立前先验证全部存量 Desired State，避免 Connector
+	// 在超大 Snapshot 上进入永久重连循环。
+	if err := validateStoredSnapshots(ctx, config, serverResources.database); err != nil {
+		return nil, fmt.Errorf("validate stored tunnel snapshots before gateway startup: %w", err)
+	}
+	runtimeErrors := make(chan error, 1)
+	reportRuntimeError := func(err error) {
+		select {
+		case runtimeErrors <- err:
+		default:
+		}
+	}
+	gatewayServer, sessions, err := openGatewayLifecycle(config, resources, logger, reportRuntimeError)
 	if err != nil {
 		return nil, err
 	}
-	runtimeErrors := make(chan error, 1)
 	startGateway := func() error {
 		// 进程 Context 取消只触发外层冻结的排空顺序；已认证 Gateway 连接必须继续
 		// 存活到 ACTIVE 自然结束或 Server Drain Deadline。
 		if err := gatewayServer.Start(context.WithoutCancel(ctx)); err != nil {
 			startErr := fmt.Errorf("start agent gateway after admin bootstrap: %w", err)
-			select {
-			case runtimeErrors <- startErr:
-			default:
-			}
+			reportRuntimeError(startErr)
 			return startErr
 		}
 		return nil
@@ -310,7 +335,7 @@ func openGatewayAndBootstrapWith(
 		}
 		return &gatewayBootstrapCloser{gateway: gatewayServer, sessions: sessions, runtimeErrors: runtimeErrors}, nil
 	}
-	socket, err := openBootstrapSocket(ctx, runtimeDir, serverResources.targetHash, serverResources.database, startGateway)
+	socket, err := openBootstrapSocket(ctx, runtimeDir, serverResources.targetHash, serverResources.database, startGateway, reportRuntimeError)
 	if err != nil {
 		return nil, errors.Join(err, gatewayServer.Close())
 	}

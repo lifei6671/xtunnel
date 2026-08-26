@@ -16,6 +16,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/agent/connector"
 	"github.com/lifei6671/xtunnel/internal/agent/open"
 	"github.com/lifei6671/xtunnel/internal/application"
+	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	repositorysqlite "github.com/lifei6671/xtunnel/internal/repository/sqlite"
@@ -25,6 +26,7 @@ import (
 	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	"github.com/lifei6671/xtunnel/internal/server/sessionruntime"
+	serversnapshot "github.com/lifei6671/xtunnel/internal/server/snapshot"
 	"github.com/lifei6671/xtunnel/internal/server/workauth"
 	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
@@ -66,11 +68,24 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		t.Fatalf("create Limit manager: %v", err)
 	}
 	registry := serverruntime.NewRegistryWithLimits(limitManager)
+	snapshotBuilder, err := serversnapshot.New(serversnapshot.Config{
+		ProtocolVersion:      1,
+		MaxServices:          serversnapshot.MaxServicesPerTunnel,
+		MaxSnapshotBytes:     serversnapshot.MaxTunnelSnapshotSize,
+		MaxControlFrameBytes: int(frame.MaxControlFrameSize),
+	})
+	if err != nil {
+		t.Fatalf("create Snapshot builder: %v", err)
+	}
+	snapshotSource, err := serversnapshot.NewSource(store, snapshotBuilder)
+	if err != nil {
+		t.Fatalf("create Snapshot source: %v", err)
+	}
 	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
 		HighPriorityCapacity: 32, NormalCapacity: 128, InboundCapacity: 128,
 		WriteTimeout: 2 * time.Second, MaxReplayEntries: 256,
 		MaxWorkTotal: 32, MaxWorkConnecting: 16,
-		LimitManager: limitManager,
+		LimitManager: limitManager, SnapshotProvider: snapshotSource,
 	})
 	if err != nil {
 		t.Fatalf("create Session manager: %v", err)

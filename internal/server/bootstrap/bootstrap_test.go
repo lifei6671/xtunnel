@@ -139,6 +139,34 @@ agent_gateway:
 	}
 }
 
+func TestRunClosesStorageWhenBootstrapInitializationFails(t *testing.T) {
+	configPath := writeConfig(t, `
+management:
+  public_url: https://admin.example.com
+agent_gateway:
+  public_hostname: tunnel.example.com
+`)
+	resources := &fakeStorage{}
+	wantErr := errors.New("startup snapshot gate failed")
+	err := runWithStorageAndBootstrap(
+		context.Background(),
+		"xtunnel-server",
+		[]string{"--config", configPath, "--set", "server.data_dir=" + t.TempDir()},
+		nil,
+		&bytes.Buffer{},
+		func(context.Context, string) (storage, error) { return resources, nil },
+		func(context.Context, serverconfig.Config, storage, *slog.Logger) (io.Closer, error) {
+			return nil, wantErr
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runWithStorageAndBootstrap() error = %v, want startup failure", err)
+	}
+	if !resources.closed {
+		t.Fatal("runWithStorageAndBootstrap() did not close storage after startup failure")
+	}
+}
+
 func TestRunPassesProductionLoggerToBootstrap(t *testing.T) {
 	configPath := writeConfig(t, `
 management:

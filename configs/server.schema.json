@@ -334,7 +334,7 @@
         "max_tunnels": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 1000, "x-secret": false, "x-reloadable": false},
         "max_connectors": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 5000, "x-secret": false, "x-reloadable": false},
         "max_connectors_per_tunnel": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 100, "x-secret": false, "x-reloadable": false},
-        "max_services_per_tunnel": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 1000, "x-secret": false, "x-reloadable": false},
+        "max_services_per_tunnel": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 1000, "x-secret": false, "x-reloadable": false},
         "max_health_targets_per_tunnel": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 2000, "x-secret": false, "x-reloadable": false},
         "max_health_targets_global": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 50000, "x-secret": false, "x-reloadable": false},
         "max_tunnel_snapshot_bytes": {"type": "integer", "minimum": 1, "maximum": 786432, "default": 786432, "x-secret": false, "x-reloadable": false},

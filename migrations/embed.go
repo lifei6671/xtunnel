@@ -24,3 +24,8 @@ var SecurityAuditEvents string
 //
 //go:embed 000004_credential_lifecycle_audit.sql
 var CredentialLifecycleAudit string
+
+// ServiceDomain 包含 M3-01 的 Service 聚合与 Tunnel 直接引用前向 Migration。
+//
+//go:embed 000005_services.sql
+var ServiceDomain string

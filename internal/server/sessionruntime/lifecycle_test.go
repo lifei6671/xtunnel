@@ -13,6 +13,7 @@ import (
 
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
+	"github.com/lifei6671/xtunnel/internal/safego"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 )
 
@@ -25,7 +26,8 @@ func TestConnectorSnapshotsMetricsHeartbeatDrainAndLifecycleLogs(t *testing.T) {
 		HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 		WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
-		Logger: logger,
+		SnapshotProvider: testSnapshotProvider{},
+		Logger:           logger,
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -273,7 +275,8 @@ func TestConvergenceFreezesLifecycleReasonBeforeUnlock(t *testing.T) {
 				HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 				WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
 				MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
-				Logger: slog.New(slog.NewJSONHandler(&output, nil)),
+				SnapshotProvider: testSnapshotProvider{},
+				Logger:           slog.New(slog.NewJSONHandler(&output, nil)),
 			})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -383,7 +386,8 @@ func TestSessionReplacementLogsNewGenerationWithoutOldCleanupPollution(t *testin
 		HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 		WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
-		Logger: slog.New(slog.NewJSONHandler(&output, nil)),
+		SnapshotProvider: testSnapshotProvider{},
+		Logger:           slog.New(slog.NewJSONHandler(&output, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -501,7 +505,8 @@ func TestRevokeClosesCurrentAndRetiringSessionsDuringInstallTransition(t *testin
 		HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 		WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
-		Logger: slog.New(slog.NewJSONHandler(&output, nil)),
+		SnapshotProvider: testSnapshotProvider{},
+		Logger:           slog.New(slog.NewJSONHandler(&output, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -571,7 +576,8 @@ func TestRevokeOwnsCleanupAfterServeRemovesLookup(t *testing.T) {
 		HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 		WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
-		Logger: slog.New(slog.NewJSONHandler(&output, nil)),
+		SnapshotProvider: testSnapshotProvider{},
+		Logger:           slog.New(slog.NewJSONHandler(&output, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -752,8 +758,29 @@ func TestCleanupWaitsForControlOwnerBeforeConvergenceCompletes(t *testing.T) {
 						operationResult <- err
 						return
 					}
+					snapshot := envelope.GetConfigSnapshot()
+					if snapshot == nil {
+						operationResult <- errors.New("replacement initial Control message is not ConfigSnapshot")
+						return
+					}
+					if err := frame.WriteControl(secondClient, &protocolv1.ControlEnvelope{
+						ProtocolVersion: testProtocol,
+						Payload: &protocolv1.ControlEnvelope_ConfigAck{ConfigAck: &protocolv1.ConfigAck{
+							ObservedRevision: snapshot.GetRevision(),
+							ApplyStatus:      protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED,
+							ErrorCode:        protocolv1.ErrorCode_ERROR_CODE_OK,
+						}},
+					}); err != nil {
+						operationResult <- err
+						return
+					}
+					envelope.Reset()
+					if err := frame.ReadControl(secondClient, envelope); err != nil {
+						operationResult <- err
+						return
+					}
 					if envelope.GetWorkDemand() == nil {
-						operationResult <- errors.New("replacement initial Control message is not WorkDemand")
+						operationResult <- errors.New("replacement post-Ack Control message is not WorkDemand")
 						return
 					}
 					operationResult <- nil
@@ -855,7 +882,8 @@ func TestInitialDemandFailureLogsPairedDisconnect(t *testing.T) {
 				HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 				WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
 				MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
-				Logger: slog.New(slog.NewJSONHandler(&output, nil)),
+				SnapshotProvider: testSnapshotProvider{},
+				Logger:           slog.New(slog.NewJSONHandler(&output, nil)),
 			})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -866,7 +894,15 @@ func TestInitialDemandFailureLogsPairedDisconnect(t *testing.T) {
 			t.Cleanup(func() { _ = client.Close() })
 			established := establishedSession(t, session, 0x71)
 
-			err = manager.Serve(context.Background(), server, &established)
+			serveResult := make(chan error, 1)
+			go func() { serveResult <- manager.Serve(context.Background(), server, &established) }()
+			snapshot := readConfigSnapshot(t, client)
+			writeConfigAck(t, client, appliedConfigAck(snapshot.GetRevision()))
+			select {
+			case err = <-serveResult:
+			case <-time.After(testWait):
+				t.Fatal("Serve() did not report initial Demand failure")
+			}
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("Serve() error = %v, want %q", err, test.wantError)
 			}
@@ -887,6 +923,50 @@ func TestInitialDemandFailureLogsPairedDisconnect(t *testing.T) {
 	}
 }
 
+func TestInboundPanicIsReportedAndSessionIsCleanedUp(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	manager, err := New(registry, Options{
+		HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
+		WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
+		MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
+		SnapshotProvider: testSnapshotProvider{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	manager.beforeInitialDemandForTest = func(*managedSession) {
+		panic("sensitive panic value")
+	}
+	session := commitSession(t, registry, testTunnelID, testConnectorID)
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	established := establishedSession(t, session, 0x71)
+
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- manager.Serve(context.Background(), server, &established) }()
+	snapshot := readConfigSnapshot(t, client)
+	writeConfigAck(t, client, appliedConfigAck(snapshot.GetRevision()))
+
+	select {
+	case err = <-serveResult:
+	case <-time.After(testWait):
+		t.Fatal("Serve() did not report inbound panic")
+	}
+	if !errors.Is(err, safego.ErrPanic) {
+		t.Fatalf("Serve() error = %v, want safego.ErrPanic", err)
+	}
+	if strings.Contains(err.Error(), "sensitive panic value") {
+		t.Fatalf("Serve() error exposed panic value: %v", err)
+	}
+	manager.mu.Lock()
+	liveCount := len(manager.liveSessions)
+	lookupCount := len(manager.bySession)
+	manager.mu.Unlock()
+	if liveCount != 0 || lookupCount != 0 {
+		t.Fatalf("Manager resources after inbound panic = live %d lookup %d", liveCount, lookupCount)
+	}
+}
+
 func TestShutdownUsesExplicitLifecycleReason(t *testing.T) {
 	registry := serverruntime.NewRegistry()
 	var output bytes.Buffer
@@ -894,7 +974,8 @@ func TestShutdownUsesExplicitLifecycleReason(t *testing.T) {
 		HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 		WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
-		Logger: slog.New(slog.NewJSONHandler(&output, nil)),
+		SnapshotProvider: testSnapshotProvider{},
+		Logger:           slog.New(slog.NewJSONHandler(&output, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

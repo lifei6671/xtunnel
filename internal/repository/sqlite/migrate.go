@@ -39,6 +39,12 @@ var productionMigrations = []migration{
 			migrations.CredentialLifecycleAudit,
 		},
 	},
+	{
+		version: 5,
+		statements: []string{
+			migrations.ServiceDomain,
+		},
+	},
 }
 
 func migrate(ctx context.Context, database *gorm.DB) error {

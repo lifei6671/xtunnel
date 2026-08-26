@@ -7,11 +7,12 @@ import (
 	"math"
 	"sync"
 
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
-	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -31,7 +32,14 @@ var (
 
 type normalKind uint8
 
+type highKind uint8
+
 const (
+	highError highKind = iota + 1
+	highDrain
+	highConfigAck
+	highHeartbeat
+
 	normalTunnelSnapshot normalKind = iota + 1
 	normalWorkDemand
 	normalServiceHealth
@@ -143,11 +151,35 @@ func (outbox *Outbox) Dequeue() (*protocolv1.ControlEnvelope, bool) {
 	return outbox.dequeueHealthBatch(), true
 }
 
+// dequeueBeforeConfigAck 只取允许越过 outstanding Snapshot 的高优先级消息。
+// high 已按固定类别排序，因此遇到 Heartbeat 即可停止；普通消息必须等待 Ack。
+func (outbox *Outbox) dequeueBeforeConfigAck() (*protocolv1.ControlEnvelope, bool) {
+	outbox.mu.Lock()
+	defer outbox.mu.Unlock()
+	if len(outbox.high) == 0 || classifyHigh(outbox.high[0]) == highHeartbeat {
+		return nil, false
+	}
+	envelope := outbox.high[0]
+	clear(outbox.high[:1])
+	outbox.high = outbox.high[1:]
+	return envelope, true
+}
+
 func (outbox *Outbox) enqueueHigh(envelope *protocolv1.ControlEnvelope) error {
 	if len(outbox.high) >= outbox.highCapacity {
 		return ErrOutboxFull
 	}
-	outbox.high = append(outbox.high, envelope)
+	kind := classifyHigh(envelope)
+	index := len(outbox.high)
+	for current, queued := range outbox.high {
+		if classifyHigh(queued) > kind {
+			index = current
+			break
+		}
+	}
+	outbox.high = append(outbox.high, nil)
+	copy(outbox.high[index+1:], outbox.high[index:])
+	outbox.high[index] = envelope
 	return nil
 }
 
@@ -159,6 +191,21 @@ func (outbox *Outbox) enqueueHeartbeat(envelope *protocolv1.ControlEnvelope) err
 		}
 	}
 	return outbox.enqueueHigh(envelope)
+}
+
+func classifyHigh(envelope *protocolv1.ControlEnvelope) highKind {
+	switch envelope.GetPayload().(type) {
+	case *protocolv1.ControlEnvelope_Error:
+		return highError
+	case *protocolv1.ControlEnvelope_DrainRequest, *protocolv1.ControlEnvelope_DrainAck:
+		return highDrain
+	case *protocolv1.ControlEnvelope_ConfigAck:
+		return highConfigAck
+	case *protocolv1.ControlEnvelope_Heartbeat:
+		return highHeartbeat
+	default:
+		panic("control outbox high-priority invariant violated")
+	}
 }
 
 func (outbox *Outbox) enqueueSnapshot(envelope *protocolv1.ControlEnvelope, snapshot *protocolv1.TunnelSnapshot) error {

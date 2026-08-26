@@ -11,13 +11,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/agent/configruntime"
 	"github.com/lifei6671/xtunnel/internal/agent/open"
 	"github.com/lifei6671/xtunnel/internal/agent/reconnect"
 	agentsession "github.com/lifei6671/xtunnel/internal/agent/session"
 	agentworkpool "github.com/lifei6671/xtunnel/internal/agent/workpool"
 	"github.com/lifei6671/xtunnel/internal/controlsession"
 	"github.com/lifei6671/xtunnel/internal/identity"
+	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
+	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
 const (
@@ -44,7 +47,7 @@ var (
 	ErrInvalidConfig = errors.New("agent connector runtime config is invalid")
 	// ErrUnsupportedControlMessage 表示 M1 Agent 收到当前方向不应处理的消息。
 	ErrUnsupportedControlMessage = errors.New("agent connector received unsupported control message")
-	// ErrServiceConfigNotObserved 是 M3 接入远端 Snapshot 前生产 Origin 边界的明确失败。
+	// ErrServiceConfigNotObserved 表示本代 Session 尚未成功 Ack 任何完整 Snapshot。
 	ErrServiceConfigNotObserved = errors.New("service configuration has not been observed by connector")
 )
 
@@ -61,17 +64,19 @@ type Config struct {
 
 // Runtime 持有一个进程内固定 Connector 身份及其可重连 Control Runner。
 type Runtime struct {
-	runner       *agentsession.Runner
-	token        string
-	origin       open.OriginDialer
-	newWorkPool  func(agentworkpool.Config) (workPool, error)
-	newDrainID   func() (string, error)
-	drainTimeout time.Duration
+	token              string
+	origin             open.OriginDialer
+	runControlSessions func(context.Context, reconnect.SessionHandler[*agentsession.Session]) error
+	newConfigManager   func(context.Context) (*configruntime.Manager, error)
+	newWorkPool        func(agentworkpool.Config) (workPool, error)
+	newDrainID         func() (string, error)
+	drainTimeout       time.Duration
 
 	retiredMu    sync.Mutex
 	retiredNext  uint64
 	retiredPools map[uint64]retiredPool
 	retiredWait  sync.WaitGroup
+	retiredErr   error
 }
 
 type retiredPool struct {
@@ -92,6 +97,12 @@ type establishedSession interface {
 	Inbound() <-chan controlsession.Inbound
 	Done() <-chan struct{}
 }
+
+type snapshotBuilder struct{}
+
+type snapshotCandidate struct{}
+
+type snapshotResources struct{}
 
 // New 创建生产 Connector Runtime，但不会立即建立网络连接。
 func New(config Config) (*Runtime, error) {
@@ -121,9 +132,26 @@ func New(config Config) (*Runtime, error) {
 	}
 	sharedBudget := agentworkpool.NewBudget()
 	return &Runtime{
-		runner: runner,
 		token:  config.ConnectionToken,
 		origin: config.OriginDialer,
+		runControlSessions: func(ctx context.Context, handler reconnect.SessionHandler[*agentsession.Session]) error {
+			return reconnect.Run(ctx, runner, handler, reconnect.Options{
+				InitialBackoff: reconnectInitial,
+				MaximumBackoff: reconnectMaximum,
+				StableAfter:    reconnectStable,
+				JitterFraction: reconnectJitter,
+			})
+		},
+		newConfigManager: func(parent context.Context) (*configruntime.Manager, error) {
+			return configruntime.New(parent, configruntime.Config{
+				ProtocolVersion:      1,
+				MaxServices:          configruntime.MaxServicesPerTunnel,
+				MaxSnapshotBytes:     configruntime.MaxSnapshotSize,
+				MaxControlFrameBytes: int(frame.MaxControlFrameSize),
+				RetireTimeout:        agentDrainTimeout,
+				Builder:              snapshotBuilder{},
+			})
+		},
 		newWorkPool: func(config agentworkpool.Config) (workPool, error) {
 			return agentworkpool.NewWithBudget(config, sharedBudget)
 		},
@@ -136,38 +164,59 @@ func New(config Config) (*Runtime, error) {
 // Run 持续运行同一个 Connector 的多代 Control Session，直到进程 Context 取消，
 // 或 Token、Pin、ALPN、协议版本等永久错误要求管理员介入。
 func (runtime *Runtime) Run(ctx context.Context) error {
-	if runtime == nil || ctx == nil || runtime.runner == nil {
+	if runtime == nil || ctx == nil || runtime.runControlSessions == nil || runtime.newConfigManager == nil ||
+		runtime.drainTimeout <= 0 {
 		return ErrInvalidConfig
 	}
+	managerParent, cancelManagerParent := context.WithCancel(context.WithoutCancel(ctx))
+	manager, err := runtime.newConfigManager(managerParent)
+	if err != nil {
+		cancelManagerParent()
+		return fmt.Errorf("create Agent config runtime: %w", err)
+	}
+	defer cancelManagerParent()
+
 	shutdownStarted := make(chan time.Time, 1)
 	stopShutdownClock := context.AfterFunc(ctx, func() { shutdownStarted <- time.Now() })
-	runErr := reconnect.Run(ctx, runtime.runner, runtime.handleSession, reconnect.Options{
-		InitialBackoff: reconnectInitial,
-		MaximumBackoff: reconnectMaximum,
-		StableAfter:    reconnectStable,
-		JitterFraction: reconnectJitter,
+	runErr := runtime.runControlSessions(ctx, func(sessionContext context.Context, session *agentsession.Session) error {
+		return runtime.handleSession(sessionContext, manager, session)
 	})
+	closeTimeout := runtime.drainTimeout
 	if stopShutdownClock() {
 		if ctx.Err() == nil {
 			runtime.shutdownRetiredPools()
-			return runErr
+			return errors.Join(runErr, runtime.retiredError(), closeConfigManager(ctx, manager, closeTimeout))
 		}
 		shutdownStarted <- time.Now()
 	}
-	remaining := time.Until((<-shutdownStarted).Add(runtime.drainTimeout))
+	shutdownDeadline := (<-shutdownStarted).Add(runtime.drainTimeout)
+	remaining := time.Until(shutdownDeadline)
 	if remaining < 0 {
 		remaining = 0
 	}
 	runtime.drainRetiredPools(remaining)
-	return runErr
+	closeTimeout = time.Until(shutdownDeadline)
+	if closeTimeout < 0 {
+		closeTimeout = 0
+	}
+	return errors.Join(runErr, runtime.retiredError(), closeConfigManager(ctx, manager, closeTimeout))
 }
 
-func (runtime *Runtime) handleSession(ctx context.Context, session *agentsession.Session) (resultErr error) {
+func (runtime *Runtime) handleSession(
+	ctx context.Context,
+	manager *configruntime.Manager,
+	session *agentsession.Session,
+) (resultErr error) {
 	authentication, err := session.WorkAuthSession()
 	if err != nil {
 		return fmt.Errorf("copy current Work authentication: %w", err)
 	}
 	heartbeatInterval := authentication.HeartbeatInterval
+	configSession, err := manager.NewSession(authentication.TunnelID)
+	if err != nil {
+		clear(authentication.SessionSecret[:])
+		return fmt.Errorf("create Agent config session: %w", err)
+	}
 
 	openHandler, err := open.NewHandler(open.Options{
 		ReadTimeout: openReadTimeout, WriteTimeout: openWriteTimeout,
@@ -217,30 +266,31 @@ func (runtime *Runtime) handleSession(ctx context.Context, session *agentsession
 
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
-	return runtime.runEstablished(ctx, session, pool, ticker)
+	return runtime.runEstablished(ctx, session, configSession, pool, ticker)
 }
 
 func (runtime *Runtime) runEstablished(
 	ctx context.Context,
 	session establishedSession,
+	configSession *configruntime.Session,
 	pool workPool,
 	ticker *time.Ticker,
 ) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return runtime.drain(ctx, session, pool, ticker)
+			return runtime.drain(ctx, session, configSession, pool, ticker)
 		case <-session.Done():
 			return nil
 		case inbound, ok := <-session.Inbound():
 			if !ok {
 				return nil
 			}
-			if err := applyInbound(pool, inbound); err != nil {
+			if err := applyInbound(ctx, session, configSession, pool, inbound); err != nil {
 				return err
 			}
 		case now := <-ticker.C:
-			if err := session.Enqueue(heartbeatEnvelope(now)); err != nil {
+			if err := session.Enqueue(heartbeatEnvelope(now, observedRevision(configSession))); err != nil {
 				// Owner 已经关闭时，Session.Done 可能尚未完成 Secret 清理和广播。
 				// 这是普通 Control 代际结束，不得因 select 时序误杀旧 ACTIVE。
 				if errors.Is(err, controlsession.ErrOwnerClosed) {
@@ -266,13 +316,20 @@ func (runtime *Runtime) retainPool(pool workPool, cancel context.CancelFunc) {
 	runtime.retiredWait.Add(1)
 	runtime.retiredMu.Unlock()
 
-	go func() {
-		defer runtime.retiredWait.Done()
-		<-pool.Done()
+	safego.Go(func(err error) {
+		cancel()
+		runtime.recordRetiredError(fmt.Errorf("observe retired Agent WorkPool: %w", err))
+	}, func() {
 		runtime.retiredMu.Lock()
 		delete(runtime.retiredPools, id)
 		runtime.retiredMu.Unlock()
-	}()
+		runtime.retiredWait.Done()
+	}, func() {
+		<-pool.Done()
+		if err := pool.Wait(); errors.Is(err, safego.ErrPanic) {
+			runtime.recordRetiredError(err)
+		}
+	})
 }
 
 func (runtime *Runtime) drainRetiredPools(timeout time.Duration) {
@@ -280,10 +337,13 @@ func (runtime *Runtime) drainRetiredPools(timeout time.Duration) {
 		return
 	}
 	done := make(chan struct{})
-	go func() {
-		runtime.retiredWait.Wait()
+	safego.Go(func(err error) {
+		runtime.recordRetiredError(fmt.Errorf("wait for retired Agent WorkPools: %w", err))
+	}, func() {
 		close(done)
-	}()
+	}, func() {
+		runtime.retiredWait.Wait()
+	})
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
@@ -292,6 +352,21 @@ func (runtime *Runtime) drainRetiredPools(timeout time.Duration) {
 	case <-timer.C:
 		runtime.shutdownRetiredPools()
 	}
+}
+
+func (runtime *Runtime) recordRetiredError(err error) {
+	if err == nil {
+		return
+	}
+	runtime.retiredMu.Lock()
+	runtime.retiredErr = errors.Join(runtime.retiredErr, err)
+	runtime.retiredMu.Unlock()
+}
+
+func (runtime *Runtime) retiredError() error {
+	runtime.retiredMu.Lock()
+	defer runtime.retiredMu.Unlock()
+	return runtime.retiredErr
 }
 
 func (runtime *Runtime) shutdownRetiredPools() {
@@ -313,6 +388,7 @@ func (runtime *Runtime) shutdownRetiredPools() {
 func (runtime *Runtime) drain(
 	processContext context.Context,
 	session establishedSession,
+	configSession *configruntime.Session,
 	pool workPool,
 	ticker *time.Ticker,
 ) error {
@@ -348,7 +424,7 @@ func (runtime *Runtime) drain(
 			if ack == nil || ack.GetDrainId() != drainID {
 				// 旧代或错误 ID 的 Ack 已由协议 Owner 做过方向/字段校验，但不能完成
 				// 本次两阶段握手；其他合法消息继续按既有业务路径消费。
-				if err := applyInbound(pool, inbound); err != nil {
+				if err := applyInbound(drainContext, session, configSession, pool, inbound); err != nil {
 					return errors.Join(processContext.Err(), err)
 				}
 				continue
@@ -359,7 +435,7 @@ func (runtime *Runtime) drain(
 			return processContext.Err()
 		case now := <-ticker.C:
 			// Heartbeat 在 DRAINING 仍为合法方向；握手期间继续发送，避免长连接被误判失联。
-			if err := session.Enqueue(heartbeatEnvelope(now)); err != nil {
+			if err := session.Enqueue(heartbeatEnvelope(now, observedRevision(configSession))); err != nil {
 				return errors.Join(processContext.Err(), fmt.Errorf("enqueue draining heartbeat: %w", err))
 			}
 		}
@@ -375,19 +451,32 @@ func drainEnvelope(drainID string, timeout time.Duration) *protocolv1.ControlEnv
 	}
 }
 
-func applyInbound(pool workPool, inbound controlsession.Inbound) error {
+func applyInbound(
+	ctx context.Context,
+	session establishedSession,
+	configSession *configruntime.Session,
+	pool workPool,
+	inbound controlsession.Inbound,
+) error {
 	if inbound.Envelope == nil {
 		return ErrUnsupportedControlMessage
 	}
 	switch payload := inbound.Envelope.GetPayload().(type) {
 	case *protocolv1.ControlEnvelope_WorkDemand:
+		if _, _, observed := configSession.Observed(); !observed {
+			return ErrServiceConfigNotObserved
+		}
 		if _, err := pool.ApplyDemand(payload.WorkDemand); err != nil {
 			return fmt.Errorf("apply WorkDemand: %w", err)
 		}
 		return nil
 	case *protocolv1.ControlEnvelope_ConfigSnapshot:
-		// M1 的静态 Service 只能由 Integration Harness 注入；M3 会在此处接入
-		// Snapshot 原子 Apply 与 ConfigAck。当前不能伪造 Ack 或提前旁路持久配置。
+		if err := configSession.Apply(ctx, payload.ConfigSnapshot, session); err != nil {
+			if errors.Is(err, configruntime.ErrConfigRejected) {
+				return nil
+			}
+			return fmt.Errorf("apply Agent config snapshot: %w", err)
+		}
 		return nil
 	case *protocolv1.ControlEnvelope_DrainAck:
 		// DrainAck 只确认 Agent 主动发出的关闭请求；基线重连循环会在进程
@@ -400,7 +489,7 @@ func applyInbound(pool workPool, inbound controlsession.Inbound) error {
 	}
 }
 
-func heartbeatEnvelope(now time.Time) *protocolv1.ControlEnvelope {
+func heartbeatEnvelope(now time.Time, observedRevision uint64) *protocolv1.ControlEnvelope {
 	timestamp := now.UnixMilli()
 	if timestamp < 0 {
 		timestamp = 0
@@ -408,9 +497,50 @@ func heartbeatEnvelope(now time.Time) *protocolv1.ControlEnvelope {
 	return &protocolv1.ControlEnvelope{
 		ProtocolVersion: 1,
 		Payload: &protocolv1.ControlEnvelope_Heartbeat{Heartbeat: &protocolv1.Heartbeat{
-			TimestampMs: uint64(timestamp),
+			TimestampMs:      uint64(timestamp),
+			ObservedRevision: observedRevision,
 		}},
 	}
+}
+
+func observedRevision(session *configruntime.Session) uint64 {
+	revision, _, observed := session.Observed()
+	if !observed {
+		return 0
+	}
+	return revision
+}
+
+func (snapshotBuilder) Build(ctx context.Context, _ *protocolv1.TunnelSnapshot, _ configruntime.Gate) (configruntime.Candidate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return snapshotCandidate{}, nil
+}
+
+func (snapshotCandidate) Start(ctx context.Context) error {
+	return ctx.Err()
+}
+
+func (snapshotCandidate) Abort(context.Context) error {
+	return nil
+}
+
+func (snapshotCandidate) Runtime() configruntime.Resources {
+	return snapshotResources{}
+}
+
+func (snapshotResources) Retire(context.Context) error {
+	return nil
+}
+
+func closeConfigManager(parent context.Context, manager *configruntime.Manager, timeout time.Duration) error {
+	closeContext, cancelClose := context.WithTimeout(context.WithoutCancel(parent), timeout)
+	defer cancelClose()
+	if err := manager.Close(closeContext); err != nil {
+		return fmt.Errorf("close Agent config runtime: %w", err)
+	}
+	return nil
 }
 
 // HostConfig 使用进程当前主机与 Go 运行时信息构造无本地状态的生产配置。

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
+	"github.com/lifei6671/xtunnel/internal/safego"
 	"github.com/lifei6671/xtunnel/internal/server/datadir"
 )
 
@@ -260,6 +261,63 @@ func TestAdminBootstrapSocketRejectedPeerDoesNotCreateAdmin(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(runtimeDir, adminBootstrapSocketName)); err != nil {
 		t.Fatalf("rejected Bootstrap peer removed socket: %v", err)
+	}
+}
+
+func TestAdminBootstrapSocketRecoversRequestPanicAndStops(t *testing.T) {
+	runtimeDir := newRuntimeDirectory(t)
+	store, err := sqlite.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+	runtimeErrors := make(chan error, 1)
+	const targetHash = "f43e13f6c4fde59d625b1d08ce141d195bc98b500555aedee2a6de90ddc4ce16"
+	socket, err := openAdminBootstrapSocketWithRuntime(
+		context.Background(),
+		runtimeDir,
+		targetHash,
+		store,
+		func(*net.UnixConn) error { panic("test bootstrap request panic") },
+		nil,
+		func(err error) { runtimeErrors <- err },
+	)
+	if err != nil {
+		t.Fatalf("openAdminBootstrapSocketWithRuntime() error = %v", err)
+	}
+	t.Cleanup(func() { _ = socket.Close() })
+	socketPath := filepath.Join(runtimeDir, adminBootstrapSocketName)
+	if handled, err := requestAdminBootstrap(context.Background(), socketPath, targetHash, "admin", "panic test password"); !handled || err == nil {
+		t.Fatalf("requestAdminBootstrap() = handled %t, error %v; want handled connection failure", handled, err)
+	}
+	select {
+	case runtimeErr := <-runtimeErrors:
+		if !errors.Is(runtimeErr, safego.ErrPanic) {
+			t.Fatalf("runtime error = %v, want safego.ErrPanic", runtimeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Bootstrap Socket did not report request panic")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, pathErr := os.Lstat(socketPath)
+		if errors.Is(pathErr, os.ErrNotExist) {
+			break
+		}
+		if pathErr != nil {
+			t.Fatalf("os.Lstat(socket) error = %v", pathErr)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("panicking Bootstrap request did not stop the Socket")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := socket.Close(); !errors.Is(err, safego.ErrPanic) {
+		t.Fatalf("admin Bootstrap Socket Close() error = %v, want safego.ErrPanic", err)
 	}
 }
 

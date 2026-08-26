@@ -10,6 +10,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
 var (
@@ -51,8 +53,8 @@ func ProxyBidirectional(ctx context.Context, left, right net.Conn) error {
 	}
 
 	results := make(chan copyResult, 2)
-	go proxyOneWay("left_to_right", right, left, results)
-	go proxyOneWay("right_to_left", left, right, results)
+	startProxyOneWay("left_to_right", right, left, results)
+	startProxyOneWay("right_to_left", left, right, results)
 
 	var (
 		closeOnce   sync.Once
@@ -106,6 +108,18 @@ func ProxyBidirectional(ctx context.Context, left, right net.Conn) error {
 		return errors.Join(terminal, errors.Join(copyErrs...), errors.Join(cleanupErrs...), closeErr)
 	}
 	return errors.Join(errors.Join(cleanupErrs...), closeErr)
+}
+
+func startProxyOneWay(direction string, destination, source net.Conn, results chan<- copyResult) {
+	safego.Go(
+		func(err error) {
+			results <- copyResult{direction: direction, err: err}
+		},
+		nil,
+		func() {
+			proxyOneWay(direction, destination, source, results)
+		},
+	)
 }
 
 func proxyOneWay(direction string, destination, source net.Conn, results chan<- copyResult) {

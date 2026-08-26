@@ -113,6 +113,45 @@ func (store *Store) Read(ctx context.Context, fn func(repository.RepositoryView)
 	return fn(&transactionStore{database: store.database.WithContext(ctx)})
 }
 
+// ReadConsistent 在同一个 SQLite 连接的普通只读事务中运行 fn。
+//
+// 普通 BEGIN 不抢占写锁；WAL 模式下首次读取固定快照，后续跨表查询只能看到
+// 同一次提交前或提交后的完整状态，不能拼出不同提交的 Tunnel Revision 与 Services。
+func (store *Store) ReadConsistent(ctx context.Context, fn func(repository.RepositoryView) error) error {
+	if fn == nil {
+		return errors.New("repository consistent read callback must not be nil")
+	}
+
+	return store.database.WithContext(ctx).Connection(func(connection *gorm.DB) (resultErr error) {
+		committed := false
+		if err := connection.Exec("BEGIN").Error; err != nil {
+			return fmt.Errorf("begin consistent repository read: %w", err)
+		}
+		defer func() {
+			if committed {
+				return
+			}
+			// 回调可能因请求取消而返回；资源清理不能继承已取消的请求 Context，
+			// 否则打开的只读事务会随连接回到池中并长期保留 WAL 快照。
+			rollbackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+			defer cancel()
+			if err := connection.WithContext(rollbackContext).Exec("ROLLBACK").Error; err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("rollback consistent repository read: %w", err))
+			}
+		}()
+
+		transaction := connection.Session(&gorm.Session{SkipDefaultTransaction: true})
+		if err := fn(&transactionStore{database: transaction}); err != nil {
+			return err
+		}
+		if err := connection.Exec("COMMIT").Error; err != nil {
+			return fmt.Errorf("commit consistent repository read: %w", err)
+		}
+		committed = true
+		return nil
+	})
+}
+
 // WithTx 使用 SQLite BEGIN IMMEDIATE 取得写入权后运行 fn。
 //
 // 这里不能改用 GORM 默认的 Begin：SQLite 的普通 BEGIN 是延迟事务，两个并发签发
@@ -193,6 +232,11 @@ func (store *transactionStore) TunnelTokens() repository.TunnelTokenRepository {
 	return tunnelTokenRepository{database: store.database}
 }
 
+// Services 返回当前只读视图或 BEGIN IMMEDIATE 事务作用域的 Service Repository。
+func (store *transactionStore) Services() repository.ServiceRepository {
+	return serviceRepository{database: store.database}
+}
+
 type tunnelRepository struct{ database *gorm.DB }
 
 func (store tunnelRepository) Create(ctx context.Context, tunnel repository.Tunnel) error {
@@ -219,6 +263,25 @@ func (store tunnelRepository) Get(ctx context.Context, id string) (repository.Tu
 	return record.toDomain(), nil
 }
 
+// List 按 Tunnel ID 升序返回当前视图中的全部持久化 Tunnel。
+func (store tunnelRepository) List(ctx context.Context) ([]repository.Tunnel, error) {
+	var records []tunnelRecord
+	if err := store.database.WithContext(ctx).Model(&tunnelRecord{}).
+		Order(TunnelColumns.ID + " ASC").
+		Find(&records).Error; err != nil {
+		return nil, fmt.Errorf("list tunnels: %w", err)
+	}
+	tunnels := make([]repository.Tunnel, 0, len(records))
+	for _, record := range records {
+		tunnel := record.toDomain()
+		if err := tunnel.Validate(); err != nil {
+			return nil, fmt.Errorf("list tunnels: stored tunnel %q is invalid: %w", record.ID, err)
+		}
+		tunnels = append(tunnels, tunnel)
+	}
+	return tunnels, nil
+}
+
 // AdvanceVersion 以 Tunnel aggregate version 为唯一 CAS 条件推进一次管理面变更。
 func (store tunnelRepository) AdvanceVersion(ctx context.Context, id string, expectedVersion, updatedAt int64) (repository.Tunnel, error) {
 	if !validate.ValidID(id, "tun_") || expectedVersion < 1 || expectedVersion == math.MaxInt64 || updatedAt <= 0 {
@@ -230,6 +293,39 @@ func (store tunnelRepository) AdvanceVersion(ctx context.Context, id string, exp
 		Updates(map[string]any{TunnelColumns.Version: expectedVersion + 1, TunnelColumns.UpdatedAt: updatedAt})
 	if result.Error != nil {
 		return repository.Tunnel{}, fmt.Errorf("advance tunnel version: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		if _, err := store.Get(ctx, id); err != nil {
+			return repository.Tunnel{}, err
+		}
+		return repository.Tunnel{}, repository.ErrVersionConflict
+	}
+	return store.Get(ctx, id)
+}
+
+// AdvanceDesiredRevision 在不改变 Tunnel ETag Version 的前提下推进远端 Desired State。
+// expectedVersion 用于拒绝基于旧 Tunnel Aggregate 的 Service 写入，expectedRevision 则
+// 防止调用方重复发布或跳过 Revision。两者必须在同一个 BEGIN IMMEDIATE 事务内校验。
+func (store tunnelRepository) AdvanceDesiredRevision(
+	ctx context.Context,
+	id string,
+	expectedVersion, expectedRevision, updatedAt int64,
+) (repository.Tunnel, error) {
+	if !validate.ValidID(id, "tun_") || expectedVersion < 1 || expectedRevision < 0 ||
+		expectedRevision == math.MaxInt64 || updatedAt <= 0 {
+		return repository.Tunnel{}, repository.ErrInvalidTunnel
+	}
+	result := store.database.WithContext(ctx).Model(&tunnelRecord{}).
+		Where(TunnelColumns.ID+" = ?", id).
+		Where(TunnelColumns.Version+" = ?", expectedVersion).
+		Where(TunnelColumns.DesiredRevision+" = ?", expectedRevision).
+		Where(TunnelColumns.RevokedAt + " IS NULL").
+		Updates(map[string]any{
+			TunnelColumns.DesiredRevision: expectedRevision + 1,
+			TunnelColumns.UpdatedAt:       updatedAt,
+		})
+	if result.Error != nil {
+		return repository.Tunnel{}, fmt.Errorf("advance tunnel desired revision: %w", result.Error)
 	}
 	if result.RowsAffected == 0 {
 		if _, err := store.Get(ctx, id); err != nil {

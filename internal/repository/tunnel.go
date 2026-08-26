@@ -120,7 +120,9 @@ func (token TunnelToken) Validate() error {
 type TunnelRepository interface {
 	Create(context.Context, Tunnel) error
 	Get(context.Context, string) (Tunnel, error)
+	List(context.Context) ([]Tunnel, error)
 	AdvanceVersion(context.Context, string, int64, int64) (Tunnel, error)
+	AdvanceDesiredRevision(context.Context, string, int64, int64, int64) (Tunnel, error)
 	Revoke(context.Context, string, int64, int64) (Tunnel, error)
 }
 
@@ -139,6 +141,7 @@ type TunnelTokenRepository interface {
 type RepositoryView interface {
 	Tunnels() TunnelRepository
 	TunnelTokens() TunnelTokenRepository
+	Services() ServiceRepository
 }
 
 // TxStore 是一次写事务内共享的 Repository 视图。

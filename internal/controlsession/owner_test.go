@@ -15,13 +15,14 @@ import (
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
+	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
 func TestOwnerWritesSingleOrderedStreamWithPriorityAndCoalescing(t *testing.T) {
 	server, peer := net.Pipe()
 	defer peer.Close()
 	signaled := &writeSignalConn{Conn: server, started: make(chan struct{})}
-	owner := mustOwner(t, signaled, state.EndpointServer, ownerOptions(2, 3, 1, time.Second))
+	owner := mustOwner(t, signaled, state.EndpointServer, ownerOptions(2, 3, 2, time.Second))
 	if err := owner.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -51,11 +52,25 @@ func TestOwnerWritesSingleOrderedStreamWithPriorityAndCoalescing(t *testing.T) {
 
 	setConnectionDeadline(t, peer)
 	frames := make([]*protocolv1.ControlEnvelope, 4)
-	for index := range frames {
+	frames[0] = &protocolv1.ControlEnvelope{}
+	if err := frame.ReadControl(peer, frames[0]); err != nil {
+		t.Fatalf("ReadControl(frame 0) error = %v", err)
+	}
+	if err := frame.WriteControl(peer, configAckEnvelope(1)); err != nil {
+		t.Fatalf("WriteControl(ConfigAck 1) error = %v", err)
+	}
+	for index := 1; index < 3; index++ {
 		frames[index] = &protocolv1.ControlEnvelope{}
 		if err := frame.ReadControl(peer, frames[index]); err != nil {
 			t.Fatalf("ReadControl(frame %d) error = %v", index, err)
 		}
+	}
+	if err := frame.WriteControl(peer, configAckEnvelope(3)); err != nil {
+		t.Fatalf("WriteControl(ConfigAck 3) error = %v", err)
+	}
+	frames[3] = &protocolv1.ControlEnvelope{}
+	if err := frame.ReadControl(peer, frames[3]); err != nil {
+		t.Fatalf("ReadControl(frame 3) error = %v; owner error = %v", err, owner.Wait())
 	}
 	if frames[0].GetConfigSnapshot().GetRevision() != 1 {
 		t.Fatalf("first frame = %#v, want already in-flight snapshot revision 1", frames[0])
@@ -268,6 +283,75 @@ func TestOwnerCancellationAndCleanEOFBothExitAllLoops(t *testing.T) {
 	})
 }
 
+func TestOwnerLoopPanicsUseSingleShutdownPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		endpoint    state.Endpoint
+		connection  func(net.Conn) net.Conn
+		beforeStart func(*Owner)
+		afterStart  func(*Owner) error
+	}{
+		{
+			name:     "read loop",
+			endpoint: state.EndpointServer,
+			connection: func(connection net.Conn) net.Conn {
+				return &panicReadConn{Conn: connection}
+			},
+			afterStart: func(*Owner) error { return nil },
+		},
+		{
+			name:     "write loop",
+			endpoint: state.EndpointAgent,
+			connection: func(connection net.Conn) net.Conn {
+				return &panicWriteConn{Conn: connection}
+			},
+			afterStart: func(owner *Owner) error {
+				return owner.Enqueue(heartbeatEnvelope(1))
+			},
+		},
+		{
+			name:       "owner loop",
+			endpoint:   state.EndpointServer,
+			connection: func(connection net.Conn) net.Conn { return connection },
+			beforeStart: func(owner *Owner) {
+				// 破坏同 package 内部不变量，确定性验证中央 Owner 自身 panic 时仍能
+				// 执行唯一关闭路径，而不是向已经退出的 fatal 消费者发送错误。
+				owner.outbox = nil
+			},
+			afterStart: func(*Owner) error { return nil },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, peer := net.Pipe()
+			defer peer.Close()
+			owner := mustOwner(t, test.connection(server), test.endpoint, ownerOptions(1, 1, 1, time.Second))
+			if test.beforeStart != nil {
+				test.beforeStart(owner)
+			}
+			if err := owner.Start(context.Background()); err != nil {
+				t.Fatalf("Start() error = %v", err)
+			}
+			if err := test.afterStart(owner); err != nil {
+				t.Fatalf("prepare panic path: %v", err)
+			}
+
+			select {
+			case <-owner.Done():
+			case <-time.After(3 * time.Second):
+				t.Fatal("Owner panic path did not close Done")
+			}
+			if err := owner.Wait(); !errors.Is(err, safego.ErrPanic) {
+				t.Fatalf("Wait() error = %v, want safego.ErrPanic", err)
+			}
+			if phase := owner.control.Phase(); phase != state.ControlClosed {
+				t.Fatalf("control phase = %v, want CLOSED", phase)
+			}
+		})
+	}
+}
+
 func TestNewOwnerRejectsControlFrameLimitAboveProtocol(t *testing.T) {
 	serverConnection, peer := net.Pipe()
 	defer serverConnection.Close()
@@ -347,6 +431,22 @@ func mustOwner(t *testing.T, connection net.Conn, endpoint state.Endpoint, optio
 		t.Fatalf("NewOwner() error = %v", err)
 	}
 	return owner
+}
+
+type panicReadConn struct {
+	net.Conn
+}
+
+func (*panicReadConn) Read([]byte) (int, error) {
+	panic("injected read panic")
+}
+
+type panicWriteConn struct {
+	net.Conn
+}
+
+func (*panicWriteConn) Write([]byte) (int, error) {
+	panic("injected write panic")
 }
 
 func establishedControl(t *testing.T, endpoint state.Endpoint) *state.Control {

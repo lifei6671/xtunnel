@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
 func TestServerAcceptsOnlyFrozenALPN(t *testing.T) {
@@ -225,6 +228,100 @@ func TestServerStartOnlyOnce(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 	if err := server.Start(context.Background()); err == nil {
 		t.Fatal("second Server.Start() error = nil, want rejection")
+	}
+}
+
+func TestServerRecoversProtocolHandlerPanicAndStops(t *testing.T) {
+	runtimeErrors := make(chan error, 1)
+	server, err := NewServer(ServerOptions{
+		Listen:                  "127.0.0.1:0",
+		Identity:                testIdentity(t),
+		MaxPendingTLSHandshakes: 1,
+		Handle: func(context.Context, *tls.Conn, Protocol) {
+			panic("test protocol handler panic")
+		},
+		ReportRuntimeError: func(err error) {
+			runtimeErrors <- err
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatalf("Server.Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	address := server.Addr().String()
+	connection, err := dialTLS(address, ControlALPN)
+	if err != nil {
+		t.Fatalf("dial protocol handler that panics: %v", err)
+	}
+	defer connection.Close()
+
+	select {
+	case runtimeErr := <-runtimeErrors:
+		if !errors.Is(runtimeErr, safego.ErrPanic) {
+			t.Fatalf("runtime error = %v, want safego.ErrPanic", runtimeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Gateway did not report protocol handler panic")
+	}
+	waitForGatewayCondition(t, func() bool {
+		late, dialErr := net.DialTimeout("tcp", address, 10*time.Millisecond)
+		if dialErr != nil {
+			return true
+		}
+		_ = late.Close()
+		return false
+	})
+	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("connection.SetReadDeadline() error = %v", err)
+	}
+	if _, err := connection.Read(make([]byte, 1)); err == nil {
+		t.Fatal("panicking protocol handler left its connection open")
+	}
+	if err := server.Close(); !errors.Is(err, safego.ErrPanic) {
+		t.Fatalf("Server.Close() error = %v, want safego.ErrPanic", err)
+	}
+}
+
+func TestServerRecoversRenewalLoopPanicAndStops(t *testing.T) {
+	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	identity, err := LoadOrCreatePinnedIdentity(t.TempDir(), "gateway.example.test", true, createdAt)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
+	}
+	runtimeErrors := make(chan error, 1)
+	server, err := NewServer(ServerOptions{
+		Listen:                  "127.0.0.1:0",
+		Identity:                identity,
+		MaxPendingTLSHandshakes: 1,
+		renewalCheckInterval:    time.Millisecond,
+		now: func() time.Time {
+			panic("test renewal loop panic")
+		},
+		ReportRuntimeError: func(err error) {
+			runtimeErrors <- err
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatalf("Server.Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	select {
+	case runtimeErr := <-runtimeErrors:
+		if !errors.Is(runtimeErr, safego.ErrPanic) {
+			t.Fatalf("runtime error = %v, want safego.ErrPanic", runtimeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Gateway did not report renewal loop panic")
+	}
+	if err := server.Close(); !errors.Is(err, safego.ErrPanic) {
+		t.Fatalf("Server.Close() error = %v, want safego.ErrPanic", err)
 	}
 }
 

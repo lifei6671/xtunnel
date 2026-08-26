@@ -114,8 +114,8 @@ func TestFirstAdminCreationStartsGateway(t *testing.T) {
 		resources,
 		slog.Default(),
 		runtimeDir,
-		func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (io.Closer, error) {
-			return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, func(*net.UnixConn) error { return nil }, afterCreate)
+		func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
+			return openAdminBootstrapSocketWithRuntime(ctx, runtimeDir, targetHash, store, func(*net.UnixConn) error { return nil }, afterCreate, reportRuntimeError)
 		},
 	)
 	if err != nil {
@@ -196,8 +196,8 @@ func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
 					resources,
 					logger,
 					runtimeDir,
-					func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (io.Closer, error) {
-						return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, func(*net.UnixConn) error { return nil }, afterCreate)
+					func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
+						return openAdminBootstrapSocketWithRuntime(ctx, runtimeDir, targetHash, store, func(*net.UnixConn) error { return nil }, afterCreate, reportRuntimeError)
 					},
 				)
 			},
@@ -245,7 +245,7 @@ func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
 		restartedResources,
 		slog.Default(),
 		runtimeDir,
-		func(context.Context, string, string, *sqlite.Store, func() error) (io.Closer, error) {
+		func(context.Context, string, string, *sqlite.Store, func() error, func(error)) (io.Closer, error) {
 			return nil, errors.New("unexpected Bootstrap Socket after Admin was committed")
 		},
 	)
@@ -284,6 +284,8 @@ func gatewayLifecycleTestConfig(dataDir, listen string) serverconfig.Config {
 		Limits: serverconfig.Limits{
 			MaxConnectors:                8,
 			MaxConnectorsPerTunnel:       4,
+			MaxServicesPerTunnel:         1_000,
+			MaxTunnelSnapshotBytes:       768 << 10,
 			MaxPendingTLSHandshakes:      1,
 			MaxPendingAuth:               2,
 			MaxReplayEntriesPerSession:   32,
@@ -295,6 +297,7 @@ func gatewayLifecycleTestConfig(dataDir, listen string) serverconfig.Config {
 			MaxConnectionsPerTunnel:      16,
 			MaxConnectionsPerService:     16,
 			MaxConnectionsPerSourceIP:    8,
+			MaxControlFrameBytes:         1 << 20,
 		},
 	}
 }

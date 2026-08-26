@@ -10,24 +10,41 @@ import (
 )
 
 const (
-	tunnelPrefix     = "tun_"
-	connectorPrefix  = "con_"
-	sessionPrefix    = "sess_"
-	workPrefix       = "work_"
-	leasePrefix      = "lease_"
+	// tunnelPrefix 标识持久化 Tunnel 聚合 ID，用于生成和校验 tun_<ULID>。
+	tunnelPrefix = "tun_"
+	// servicePrefix 标识 Tunnel 下的持久化 Service ID，用于生成和校验 svc_<ULID>。
+	servicePrefix = "svc_"
+	// connectorPrefix 标识一次 Agent 进程的临时 Connector ID，用于生成和校验 con_<ULID>。
+	connectorPrefix = "con_"
+	// sessionPrefix 标识一次认证成功的 Control Session ID，用于生成和校验 sess_<ULID>。
+	sessionPrefix = "sess_"
+	// workPrefix 标识一条 WorkConn ID，用于生成 work_<ULID>。
+	workPrefix = "work_"
+	// leasePrefix 标识 Server 下发的一次 WorkDemand Budget Lease ID，用于生成 lease_<ULID>。
+	leasePrefix = "lease_"
+	// connectionPrefix 标识一条端到端业务连接 ID，用于生成 conn_<ULID>。
 	connectionPrefix = "conn_"
-	drainPrefix      = "drain_"
+	// drainPrefix 标识一次 Agent/Server Drain 握手 ID，用于生成 drain_<ULID>。
+	drainPrefix = "drain_"
+	// auditEventPrefix 标识一条持久化安全审计事件 ID，用于生成 evt_<ULID>。
 	auditEventPrefix = "evt_"
-	operationPrefix  = "op_"
-	ulidLength       = 26
-	maxULIDMillis    = (1 << 48) - 1
+	// operationPrefix 标识一次管理操作 ID，用于生成 op_<ULID> 并关联操作结果。
+	operationPrefix = "op_"
 
+	// ulidLength 是不含业务前缀的 Crockford Base32 ULID 固定字符数。
+	ulidLength = 26
+	// maxULIDMillis 是 ULID 48 位时间戳可表达的最大 Unix 毫秒值。
+	maxULIDMillis = (1 << 48) - 1
+
+	// crockfordBase32 是 ULID 编解码及格式校验使用的规范大写字母表。
 	crockfordBase32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 )
 
 var (
 	// ErrInvalidTunnelID 表示 Tunnel ID 不符合 tun_ 加 ULID 的固定格式。
 	ErrInvalidTunnelID = errors.New("tunnel identifier is invalid")
+	// ErrInvalidServiceID 表示 Service ID 不符合 svc_ 加 ULID 的固定格式。
+	ErrInvalidServiceID = errors.New("service identifier is invalid")
 
 	// ErrInvalidConnectorID 表示 Connector ID 不符合 con_ 加 ULID 的固定格式。
 	ErrInvalidConnectorID = errors.New("connector identifier is invalid")
@@ -53,6 +70,15 @@ func NewConnector() (Connector, error) {
 		return Connector{}, fmt.Errorf("generate connector identifier: %w", err)
 	}
 	return Connector{id: id}, nil
+}
+
+// NewServiceID 使用 CSPRNG 生成一个持久化 Service 身份。
+func NewServiceID() (string, error) {
+	id, err := newID(servicePrefix, time.Now(), rand.Reader)
+	if err != nil {
+		return "", fmt.Errorf("generate service identifier: %w", err)
+	}
+	return id, nil
 }
 
 // ID 返回本进程在所有重连中复用的 Connector ID。
@@ -135,6 +161,14 @@ func ValidateTunnelID(value string) error {
 	return nil
 }
 
+// ValidateServiceID 校验 svc_ 前缀和 26 位大写 Crockford ULID。
+func ValidateServiceID(value string) error {
+	if !validID(value, servicePrefix) {
+		return ErrInvalidServiceID
+	}
+	return nil
+}
+
 // ValidateConnectorID 校验 con_ 前缀和 26 位大写 Crockford ULID。
 func ValidateConnectorID(value string) error {
 	if !validID(value, connectorPrefix) {
@@ -154,6 +188,11 @@ func ValidateSessionID(value string) error {
 // ValidTunnelID 返回 value 是否为合法 Tunnel ID。
 func ValidTunnelID(value string) bool {
 	return validID(value, tunnelPrefix)
+}
+
+// ValidServiceID 返回 value 是否为合法 Service ID。
+func ValidServiceID(value string) bool {
+	return validID(value, servicePrefix)
 }
 
 // ValidConnectorID 返回 value 是否为合法 Connector ID。
@@ -202,7 +241,7 @@ func newID(prefix string, now time.Time, random io.Reader) (string, error) {
 	var encoded [ulidLength]byte
 	for index := range encoded {
 		var value byte
-		for bit := 0; bit < 5; bit++ {
+		for bit := range 5 {
 			value <<= 1
 			sourceBit := index*5 + bit - 2
 			if sourceBit < 0 {

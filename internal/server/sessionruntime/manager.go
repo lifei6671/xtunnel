@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 	"sync"
 	"time"
 
@@ -15,12 +16,20 @@ import (
 	"github.com/lifei6671/xtunnel/internal/identity"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
+	"github.com/lifei6671/xtunnel/internal/safego"
 	servercontrolauth "github.com/lifei6671/xtunnel/internal/server/controlauth"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
+	serversnapshot "github.com/lifei6671/xtunnel/internal/server/snapshot"
 	"github.com/lifei6671/xtunnel/internal/server/workauth"
 	serverworkpool "github.com/lifei6671/xtunnel/internal/server/workpool"
 )
+
+// SnapshotProvider 返回 Tunnel 当前完整 Desired State。实现必须尊重 ctx 取消，且
+// 返回值由 sessionruntime 只读使用并交给 Control Owner 深拷贝后发送。
+type SnapshotProvider interface {
+	Current(context.Context, string) (serversnapshot.Result, error)
+}
 
 var (
 	// ErrInvalidOptions 表示 Manager 缺少 Registry 或使用了无界容量/超时。
@@ -55,6 +64,8 @@ type Options struct {
 	MaxWorkConnecting    uint32
 	MaxControlFrameBytes uint64
 	LimitManager         *serverlimits.Manager
+	// SnapshotProvider 是每条 Session 第一条业务消息的唯一完整配置来源。
+	SnapshotProvider SnapshotProvider
 	// HeartbeatTimeout 使用 Server 本地单调时间关闭失联 Session；零值使用冻结的 30 秒默认值。
 	HeartbeatTimeout time.Duration
 	// Logger 接收稳定 Connector lifecycle 事件；nil 只用于不需要日志的隔离测试。
@@ -90,6 +101,12 @@ type managedSession struct {
 	cleanupOnce       sync.Once
 	cleanupDone       chan struct{}
 	cleanupErr        error
+
+	configMu            sync.Mutex
+	configReady         bool
+	observedRevision    uint64
+	outstandingRevision uint64
+	hasOutstanding      bool
 
 	reconcileMu          sync.Mutex
 	demandMu             sync.Mutex
@@ -149,7 +166,7 @@ func New(registry *serverruntime.Registry, options Options) (*Manager, error) {
 		options.InboundCapacity <= 0 || options.WriteTimeout <= 0 || options.MaxReplayEntries <= 0 ||
 		options.MaxWorkTotal == 0 || options.MaxWorkConnecting == 0 ||
 		options.MaxWorkConnecting > options.MaxWorkTotal || options.MaxControlFrameBytes > frame.MaxControlFrameSize ||
-		options.HeartbeatTimeout <= 0 {
+		options.HeartbeatTimeout <= 0 || nilSnapshotProvider(options.SnapshotProvider) {
 		return nil, ErrInvalidOptions
 	}
 	return &Manager{
@@ -174,10 +191,37 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 		return ErrInvalidSession
 	}
 
+	sessionContext, managed, err := manager.prepareSession(ctx, connection, established)
+	if err != nil {
+		return err
+	}
+	previous, err := manager.startSession(sessionContext, connection, managed)
+	if err != nil {
+		return err
+	}
+	if previous != nil {
+		// previous 已从 Current/WorkAuth 查找入口摘除，但仍由 liveSessions 跟踪，
+		// 因而并发 Revoke/Shutdown 也能关闭它。这里必须在任何后续失败前接管替换清理。
+		previous.setTerminationReason("session_replaced")
+		_ = manager.cleanupManaged(previous, cleanupNonActive)
+	}
+	if err := manager.enqueueInitialSnapshot(sessionContext, managed, established.DesiredRevision); err != nil {
+		return manager.abortInstalledSession(managed, err)
+	}
+	return manager.waitForSession(ctx, sessionContext, managed)
+}
+
+func (manager *Manager) prepareSession(
+	ctx context.Context,
+	connection net.Conn,
+	established *servercontrolauth.Established,
+) (context.Context, *managedSession, error) {
 	authenticator, err := workauth.New(workauth.Session{
-		TunnelID: established.Session.TunnelID, ConnectorID: established.Session.ConnectorID,
-		SessionID: established.Session.SessionID, Generation: established.Session.Generation,
-		Secret: established.SessionSecret[:],
+		TunnelID:    established.Session.TunnelID,
+		ConnectorID: established.Session.ConnectorID,
+		SessionID:   established.Session.SessionID,
+		Generation:  established.Session.Generation,
+		Secret:      established.SessionSecret[:],
 	}, manager.options.MaxReplayEntries, func() time.Duration {
 		return time.Since(manager.startedAt)
 	})
@@ -186,56 +230,76 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 	clear(established.SessionSecret[:])
 	if err != nil {
 		manager.registry.ClearIfCurrent(established.Session)
-		return errors.Join(fmt.Errorf("construct server Work authenticator: %w", err), connection.Close())
+		return nil, nil, errors.Join(fmt.Errorf("construct server Work authenticator: %w", err), connection.Close())
 	}
 	pool, err := serverworkpool.New(serverworkpool.Options{
 		Session: serverworkpool.Session{
-			TunnelID: established.Session.TunnelID, ConnectorID: established.Session.ConnectorID,
-			SessionID: established.Session.SessionID, Generation: established.Session.Generation,
+			TunnelID:    established.Session.TunnelID,
+			ConnectorID: established.Session.ConnectorID,
+			SessionID:   established.Session.SessionID,
+			Generation:  established.Session.Generation,
 		},
-		MaxTotal: manager.options.MaxWorkTotal, MaxConnecting: manager.options.MaxWorkConnecting,
-		LimitManager: manager.options.LimitManager,
-		Clock:        func() time.Duration { return time.Since(manager.startedAt) }, DeadlineNow: time.Now,
+		MaxTotal:      manager.options.MaxWorkTotal,
+		MaxConnecting: manager.options.MaxWorkConnecting,
+		LimitManager:  manager.options.LimitManager,
+		Clock:         func() time.Duration { return time.Since(manager.startedAt) },
+		DeadlineNow:   time.Now,
 	})
 	if err != nil {
 		authenticator.Close()
 		manager.registry.ClearIfCurrent(established.Session)
-		return errors.Join(fmt.Errorf("construct server WorkPool: %w", err), connection.Close())
+		return nil, nil, errors.Join(fmt.Errorf("construct server WorkPool: %w", err), connection.Close())
 	}
 
 	owner, err := controlsession.NewOwner(connection, established.Control, controlsession.Options{
-		ProtocolVersion: established.ProtocolVersion, HighPriorityCapacity: manager.options.HighPriorityCapacity,
-		NormalCapacity: manager.options.NormalCapacity, InboundCapacity: manager.options.InboundCapacity,
-		WriteTimeout: manager.options.WriteTimeout, MaxFrameBytes: manager.options.MaxControlFrameBytes,
+		ProtocolVersion:      established.ProtocolVersion,
+		HighPriorityCapacity: manager.options.HighPriorityCapacity,
+		NormalCapacity:       manager.options.NormalCapacity,
+		InboundCapacity:      manager.options.InboundCapacity,
+		WriteTimeout:         manager.options.WriteTimeout,
+		MaxFrameBytes:        manager.options.MaxControlFrameBytes,
 	})
 	if err != nil {
 		authenticator.Close()
 		_ = pool.Close()
 		manager.registry.ClearIfCurrent(established.Session)
-		return errors.Join(fmt.Errorf("construct server Control Session owner: %w", err), connection.Close())
+		return nil, nil, errors.Join(fmt.Errorf("construct server Control Session owner: %w", err), connection.Close())
 	}
 
 	sessionContext, cancel := context.WithCancel(ctx)
 	managed := &managedSession{
-		session: established.Session, metadata: established.ConnectorMetadata,
-		authenticator: authenticator, owner: owner, pool: pool, cancel: cancel,
-		protocol: established.ProtocolVersion, cleanupDone: make(chan struct{}),
+		session:       established.Session,
+		metadata:      established.ConnectorMetadata,
+		authenticator: authenticator,
+		owner:         owner,
+		pool:          pool,
+		cancel:        cancel,
+		protocol:      established.ProtocolVersion,
+		cleanupDone:   make(chan struct{}),
 	}
+	return sessionContext, managed, nil
+}
+
+func (manager *Manager) startSession(
+	sessionContext context.Context,
+	connection net.Conn,
+	managed *managedSession,
+) (*managedSession, error) {
 	if err := manager.beginStartup(managed.session.TunnelID); err != nil {
-		cancel()
-		authenticator.Close()
-		_ = pool.Close()
-		manager.registry.ClearIfCurrent(established.Session)
-		return errors.Join(err, connection.Close())
+		managed.cancel()
+		managed.authenticator.Close()
+		_ = managed.pool.Close()
+		manager.registry.ClearIfCurrent(managed.session)
+		return nil, errors.Join(err, connection.Close())
 	}
-	if err := owner.Start(sessionContext); err != nil {
-		cancel()
-		authenticator.Close()
-		_ = pool.Close()
-		manager.registry.ClearIfCurrent(established.Session)
+	if err := managed.owner.Start(sessionContext); err != nil {
+		managed.cancel()
+		managed.authenticator.Close()
+		_ = managed.pool.Close()
+		manager.registry.ClearIfCurrent(managed.session)
 		startErr := errors.Join(fmt.Errorf("start server Control Session owner: %w", err), connection.Close())
 		manager.endStartup(managed.session.TunnelID)
-		return startErr
+		return nil, startErr
 	}
 	if manager.beforeInstallForTest != nil {
 		manager.beforeInstallForTest(managed.session)
@@ -243,129 +307,81 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 
 	previous, installErr := manager.install(managed)
 	if installErr != nil {
-		cancel()
-		ownerErr := owner.Wait()
-		authenticator.Close()
-		_ = pool.Close()
-		manager.registry.ClearIfCurrent(established.Session)
+		managed.cancel()
+		ownerErr := managed.owner.Wait()
+		managed.authenticator.Close()
+		_ = managed.pool.Close()
+		manager.registry.ClearIfCurrent(managed.session)
 		manager.endStartup(managed.session.TunnelID)
-		return errors.Join(installErr, ownerErr)
+		return nil, errors.Join(installErr, ownerErr)
 	}
 	manager.endStartup(managed.session.TunnelID)
 	if manager.afterInstallForTest != nil {
 		manager.afterInstallForTest(managed.session)
 	}
-	if previous != nil {
-		// previous 已从 Current/WorkAuth 查找入口摘除，但仍由 liveSessions 跟踪，
-		// 因而并发 Revoke/Shutdown 也能关闭它。这里必须在任何后续失败前接管替换清理。
-		previous.setTerminationReason("session_replaced")
-		_ = manager.cleanupManaged(previous, cleanupNonActive)
-	}
-	lifecycleEvent, observed := manager.registry.ObserveConnected(managed.session, managed.metadata)
-	if !observed {
-		cancel()
-		ownerErr := owner.Wait()
-		manager.removeLookup(managed)
-		cleanupErr := manager.cleanupManaged(managed, cleanupAll)
-		return errors.Join(ErrSessionUnavailable, ownerErr, cleanupErr)
-	}
-	manager.logLifecycle(lifecycleEvent)
-	if manager.beforeInitialDemandForTest != nil {
-		manager.beforeInitialDemandForTest(managed)
-	}
-	if err := manager.enqueueInitialDemand(managed, established.ProtocolVersion); err != nil {
-		managed.setTerminationReason(initialDemandFailedReason)
-		cancel()
-		ownerErr := owner.Wait()
-		manager.removeLookup(managed)
-		cleanupErr := manager.cleanupManaged(managed, cleanupAll)
-		return errors.Join(err, ownerErr, cleanupErr)
-	}
+	return previous, nil
+}
 
+func (manager *Manager) enqueueInitialSnapshot(
+	sessionContext context.Context,
+	managed *managedSession,
+	desiredRevision uint64,
+) error {
+	snapshotResult, err := manager.options.SnapshotProvider.Current(sessionContext, managed.session.TunnelID)
+	if err != nil {
+		return fmt.Errorf("load initial TunnelSnapshot: %w", err)
+	}
+	snapshot := snapshotResult.Snapshot
+	if snapshot == nil || snapshot.GetTunnelId() != managed.session.TunnelID ||
+		snapshot.GetRevision() < desiredRevision {
+		return fmt.Errorf("invalid initial TunnelSnapshot for session: desired_revision=%d", desiredRevision)
+	}
+	if err := managed.installOutstandingSnapshot(snapshot.GetRevision()); err != nil {
+		return err
+	}
+	if err := managed.owner.Enqueue(&protocolv1.ControlEnvelope{
+		ProtocolVersion: managed.protocol,
+		Payload:         &protocolv1.ControlEnvelope_ConfigSnapshot{ConfigSnapshot: snapshot},
+	}); err != nil {
+		return fmt.Errorf("enqueue initial TunnelSnapshot: %w", err)
+	}
+	return nil
+}
+
+func (manager *Manager) abortInstalledSession(managed *managedSession, cause error) error {
+	managed.cancel()
+	ownerErr := managed.owner.Wait()
+	manager.removeLookup(managed)
+	cleanupErr := manager.cleanupManaged(managed, cleanupAll)
+	return errors.Join(cause, ownerErr, cleanupErr)
+}
+
+func (manager *Manager) waitForSession(
+	ctx context.Context,
+	sessionContext context.Context,
+	managed *managedSession,
+) error {
 	// Manager 持续消费已通过状态机校验的入站消息。DrainRequest 必须在同一
 	// Session Owner 内完成摘流、等待 OPENING 与 Ack，不能像普通 Heartbeat 一样丢弃。
 	inboundDrained := make(chan struct{})
 	inboundErrors := make(chan error, 1)
-	go func() {
-		defer close(inboundDrained)
-		heartbeatTimer := time.NewTimer(manager.options.HeartbeatTimeout)
-		defer heartbeatTimer.Stop()
-		var drainAck *protocolv1.ControlEnvelope
-		for {
-			var inbound controlsession.Inbound
-			var ok bool
-			select {
-			case <-heartbeatTimer.C:
-				managed.setTerminationReason("heartbeat_timeout")
-				inboundErrors <- ErrHeartbeatTimeout
-				cancel()
-				return
-			case inbound, ok = <-owner.Inbound():
-				if !ok {
-					return
-				}
-			}
-			if inbound.Envelope.GetHeartbeat() != nil {
-				if !manager.registry.ObserveHeartbeat(managed.session) {
-					managed.setTerminationReason("session_replaced")
-					inboundErrors <- ErrSessionSuperseded
-					cancel()
-					return
-				}
-				resetTimer(heartbeatTimer, manager.options.HeartbeatTimeout)
-				if _, err := manager.reconcileDemand(managed, established.ProtocolVersion); err != nil {
-					inboundErrors <- fmt.Errorf("reconcile WorkDemand after Heartbeat: %w", err)
-					cancel()
-					return
-				}
-				continue
-			}
-			request := inbound.Envelope.GetDrainRequest()
-			if request == nil {
-				continue
-			}
-			if inbound.Duplicate && drainAck != nil {
-				if err := owner.Enqueue(drainAck); err != nil {
-					inboundErrors <- fmt.Errorf("enqueue duplicate DrainAck: %w", err)
-					cancel()
-					return
-				}
-				continue
-			}
-			manager.markDraining(managed)
-			if err := pool.BeginDrain(); err != nil && !errors.Is(err, serverworkpool.ErrPoolDraining) {
-				inboundErrors <- fmt.Errorf("begin server WorkPool drain: %w", err)
-				cancel()
-				return
-			}
-			stopTimer(heartbeatTimer)
-			drainContext, cancelDrain := context.WithTimeout(sessionContext, time.Duration(request.GetDrainTimeoutMs())*time.Millisecond)
-			remainingActive, err := pool.WaitOpeningAndCloseNonActive(drainContext)
-			cancelDrain()
-			if err != nil {
-				inboundErrors <- fmt.Errorf("close non-active WorkConn during drain: %w", err)
-				cancel()
-				return
-			}
-			drainAck = &protocolv1.ControlEnvelope{
-				ProtocolVersion: established.ProtocolVersion,
-				Payload: &protocolv1.ControlEnvelope_DrainAck{DrainAck: &protocolv1.DrainAck{
-					DrainId: request.GetDrainId(), RemainingActive: remainingActive,
-				}},
-			}
-			if err := owner.Enqueue(drainAck); err != nil {
-				inboundErrors <- fmt.Errorf("enqueue DrainAck: %w", err)
-				cancel()
-				return
-			}
-			heartbeatTimer.Reset(manager.options.HeartbeatTimeout)
+	safego.Go(func(err error) {
+		managed.setTerminationReason("inbound_panic")
+		inboundErrors <- fmt.Errorf("consume server Control inbound: %w", err)
+		managed.cancel()
+	}, func() {
+		close(inboundDrained)
+	}, func() {
+		if err := manager.consumeInbound(sessionContext, managed); err != nil {
+			inboundErrors <- err
+			managed.cancel()
 		}
-	}()
+	})
 
-	ownerErr := owner.Wait()
+	ownerErr := managed.owner.Wait()
 	// Owner 已经终止时不再可能写出 DrainAck；先取消 Session Context，立即打断
 	// 可能正按对端 drain_timeout_ms 等待 OPENING 的入站消费者，再等待其退出。
-	cancel()
+	managed.cancel()
 	<-inboundDrained
 	var inboundErr error
 	select {
@@ -382,6 +398,130 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 	}
 	cleanupErr := manager.cleanupManaged(managed, cleanupMode)
 	return errors.Join(ownerErr, inboundErr, cleanupErr)
+}
+
+func (manager *Manager) consumeInbound(sessionContext context.Context, managed *managedSession) error {
+	heartbeatTimer := time.NewTimer(manager.options.HeartbeatTimeout)
+	defer heartbeatTimer.Stop()
+	var drainAck *protocolv1.ControlEnvelope
+	for {
+		select {
+		case <-heartbeatTimer.C:
+			managed.setTerminationReason("heartbeat_timeout")
+			return ErrHeartbeatTimeout
+		case inbound, ok := <-managed.owner.Inbound():
+			if !ok {
+				return nil
+			}
+			var err error
+			drainAck, err = manager.handleInbound(sessionContext, managed, heartbeatTimer, drainAck, inbound)
+			if err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (manager *Manager) handleInbound(
+	sessionContext context.Context,
+	managed *managedSession,
+	heartbeatTimer *time.Timer,
+	drainAck *protocolv1.ControlEnvelope,
+	inbound controlsession.Inbound,
+) (*protocolv1.ControlEnvelope, error) {
+	if inbound.Envelope.GetHeartbeat() != nil {
+		resetTimer(heartbeatTimer, manager.options.HeartbeatTimeout)
+		return drainAck, manager.handleHeartbeat(managed)
+	}
+	if inbound.Envelope.GetConfigAck() != nil {
+		return drainAck, manager.handleConfigAck(managed, inbound)
+	}
+	request := inbound.Envelope.GetDrainRequest()
+	if request == nil {
+		return drainAck, nil
+	}
+	if inbound.Duplicate && drainAck != nil {
+		return drainAck, enqueueDrainAck(managed.owner, drainAck, true)
+	}
+	return manager.handleDrain(sessionContext, managed, heartbeatTimer, request)
+}
+
+func (manager *Manager) handleHeartbeat(managed *managedSession) error {
+	if !managed.isConfigReady() {
+		return nil
+	}
+	if !manager.registry.ObserveHeartbeat(managed.session) {
+		managed.setTerminationReason("session_replaced")
+		return ErrSessionSuperseded
+	}
+	if _, err := manager.reconcileDemand(managed, managed.protocol); err != nil {
+		return fmt.Errorf("reconcile WorkDemand after Heartbeat: %w", err)
+	}
+	return nil
+}
+
+func (manager *Manager) handleConfigAck(managed *managedSession, inbound controlsession.Inbound) error {
+	if inbound.Duplicate && !managed.hasOutstandingSnapshot() {
+		return nil
+	}
+	applied, err := managed.acceptConfigAck(inbound.Envelope.GetConfigAck())
+	if err != nil || !applied {
+		return err
+	}
+	lifecycleEvent, observed := manager.registry.ObserveConnected(managed.session, managed.metadata)
+	if !observed {
+		return ErrSessionUnavailable
+	}
+	manager.logLifecycle(lifecycleEvent)
+	managed.markConfigReady()
+	if manager.beforeInitialDemandForTest != nil {
+		manager.beforeInitialDemandForTest(managed)
+	}
+	if _, err := manager.reconcileDemand(managed, managed.protocol); err != nil {
+		managed.setTerminationReason(initialDemandFailedReason)
+		return err
+	}
+	return nil
+}
+
+func (manager *Manager) handleDrain(
+	sessionContext context.Context,
+	managed *managedSession,
+	heartbeatTimer *time.Timer,
+	request *protocolv1.DrainRequest,
+) (*protocolv1.ControlEnvelope, error) {
+	manager.markDraining(managed)
+	if err := managed.pool.BeginDrain(); err != nil && !errors.Is(err, serverworkpool.ErrPoolDraining) {
+		return nil, fmt.Errorf("begin server WorkPool drain: %w", err)
+	}
+	stopTimer(heartbeatTimer)
+	drainContext, cancelDrain := context.WithTimeout(sessionContext, time.Duration(request.GetDrainTimeoutMs())*time.Millisecond)
+	remainingActive, err := managed.pool.WaitOpeningAndCloseNonActive(drainContext)
+	cancelDrain()
+	if err != nil {
+		return nil, fmt.Errorf("close non-active WorkConn during drain: %w", err)
+	}
+	drainAck := &protocolv1.ControlEnvelope{
+		ProtocolVersion: managed.protocol,
+		Payload: &protocolv1.ControlEnvelope_DrainAck{DrainAck: &protocolv1.DrainAck{
+			DrainId: request.GetDrainId(), RemainingActive: remainingActive,
+		}},
+	}
+	if err := enqueueDrainAck(managed.owner, drainAck, false); err != nil {
+		return nil, err
+	}
+	heartbeatTimer.Reset(manager.options.HeartbeatTimeout)
+	return drainAck, nil
+}
+
+func enqueueDrainAck(owner *controlsession.Owner, drainAck *protocolv1.ControlEnvelope, duplicate bool) error {
+	if err := owner.Enqueue(drainAck); err != nil {
+		if duplicate {
+			return fmt.Errorf("enqueue duplicate DrainAck: %w", err)
+		}
+		return fmt.Errorf("enqueue DrainAck: %w", err)
+	}
+	return nil
 }
 
 // Shutdown 停止发布新的 Session/Work，收束当前 Session 的非 ACTIVE Work，等待所有
@@ -464,7 +604,7 @@ func (manager *Manager) Resolve(sessionID string) (*workauth.SessionAuthenticato
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	managed, exists := manager.bySession[sessionID]
-	if !exists {
+	if !exists || !managed.isConfigReady() {
 		return nil, false
 	}
 	return managed.authenticator, true
@@ -494,7 +634,7 @@ func (manager *Manager) RegisterIdle(connection net.Conn, idle workauth.Idle) (*
 	manager.mu.Lock()
 	managed := manager.bySession[idle.SessionID]
 	if managed == nil || managed.session.TunnelID != idle.TunnelID ||
-		managed.session.ConnectorID != idle.ConnectorID {
+		managed.session.ConnectorID != idle.ConnectorID || !managed.isConfigReady() {
 		manager.mu.Unlock()
 		return nil, ErrSessionUnavailable
 	}
@@ -522,7 +662,7 @@ func (manager *Manager) Pool(session serverruntime.Session) (*serverworkpool.Poo
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	managed := manager.bySession[session.SessionID]
-	if managed == nil || managed.session != session {
+	if managed == nil || managed.session != session || !managed.isConfigReady() {
 		return nil, false
 	}
 	return managed.pool, true
@@ -538,6 +678,9 @@ func (manager *Manager) ConnectorSnapshots() []serverruntime.ConnectorSnapshot {
 	manager.mu.Lock()
 	pools := make(map[serverruntime.Session]*serverworkpool.Pool, len(manager.byConnector))
 	for _, managed := range manager.byConnector {
+		if !managed.isConfigReady() {
+			continue
+		}
 		pools[managed.session] = managed.pool
 	}
 	manager.mu.Unlock()
@@ -628,7 +771,7 @@ func (manager *Manager) SetPendingOpens(session serverruntime.Session, pending u
 	}
 	manager.mu.Lock()
 	managed := manager.bySession[session.SessionID]
-	if managed == nil || managed.session != session {
+	if managed == nil || managed.session != session || !managed.isConfigReady() {
 		manager.mu.Unlock()
 		return ErrSessionUnavailable
 	}
@@ -708,18 +851,10 @@ func (manager *Manager) startupDoneLocked(tunnelID string) <-chan struct{} {
 	return group.done
 }
 
-func (manager *Manager) enqueueInitialDemand(managed *managedSession, protocolVersion uint32) error {
-	emitted, err := manager.reconcileDemand(managed, protocolVersion)
-	if err != nil {
-		return err
-	}
-	if !emitted {
-		return errors.New("initial WorkDemand did not reserve a Budget Lease")
-	}
-	return nil
-}
-
 func (manager *Manager) reconcileDemand(managed *managedSession, protocolVersion uint32) (bool, error) {
+	if managed == nil || !managed.isConfigReady() {
+		return false, nil
+	}
 	managed.reconcileMu.Lock()
 	defer managed.reconcileMu.Unlock()
 	counts := managed.pool.Snapshot()
@@ -794,6 +929,71 @@ func (manager *Manager) reconcileDemand(managed *managedSession, protocolVersion
 		return false, fmt.Errorf("enqueue WorkDemand: %w", err)
 	}
 	return true, nil
+}
+
+func (managed *managedSession) installOutstandingSnapshot(revision uint64) error {
+	managed.configMu.Lock()
+	defer managed.configMu.Unlock()
+	if managed.hasOutstanding || managed.configReady {
+		return errors.New("initial TunnelSnapshot already installed")
+	}
+	managed.outstandingRevision = revision
+	managed.hasOutstanding = true
+	return nil
+}
+
+// acceptConfigAck 只完成 Ack 与唯一 outstanding Snapshot 的业务关联。APPLIED 的
+// ONLINE 发布由调用方先提交 Registry，再通过 markConfigReady 开放数据面入口。
+func (managed *managedSession) acceptConfigAck(ack *protocolv1.ConfigAck) (bool, error) {
+	managed.configMu.Lock()
+	defer managed.configMu.Unlock()
+	if ack == nil || !managed.hasOutstanding {
+		return false, errors.New("ConfigAck has no outstanding TunnelSnapshot")
+	}
+	switch ack.GetApplyStatus() {
+	case protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED:
+		if ack.GetErrorCode() != protocolv1.ErrorCode_ERROR_CODE_OK ||
+			ack.GetObservedRevision() != managed.outstandingRevision {
+			return false, errors.New("ConfigAck APPLIED does not match outstanding TunnelSnapshot")
+		}
+		managed.observedRevision = managed.outstandingRevision
+		managed.outstandingRevision = 0
+		managed.hasOutstanding = false
+		return true, nil
+	case protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED:
+		if ack.GetErrorCode() == protocolv1.ErrorCode_ERROR_CODE_OK ||
+			ack.GetObservedRevision() != managed.observedRevision {
+			return false, errors.New("ConfigAck REJECTED does not preserve observed revision")
+		}
+		managed.outstandingRevision = 0
+		managed.hasOutstanding = false
+		return false, nil
+	default:
+		return false, errors.New("ConfigAck apply status is invalid")
+	}
+}
+
+func (managed *managedSession) markConfigReady() {
+	managed.configMu.Lock()
+	managed.configReady = true
+	managed.configMu.Unlock()
+}
+
+func (managed *managedSession) hasOutstandingSnapshot() bool {
+	managed.configMu.Lock()
+	outstanding := managed.hasOutstanding
+	managed.configMu.Unlock()
+	return outstanding
+}
+
+func (managed *managedSession) isConfigReady() bool {
+	if managed == nil {
+		return false
+	}
+	managed.configMu.Lock()
+	ready := managed.configReady
+	managed.configMu.Unlock()
+	return ready
 }
 
 func (managed *managedSession) setPendingOpens(pending uint32) {
@@ -1049,4 +1249,17 @@ func validSession(session serverruntime.Session) bool {
 	return identity.ValidateTunnelID(session.TunnelID) == nil &&
 		identity.ValidateConnectorID(session.ConnectorID) == nil &&
 		identity.ValidateSessionID(session.SessionID) == nil && session.Generation > 0
+}
+
+func nilSnapshotProvider(provider SnapshotProvider) bool {
+	if provider == nil {
+		return true
+	}
+	value := reflect.ValueOf(provider)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }

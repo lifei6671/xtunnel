@@ -3,9 +3,12 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 
 	"github.com/lifei6671/xtunnel/internal/repository"
 )
@@ -63,6 +66,129 @@ func TestTunnelRepositoriesShareBeginImmediateTransaction(t *testing.T) {
 	}
 }
 
+func TestTunnelRepositoryListReturnsNonNilEmptySlice(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		tunnels, err := view.Tunnels().List(context.Background())
+		if err != nil {
+			return err
+		}
+		if tunnels == nil || len(tunnels) != 0 {
+			t.Fatalf("List() = %#v, want non-nil empty slice", tunnels)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Read(List) error = %v", err)
+	}
+}
+
+func TestTunnelRepositoryListUsesStableOrderAndMapsEveryField(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+
+	revokedAt := int64(31)
+	want := []repository.Tunnel{
+		{ID: "tun_01J00000000000000000000001", Name: "first", Version: 2, DesiredRevision: 11, CreatedAt: 21, UpdatedAt: 22},
+		{ID: "tun_01J00000000000000000000002", Name: "second", Version: 3, DesiredRevision: 12, RevokedAt: &revokedAt, CreatedAt: 23, UpdatedAt: 31},
+		{ID: "tun_01J00000000000000000000003", Name: "third", Version: 4, DesiredRevision: 13, CreatedAt: 24, UpdatedAt: 25},
+	}
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		for _, index := range []int{2, 0, 1} {
+			if err := transaction.Tunnels().Create(context.Background(), want[index]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed Tunnels error = %v", err)
+	}
+
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		got, err := view.Tunnels().List(context.Background())
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("List() = %#v, want %#v", got, want)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Read(List) error = %v", err)
+	}
+}
+
+func TestTunnelRepositoryListPropagatesCancellation(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = store.Read(ctx, func(view repository.RepositoryView) error {
+		_, err := view.Tunnels().List(ctx)
+		return err
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("List(canceled) error = %v, want context.Canceled", err)
+	}
+}
+
+func TestTunnelRepositoryListRejectsDamagedStoredRow(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+
+	const damagedID = "tun_01J00000000000000000000009"
+	if err := store.database.Connection(func(connection *gorm.DB) error {
+		if err := connection.Exec("PRAGMA ignore_check_constraints = ON").Error; err != nil {
+			return err
+		}
+		createErr := connection.Create(&tunnelRecord{
+			ID: damagedID, Name: " ", Version: 1, CreatedAt: 1, UpdatedAt: 1,
+		}).Error
+		restoreErr := connection.Exec("PRAGMA ignore_check_constraints = OFF").Error
+		return errors.Join(createErr, restoreErr)
+	}); err != nil {
+		t.Fatalf("seed damaged Tunnel row error = %v", err)
+	}
+
+	err = store.Read(context.Background(), func(view repository.RepositoryView) error {
+		_, err := view.Tunnels().List(context.Background())
+		return err
+	})
+	if !errors.Is(err, repository.ErrInvalidTunnel) || !strings.Contains(err.Error(), damagedID) {
+		t.Fatalf("List(damaged) error = %v, want contextual ErrInvalidTunnel", err)
+	}
+}
+
 func TestHasTunnelTokensOnlyReportsRowPresence(t *testing.T) {
 	store, err := Open(context.Background(), t.TempDir())
 	if err != nil {
@@ -114,6 +240,151 @@ func TestTunnelRepositoriesRollBackWholeTransaction(t *testing.T) {
 		_, err := transaction.Tunnels().Get(context.Background(), repositoryTestTunnelID)
 		if !errors.Is(err, repository.ErrNotFound) {
 			return errors.New("rolled-back Tunnel remained visible")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdvanceDesiredRevisionUsesIndependentCAS(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		if err := transaction.Tunnels().Create(context.Background(), testTunnel()); err != nil {
+			return err
+		}
+		updated, err := transaction.Tunnels().AdvanceDesiredRevision(
+			context.Background(), repositoryTestTunnelID, 1, 0, 2,
+		)
+		if err != nil {
+			return err
+		}
+		if updated.Version != 1 || updated.DesiredRevision != 1 || updated.UpdatedAt != 2 {
+			return errors.New("desired revision CAS changed the wrong Tunnel fields")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("advance desired revision error = %v", err)
+	}
+
+	tests := []struct {
+		name             string
+		expectedVersion  int64
+		expectedRevision int64
+	}{
+		{name: "旧 Tunnel Version", expectedVersion: 2, expectedRevision: 1},
+		{name: "旧 Desired Revision", expectedVersion: 1, expectedRevision: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+				_, err := transaction.Tunnels().AdvanceDesiredRevision(
+					context.Background(), repositoryTestTunnelID,
+					test.expectedVersion, test.expectedRevision, 3,
+				)
+				return err
+			})
+			if !errors.Is(err, repository.ErrVersionConflict) {
+				t.Fatalf("AdvanceDesiredRevision() error = %v, want ErrVersionConflict", err)
+			}
+		})
+	}
+}
+
+func TestAdvanceDesiredRevisionRejectsRevokedTunnel(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		if err := transaction.Tunnels().Create(context.Background(), testTunnel()); err != nil {
+			return err
+		}
+		_, err := transaction.Tunnels().Revoke(context.Background(), repositoryTestTunnelID, 1, 2)
+		return err
+	}); err != nil {
+		t.Fatalf("revoke Tunnel error = %v", err)
+	}
+
+	err = store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		_, err := transaction.Tunnels().AdvanceDesiredRevision(
+			context.Background(), repositoryTestTunnelID, 2, 0, 3,
+		)
+		return err
+	})
+	if !errors.Is(err, repository.ErrVersionConflict) {
+		t.Fatalf("AdvanceDesiredRevision(revoked) error = %v, want ErrVersionConflict", err)
+	}
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		tunnel, err := view.Tunnels().Get(context.Background(), repositoryTestTunnelID)
+		if err != nil {
+			return err
+		}
+		if tunnel.Version != 2 || tunnel.DesiredRevision != 0 || tunnel.RevokedAt == nil || *tunnel.RevokedAt != 2 {
+			return errors.New("rejected desired revision CAS changed the revoked Tunnel")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdvanceDesiredRevisionConcurrentCASCommitsOnce(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		return transaction.Tunnels().Create(context.Background(), testTunnel())
+	}); err != nil {
+		t.Fatalf("seed Tunnel error = %v", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+				_, err := transaction.Tunnels().AdvanceDesiredRevision(
+					context.Background(), repositoryTestTunnelID, 1, 0, 2,
+				)
+				return err
+			})
+		}()
+	}
+	close(start)
+
+	var succeeded, conflicted int
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, repository.ErrVersionConflict):
+			conflicted++
+		default:
+			t.Fatalf("concurrent AdvanceDesiredRevision() error = %v", err)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("concurrent CAS results = succeeded:%d conflicted:%d, want 1/1", succeeded, conflicted)
+	}
+
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		tunnel, err := view.Tunnels().Get(context.Background(), repositoryTestTunnelID)
+		if err != nil {
+			return err
+		}
+		if tunnel.Version != 1 || tunnel.DesiredRevision != 1 {
+			return errors.New("concurrent desired revision CAS committed more than once")
 		}
 		return nil
 	}); err != nil {
@@ -354,7 +625,7 @@ func TestTunnelDomainMigrationUpgradesAndRollsBackFailedNextVersion(t *testing.T
 	}
 
 	available := append([]migration{}, productionMigrations...)
-	available = append(available, migration{version: 5, statements: []string{
+	available = append(available, migration{version: 6, statements: []string{
 		"CREATE TABLE interrupted_tunnel_migration (id INTEGER PRIMARY KEY)",
 		"THIS IS NOT VALID SQL",
 	}})
@@ -368,7 +639,7 @@ func TestTunnelDomainMigrationUpgradesAndRollsBackFailedNextVersion(t *testing.T
 	if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
 		t.Fatalf("count migration versions error = %v", err)
 	}
-	if interruptedCount != 0 || versionCount != 4 {
+	if interruptedCount != 0 || versionCount != 5 {
 		t.Fatalf("failed migration rollback = table:%d versions:%d", interruptedCount, versionCount)
 	}
 }

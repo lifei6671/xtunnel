@@ -39,7 +39,7 @@ func TestNewOutboxRejectsInvalidOptions(t *testing.T) {
 	}
 }
 
-func TestOutboxHighPriorityFIFOHeartbeatCoalescingAndCapacity(t *testing.T) {
+func TestOutboxHighPriorityOrderingHeartbeatCoalescingAndCapacity(t *testing.T) {
 	outbox := mustOutbox(t, 2, 2)
 	heartbeat := heartbeatEnvelope(1)
 	if err := outbox.Enqueue(heartbeat); err != nil {
@@ -59,12 +59,12 @@ func TestOutboxHighPriorityFIFOHeartbeatCoalescingAndCapacity(t *testing.T) {
 	}
 
 	first := mustDequeue(t, outbox)
-	if timestamp := first.GetHeartbeat().GetTimestampMs(); timestamp != 2 {
-		t.Fatalf("first heartbeat timestamp = %d, want latest 2", timestamp)
+	if first.GetError().GetErrorCode() != protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR {
+		t.Fatalf("first payload = %#v, want queued Error", first.GetPayload())
 	}
 	second := mustDequeue(t, outbox)
-	if second.GetError().GetErrorCode() != protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR {
-		t.Fatalf("second payload = %#v, want queued Error", second.GetPayload())
+	if timestamp := second.GetHeartbeat().GetTimestampMs(); timestamp != 2 {
+		t.Fatalf("second heartbeat timestamp = %d, want latest 2", timestamp)
 	}
 	assertEmpty(t, outbox)
 }
@@ -86,7 +86,8 @@ func TestOutboxHighPriorityTypesAndPriorityOverNormal(t *testing.T) {
 			t.Fatalf("Enqueue(%T) error = %v", envelope.GetPayload(), err)
 		}
 	}
-	for index, expected := range high {
+	want := []*protocolv1.ControlEnvelope{high[3], high[0], high[1], high[2], high[4]}
+	for index, expected := range want {
 		actual := mustDequeue(t, outbox)
 		if reflect.TypeOf(actual.GetPayload()) != reflect.TypeOf(expected.GetPayload()) {
 			t.Fatalf("high dequeue %d payload = %T, want %T", index, actual.GetPayload(), expected.GetPayload())
@@ -94,6 +95,29 @@ func TestOutboxHighPriorityTypesAndPriorityOverNormal(t *testing.T) {
 	}
 	if snapshot := mustDequeue(t, outbox).GetConfigSnapshot(); snapshot.GetTunnelId() != testTunnelID {
 		t.Fatalf("normal payload after high = %#v, want snapshot", snapshot)
+	}
+}
+
+func TestOutboxOutstandingSnapshotBlocksHeartbeatAndNormalUntilConfigAck(t *testing.T) {
+	outbox := mustOutbox(t, 4, 1)
+	for _, envelope := range []*protocolv1.ControlEnvelope{
+		heartbeatEnvelope(8), snapshotEnvelope(testTunnelID, 2), configAckEnvelope(2),
+	} {
+		if err := outbox.Enqueue(envelope); err != nil {
+			t.Fatalf("Enqueue(%T) error = %v", envelope.GetPayload(), err)
+		}
+	}
+	if ack, ok := outbox.dequeueBeforeConfigAck(); !ok || ack.GetConfigAck().GetObservedRevision() != 2 {
+		t.Fatalf("dequeueBeforeConfigAck() = (%#v, %v), want ConfigAck revision 2", ack, ok)
+	}
+	if envelope, ok := outbox.dequeueBeforeConfigAck(); ok {
+		t.Fatalf("dequeueBeforeConfigAck() = %#v, want blocked heartbeat and normal Snapshot", envelope)
+	}
+	if heartbeat := mustDequeue(t, outbox).GetHeartbeat(); heartbeat.GetTimestampMs() != 8 {
+		t.Fatalf("heartbeat after Ack = %#v, want timestamp 8", heartbeat)
+	}
+	if snapshot := mustDequeue(t, outbox).GetConfigSnapshot(); snapshot.GetRevision() != 2 {
+		t.Fatalf("snapshot after Ack = %#v, want revision 2", snapshot)
 	}
 }
 
@@ -381,7 +405,11 @@ func drainAckEnvelope(id string) *protocolv1.ControlEnvelope {
 func configAckEnvelope(revision uint64) *protocolv1.ControlEnvelope {
 	return &protocolv1.ControlEnvelope{
 		ProtocolVersion: testProtocolVersion,
-		Payload:         &protocolv1.ControlEnvelope_ConfigAck{ConfigAck: &protocolv1.ConfigAck{ObservedRevision: revision}},
+		Payload: &protocolv1.ControlEnvelope_ConfigAck{ConfigAck: &protocolv1.ConfigAck{
+			ObservedRevision: revision,
+			ApplyStatus:      protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED,
+			ErrorCode:        protocolv1.ErrorCode_ERROR_CODE_OK,
+		}},
 	}
 }
 

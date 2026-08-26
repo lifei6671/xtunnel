@@ -20,6 +20,7 @@ import (
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
+	"github.com/lifei6671/xtunnel/internal/safego"
 	servergateway "github.com/lifei6671/xtunnel/internal/server/gateway"
 )
 
@@ -337,7 +338,11 @@ func (pool *Pool) Start(parent context.Context) error {
 	pool.started = true
 	pool.mu.Unlock()
 
-	go pool.observeLifetime(parent)
+	safego.Go(func(err error) {
+		pool.shutdown(fmt.Errorf("observe Agent WorkPool lifetime: %w", err))
+	}, nil, func() {
+		pool.observeLifetime(parent)
+	})
 	return nil
 }
 
@@ -547,6 +552,8 @@ func (pool *Pool) Wait() error {
 		return ErrPoolNotRunning
 	}
 	<-pool.waitDone
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
 	return pool.result
 }
 
@@ -578,6 +585,9 @@ func (pool *Pool) observeLifetime(parent context.Context) {
 func (pool *Pool) shutdown(cause error) {
 	pool.mu.Lock()
 	if pool.closed {
+		if cause != nil {
+			pool.result = errors.Join(pool.result, cause)
+		}
 		if cause == nil || len(pool.detachedActive) == 0 {
 			pool.mu.Unlock()
 			return
@@ -634,10 +644,13 @@ func (pool *Pool) shutdown(cause error) {
 		<-entry.done
 	}
 	pool.finishWait(nil, shutdownErr)
-	go func() {
-		pool.workers.Wait()
+	safego.Go(func(err error) {
+		pool.recordResultError(fmt.Errorf("wait for all Agent WorkPool workers: %w", err))
+	}, func() {
 		pool.doneOnce.Do(func() { close(pool.done) })
-	}()
+	}, func() {
+		pool.workers.Wait()
+	})
 }
 
 func (pool *Pool) finishShutdown(cause, shutdownErr error) {
@@ -655,10 +668,23 @@ func (pool *Pool) finishWait(cause, shutdownErr error) {
 	})
 }
 
+func (pool *Pool) recordResultError(err error) {
+	if err == nil {
+		return
+	}
+	pool.mu.Lock()
+	pool.result = errors.Join(pool.result, err)
+	pool.mu.Unlock()
+}
+
 func (pool *Pool) launch(jobs []workJob) {
 	for index := range jobs {
 		job := jobs[index]
-		go pool.connect(job)
+		safego.Go(func(err error) {
+			pool.shutdown(fmt.Errorf("run Agent WorkConn worker: %w", err))
+		}, nil, func() {
+			pool.connect(job)
+		})
 	}
 }
 
