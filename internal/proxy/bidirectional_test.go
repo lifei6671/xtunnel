@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -219,6 +221,40 @@ func TestProxyOneWayAttemptsCloseWriteWhenCloseReadFails(t *testing.T) {
 	}
 	if destination.calls != 1 {
 		t.Fatalf("destination CloseWrite calls = %d, want 1", destination.calls)
+	}
+}
+
+func TestProxyOneWayIgnoresDisconnectedCloseRead(t *testing.T) {
+	readSide, readPeer := net.Pipe()
+	writeSide, writePeer := net.Pipe()
+	defer readSide.Close()
+	defer writeSide.Close()
+	defer writePeer.Close()
+	if err := readPeer.Close(); err != nil {
+		t.Fatalf("close read peer: %v", err)
+	}
+
+	// 使用与 net.TCPConn.CloseRead 在 Linux 上一致的错误包装链，确保判断依赖
+	// errors.Is 的系统错误语义，而不是脆弱的错误字符串。
+	disconnectedErr := &net.OpError{
+		Op:  "close",
+		Net: "tcp",
+		Err: os.NewSyscallError("shutdown", syscall.ENOTCONN),
+	}
+	source := &failingCloseReader{Conn: readSide, err: disconnectedErr}
+	destination := &trackingCloseWriter{Conn: writeSide}
+	result := make(chan copyResult, 1)
+	proxyOneWay("test", destination, source, result)
+
+	got := <-result
+	if got.err != nil {
+		t.Fatalf("proxyOneWay() fatal error = %v，want nil", got.err)
+	}
+	if got.cleanupErr != nil {
+		t.Fatalf("proxyOneWay() cleanup error = %v，want nil", got.cleanupErr)
+	}
+	if destination.calls != 1 {
+		t.Fatalf("destination CloseWrite calls = %d，want 1", destination.calls)
 	}
 }
 

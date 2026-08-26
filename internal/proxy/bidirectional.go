@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -114,7 +115,7 @@ func proxyOneWay(direction string, destination, source net.Conn, results chan<- 
 		// io.Copy 返回 nil 代表源端正常 EOF。先关闭可选的读半边，再关闭目标写半边，
 		// 让对端看到 EOF，但继续保留目标到源端的反向响应路径。
 		if reader, ok := source.(closeReader); ok {
-			if closeErr := reader.CloseRead(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			if closeErr := reader.CloseRead(); !isCompletedCloseRead(closeErr) {
 				cleanupErr = fmt.Errorf("close source read half: %w", closeErr)
 			}
 		}
@@ -123,6 +124,14 @@ func proxyOneWay(direction string, destination, source net.Conn, results chan<- 
 		}
 	}
 	results <- copyResult{direction: direction, err: err, cleanupErr: cleanupErr}
+}
+
+func isCompletedCloseRead(err error) bool {
+	// io.Copy 返回 nil 已经证明源端读到了正常 EOF。Linux 在 TCP 对端完成
+	// Half-Close 后再次 shutdown(SHUT_RD) 可能返回 ENOTCONN；这表示读半边
+	// 已经没有可关闭的连接，是 CloseRead 的幂等终态，不应把成功的数据转发
+	// 重新判为失败。其他错误仍需延迟到反向复制结束后报告，避免掩盖真实清理故障。
+	return err == nil || errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ENOTCONN)
 }
 
 func wrapNetworkError(operation string, err error) error {

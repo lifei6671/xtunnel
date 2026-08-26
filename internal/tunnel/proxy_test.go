@@ -398,8 +398,23 @@ func TestProxyPendingGroupReselectsWhenSelectedSessionDrains(t *testing.T) {
 		proxyResult <- tunnelProxy.Serve(context.Background(), testTunnelID, testServiceID,
 			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
 	}()
-	waitForSnapshot(t, limits, func(snapshot serverlimits.Snapshot) bool { return snapshot.PendingOpens == 1 })
-	first := pendingGroupSession(t, tunnelProxy)
+	var first serverruntime.Session
+	waitFor(t, func() bool {
+		tunnelProxy.pendingMu.Lock()
+		defer tunnelProxy.pendingMu.Unlock()
+		group := tunnelProxy.pendingGroups[testTunnelID]
+		if group == nil || group.waiters != 1 {
+			return false
+		}
+		// PendingOpen 配额早于 Pending Group 创建，不能把配额快照当作 Group
+		// 已就绪的同步信号。Session 必须和就绪判断在同一锁区间内取得，避免
+		// Race 调度在两次读之间删除或替换 Group。
+		first = group.session
+		return true
+	})
+	if snapshot := limits.Snapshot(); snapshot.PendingOpens != 1 {
+		t.Fatalf("Pending opens = %d，want 1", snapshot.PendingOpens)
+	}
 	firstPool, exists := sessions.Pool(first)
 	if !exists {
 		t.Fatal("selected Pending group Pool disappeared")
@@ -407,13 +422,17 @@ func TestProxyPendingGroupReselectsWhenSelectedSessionDrains(t *testing.T) {
 	if err := firstPool.BeginDrain(); err != nil {
 		t.Fatalf("BeginDrain() error = %v", err)
 	}
+	var second serverruntime.Session
 	waitFor(t, func() bool {
 		tunnelProxy.pendingMu.Lock()
 		defer tunnelProxy.pendingMu.Unlock()
 		group := tunnelProxy.pendingGroups[testTunnelID]
-		return group != nil && group.session != first && group.waiters == 1
+		if group == nil || group.session == first || group.waiters != 1 {
+			return false
+		}
+		second = group.session
+		return true
 	})
-	second := pendingGroupSession(t, tunnelProxy)
 	if second != sessionByConnector[testConnectorTwo] && second != sessionByConnector[testConnectorID] {
 		t.Fatalf("reselected Session = %#v, want the other current Connector", second)
 	}
@@ -748,17 +767,6 @@ func waitForSnapshot(
 		}
 		time.Sleep(time.Millisecond)
 	}
-}
-
-func pendingGroupSession(t *testing.T, tunnelProxy *Proxy) serverruntime.Session {
-	t.Helper()
-	tunnelProxy.pendingMu.Lock()
-	defer tunnelProxy.pendingMu.Unlock()
-	group := tunnelProxy.pendingGroups[testTunnelID]
-	if group == nil {
-		t.Fatal("Pending group is missing")
-	}
-	return group.session
 }
 
 func waitFor(t *testing.T, condition func() bool) {
