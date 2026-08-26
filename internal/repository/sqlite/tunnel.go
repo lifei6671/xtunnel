@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"gorm.io/gorm"
@@ -135,6 +136,7 @@ func (store *Store) withTx(ctx context.Context, durable bool, fn func(repository
 	}
 
 	return store.database.WithContext(ctx).Connection(func(connection *gorm.DB) (resultErr error) {
+		committed := false
 		if durable {
 			if err := connection.Exec("PRAGMA synchronous = FULL").Error; err != nil {
 				return fmt.Errorf("enable durable SQLite transaction: %w", err)
@@ -143,7 +145,11 @@ func (store *Store) withTx(ctx context.Context, durable bool, fn func(repository
 				restoreContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
 				defer cancel()
 				if err := connection.WithContext(restoreContext).Exec("PRAGMA synchronous = NORMAL").Error; err != nil {
-					resultErr = errors.Join(resultErr, fmt.Errorf("restore normal SQLite synchronous mode: %w", err))
+					restoreErr := fmt.Errorf("restore normal SQLite synchronous mode: %w", err)
+					if committed {
+						restoreErr = fmt.Errorf("%w: %w", repository.ErrPostCommitCleanup, restoreErr)
+					}
+					resultErr = errors.Join(resultErr, restoreErr)
 				}
 			}()
 		}
@@ -151,7 +157,6 @@ func (store *Store) withTx(ctx context.Context, durable bool, fn func(repository
 			return fmt.Errorf("begin immediate repository transaction: %w", err)
 		}
 
-		committed := false
 		defer func() {
 			if committed {
 				return
@@ -212,6 +217,51 @@ func (store tunnelRepository) Get(ctx context.Context, id string) (repository.Tu
 		return repository.Tunnel{}, fmt.Errorf("get tunnel: %w", err)
 	}
 	return record.toDomain(), nil
+}
+
+// AdvanceVersion 以 Tunnel aggregate version 为唯一 CAS 条件推进一次管理面变更。
+func (store tunnelRepository) AdvanceVersion(ctx context.Context, id string, expectedVersion, updatedAt int64) (repository.Tunnel, error) {
+	if !validate.ValidID(id, "tun_") || expectedVersion < 1 || expectedVersion == math.MaxInt64 || updatedAt <= 0 {
+		return repository.Tunnel{}, repository.ErrInvalidTunnel
+	}
+	result := store.database.WithContext(ctx).Model(&tunnelRecord{}).
+		Where(TunnelColumns.ID+" = ?", id).
+		Where(TunnelColumns.Version+" = ?", expectedVersion).
+		Updates(map[string]any{TunnelColumns.Version: expectedVersion + 1, TunnelColumns.UpdatedAt: updatedAt})
+	if result.Error != nil {
+		return repository.Tunnel{}, fmt.Errorf("advance tunnel version: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		if _, err := store.Get(ctx, id); err != nil {
+			return repository.Tunnel{}, err
+		}
+		return repository.Tunnel{}, repository.ErrVersionConflict
+	}
+	return store.Get(ctx, id)
+}
+
+// Revoke 原子设置 Tunnel revoke tombstone 并推进 aggregate version。
+func (store tunnelRepository) Revoke(ctx context.Context, id string, expectedVersion, revokedAt int64) (repository.Tunnel, error) {
+	if !validate.ValidID(id, "tun_") || expectedVersion < 1 || expectedVersion == math.MaxInt64 || revokedAt <= 0 {
+		return repository.Tunnel{}, repository.ErrInvalidTunnel
+	}
+	result := store.database.WithContext(ctx).Model(&tunnelRecord{}).
+		Where(TunnelColumns.ID+" = ?", id).
+		Where(TunnelColumns.Version+" = ?", expectedVersion).
+		Where(TunnelColumns.RevokedAt + " IS NULL").
+		Updates(map[string]any{
+			TunnelColumns.Version: expectedVersion + 1, TunnelColumns.RevokedAt: revokedAt, TunnelColumns.UpdatedAt: revokedAt,
+		})
+	if result.Error != nil {
+		return repository.Tunnel{}, fmt.Errorf("revoke tunnel: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		if _, err := store.Get(ctx, id); err != nil {
+			return repository.Tunnel{}, err
+		}
+		return repository.Tunnel{}, repository.ErrVersionConflict
+	}
+	return store.Get(ctx, id)
 }
 
 type tunnelTokenRepository struct{ database *gorm.DB }
@@ -277,6 +327,62 @@ func (store tunnelTokenRepository) GetByTunnelVersion(ctx context.Context, tunne
 		return repository.TunnelToken{}, fmt.Errorf("get tunnel token by version: %w", err)
 	}
 	return record.toDomain(), nil
+}
+
+// TransitionStatus 只允许生命周期服务按精确 Token identity 和旧状态推进一次状态机。
+func (store tunnelTokenRepository) TransitionStatus(
+	ctx context.Context,
+	tunnelID, tokenID string,
+	version int64,
+	from, to repository.TunnelTokenStatus,
+	revokedAt int64,
+) error {
+	if !validate.ValidID(tunnelID, "tun_") || !validate.ValidID(tokenID, "tok_") || version < 1 || revokedAt <= 0 ||
+		from != repository.TunnelTokenStatusActive ||
+		(to != repository.TunnelTokenStatusRevokedForNewSession && to != repository.TunnelTokenStatusRevoked) {
+		return repository.ErrInvalidTunnelToken
+	}
+	result := store.database.WithContext(ctx).Model(&tunnelTokenRecord{}).
+		Where(TunnelTokenColumns.TunnelID+" = ?", tunnelID).
+		Where(TunnelTokenColumns.ID+" = ?", tokenID).
+		Where(TunnelTokenColumns.Version+" = ?", version).
+		Where(TunnelTokenColumns.Status+" = ?", from).
+		Updates(map[string]any{TunnelTokenColumns.Status: string(to), TunnelTokenColumns.RevokedAt: revokedAt})
+	if result.Error != nil {
+		return fmt.Errorf("transition tunnel token status: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		if _, err := store.GetByIdentity(ctx, tunnelID, tokenID, version); err != nil {
+			return err
+		}
+		return repository.ErrTunnelTokenStateConflict
+	}
+	return nil
+}
+
+// RevokeAll 使 Tunnel 的全部历史 Credential 永久拒绝新认证。
+func (store tunnelTokenRepository) RevokeAll(ctx context.Context, tunnelID string, revokedAt int64) error {
+	if !validate.ValidID(tunnelID, "tun_") || revokedAt <= 0 {
+		return repository.ErrInvalidTunnelToken
+	}
+	activeResult := store.database.WithContext(ctx).Model(&tunnelTokenRecord{}).
+		Where(TunnelTokenColumns.TunnelID+" = ?", tunnelID).
+		Where(TunnelTokenColumns.Status+" = ?", repository.TunnelTokenStatusActive).
+		Updates(map[string]any{
+			TunnelTokenColumns.Status: string(repository.TunnelTokenStatusRevoked), TunnelTokenColumns.RevokedAt: revokedAt,
+		})
+	if activeResult.Error != nil {
+		return fmt.Errorf("revoke active tunnel tokens: %w", activeResult.Error)
+	}
+	// 已因 Rotate 禁止新认证的历史 Token 保留首次 revoked_at，只推进最终状态。
+	rotatedResult := store.database.WithContext(ctx).Model(&tunnelTokenRecord{}).
+		Where(TunnelTokenColumns.TunnelID+" = ?", tunnelID).
+		Where(TunnelTokenColumns.Status+" = ?", repository.TunnelTokenStatusRevokedForNewSession).
+		Update(TunnelTokenColumns.Status, string(repository.TunnelTokenStatusRevoked))
+	if rotatedResult.Error != nil {
+		return fmt.Errorf("revoke rotated tunnel tokens: %w", rotatedResult.Error)
+	}
+	return nil
 }
 
 func tunnelRecordFromDomain(tunnel repository.Tunnel) tunnelRecord {

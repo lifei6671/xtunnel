@@ -44,8 +44,11 @@ type Options struct {
 type Proxy struct {
 	options Options
 
-	pendingMu     sync.Mutex
-	pendingGroups map[string]*pendingGroup
+	pendingMu       sync.Mutex
+	pendingGroups   map[string]*pendingGroup
+	newConnectionID func() (string, error)
+	// afterAlternateAcquire 仅为同 package 的确定性竞态测试提供提交前同步点。
+	afterAlternateAcquire func(serverruntime.Session)
 }
 
 type pendingGroup struct {
@@ -67,7 +70,10 @@ func NewProxy(options Options) (*Proxy, error) {
 	if options.Registry == nil || options.Sessions == nil || options.OpenHandler == nil || options.AcquireTimeout <= 0 {
 		return nil, ErrInvalidOptions
 	}
-	return &Proxy{options: options, pendingGroups: make(map[string]*pendingGroup)}, nil
+	return &Proxy{
+		options: options, pendingGroups: make(map[string]*pendingGroup),
+		newConnectionID: identity.NewConnectionID,
+	}, nil
 }
 
 // Serve 处理一条业务连接。Service 直接属于 Tunnel；线协议只发送 service_id，Agent
@@ -106,6 +112,13 @@ func (tunnelProxy *Proxy) Serve(
 		defer openLease.Release()
 	}
 
+	// connection_id 在任何 Connector/Work 所有权取得前生成。若系统随机源
+	// 失败，直接返回，不会把 IDLE Work 留在 OPENING。
+	connectionID, err := tunnelProxy.newConnectionID()
+	if err != nil {
+		return err
+	}
+
 	connectorLease, session, pool, selectedWork, err := tunnelProxy.acquireWork(ctx, tunnelID)
 	if err != nil {
 		return err
@@ -120,42 +133,96 @@ func (tunnelProxy *Proxy) Serve(
 	if err != nil {
 		return err
 	}
-	connectionID, err := identity.NewConnectionID()
-	if err != nil {
-		return err
-	}
-
-	var active *serveropen.Active
-	for attempt := 0; attempt < 2; attempt++ {
-		if attempt > 0 {
-			selectedWork, err = pool.Acquire(ctx, tunnelProxy.options.AcquireTimeout)
-			if err != nil {
-				return err
-			}
-		}
-		protocolState := selectedWork.ProtocolState()
+	openSelectedWork := func(selectedSession serverruntime.Session, work *serverworkpool.Work) (*serveropen.Active, error) {
+		protocolState := work.ProtocolState()
 		idle := serverworkauth.Idle{
-			TunnelID: session.TunnelID, ConnectorID: session.ConnectorID,
-			SessionID: session.SessionID, WorkID: selectedWork.ID(), State: protocolState,
+			TunnelID: selectedSession.TunnelID, ConnectorID: selectedSession.ConnectorID,
+			SessionID: selectedSession.SessionID, WorkID: work.ID(), State: protocolState,
 		}
 		request := &protocolv1.OpenRequest{
 			ProtocolVersion: 1, ConnectionId: connectionID, ServiceId: serviceID,
 			ClientAddr: peer.RemoteAddr().String(), TimestampMs: uint64(time.Now().UnixMilli()),
 			IngressType: ingress,
 		}
-		active, err = tunnelProxy.options.OpenHandler.Handle(ctx, selectedWork.Conn(), idle, request)
-		if err == nil {
-			if err := selectedWork.MarkActive(); err != nil {
-				_ = selectedWork.Close()
-				return err
+		active, openErr := tunnelProxy.options.OpenHandler.Handle(ctx, work.Conn(), idle, request)
+		if openErr != nil {
+			return nil, openErr
+		}
+		if err := work.MarkActive(); err != nil {
+			return nil, err
+		}
+		return active, nil
+	}
+
+	var (
+		active         *serveropen.Active
+		openErr        error
+		crossConnector bool
+	)
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return errors.Join(openErr, contextErr)
 			}
+			var acquired bool
+			selectedWork, acquired, err = pool.TryAcquire()
+			if err != nil || !acquired {
+				if contextErr := ctx.Err(); contextErr != nil {
+					return errors.Join(openErr, err, contextErr)
+				}
+				if err != nil && !errors.Is(err, serverworkpool.ErrPoolClosed) &&
+					!errors.Is(err, serverworkpool.ErrPoolDraining) {
+					return errors.Join(openErr, err)
+				}
+				openErr = errors.Join(openErr, err)
+				crossConnector = true
+				break
+			}
+		}
+		active, openErr = openSelectedWork(session, selectedWork)
+		if openErr == nil {
 			break
 		}
 		_ = selectedWork.Close()
 		selectedWork = nil
-		// 明确 OPEN_ERROR 代表 Origin/Service 结果，协议错误也不可安全重放；只有
-		// RAW 前传输失败允许在同一 Connector 的另一个 WorkConn 上重试一次。
-		if attempt != 0 || errors.Is(err, serveropen.ErrRejected) || errors.Is(err, serveropen.ErrProtocol) || ctx.Err() != nil {
+		if isOpenDraining(openErr) {
+			crossConnector = true
+			break
+		}
+		// 只有 RAW 前 Transport 失败可在首 Connector 的同一 Pool 内重试一次。
+		// Protocol、普通 OPEN_ERROR、Context Cancel、RawCommitted 和本地提交失败均直接结束。
+		if contextErr := ctx.Err(); contextErr != nil {
+			return errors.Join(openErr, contextErr)
+		}
+		if !errors.Is(openErr, serveropen.ErrPreRAWTransport) {
+			return openErr
+		}
+		if attempt == 1 {
+			crossConnector = true
+		}
+	}
+	if crossConnector {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return errors.Join(openErr, contextErr)
+		}
+		failedConnectorID := session.ConnectorID
+		if !connectorLease.Release() {
+			return errors.Join(openErr, errors.New("release failed Connector lease before cross-Connector reselect"))
+		}
+		connectorLease = nil
+		connectorLease, session, pool, selectedWork, err = tunnelProxy.tryAcquireAlternateWork(ctx, tunnelID, failedConnectorID)
+		if err != nil {
+			return errors.Join(openErr, err)
+		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			_ = selectedWork.Close()
+			selectedWork = nil
+			return errors.Join(openErr, contextErr)
+		}
+		active, err = openSelectedWork(session, selectedWork)
+		if err != nil {
+			_ = selectedWork.Close()
+			selectedWork = nil
 			return err
 		}
 	}
@@ -186,6 +253,73 @@ func (tunnelProxy *Proxy) Serve(
 	finishErr := activeWork.Finish()
 	workCloseErr := selectedWork.Close()
 	return errors.Join(proxyErr, finishErr, workCloseErr)
+}
+
+func (tunnelProxy *Proxy) tryAcquireAlternateWork(
+	ctx context.Context,
+	tunnelID, excludedConnectorID string,
+) (*serverruntime.ConnectorLease, serverruntime.Session, *serverworkpool.Pool, *serverworkpool.Work, error) {
+	attempted := map[string]struct{}{excludedConnectorID: {}}
+	var attemptErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, serverruntime.Session{}, nil, nil, errors.Join(attemptErr, err)
+		}
+		connectorLease, err := tunnelProxy.options.Registry.AcquireConnectorWhere(tunnelID, func(session serverruntime.Session) bool {
+			if _, exists := attempted[session.ConnectorID]; exists {
+				return false
+			}
+			pool, exists := tunnelProxy.options.Sessions.Pool(session)
+			if !exists {
+				return false
+			}
+			counts := pool.Snapshot()
+			return !counts.Closed && !counts.Draining && counts.Idle > 0
+		})
+		if err != nil {
+			return nil, serverruntime.Session{}, nil, nil, errors.Join(attemptErr, err)
+		}
+		session := connectorLease.Session()
+		attempted[session.ConnectorID] = struct{}{}
+		if tunnelProxy.afterAlternateAcquire != nil {
+			tunnelProxy.afterAlternateAcquire(session)
+		}
+		if err := ctx.Err(); err != nil {
+			connectorLease.Release()
+			return nil, serverruntime.Session{}, nil, nil, errors.Join(attemptErr, err)
+		}
+		pool, exists := tunnelProxy.options.Sessions.Pool(session)
+		if !exists {
+			connectorLease.Release()
+			attemptErr = errors.Join(attemptErr, ErrSessionPoolUnavailable)
+			continue
+		}
+		work, acquired, err := pool.TryAcquire()
+		if err != nil {
+			connectorLease.Release()
+			if errors.Is(err, serverworkpool.ErrPoolClosed) || errors.Is(err, serverworkpool.ErrPoolDraining) {
+				attemptErr = errors.Join(attemptErr, err, ErrSessionPoolUnavailable)
+				continue
+			}
+			return nil, serverruntime.Session{}, nil, nil, errors.Join(attemptErr, err)
+		}
+		if !acquired {
+			connectorLease.Release()
+			attemptErr = errors.Join(attemptErr, ErrSessionPoolUnavailable)
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			_ = work.Close()
+			connectorLease.Release()
+			return nil, serverruntime.Session{}, nil, nil, errors.Join(attemptErr, err)
+		}
+		return connectorLease, session, pool, work, nil
+	}
+}
+
+func isOpenDraining(err error) bool {
+	var rejected *serveropen.Rejected
+	return errors.As(err, &rejected) && rejected.Code == protocolv1.ErrorCode_ERROR_CODE_OPEN_DRAINING
 }
 
 func (tunnelProxy *Proxy) acquireWork(

@@ -56,6 +56,39 @@ func TestSecurityAuditEventValidate(t *testing.T) {
 	}
 }
 
+func TestSecurityAuditEventValidateManagementSubjects(t *testing.T) {
+	const adminID = "adm_01J00000000000000000000000"
+	tests := []struct {
+		action       string
+		resourceType string
+	}{
+		{SecurityAuditActionTokenReveal, SecurityAuditResourceTunnelToken},
+		{SecurityAuditActionTokenRotate, SecurityAuditResourceTunnelToken},
+		{SecurityAuditActionTokenRevoke, SecurityAuditResourceTunnelToken},
+		{SecurityAuditActionTunnelRevoke, SecurityAuditResourceTunnel},
+	}
+	for index, test := range tests {
+		event := testSecurityAuditEvent()
+		event.EventID = "evt_01J0000000000000000000000" + string(rune('1'+index))
+		event.OperationID = "op_01J0000000000000000000000" + string(rune('1'+index))
+		event.Action = test.action
+		event.ActorType = SecurityAuditActorAdmin
+		event.ActorID = adminID
+		event.SourceIP = "2001:db8::1"
+		event.ResourceType = test.resourceType
+		event.ResourceID = "tun_01J00000000000000000000000"
+		if err := event.Validate(); err != nil {
+			t.Fatalf("management event %s Validate() error = %v", test.action, err)
+		}
+
+		invalid := event
+		invalid.ActorID = "adm_invalid"
+		if err := invalid.Validate(); !errors.Is(err, ErrInvalidSecurityAuditEvent) {
+			t.Fatalf("management event %s invalid actor error = %v", test.action, err)
+		}
+	}
+}
+
 func testSecurityAuditEvent() SecurityAuditEvent {
 	return SecurityAuditEvent{
 		EventID:           testAuditEventID,

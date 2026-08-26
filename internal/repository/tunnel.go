@@ -21,6 +21,13 @@ var (
 	ErrInvalidTunnelToken = errors.New("tunnel token is invalid")
 	// ErrNotFound 表示 Repository 未找到指定的持久化对象。
 	ErrNotFound = errors.New("repository record not found")
+	// ErrVersionConflict 表示聚合版本已变化，调用方必须拒绝覆盖并重新读取。
+	ErrVersionConflict = errors.New("repository aggregate version conflicts")
+	// ErrTunnelTokenStateConflict 表示 Token 已不处于调用方声明的旧状态。
+	ErrTunnelTokenStateConflict = errors.New("tunnel token state conflicts")
+	// ErrPostCommitCleanup 表示权威事务已经 COMMIT，但连接级清理失败。
+	// 调用方不得把它当作回滚；存在提交后副作用时必须继续执行并合并返回该错误。
+	ErrPostCommitCleanup = errors.New("repository transaction committed but cleanup failed")
 )
 
 // Tunnel 是 Management 平面创建的隧道聚合，也是 Connection Token 的所有者。
@@ -113,6 +120,8 @@ func (token TunnelToken) Validate() error {
 type TunnelRepository interface {
 	Create(context.Context, Tunnel) error
 	Get(context.Context, string) (Tunnel, error)
+	AdvanceVersion(context.Context, string, int64, int64) (Tunnel, error)
+	Revoke(context.Context, string, int64, int64) (Tunnel, error)
 }
 
 // TunnelTokenRepository 定义 Tunnel Credential 的敏感持久化边界。
@@ -121,6 +130,8 @@ type TunnelTokenRepository interface {
 	GetByIdentity(context.Context, string, string, int64) (TunnelToken, error)
 	GetActiveByTunnel(context.Context, string) (TunnelToken, error)
 	GetByTunnelVersion(context.Context, string, int64) (TunnelToken, error)
+	TransitionStatus(context.Context, string, string, int64, TunnelTokenStatus, TunnelTokenStatus, int64) error
+	RevokeAll(context.Context, string, int64) error
 }
 
 // RepositoryView 是一次 Repository 访问中共享的只读视图。

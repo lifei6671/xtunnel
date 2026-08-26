@@ -19,3 +19,8 @@ var TunnelDomain string
 //
 //go:embed 000003_security_audit_events.sql
 var SecurityAuditEvents string
+
+// CredentialLifecycleAudit 扩展 M2 管理面 Credential 生命周期审计，同时保留 v3 证据。
+//
+//go:embed 000004_credential_lifecycle_audit.sql
+var CredentialLifecycleAudit string

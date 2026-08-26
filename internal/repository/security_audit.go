@@ -11,8 +11,15 @@ import (
 const (
 	SecurityAuditEventOperationResult    = "SECURITY_OPERATION_RESULT"
 	SecurityAuditActionGatewayKeyRotate  = "GATEWAY_KEY_ROTATE"
+	SecurityAuditActionTokenReveal       = "CONNECTION_TOKEN_REVEAL"
+	SecurityAuditActionTokenRotate       = "CONNECTION_TOKEN_ROTATE"
+	SecurityAuditActionTokenRevoke       = "CONNECTION_TOKEN_REVOKE"
+	SecurityAuditActionTunnelRevoke      = "TUNNEL_REVOKE"
 	SecurityAuditActorLocalOperator      = "LOCAL_OPERATOR"
+	SecurityAuditActorAdmin              = "ADMIN"
 	SecurityAuditResourceGatewayIdentity = "GATEWAY_IDENTITY"
+	SecurityAuditResourceTunnelToken     = "TUNNEL_TOKEN"
+	SecurityAuditResourceTunnel          = "TUNNEL"
 	SecurityAuditResultSucceeded         = "SUCCEEDED"
 	SecurityAuditResultFailed            = "FAILED"
 
@@ -29,7 +36,7 @@ var (
 	ErrSecurityAuditConflict = errors.New("security audit event conflicts with existing evidence")
 )
 
-// SecurityAuditEvent 是 M1 写入的最小持久化安全证据。
+// SecurityAuditEvent 是 M1/M2 写入的最小持久化安全证据。
 // 可选字符串使用空值表示 SQL NULL；Digest 只能为空或精确 32 字节。
 // V0.1 不接受通用 Metadata，新增字段必须先冻结允许列表和边界。
 type SecurityAuditEvent struct {
@@ -55,16 +62,16 @@ type SecurityAuditEvent struct {
 func (event SecurityAuditEvent) Validate() error {
 	if !validate.ValidID(event.EventID, "evt_") || !validate.ValidID(event.OperationID, "op_") ||
 		event.Event != SecurityAuditEventOperationResult ||
-		event.Action != SecurityAuditActionGatewayKeyRotate ||
-		event.ActorType != SecurityAuditActorLocalOperator ||
-		event.ResourceType != SecurityAuditResourceGatewayIdentity ||
 		event.OccurredAt <= 0 ||
-		event.ActorID != "" || event.SourceIP != "" ||
 		!validRequiredAuditText(event.ResourceID, maxAuditResourceIDBytes) ||
+		!validOptionalAuditText(event.SourceIP, maxAuditCorrelationBytes) ||
 		!validOptionalAuditText(event.RequestID, maxAuditCorrelationBytes) ||
 		!validOptionalAuditText(event.TraceID, maxAuditCorrelationBytes) ||
 		!validOptionalAuditDigest(event.BeforeStateDigest) ||
 		!validOptionalAuditDigest(event.AfterStateDigest) {
+		return ErrInvalidSecurityAuditEvent
+	}
+	if !validAuditSubject(event) {
 		return ErrInvalidSecurityAuditEvent
 	}
 	switch event.Result {
@@ -80,6 +87,22 @@ func (event SecurityAuditEvent) Validate() error {
 		return ErrInvalidSecurityAuditEvent
 	}
 	return nil
+}
+
+func validAuditSubject(event SecurityAuditEvent) bool {
+	switch event.Action {
+	case SecurityAuditActionGatewayKeyRotate:
+		return event.ActorType == SecurityAuditActorLocalOperator && event.ActorID == "" && event.SourceIP == "" &&
+			event.ResourceType == SecurityAuditResourceGatewayIdentity
+	case SecurityAuditActionTokenReveal, SecurityAuditActionTokenRotate, SecurityAuditActionTokenRevoke:
+		return event.ActorType == SecurityAuditActorAdmin && validate.ValidID(event.ActorID, "adm_") &&
+			event.ResourceType == SecurityAuditResourceTunnelToken && validate.ValidID(event.ResourceID, "tun_")
+	case SecurityAuditActionTunnelRevoke:
+		return event.ActorType == SecurityAuditActorAdmin && validate.ValidID(event.ActorID, "adm_") &&
+			event.ResourceType == SecurityAuditResourceTunnel && validate.ValidID(event.ResourceID, "tun_")
+	default:
+		return false
+	}
 }
 
 func validOptionalAuditText(value string, maximum int) bool {

@@ -31,7 +31,7 @@ func TestConnectionTokenIssueCurrentAndVerify(t *testing.T) {
 		t.Fatalf("Issue() error = %v", err)
 	}
 	if issued.TunnelID != applicationTestTunnelID || issued.TokenVersion != 1 {
-		t.Fatalf("Issue() identity = %#v", issued)
+		t.Fatalf("Issue() identity = Tunnel %q version=%d", issued.TunnelID, issued.TokenVersion)
 	}
 	parsed, err := token.Parse(issued.Token)
 	if err != nil {

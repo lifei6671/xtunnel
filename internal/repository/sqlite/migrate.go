@@ -33,6 +33,12 @@ var productionMigrations = []migration{
 			migrations.SecurityAuditEvents,
 		},
 	},
+	{
+		version: 4,
+		statements: []string{
+			migrations.CredentialLifecycleAudit,
+		},
+	},
 }
 
 func migrate(ctx context.Context, database *gorm.DB) error {

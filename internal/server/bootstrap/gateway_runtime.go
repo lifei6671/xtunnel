@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -40,7 +41,7 @@ const (
 
 // openGatewayLifecycle 在 Server 已持有 External Lock 且 SQLite 已完成 Migration 后加载身份。
 // 它只装配 Listener，不在这里监听；首个 Admin 成功前不得调用 Start。
-func openGatewayLifecycle(config serverconfig.Config, resources storage) (*gateway.Server, *sessionruntime.Manager, error) {
+func openGatewayLifecycle(config serverconfig.Config, resources storage, logger *slog.Logger) (*gateway.Server, *sessionruntime.Manager, error) {
 	serverResources, ok := resources.(*serverStorage)
 	if !ok {
 		return nil, nil, errors.New("unexpected server storage implementation")
@@ -111,6 +112,7 @@ func openGatewayLifecycle(config serverconfig.Config, resources storage) (*gatew
 		MaxControlFrameBytes: uint64(config.Limits.MaxControlFrameBytes),
 		LimitManager:         limitManager,
 		HeartbeatTimeout:     config.ConnectorRuntime.HeartbeatTimeout.Duration,
+		Logger:               logger,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("construct gateway Session runtime: %w", err)
@@ -260,8 +262,8 @@ func (closer *gatewayBootstrapCloser) RuntimeErrors() <-chan error {
 	return closer.runtimeErrors
 }
 
-func openGatewayAndBootstrap(ctx context.Context, config serverconfig.Config, resources storage) (io.Closer, error) {
-	return openGatewayAndBootstrapWith(ctx, config, resources, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (io.Closer, error) {
+func openGatewayAndBootstrap(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
+	return openGatewayAndBootstrapWith(ctx, config, resources, logger, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (io.Closer, error) {
 		return openAdminBootstrapSocketAfter(ctx, runtimeDir, targetHash, store, afterCreate)
 	})
 }
@@ -272,6 +274,7 @@ func openGatewayAndBootstrapWith(
 	ctx context.Context,
 	config serverconfig.Config,
 	resources storage,
+	logger *slog.Logger,
 	runtimeDir string,
 	openBootstrapSocket func(context.Context, string, string, *sqlite.Store, func() error) (io.Closer, error),
 ) (io.Closer, error) {
@@ -279,7 +282,7 @@ func openGatewayAndBootstrapWith(
 	if !ok {
 		return nil, errors.New("unexpected server storage implementation")
 	}
-	gatewayServer, sessions, err := openGatewayLifecycle(config, resources)
+	gatewayServer, sessions, err := openGatewayLifecycle(config, resources, logger)
 	if err != nil {
 		return nil, err
 	}

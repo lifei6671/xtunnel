@@ -21,7 +21,7 @@ const integrationTunnelID = "tun_01J00000000000000000000000"
 
 // TestConnectorAuthenticationWithPersistentTunnelToken 穿过真实 SQLite Repository、
 // AES-GCM Token 密文、Token Verify、Server AUTH 与 Agent AUTH，证明同一 Tunnel 当前
-// Token 可以被两个独立 Connector 复用，而不会为第二个 Connector 签发新 Credential。
+// Token 可以被三个独立 Connector 复用，而不会为新增 Connector 签发新 Credential。
 func TestConnectorAuthenticationWithPersistentTunnelToken(t *testing.T) {
 	ctx := context.Background()
 	store, err := repositorysqlite.Open(ctx, t.TempDir())
@@ -69,36 +69,45 @@ func TestConnectorAuthenticationWithPersistentTunnelToken(t *testing.T) {
 		t.Fatalf("controlauth.New() error = %v", err)
 	}
 
-	firstConnector, err := identity.NewConnector()
+	const connectorCount = 3
+	connectorIDs := make(map[string]struct{}, connectorCount)
+	sessionIDs := make(map[string]struct{}, connectorCount)
+	for index := range connectorCount {
+		connector, err := identity.NewConnector()
+		if err != nil {
+			t.Fatalf("NewConnector(%d) error = %v", index, err)
+		}
+		serverSession, agentSession := authenticatePair(t, serverHandler, current.Token, connector)
+		if serverSession.Session.TunnelID != integrationTunnelID || serverSession.Session.ConnectorID != connector.ID() {
+			t.Fatalf("authenticated Session(%d) = %#v, want Tunnel %q Connector %q", index, serverSession.Session, integrationTunnelID, connector.ID())
+		}
+		if agentSession.SessionID != serverSession.Session.SessionID ||
+			!bytes.Equal(agentSession.SessionSecret[:], serverSession.SessionSecret[:]) {
+			t.Fatalf("Agent and Server Session(%d) identity or Secret mismatch", index)
+		}
+		if _, exists := connectorIDs[serverSession.Session.ConnectorID]; exists {
+			t.Fatalf("Connector ID %q was reused", serverSession.Session.ConnectorID)
+		}
+		connectorIDs[serverSession.Session.ConnectorID] = struct{}{}
+		if _, exists := sessionIDs[serverSession.Session.SessionID]; exists {
+			t.Fatalf("Session ID %q was reused", serverSession.Session.SessionID)
+		}
+		sessionIDs[serverSession.Session.SessionID] = struct{}{}
+		if currentSession, exists := registry.Current(integrationTunnelID, connector.ID()); !exists || currentSession != serverSession.Session {
+			t.Fatalf("Current(%d) = %#v, %v, want %#v", index, currentSession, exists, serverSession.Session)
+		}
+		clear(agentSession.SessionSecret[:])
+		clear(serverSession.SessionSecret[:])
+	}
+	afterConnectors, err := tokenService.Current(ctx, integrationTunnelID)
 	if err != nil {
-		t.Fatalf("NewConnector(first) error = %v", err)
+		t.Fatalf("Current(after Connectors) error = %v", err)
 	}
-	secondConnector, err := identity.NewConnector()
-	if err != nil {
-		t.Fatalf("NewConnector(second) error = %v", err)
+	if afterConnectors.Token != issued.Token || afterConnectors.TokenID != issued.TokenID ||
+		afterConnectors.TokenVersion != issued.TokenVersion {
+		t.Fatalf("Current(after Connectors) changed Credential identity: got=%s/v%d want=%s/v%d",
+			afterConnectors.TokenID, afterConnectors.TokenVersion, issued.TokenID, issued.TokenVersion)
 	}
-	firstServer, firstAgent := authenticatePair(t, serverHandler, issued.Token, firstConnector)
-	secondServer, secondAgent := authenticatePair(t, serverHandler, current.Token, secondConnector)
-
-	if firstServer.Session.TunnelID != integrationTunnelID || secondServer.Session.TunnelID != integrationTunnelID ||
-		firstServer.Session.ConnectorID == secondServer.Session.ConnectorID {
-		t.Fatalf("authenticated Sessions = %#v, %#v, want same Tunnel and different Connectors", firstServer.Session, secondServer.Session)
-	}
-	if firstAgent.SessionID != firstServer.Session.SessionID || secondAgent.SessionID != secondServer.Session.SessionID ||
-		!bytes.Equal(firstAgent.SessionSecret[:], firstServer.SessionSecret[:]) ||
-		!bytes.Equal(secondAgent.SessionSecret[:], secondServer.SessionSecret[:]) {
-		t.Fatal("Agent and Server did not commit identical Session identities and Secrets")
-	}
-	if _, exists := registry.Current(integrationTunnelID, firstConnector.ID()); !exists {
-		t.Fatal("first Connector is absent from the Tunnel runtime Registry")
-	}
-	if _, exists := registry.Current(integrationTunnelID, secondConnector.ID()); !exists {
-		t.Fatal("second Connector is absent from the Tunnel runtime Registry")
-	}
-	clear(firstAgent.SessionSecret[:])
-	clear(secondAgent.SessionSecret[:])
-	clear(firstServer.SessionSecret[:])
-	clear(secondServer.SessionSecret[:])
 }
 
 func authenticatePair(

@@ -156,6 +156,9 @@ func TestHandleRejectsMismatchedConnectionID(t *testing.T) {
 		if !errors.Is(err, ErrProtocol) {
 			t.Fatalf("Handle() error = %v, want ErrProtocol", err)
 		}
+		if errors.Is(err, ErrPreRAWTransport) || errors.Is(err, ErrRawCommitted) {
+			t.Fatalf("Handle() error = %v, mismatched connection ID must not be retryable", err)
+		}
 	case <-time.After(testTimeout):
 		t.Fatal("Handle() did not reject mismatched connection ID")
 	}

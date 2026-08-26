@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -63,7 +64,7 @@ func TestServerStartupReconcilesGatewayRotationAuditBeforeBootstrap(t *testing.T
 		func(ctx context.Context, dataDir string) (storage, error) {
 			return openServerStorage(ctx, dataDir, runtimeDir)
 		},
-		func(context.Context, serverconfig.Config, storage) (io.Closer, error) {
+		func(context.Context, serverconfig.Config, storage, *slog.Logger) (io.Closer, error) {
 			bootstrapCalled = true
 			if _, exists, err := gateway.PendingRotationAuditEvent(dataDir); err != nil || exists {
 				t.Fatalf("PendingRotationAuditEvent() in bootstrap = exists %t, error %v", exists, err)
@@ -111,6 +112,7 @@ func TestFirstAdminCreationStartsGateway(t *testing.T) {
 		ctx,
 		config,
 		resources,
+		slog.Default(),
 		runtimeDir,
 		func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (io.Closer, error) {
 			return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, func(*net.UnixConn) error { return nil }, afterCreate)
@@ -187,11 +189,12 @@ func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
 			func(ctx context.Context, dataDir string) (storage, error) {
 				return openServerStorage(ctx, dataDir, runtimeDir)
 			},
-			func(ctx context.Context, _ serverconfig.Config, resources storage) (io.Closer, error) {
+			func(ctx context.Context, _ serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
 				return openGatewayAndBootstrapWith(
 					ctx,
 					gatewayConfig,
 					resources,
+					logger,
 					runtimeDir,
 					func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (io.Closer, error) {
 						return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, func(*net.UnixConn) error { return nil }, afterCreate)
@@ -240,6 +243,7 @@ func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
 		restartContext,
 		gatewayLifecycleTestConfig(dataDir, blockedAddress),
 		restartedResources,
+		slog.Default(),
 		runtimeDir,
 		func(context.Context, string, string, *sqlite.Store, func() error) (io.Closer, error) {
 			return nil, errors.New("unexpected Bootstrap Socket after Admin was committed")

@@ -46,6 +46,36 @@ func TestSecurityAuditWriterPersistsBeforeStructuredLog(t *testing.T) {
 	}
 }
 
+func TestSecurityAuditWriterLogsCommittedEventOnPostCommitCleanupFailure(t *testing.T) {
+	store, err := sqlite.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+	cleanupErr := errors.New("injected security audit cleanup failure")
+	recordingStore := &recordingAuditStore{Store: store}
+	faultStore := &postCommitCleanupStore{Store: recordingStore, err: cleanupErr}
+	output, writer := newTestAuditWriter(t, faultStore)
+	event := applicationSecurityAuditEvent()
+
+	err = writer.Append(context.Background(), event)
+	if !errors.Is(err, repository.ErrPostCommitCleanup) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("Append() error = %v, want post-commit cleanup causes", err)
+	}
+	events := recordingStore.snapshot()
+	if len(events) != 1 || events[0].EventID != event.EventID || events[0].OperationID != event.OperationID {
+		t.Fatalf("committed audit events = %#v, want the submitted event", events)
+	}
+	if !strings.Contains(output.String(), `"event":"security_audit_event"`) ||
+		!strings.Contains(output.String(), `"event_id":"`+event.EventID+`"`) {
+		t.Fatalf("committed audit event was not logged: %q", output.String())
+	}
+}
+
 func TestSecurityAuditWriterRejectsInvalidInputWithoutLogging(t *testing.T) {
 	var output bytes.Buffer
 	logger, err := logging.New(&output, logging.Options{Level: "info", Format: "json", Component: "server"})

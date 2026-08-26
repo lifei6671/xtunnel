@@ -6,11 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 )
 
 func TestParseConfigOptions(t *testing.T) {
@@ -132,6 +136,46 @@ agent_gateway:
 	})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("runWithStorage() error = %v, want close error", err)
+	}
+}
+
+func TestRunPassesProductionLoggerToBootstrap(t *testing.T) {
+	configPath := writeConfig(t, `
+management:
+  public_url: https://admin.example.com
+agent_gateway:
+  public_hostname: tunnel.example.com
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resources := &fakeStorage{}
+	bootstrapCloser := &fakeStorage{}
+	var stderr bytes.Buffer
+	err := runWithStorageAndBootstrap(
+		ctx,
+		"xtunnel-server",
+		[]string{"--config", configPath, "--set", "server.data_dir=" + t.TempDir()},
+		nil,
+		&stderr,
+		func(context.Context, string) (storage, error) { return resources, nil },
+		func(_ context.Context, _ serverconfig.Config, _ storage, logger *slog.Logger) (io.Closer, error) {
+			if logger == nil {
+				t.Fatal("bootstrap received a nil production Logger")
+			}
+			logger.Info("connector_connected")
+			cancel()
+			return bootstrapCloser, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("runWithStorageAndBootstrap() error = %v", err)
+	}
+	if !resources.closed || !bootstrapCloser.closed {
+		t.Fatalf("bootstrap close state = resources %t bootstrap %t", resources.closed, bootstrapCloser.closed)
+	}
+	if !strings.Contains(stderr.String(), `"component":"server"`) ||
+		!strings.Contains(stderr.String(), `"event":"connector_connected"`) {
+		t.Fatalf("bootstrap production Logger output = %s", stderr.String())
 	}
 }
 

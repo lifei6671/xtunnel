@@ -524,6 +524,10 @@ Token 返回响应必须 `Cache-Control: no-store`，不得进入日志、URL、
 
 Rotate 才生成新 Token Version：旧 Token 进入 `REVOKED_FOR_NEW_SESSION`，新 Token 进入 `ACTIVE`；既有 Session 继续工作，新认证只接受新 Token。
 
+Reveal、Rotate 与 Token Revoke 只能通过 Credential Lifecycle Application Service 执行。Rotate 和 Revoke 使用 Tunnel aggregate `version` 作为精确 `If-Match`：Token 状态迁移、下一代 Token 写入、Tunnel Version 推进与对应 Security Audit Event 必须处于同一个 `BEGIN IMMEDIATE + synchronous=FULL` 事务。Rotate 复用当前 Token 中冻结的 Endpoint/TLS Trust，不从可能已经变化的外部配置重新编码；Token Revoke 只禁止新认证，不关闭已有 Session/ActiveWork。
+
+如果 COMMIT 已成功、但恢复连接级 `synchronous=NORMAL` 失败，Repository 返回可识别的 `post-commit cleanup` 错误。Application 必须同时返回已经提交的真实结果（Rotate 包括新 Token），派生 committed audit 日志，并禁止把该错误误报成回滚后重试；普通事务错误仍返回零结果且不产生 committed 日志。
+
 ---
 
 # 19. Tunnel Revoke
@@ -531,6 +535,10 @@ Rotate 才生成新 Token Version：旧 Token 进入 `REVOKED_FOR_NEW_SESSION`�
 强制下线使用 Revoke Tunnel，原子禁用全部 Token，并在事务提交后关闭该 Tunnel 的全部 Session、Idle WorkConn 和 ActiveWork。
 
 Token 状态、Tunnel Desired State 与 `tunnels.version` 必须在同一个 `BEGIN IMMEDIATE` 事务中提交并受 `If-Match` 保护。锁内不得执行网络 IO 或 Close。
+
+耐久 COMMIT 后，Application 才调用当前进程唯一 Session Manager 的 `RevokeTunnel`，由它先建立永久 Auth/Install Fence，再在锁外关闭该 Tunnel 全 generation 的 Control Session、Idle/Connecting/Opening WorkConn 与 ActiveWork。已经撤销且 Version 仍匹配的重复请求不再次递增 Version，但必须重新执行 Runtime 收敛；并发 Revoke/Shutdown 必须等待同一 per-Session cleanup 完成，不能因查找入口已摘除而提前返回。
+
+`TUNNEL_REVOKE/SUCCEEDED` 表示权威持久化吊销已经提交。若之后 Runtime 收敛失败，原事件保持不可变，并追加同一 request/trace 关联、独立 event/operation ID 的 `TUNNEL_REVOKE/FAILED` 事件，稳定 `error_code=RUNTIME_CONVERGENCE_FAILED`；失败证据写入失败也必须进入返回错误链。
 
 ---
 
@@ -1502,6 +1510,12 @@ WorkPool / ActiveWork / Health
 
 进程退出且 Tombstone 清理完成后，该 Connector 从运行态消失。V0.1 不提供跨重启 Installation History、设备清单或机器身份审计；长期审计依赖结构化安全事件和 Server 日志，而不是 Agent 本地身份文件。
 
+Runtime 以完整 `(tunnel_id, connector_id, session_id, generation)` fencing 更新 Connected、Heartbeat、Draining、Disconnected；旧 generation 不得覆盖新 generation 的 Metadata、时间或状态。同一 Connector replacement、Revoke 和 Shutdown 期间，Manager 必须继续持有所有尚未完成 cleanup 的 retiring Session，直到 Authenticator、Pool、Owner 与 Registry 收敛完成。
+
+稳定生命周期日志事件为 `connector_connected`、`connector_session_replaced`、`connector_draining`、`connector_disconnected`。只允许输出真实存在的 `tunnel_id`、`connector_id`、`session_id`、`generation`、`connector_status`、`hostname`、`os`、`arch`、`version`、`reason`；项目 Bootstrap 创建的统一 JSON Logger 必须注入 Session Manager，不得用默认 Logger 或静默丢弃生产事件。
+
+M2 在 Session Manager 暴露无 Label 聚合 Metric Source：`xtunnel_connectors_online`、`xtunnel_control_sessions_online`、`xtunnel_active_connections`、`xtunnel_tcp_idle_work_connections`、`xtunnel_tcp_active_work_connections`。M6 只负责将该唯一 Source 导出到 `/metrics`，不得另建第二套计数状态。
+
 ---
 
 # 39. Tunnel 状态
@@ -2444,6 +2458,10 @@ Connector 1 Crash：
 ```text
 Connector HA
 ```
+
+发送 `OpenRequest` 后只有 `AcceptRaw` 之前的 Transport 失败允许受限重选：首 Connector 最多尝试两条当前 IDLE WorkConn，第二条只做非阻塞获取；两次失败或首次返回 `OPEN_DRAINING` 后，使用同一个 `connection_id`、排除失败 Connector，并在其他当前候选中最多提交一次跨 Connector OPEN。候选 IDLE 被并发抢走、replacement 或 drain 时可以继续检查下一个候选，但不得加入第二个 Pending Group、发送新 Demand 或阻塞等待备用 Work。
+
+Protocol Error、普通 `OPEN_ERROR`、Context Cancel、本地 MarkActive/Limit/Register 失败均不跨 Connector 重选。`AcceptRaw` 是不可逆提交点；其后的 Deadline 清理失败、RAW Proxy 失败或已经转发任意业务字节都不得重放 OpenRequest 或业务字节。
 
 ---
 
@@ -6197,9 +6215,17 @@ Security Audit Event 是持久化安全证据，不等同于可丢弃的普通�
   必须先冻结字段允许列表、单值长度和总大小，且绝不能保存业务正文、Secret、Private
   Key、Cookie 或 Credential 原文。
 - Application Audit Writer 只暴露 `Append`。SQLite Trigger 拒绝 UPDATE/DELETE；提交
-  使用固定物理连接在 `BEGIN IMMEDIATE` 前临时切换 `synchronous=FULL`，只有耐久 COMMIT
-  成功并恢复普通 `NORMAL` 模式后才派生结构化 `security_audit_event` 日志；普通 Observer
-  不得替代持久化写入。
+  使用固定物理连接在 `BEGIN IMMEDIATE` 前临时切换 `synchronous=FULL`。耐久 COMMIT 成功后
+  才派生结构化 `security_audit_event` 日志；若随后恢复普通 `NORMAL` 模式失败，必须返回
+  可识别的 post-commit cleanup 错误和已提交结果，不能把它误报成回滚。普通 Observer 不得
+  替代持久化写入。
+
+M2 的前向 Migration `000004_credential_lifecycle_audit.sql` 在单一 Migration 事务内重建
+该表并完整复制 v3 证据、恢复时间索引和 append-only Trigger。新增枚举只包括
+`CONNECTION_TOKEN_REVEAL`、`CONNECTION_TOKEN_ROTATE`、`CONNECTION_TOKEN_REVOKE`、
+`TUNNEL_REVOKE`；这些事件必须使用已认证的 `actor_type=ADMIN`、合法 `adm_` Actor，
+资源分别为 `TUNNEL_TOKEN` 或 `TUNNEL`，`resource_id` 只保存安全的 `tun_` ID。Token 文本、
+Secret、Hash 与 Ciphertext 不得进入事件、日志、错误或测试输出。
 
 `gateway rotate-key --maintenance` 在换钥前完成 Migration、Writer 初始化、旧 SPKI 读取及
 `event_id/operation_id` 生成；上述步骤失败时不得换钥。v2 Rotation Journal 在替换 Identity

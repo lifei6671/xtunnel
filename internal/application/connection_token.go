@@ -168,46 +168,74 @@ func (service *ConnectionTokenService) Issue(ctx context.Context, input IssueCon
 	return ConnectionTokenResult{TunnelID: input.TunnelID, TokenID: tokenID, TokenVersion: initialConnectionTokenVersion, Token: encoded}, nil
 }
 
-// Current 解密并返回 Tunnel 当前 ACTIVE Token。
-// Management 新增 Connector 时必须调用本方法，因此返回字节与首次 Issue 完全相同，
-// 且不会创建数据库行、递增 Credential 版本或改变既有 Connector 的认证材料。
-func (service *ConnectionTokenService) Current(ctx context.Context, tunnelID string) (ConnectionTokenResult, error) {
+// current 仅供需要自行建立更强事务边界的 Application Service 使用。
+// Management Reveal 必须走 CredentialLifecycleService.Reveal 写入耐久审计，不能暴露
+// 一个绕过审计的公开读取入口。
+func (service *ConnectionTokenService) current(ctx context.Context, tunnelID string) (ConnectionTokenResult, repository.TunnelToken, error) {
 	if service == nil || service.store == nil || service.protector == nil || !validate.ValidID(tunnelID, "tun_") {
-		return ConnectionTokenResult{}, ErrConnectionTokenInput
+		return ConnectionTokenResult{}, repository.TunnelToken{}, ErrConnectionTokenInput
 	}
+	var result ConnectionTokenResult
 	var metadata repository.TunnelToken
 	if err := service.store.Read(ctx, func(transaction repository.RepositoryView) error {
 		var err error
-		metadata, err = transaction.TunnelTokens().GetActiveByTunnel(ctx, tunnelID)
-		if errors.Is(err, repository.ErrNotFound) {
-			return ErrConnectionTokenUnavailable
-		}
-		if err != nil {
-			return fmt.Errorf("load current connection token: %w", err)
-		}
-		return nil
+		result, metadata, err = service.currentFrom(ctx, transaction, tunnelID)
+		return err
 	}); err != nil {
-		return ConnectionTokenResult{}, err
+		return ConnectionTokenResult{}, repository.TunnelToken{}, err
+	}
+	return result, metadata, nil
+}
+
+// Current 只保留给现有内部启动/协议集成路径读取稳定 Credential。
+// Management Handler 不得调用本方法；公开 Reveal 必须调用 CredentialLifecycleService.Reveal，
+// 后者会在返回 Token 前耐久写入安全审计。
+func (service *ConnectionTokenService) Current(ctx context.Context, tunnelID string) (ConnectionTokenResult, error) {
+	result, _, err := service.current(ctx, tunnelID)
+	return result, err
+}
+
+func (service *ConnectionTokenService) currentFrom(
+	ctx context.Context,
+	transaction repository.RepositoryView,
+	tunnelID string,
+) (ConnectionTokenResult, repository.TunnelToken, error) {
+	tunnelRecord, err := transaction.Tunnels().Get(ctx, tunnelID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return ConnectionTokenResult{}, repository.TunnelToken{}, ErrConnectionTokenTunnelUnavailable
+	}
+	if err != nil {
+		return ConnectionTokenResult{}, repository.TunnelToken{}, fmt.Errorf("load current connection token tunnel: %w", err)
+	}
+	if tunnelRecord.RevokedAt != nil {
+		return ConnectionTokenResult{}, repository.TunnelToken{}, ErrConnectionTokenTunnelRevoked
+	}
+	metadata, err := transaction.TunnelTokens().GetActiveByTunnel(ctx, tunnelID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return ConnectionTokenResult{}, repository.TunnelToken{}, ErrConnectionTokenUnavailable
+	}
+	if err != nil {
+		return ConnectionTokenResult{}, repository.TunnelToken{}, fmt.Errorf("load current connection token: %w", err)
 	}
 
 	protectionContext := TokenProtectionContext{TunnelID: metadata.TunnelID, TokenID: metadata.ID, Version: metadata.Version}
 	plaintext, err := service.protector.Open(metadata.TokenCiphertext, protectionContext)
 	if err != nil {
-		return ConnectionTokenResult{}, ErrConnectionTokenUnavailable
+		return ConnectionTokenResult{}, repository.TunnelToken{}, ErrConnectionTokenUnavailable
 	}
 	defer clear(plaintext)
 	parsed, err := token.Parse(string(plaintext))
 	if err != nil || parsed.GetTunnelId() != metadata.TunnelID || parsed.GetTokenId() != metadata.ID ||
 		parsed.GetTokenVersion() != uint64(metadata.Version) {
-		return ConnectionTokenResult{}, ErrConnectionTokenUnavailable
+		return ConnectionTokenResult{}, repository.TunnelToken{}, ErrConnectionTokenUnavailable
 	}
 	secretHash := sha256.Sum256(parsed.GetAuthenticationSecret())
 	if subtle.ConstantTimeCompare(metadata.SecretHash[:], secretHash[:]) != 1 {
-		return ConnectionTokenResult{}, ErrConnectionTokenUnavailable
+		return ConnectionTokenResult{}, repository.TunnelToken{}, ErrConnectionTokenUnavailable
 	}
 	return ConnectionTokenResult{
 		TunnelID: metadata.TunnelID, TokenID: metadata.ID, TokenVersion: metadata.Version, Token: string(plaintext),
-	}, nil
+	}, metadata, nil
 }
 
 // Verify 严格解析 Token 后按 Tunnel、Token ID、代次和 Secret 摘要精确核验。
@@ -237,9 +265,6 @@ func (service *ConnectionTokenService) Verify(ctx context.Context, encoded strin
 		if subtle.ConstantTimeCompare(metadata.SecretHash[:], secretHash[:]) != 1 {
 			return ErrConnectionTokenSecretMismatch
 		}
-		if metadata.Status != repository.TunnelTokenStatusActive {
-			return ErrConnectionTokenInactive
-		}
 		tunnelRecord, err := transaction.Tunnels().Get(ctx, identity.TunnelID)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
@@ -249,6 +274,9 @@ func (service *ConnectionTokenService) Verify(ctx context.Context, encoded strin
 		}
 		if tunnelRecord.RevokedAt != nil {
 			return ErrConnectionTokenTunnelRevoked
+		}
+		if metadata.Status != repository.TunnelTokenStatusActive {
+			return ErrConnectionTokenInactive
 		}
 		identity.DesiredRevision = tunnelRecord.DesiredRevision
 		return nil

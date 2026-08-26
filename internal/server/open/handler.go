@@ -22,6 +22,10 @@ var (
 	ErrProtocol = errors.New("server open protocol violation")
 	// ErrRejected 表示 Agent 完整返回了 OPEN_ERROR。
 	ErrRejected = errors.New("server open was rejected by agent")
+	// ErrPreRAWTransport 表示 AcceptRaw 前的 WorkConn IO 失败；调用方可按受限契约重试。
+	ErrPreRAWTransport = errors.New("server open transport failed before RAW")
+	// ErrRawCommitted 表示 AcceptRaw 已提交，后续失败绝不能重放业务连接。
+	ErrRawCommitted = errors.New("server open RAW was already committed")
 )
 
 // Options 固定完整 OpenRequest/OpenResponse 交换的 IO 上限。
@@ -85,6 +89,11 @@ func (handler *Handler) Handle(
 		}
 		return nil, ErrInvalidInput
 	}
+	if err := ctx.Err(); err != nil {
+		_ = connection.Close()
+		idle.State.Close()
+		return nil, err
+	}
 	if err := validate.RejectUnknownFields(request); err != nil {
 		_ = connection.Close()
 		idle.State.Close()
@@ -113,10 +122,10 @@ func (handler *Handler) Handle(
 	defer stopContextIO()
 
 	if err := connection.SetWriteDeadline(operationDeadline(ctx, handler.options.WriteTimeout)); err != nil {
-		return nil, fmt.Errorf("set OpenRequest write deadline: %w", err)
+		return nil, fmt.Errorf("%w: set OpenRequest write deadline: %w", ErrPreRAWTransport, err)
 	}
 	if err := frame.WriteWorkLimit(connection, request, handler.options.MaxFrameBytes); err != nil {
-		return nil, fmt.Errorf("write OpenRequest: %w", err)
+		return nil, classifyFrameFailure("write OpenRequest", err)
 	}
 	// 完整 Request Frame flush 后才提交 IDLE→OPENING；若写到一半，连接直接关闭，
 	// 不会被错误归还到 Idle Pool。
@@ -125,11 +134,11 @@ func (handler *Handler) Handle(
 	}
 
 	if err := connection.SetReadDeadline(operationDeadline(ctx, handler.options.ReadTimeout)); err != nil {
-		return nil, fmt.Errorf("set OpenResponse read deadline: %w", err)
+		return nil, fmt.Errorf("%w: set OpenResponse read deadline: %w", ErrPreRAWTransport, err)
 	}
 	response := &protocolv1.OpenResponse{}
 	if err := frame.ReadWorkLimit(connection, response, handler.options.MaxFrameBytes); err != nil {
-		return nil, fmt.Errorf("%w: read OpenResponse: %v", ErrProtocol, err)
+		return nil, classifyFrameFailure("read OpenResponse", err)
 	}
 	if err := validate.RejectUnknownFields(response); err != nil {
 		return nil, fmt.Errorf("%w: OpenResponse unknown fields", ErrProtocol)
@@ -153,9 +162,18 @@ func (handler *Handler) Handle(
 		return nil, fmt.Errorf("%w: RAW handoff: %v", ErrProtocol, err)
 	}
 	if err := connection.SetDeadline(time.Time{}); err != nil {
-		return nil, fmt.Errorf("clear Server WorkConn OPEN deadline: %w", err)
+		return nil, fmt.Errorf("%w: clear Server WorkConn OPEN deadline: %w", ErrRawCommitted, err)
 	}
 	return &Active{Connection: connection, Identity: idle, Response: response}, nil
+}
+
+func classifyFrameFailure(operation string, err error) error {
+	classification := ErrPreRAWTransport
+	if errors.Is(err, frame.ErrInvalidLength) || errors.Is(err, frame.ErrFrameTooLarge) ||
+		errors.Is(err, frame.ErrMalformedMessage) || errors.Is(err, frame.ErrNilMessage) {
+		classification = ErrProtocol
+	}
+	return fmt.Errorf("%w: %s: %w", classification, operation, err)
 }
 
 func operationDeadline(ctx context.Context, timeout time.Duration) time.Time {

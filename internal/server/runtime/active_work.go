@@ -137,6 +137,9 @@ type TunnelRuntime struct {
 	pendingConnectorLimits map[string]*serverlimits.ConnectorLease
 	currentConnectorLimits map[string]*serverlimits.ConnectorLease
 	connectorActive        map[Session]uint64
+	// connectors 只保存 Current Connector 或仍有 ActiveWork 的 Tombstone；它不是
+	// 持久化设备历史，也不会在无 Current/Active 后保留 OFFLINE 对象。
+	connectors map[string]connectorObservation
 	// retired 保存已不再是 Current、但仍被 Lease 或 ActiveWork 引用的 Session。
 	// 对应 Session ID 必须继续占用全局索引，避免极端随机碰撞复用正在运行的身份。
 	retired     map[Session]struct{}
@@ -151,7 +154,8 @@ func newTunnelRuntime(registry *Registry, tunnelID string, now func() time.Time)
 		TunnelID: tunnelID, registry: registry, current: make(map[string]Session), generations: make(map[string]uint64),
 		pending: make(map[string]string), pendingConnectorLimits: make(map[string]*serverlimits.ConnectorLease),
 		currentConnectorLimits: make(map[string]*serverlimits.ConnectorLease), connectorActive: make(map[Session]uint64),
-		retired: make(map[Session]struct{}), activeWorks: make(map[string]*ActiveWork), now: now,
+		connectors: make(map[string]connectorObservation), retired: make(map[Session]struct{}),
+		activeWorks: make(map[string]*ActiveWork), now: now,
 	}
 }
 
@@ -279,28 +283,61 @@ func (runtime *TunnelRuntime) detach(work *ActiveWork) bool {
 		return false
 	}
 	delete(runtime.activeWorks, work.identity.ConnectionID)
+	runtime.removeFinishedTombstoneLocked(work.identity.ConnectorID)
 	return true
 }
 
-func (runtime *TunnelRuntime) revoke() ([]*ActiveWork, []*serverlimits.ConnectorLease, []string) {
+func (runtime *TunnelRuntime) revoke() ([]*ActiveWork, []*serverlimits.ConnectorLease, []string, []ConnectorLifecycleEvent) {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	runtime.revoked = true
+	disconnectEvents := make([]ConnectorLifecycleEvent, 0, len(runtime.connectors))
+	for _, observation := range runtime.connectors {
+		if observation.tombstone {
+			continue
+		}
+		disconnectEvents = append(disconnectEvents, ConnectorLifecycleEvent{
+			Name:     ConnectorEventDisconnected,
+			Snapshot: runtime.connectorSnapshotLocked(observation),
+			Reason:   "tunnel_revoked",
+		})
+	}
+
 	works := make([]*ActiveWork, 0, len(runtime.activeWorks))
 	for connectionID, work := range runtime.activeWorks {
 		works = append(works, work)
 		delete(runtime.activeWorks, connectionID)
 	}
 	connectorLimits := make([]*serverlimits.ConnectorLease, 0, len(runtime.currentConnectorLimits)+len(runtime.pendingConnectorLimits))
-	for _, lease := range runtime.currentConnectorLimits {
+	sessionIDs := make([]string, 0, len(runtime.current)+len(runtime.pending))
+	for connectorID, session := range runtime.current {
+		lease := runtime.currentConnectorLimits[connectorID]
 		connectorLimits = append(connectorLimits, lease)
+		delete(runtime.current, connectorID)
+		delete(runtime.currentConnectorLimits, connectorID)
+		if sessionID := runtime.retireSessionLocked(session); sessionID != "" {
+			sessionIDs = append(sessionIDs, sessionID)
+		}
 	}
-	for _, lease := range runtime.pendingConnectorLimits {
+	for sessionID := range runtime.pending {
+		lease := runtime.pendingConnectorLimits[sessionID]
 		connectorLimits = append(connectorLimits, lease)
+		sessionIDs = append(sessionIDs, sessionID)
+		delete(runtime.pending, sessionID)
+		delete(runtime.pendingConnectorLimits, sessionID)
 	}
+	runtime.lastPicked = ""
+	clear(runtime.connectors)
+
 	retained := runtime.registry.discardAuthenticatedInstallsLocked(runtime)
 	connectorLimits = append(connectorLimits, retained.connectorLimits...)
-	return works, connectorLimits, retained.sessionIDs
+	sessionIDs = append(sessionIDs, retained.sessionIDs...)
+	for session := range runtime.retired {
+		if sessionID := runtime.releaseRetiredSessionIfUnusedLocked(session); sessionID != "" {
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+	}
+	return works, connectorLimits, sessionIDs, disconnectEvents
 }
 
 // TunnelRuntimeRegistry 是 Registry 的语义别名。Session、Connector Lease 与
@@ -315,11 +352,18 @@ func NewTunnelRuntimeRegistry() *TunnelRuntimeRegistry {
 // RevokeTunnel 先在目标 Tunnel 锁内撤销并摘除所有 generation 的 ActiveWork，
 // 再在锁外逐一执行 Cancel、Deadline、Close 和 Lease Release。
 func (registry *Registry) RevokeTunnel(tunnelID string) error {
+	_, err := registry.RevokeTunnelWithLifecycle(tunnelID)
+	return err
+}
+
+// RevokeTunnelWithLifecycle 与 RevokeTunnel 使用同一个线性化点，并返回撤销前仍可见的
+// Connector 断开事件。调用方只能在方法返回后于 Runtime 锁外记录这些不可变事件。
+func (registry *Registry) RevokeTunnelWithLifecycle(tunnelID string) ([]ConnectorLifecycleEvent, error) {
 	runtime, err := registry.Tunnel(tunnelID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	works, connectorLimits, sessionIDs := runtime.revoke()
+	works, connectorLimits, sessionIDs, disconnectEvents := runtime.revoke()
 	for _, lease := range connectorLimits {
 		lease.Release()
 	}
@@ -332,7 +376,7 @@ func (registry *Registry) RevokeTunnel(tunnelID string) error {
 			closeErrors = append(closeErrors, fmt.Errorf("close active work %s: %w", work.identity.ConnectionID, err))
 		}
 	}
-	return errors.Join(closeErrors...)
+	return disconnectEvents, errors.Join(closeErrors...)
 }
 
 func validActiveWorkSpec(runtime *TunnelRuntime, spec ActiveWorkSpec) bool {

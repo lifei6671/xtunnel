@@ -76,6 +76,8 @@ type Options struct {
 type Established struct {
 	// Session 是已经在成功 Frame 写出后发布的 Current Session。
 	Session serverruntime.Session
+	// ConnectorMetadata 是 Auth Request 已验证的非敏感进程元数据。
+	ConnectorMetadata serverruntime.ConnectorMetadata
 	// SessionSecret 是仅驻留双方内存的 32 字节 WorkConn HMAC 密钥。
 	SessionSecret [sessionSecretSize]byte
 	// ProtocolVersion 是本次认证协商出的 Protocol v1 版本。
@@ -292,7 +294,11 @@ func (handler *Handler) Handle(ctx context.Context, connection net.Conn) (Establ
 	sessionEstablished = true
 	committed = true
 	return Established{
-		Session: session, SessionSecret: sessionSecret, ProtocolVersion: negotiated,
+		Session: session,
+		ConnectorMetadata: serverruntime.ConnectorMetadata{
+			Hostname: request.GetHostname(), OS: request.GetOs(), Arch: request.GetArch(), Version: request.GetVersion(),
+		},
+		SessionSecret: sessionSecret, ProtocolVersion: negotiated,
 		DesiredRevision: uint64(verified.DesiredRevision), HeartbeatInterval: handler.options.HeartbeatInterval,
 		Control: control,
 	}, nil

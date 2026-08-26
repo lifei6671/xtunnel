@@ -271,6 +271,58 @@ func TestTunnelTokenSchemaConstraints(t *testing.T) {
 	}
 }
 
+func TestTunnelTokenRevokeAllPreservesOriginalRevokedAt(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		if err := transaction.Tunnels().Create(context.Background(), testTunnel()); err != nil {
+			return err
+		}
+		first := testTunnelToken()
+		if err := transaction.TunnelTokens().Create(context.Background(), first); err != nil {
+			return err
+		}
+		if err := transaction.TunnelTokens().TransitionStatus(
+			context.Background(), first.TunnelID, first.ID, first.Version,
+			repository.TunnelTokenStatusActive, repository.TunnelTokenStatusRevokedForNewSession, 2,
+		); err != nil {
+			return err
+		}
+		second := testTunnelToken()
+		second.ID = "tok_01J00000000000000000000001"
+		second.Version = 2
+		second.SecretHash[0] ^= 0xFF
+		if err := transaction.TunnelTokens().Create(context.Background(), second); err != nil {
+			return err
+		}
+		return transaction.TunnelTokens().RevokeAll(context.Background(), first.TunnelID, 3)
+	}); err != nil {
+		t.Fatalf("seed and revoke all error = %v", err)
+	}
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		first, err := view.TunnelTokens().GetByTunnelVersion(context.Background(), repositoryTestTunnelID, 1)
+		if err != nil {
+			return err
+		}
+		second, err := view.TunnelTokens().GetByTunnelVersion(context.Background(), repositoryTestTunnelID, 2)
+		if err != nil {
+			return err
+		}
+		if first.Status != repository.TunnelTokenStatusRevoked || first.RevokedAt == nil || *first.RevokedAt != 2 {
+			return errors.New("rotated Token lost its original revoked_at")
+		}
+		if second.Status != repository.TunnelTokenStatusRevoked || second.RevokedAt == nil || *second.RevokedAt != 3 {
+			return errors.New("active Token did not receive Tunnel revoke time")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTunnelDomainMigrationUpgradesAndRollsBackFailedNextVersion(t *testing.T) {
 	database := openUnmigratedDatabase(t)
 	if err := runMigrations(context.Background(), database, productionMigrations[:1], testNow); err != nil {
@@ -302,7 +354,7 @@ func TestTunnelDomainMigrationUpgradesAndRollsBackFailedNextVersion(t *testing.T
 	}
 
 	available := append([]migration{}, productionMigrations...)
-	available = append(available, migration{version: 4, statements: []string{
+	available = append(available, migration{version: 5, statements: []string{
 		"CREATE TABLE interrupted_tunnel_migration (id INTEGER PRIMARY KEY)",
 		"THIS IS NOT VALID SQL",
 	}})
@@ -316,7 +368,7 @@ func TestTunnelDomainMigrationUpgradesAndRollsBackFailedNextVersion(t *testing.T
 	if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
 		t.Fatalf("count migration versions error = %v", err)
 	}
-	if interruptedCount != 0 || versionCount != 3 {
+	if interruptedCount != 0 || versionCount != 4 {
 		t.Fatalf("failed migration rollback = table:%d versions:%d", interruptedCount, versionCount)
 	}
 }

@@ -25,21 +25,42 @@ func NewSecurityAuditWriter(store repository.Store, logger *slog.Logger) *Securi
 
 // Append 幂等追加一条已经冻结字段的安全事件。
 func (writer *SecurityAuditWriter) Append(ctx context.Context, event repository.SecurityAuditEvent) error {
-	if writer == nil || writer.store == nil || writer.logger == nil || ctx == nil {
+	if !writer.valid(ctx) {
 		return ErrSecurityAuditWriterInput
 	}
 	if err := event.Validate(); err != nil {
 		return err
 	}
-	if err := writer.store.WithDurableTx(ctx, func(transaction repository.TxStore) error {
-		if err := transaction.SecurityAuditEvents().Append(ctx, event); err != nil {
-			return fmt.Errorf("append security audit evidence: %w", err)
-		}
-		return nil
-	}); err != nil {
+	transactionErr := writer.store.WithDurableTx(ctx, func(transaction repository.TxStore) error {
+		return writer.appendTo(ctx, transaction, event)
+	})
+	if transactionErr != nil && !errors.Is(transactionErr, repository.ErrPostCommitCleanup) {
+		return transactionErr
+	}
+	writer.logCommitted(ctx, event)
+	return transactionErr
+}
+
+func (writer *SecurityAuditWriter) valid(ctx context.Context) bool {
+	return writer != nil && writer.store != nil && writer.logger != nil && ctx != nil
+}
+
+// appendTo 允许安全操作把权威事件与其状态变更放入同一个 durable transaction。
+func (writer *SecurityAuditWriter) appendTo(ctx context.Context, transaction repository.TxStore, event repository.SecurityAuditEvent) error {
+	if !writer.valid(ctx) || transaction == nil {
+		return ErrSecurityAuditWriterInput
+	}
+	if err := event.Validate(); err != nil {
 		return err
 	}
+	if err := transaction.SecurityAuditEvents().Append(ctx, event); err != nil {
+		return fmt.Errorf("append security audit evidence: %w", err)
+	}
+	return nil
+}
 
+// logCommitted 只能在包含该事件的事务成功 COMMIT 后调用。
+func (writer *SecurityAuditWriter) logCommitted(ctx context.Context, event repository.SecurityAuditEvent) {
 	attributes := []any{
 		slog.String("event_id", event.EventID),
 		slog.String("operation_id", event.OperationID),
@@ -68,5 +89,4 @@ func (writer *SecurityAuditWriter) Append(ctx context.Context, event repository.
 		attributes = append(attributes, slog.String("trace_id", event.TraceID))
 	}
 	writer.logger.InfoContext(ctx, "security_audit_event", attributes...)
-	return nil
 }

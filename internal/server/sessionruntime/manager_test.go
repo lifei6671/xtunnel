@@ -740,7 +740,11 @@ func establishedSession(t *testing.T, session serverruntime.Session, secretByte 
 		secret[index] = secretByte
 	}
 	return servercontrolauth.Established{
-		Session: session, SessionSecret: secret, ProtocolVersion: testProtocol, Control: control,
+		Session: session,
+		ConnectorMetadata: serverruntime.ConnectorMetadata{
+			Hostname: "edge-test", OS: "linux", Arch: "amd64", Version: "0.1.0-test",
+		},
+		SessionSecret: secret, ProtocolVersion: testProtocol, Control: control,
 	}
 }
 

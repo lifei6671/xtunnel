@@ -65,6 +65,11 @@ func TestHandleSuccessFlushesBeforePublishingSession(t *testing.T) {
 	if outcome.established.Session.SessionID != success.GetSessionId() || outcome.established.Session.Generation != 1 {
 		t.Fatalf("Established Session = %#v, want response Session generation 1", outcome.established.Session)
 	}
+	if outcome.established.ConnectorMetadata != (serverruntime.ConnectorMetadata{
+		Hostname: request.GetHostname(), OS: request.GetOs(), Arch: request.GetArch(), Version: request.GetVersion(),
+	}) {
+		t.Fatalf("Established ConnectorMetadata = %#v, want validated request metadata", outcome.established.ConnectorMetadata)
+	}
 	if !bytes.Equal(outcome.established.SessionSecret[:], bytes.Repeat([]byte{0x5a}, sessionSecretSize)) ||
 		!bytes.Equal(success.GetSessionSecret(), outcome.established.SessionSecret[:]) {
 		t.Fatal("session_secret was not the injected 32-byte CSPRNG output")

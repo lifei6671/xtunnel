@@ -284,6 +284,10 @@ func (registry *Registry) InstallAuthenticated(pending PendingSession) (*Authent
 	}
 
 	runtime.mu.Lock()
+	if runtime.revoked {
+		runtime.mu.Unlock()
+		return nil, ErrTunnelRuntimeRevoked
+	}
 	connectorID, exists := runtime.pending[pending.sessionID]
 	if !exists || connectorID != pending.connectorID {
 		runtime.mu.Unlock()
@@ -292,12 +296,6 @@ func (registry *Registry) InstallAuthenticated(pending PendingSession) (*Authent
 	delete(runtime.pending, pending.sessionID)
 	connectorLimit := runtime.pendingConnectorLimits[pending.sessionID]
 	delete(runtime.pendingConnectorLimits, pending.sessionID)
-	if runtime.revoked {
-		runtime.mu.Unlock()
-		connectorLimit.Release()
-		registry.releaseSessionID(pending.sessionID)
-		return nil, ErrTunnelRuntimeRevoked
-	}
 	previous, hadPrevious := runtime.current[pending.connectorID]
 	generation := runtime.generations[pending.connectorID] + 1
 	runtime.generations[pending.connectorID] = generation
@@ -565,8 +563,8 @@ func (registry *Registry) acquireConnectorWhere(tunnelID string, predicate func(
 	start := 0
 	if runtime.lastPicked != "" {
 		for index, candidate := range candidates {
-			if candidate.ConnectorID == runtime.lastPicked {
-				start = (index + 1) % len(candidates)
+			if candidate.ConnectorID > runtime.lastPicked {
+				start = index
 				break
 			}
 		}
@@ -642,13 +640,24 @@ func (runtime *TunnelRuntime) sessionReferencedLocked(session Session) bool {
 // 已预安装，则只把匹配的历史候选标记为不可恢复。已进入 ACTIVE 的旧 Work 及
 // Connector Lease tombstone 不受影响。
 func (registry *Registry) ClearIfCurrent(session Session) bool {
+	_, cleared := registry.disconnectIfCurrent(session, "")
+	return cleared
+}
+
+// DisconnectIfCurrent 把 Current Session 的摘除、Tombstone 决策和断开事件在同一
+// TunnelRuntime 临界区内线性化。reason 只能是调用方定义的非敏感稳定原因。
+func (registry *Registry) DisconnectIfCurrent(session Session, reason string) (ConnectorLifecycleEvent, bool) {
+	return registry.disconnectIfCurrent(session, reason)
+}
+
+func (registry *Registry) disconnectIfCurrent(session Session, reason string) (ConnectorLifecycleEvent, bool) {
 	if registry == nil || !identity.ValidTunnelID(session.TunnelID) || !identity.ValidConnectorID(session.ConnectorID) ||
 		!identity.ValidSessionID(session.SessionID) || session.Generation == 0 {
-		return false
+		return ConnectorLifecycleEvent{}, false
 	}
 	runtime := registry.tunnel(session.TunnelID, false)
 	if runtime == nil {
-		return false
+		return ConnectorLifecycleEvent{}, false
 	}
 	runtime.mu.Lock()
 	current, exists := runtime.current[session.ConnectorID]
@@ -662,12 +671,12 @@ func (registry *Registry) ClearIfCurrent(session Session) bool {
 				if node.session == session && node.state != authenticatedInstallFailed && node.state != authenticatedInstallDiscarded {
 					node.state = authenticatedInstallFailed
 					runtime.mu.Unlock()
-					return true
+					return ConnectorLifecycleEvent{}, true
 				}
 			}
 		}
 		runtime.mu.Unlock()
-		return false
+		return ConnectorLifecycleEvent{}, false
 	}
 	delete(runtime.current, session.ConnectorID)
 	connectorLimit := runtime.currentConnectorLimits[session.ConnectorID]
@@ -675,13 +684,14 @@ func (registry *Registry) ClearIfCurrent(session Session) bool {
 	if len(runtime.current) == 0 {
 		runtime.lastPicked = ""
 	}
+	event := runtime.disconnectObservationLocked(session, reason)
 	releaseSessionID := runtime.retireSessionLocked(session)
 	runtime.mu.Unlock()
 	connectorLimit.Release()
 	if releaseSessionID != "" {
 		registry.releaseSessionID(releaseSessionID)
 	}
-	return true
+	return event, true
 }
 
 func (registry *Registry) reserveSessionID(sessionID string) bool {

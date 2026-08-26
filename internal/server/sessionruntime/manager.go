@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -37,9 +38,10 @@ var (
 const (
 	// V0.1 的默认 Pool 目标由技术方案冻结为 target_idle=8。初始 Session 没有
 	// Opening，因此 desired_non_active 直接使用该绝对目标并由 Pool 容量再钳制。
-	initialDesiredNonActive = uint32(8)
-	initialLeaseTTL         = 10 * time.Second
-	defaultHeartbeatTimeout = 30 * time.Second
+	initialDesiredNonActive   = uint32(8)
+	initialLeaseTTL           = 10 * time.Second
+	defaultHeartbeatTimeout   = 30 * time.Second
+	initialDemandFailedReason = "initial_demand_failed"
 )
 
 // Options 固定每条 Control Session 的队列、写超时、Replay 内存上限与心跳超时。
@@ -55,6 +57,18 @@ type Options struct {
 	LimitManager         *serverlimits.Manager
 	// HeartbeatTimeout 使用 Server 本地单调时间关闭失联 Session；零值使用冻结的 30 秒默认值。
 	HeartbeatTimeout time.Duration
+	// Logger 接收稳定 Connector lifecycle 事件；nil 只用于不需要日志的隔离测试。
+	Logger *slog.Logger
+}
+
+// MetricsSnapshot 是 M2 Runtime 的无 Label 聚合快照；M6 只负责把这些字段导出到
+// 同名 Prometheus 指标，不在这里启动第二个 HTTP 或采集生命周期。
+type MetricsSnapshot struct {
+	XTunnelConnectorsOnline         uint64
+	XTunnelControlSessionsOnline    uint64
+	XTunnelActiveConnections        uint64
+	XTunnelTCPIdleWorkConnections   uint64
+	XTunnelTCPActiveWorkConnections uint64
 }
 
 type connectorKey struct {
@@ -64,11 +78,18 @@ type connectorKey struct {
 
 type managedSession struct {
 	session       serverruntime.Session
+	metadata      serverruntime.ConnectorMetadata
 	authenticator *workauth.SessionAuthenticator
 	owner         *controlsession.Owner
 	pool          *serverworkpool.Pool
 	cancel        context.CancelFunc
 	protocol      uint32
+
+	terminationMu     sync.Mutex
+	terminationReason string
+	cleanupOnce       sync.Once
+	cleanupDone       chan struct{}
+	cleanupErr        error
 
 	reconcileMu          sync.Mutex
 	demandMu             sync.Mutex
@@ -79,6 +100,11 @@ type managedSession struct {
 	demandDeadline       time.Duration
 }
 
+type startupGroup struct {
+	count int
+	done  chan struct{}
+}
+
 // Manager 是 Control Owner、Work Authenticator 与 Runtime Registry 之间的唯一桥梁。
 //
 // byConnector 只发布每个 Connector 的最高 generation；bySession 只包含仍可接受新
@@ -87,15 +113,27 @@ type managedSession struct {
 type Manager struct {
 	mu sync.Mutex
 
-	registry        *serverruntime.Registry
-	options         Options
-	startedAt       time.Time
-	demandLeaseTTL  time.Duration
-	byConnector     map[connectorKey]*managedSession
-	bySession       map[string]*managedSession
-	shutdownStarted bool
-	shutdownDone    chan struct{}
-	shutdownErr     error
+	registry       *serverruntime.Registry
+	options        Options
+	startedAt      time.Time
+	demandLeaseTTL time.Duration
+	byConnector    map[connectorKey]*managedSession
+	bySession      map[string]*managedSession
+	// liveSessions 保存从 install 成功到 Serve cleanup 完成之间的全部 generation。
+	// byConnector/bySession 只承担 Current 查找，不能用来枚举 Revoke/Shutdown 的关闭目标。
+	liveSessions                 map[*managedSession]struct{}
+	startingByTunnel             map[string]*startupGroup
+	revokedTunnels               map[string]struct{}
+	logger                       *slog.Logger
+	beforeInstallForTest         func(serverruntime.Session)
+	afterConvergenceFenceForTest func(string)
+	afterInstallForTest          func(serverruntime.Session)
+	afterRemoveForTest           func(serverruntime.Session)
+	beforeInitialDemandForTest   func(*managedSession)
+	beforeCleanupForTest         func(serverruntime.Session)
+	shutdownStarted              bool
+	shutdownDone                 chan struct{}
+	shutdownErr                  error
 }
 
 // New 创建空的 Session 运行时管理器。startedAt 仅用于构造单调时钟，不会参与
@@ -116,8 +154,11 @@ func New(registry *serverruntime.Registry, options Options) (*Manager, error) {
 	}
 	return &Manager{
 		registry: registry, options: options, startedAt: time.Now(), demandLeaseTTL: initialLeaseTTL,
-		byConnector:  make(map[connectorKey]*managedSession),
-		bySession:    make(map[string]*managedSession),
+		byConnector:      make(map[connectorKey]*managedSession),
+		bySession:        make(map[string]*managedSession),
+		liveSessions:     make(map[*managedSession]struct{}),
+		startingByTunnel: make(map[string]*startupGroup),
+		revokedTunnels:   make(map[string]struct{}), logger: options.Logger,
 		shutdownDone: make(chan struct{}),
 	}, nil
 }
@@ -176,14 +217,28 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 
 	sessionContext, cancel := context.WithCancel(ctx)
 	managed := &managedSession{
-		session: established.Session, authenticator: authenticator, owner: owner, pool: pool, cancel: cancel,
-		protocol: established.ProtocolVersion,
+		session: established.Session, metadata: established.ConnectorMetadata,
+		authenticator: authenticator, owner: owner, pool: pool, cancel: cancel,
+		protocol: established.ProtocolVersion, cleanupDone: make(chan struct{}),
+	}
+	if err := manager.beginStartup(managed.session.TunnelID); err != nil {
+		cancel()
+		authenticator.Close()
+		_ = pool.Close()
+		manager.registry.ClearIfCurrent(established.Session)
+		return errors.Join(err, connection.Close())
 	}
 	if err := owner.Start(sessionContext); err != nil {
 		cancel()
 		authenticator.Close()
+		_ = pool.Close()
 		manager.registry.ClearIfCurrent(established.Session)
-		return errors.Join(fmt.Errorf("start server Control Session owner: %w", err), connection.Close())
+		startErr := errors.Join(fmt.Errorf("start server Control Session owner: %w", err), connection.Close())
+		manager.endStartup(managed.session.TunnelID)
+		return startErr
+	}
+	if manager.beforeInstallForTest != nil {
+		manager.beforeInstallForTest(managed.session)
 	}
 
 	previous, installErr := manager.install(managed)
@@ -193,22 +248,38 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 		authenticator.Close()
 		_ = pool.Close()
 		manager.registry.ClearIfCurrent(established.Session)
+		manager.endStartup(managed.session.TunnelID)
 		return errors.Join(installErr, ownerErr)
 	}
-	if previous != nil {
-		// Cancel 只负责解除旧 Owner 的网络 IO；旧 Serve 会自行关闭 Authenticator，
-		// 且其 cleanup 会用指针和 generation 双重条件避免删除当前新代。
-		previous.cancel()
-		_ = previous.pool.CloseNonActive()
+	manager.endStartup(managed.session.TunnelID)
+	if manager.afterInstallForTest != nil {
+		manager.afterInstallForTest(managed.session)
 	}
-	if err := manager.enqueueInitialDemand(managed, established.ProtocolVersion); err != nil {
+	if previous != nil {
+		// previous 已从 Current/WorkAuth 查找入口摘除，但仍由 liveSessions 跟踪，
+		// 因而并发 Revoke/Shutdown 也能关闭它。这里必须在任何后续失败前接管替换清理。
+		previous.setTerminationReason("session_replaced")
+		_ = manager.cleanupManaged(previous, cleanupNonActive)
+	}
+	lifecycleEvent, observed := manager.registry.ObserveConnected(managed.session, managed.metadata)
+	if !observed {
 		cancel()
 		ownerErr := owner.Wait()
-		manager.remove(managed)
-		authenticator.Close()
-		poolErr := pool.Close()
-		manager.registry.ClearIfCurrent(established.Session)
-		return errors.Join(err, ownerErr, poolErr)
+		manager.removeLookup(managed)
+		cleanupErr := manager.cleanupManaged(managed, cleanupAll)
+		return errors.Join(ErrSessionUnavailable, ownerErr, cleanupErr)
+	}
+	manager.logLifecycle(lifecycleEvent)
+	if manager.beforeInitialDemandForTest != nil {
+		manager.beforeInitialDemandForTest(managed)
+	}
+	if err := manager.enqueueInitialDemand(managed, established.ProtocolVersion); err != nil {
+		managed.setTerminationReason(initialDemandFailedReason)
+		cancel()
+		ownerErr := owner.Wait()
+		manager.removeLookup(managed)
+		cleanupErr := manager.cleanupManaged(managed, cleanupAll)
+		return errors.Join(err, ownerErr, cleanupErr)
 	}
 
 	// Manager 持续消费已通过状态机校验的入站消息。DrainRequest 必须在同一
@@ -225,6 +296,7 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 			var ok bool
 			select {
 			case <-heartbeatTimer.C:
+				managed.setTerminationReason("heartbeat_timeout")
 				inboundErrors <- ErrHeartbeatTimeout
 				cancel()
 				return
@@ -234,6 +306,12 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 				}
 			}
 			if inbound.Envelope.GetHeartbeat() != nil {
+				if !manager.registry.ObserveHeartbeat(managed.session) {
+					managed.setTerminationReason("session_replaced")
+					inboundErrors <- ErrSessionSuperseded
+					cancel()
+					return
+				}
 				resetTimer(heartbeatTimer, manager.options.HeartbeatTimeout)
 				if _, err := manager.reconcileDemand(managed, established.ProtocolVersion); err != nil {
 					inboundErrors <- fmt.Errorf("reconcile WorkDemand after Heartbeat: %w", err)
@@ -294,18 +372,16 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 	case inboundErr = <-inboundErrors:
 	default:
 	}
-	manager.remove(managed)
-	authenticator.Close()
-	var poolErr error
-	if ctx.Err() != nil {
-		poolErr = pool.Close()
-	} else {
-		// 普通 Control 断开或重连只关闭旧代尚未进入 ACTIVE 的 WorkConn；
-		// ACTIVE 由其数据面所有者自然结束，不能因 Session Replacement 被截断。
-		poolErr = pool.CloseNonActive()
+	manager.removeLookup(managed)
+	if manager.afterRemoveForTest != nil {
+		manager.afterRemoveForTest(managed.session)
 	}
-	manager.registry.ClearIfCurrent(established.Session)
-	return errors.Join(ownerErr, inboundErr, poolErr)
+	cleanupMode := cleanupNonActive
+	if ctx.Err() != nil {
+		cleanupMode = cleanupAll
+	}
+	cleanupErr := manager.cleanupManaged(managed, cleanupMode)
+	return errors.Join(ownerErr, inboundErr, cleanupErr)
 }
 
 // Shutdown 停止发布新的 Session/Work，收束当前 Session 的非 ACTIVE Work，等待所有
@@ -331,12 +407,23 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 		}
 	}
 	manager.shutdownStarted = true
-	managedSessions := make([]*managedSession, 0, len(manager.byConnector))
-	for _, managed := range manager.byConnector {
+	managedSessions := make([]*managedSession, 0, len(manager.liveSessions))
+	for managed := range manager.liveSessions {
+		managed.setConvergenceReason("server_shutdown")
 		managedSessions = append(managedSessions, managed)
+	}
+	startupDone := make([]<-chan struct{}, 0, len(manager.startingByTunnel))
+	for _, group := range manager.startingByTunnel {
+		startupDone = append(startupDone, group.done)
 	}
 	clear(manager.bySession)
 	manager.mu.Unlock()
+	if manager.afterConvergenceFenceForTest != nil {
+		manager.afterConvergenceFenceForTest("shutdown")
+	}
+	for _, done := range startupDone {
+		<-done
+	}
 
 	var shutdownErr error
 	for _, managed := range managedSessions {
@@ -355,9 +442,9 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 	shutdownErr = errors.Join(shutdownErr, manager.registry.DrainActive(ctx))
 	for _, managed := range managedSessions {
 		// DrainActive 已关闭到期的 ACTIVE Transport；自然完成的 Handler 也会自行
-		// 归还 Pool Work。这里只结束 Control Session，避免对同一 ACTIVE socket
-		// 再执行一套 Close；Gateway.Close 会等待对应 Handler 全部退出。
-		managed.cancel()
+		// 归还 Pool Work。统一 cleanup 只关闭非 ACTIVE，并让并发 Serve/Revoke
+		// 等待同一个完成点，避免第二个收敛调用在首个 Close 尚未结束时提前成功。
+		shutdownErr = errors.Join(shutdownErr, manager.cleanupManaged(managed, cleanupNonActive))
 	}
 
 	manager.mu.Lock()
@@ -441,6 +528,98 @@ func (manager *Manager) Pool(session serverruntime.Session) (*serverworkpool.Poo
 	return managed.pool, true
 }
 
+// ConnectorSnapshots 返回 Registry 生命周期快照，并只用完整 Session identity
+// 叠加对应 WorkPool。replacement 前后的 Pool 永远不会混入同一个快照。
+func (manager *Manager) ConnectorSnapshots() []serverruntime.ConnectorSnapshot {
+	if manager == nil || manager.registry == nil {
+		return nil
+	}
+	snapshots := manager.registry.ConnectorSnapshots()
+	manager.mu.Lock()
+	pools := make(map[serverruntime.Session]*serverworkpool.Pool, len(manager.byConnector))
+	for _, managed := range manager.byConnector {
+		pools[managed.session] = managed.pool
+	}
+	manager.mu.Unlock()
+	for index := range snapshots {
+		pool := pools[snapshots[index].Session]
+		if pool == nil || snapshots[index].Tombstone {
+			continue
+		}
+		counts := pool.Snapshot()
+		snapshots[index].WorkPool = serverruntime.ConnectorWorkPoolSnapshot{
+			Connecting: counts.Connecting, Idle: counts.Idle, Opening: counts.Opening,
+			Active: counts.Active, Total: counts.Total, Closed: counts.Closed, Draining: counts.Draining,
+		}
+		switch {
+		case counts.Draining:
+			snapshots[index].Status = serverruntime.ConnectorStatusDraining
+		case counts.Closed:
+			snapshots[index].Status = serverruntime.ConnectorStatusDegraded
+		}
+	}
+	return snapshots
+}
+
+// MetricsSnapshot 返回 M2 冻结的五个无高基数 Label Gauge 输入。
+func (manager *Manager) MetricsSnapshot() MetricsSnapshot {
+	var metrics MetricsSnapshot
+	for _, snapshot := range manager.ConnectorSnapshots() {
+		metrics.XTunnelActiveConnections += snapshot.ActiveWork
+		metrics.XTunnelTCPActiveWorkConnections += snapshot.ActiveWork
+		if snapshot.Tombstone {
+			continue
+		}
+		metrics.XTunnelControlSessionsOnline++
+		if snapshot.Status == serverruntime.ConnectorStatusOnline {
+			metrics.XTunnelConnectorsOnline++
+		}
+		metrics.XTunnelTCPIdleWorkConnections += uint64(snapshot.WorkPool.Idle)
+	}
+	return metrics
+}
+
+// RevokeTunnel 先在 Manager 锁内建立永久 fence 并摘除全部 Session 查找入口，
+// 再在锁外撤销 Runtime、Authenticator、Pool 和 Control Owner。
+func (manager *Manager) RevokeTunnel(tunnelID string) error {
+	if manager == nil || identity.ValidateTunnelID(tunnelID) != nil {
+		return ErrSessionUnavailable
+	}
+	manager.mu.Lock()
+	manager.revokedTunnels[tunnelID] = struct{}{}
+	startupDone := manager.startupDoneLocked(tunnelID)
+	managedSessions := make([]*managedSession, 0)
+	for managed := range manager.liveSessions {
+		if managed.session.TunnelID != tunnelID {
+			continue
+		}
+		managed.setConvergenceReason("tunnel_revoked")
+		managedSessions = append(managedSessions, managed)
+		key := connectorKey{tunnelID: managed.session.TunnelID, connectorID: managed.session.ConnectorID}
+		if manager.byConnector[key] == managed {
+			delete(manager.byConnector, key)
+		}
+		if manager.bySession[managed.session.SessionID] == managed {
+			delete(manager.bySession, managed.session.SessionID)
+		}
+	}
+	manager.mu.Unlock()
+	if manager.afterConvergenceFenceForTest != nil {
+		manager.afterConvergenceFenceForTest("revoke")
+	}
+	if startupDone != nil {
+		<-startupDone
+	}
+	disconnectEvents, revokeErr := manager.registry.RevokeTunnelWithLifecycle(tunnelID)
+	for _, event := range disconnectEvents {
+		manager.logLifecycle(event)
+	}
+	for _, managed := range managedSessions {
+		revokeErr = errors.Join(revokeErr, manager.cleanupManaged(managed, cleanupNonActive))
+	}
+	return revokeErr
+}
+
 // SetPendingOpens 发布 Tunnel Proxy 已按 Tunnel 聚合到当前 Connector 的绝对等待数。
 // 零值表示最后一个等待者已离开；Demand generation 与 Lease 合并仍由 WorkPool 负责。
 func (manager *Manager) SetPendingOpens(session serverruntime.Session, pending uint32) error {
@@ -469,6 +648,9 @@ func (manager *Manager) install(managed *managedSession) (*managedSession, error
 	if manager.shutdownStarted {
 		return nil, ErrSessionUnavailable
 	}
+	if _, revoked := manager.revokedTunnels[managed.session.TunnelID]; revoked {
+		return nil, serverruntime.ErrTunnelRuntimeRevoked
+	}
 	previous := manager.byConnector[key]
 	if previous != nil && previous.session.Generation >= managed.session.Generation {
 		return nil, ErrSessionSuperseded
@@ -478,7 +660,52 @@ func (manager *Manager) install(managed *managedSession) (*managedSession, error
 	}
 	manager.byConnector[key] = managed
 	manager.bySession[managed.session.SessionID] = managed
+	manager.liveSessions[managed] = struct{}{}
 	return previous, nil
+}
+
+// beginStartup 在 Owner 启动前登记短生命周期预留。Revoke/Shutdown 先设置 fence，
+// 再在锁外等待预留完成，因此不会越过一个已经获准启动、但尚未发布到 liveSessions
+// 的 Control Owner。预留期间不持有 Manager 锁执行 Start、Wait、Close 或网络 IO。
+func (manager *Manager) beginStartup(tunnelID string) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.shutdownStarted {
+		return ErrSessionUnavailable
+	}
+	if _, revoked := manager.revokedTunnels[tunnelID]; revoked {
+		return serverruntime.ErrTunnelRuntimeRevoked
+	}
+	group := manager.startingByTunnel[tunnelID]
+	if group == nil {
+		group = &startupGroup{done: make(chan struct{})}
+		manager.startingByTunnel[tunnelID] = group
+	}
+	group.count++
+	return nil
+}
+
+func (manager *Manager) endStartup(tunnelID string) {
+	manager.mu.Lock()
+	group := manager.startingByTunnel[tunnelID]
+	if group == nil || group.count <= 0 {
+		manager.mu.Unlock()
+		panic("server session startup ownership invariant violated")
+	}
+	group.count--
+	if group.count == 0 {
+		delete(manager.startingByTunnel, tunnelID)
+		close(group.done)
+	}
+	manager.mu.Unlock()
+}
+
+func (manager *Manager) startupDoneLocked(tunnelID string) <-chan struct{} {
+	group := manager.startingByTunnel[tunnelID]
+	if group == nil {
+		return nil
+	}
+	return group.done
 }
 
 func (manager *Manager) enqueueInitialDemand(managed *managedSession, protocolVersion uint32) error {
@@ -625,6 +852,44 @@ func (managed *managedSession) shouldRolloverDemand(
 	return nonActive < desired
 }
 
+func (managed *managedSession) setTerminationReason(reason string) {
+	if managed == nil || reason == "" {
+		return
+	}
+	managed.terminationMu.Lock()
+	if managed.terminationReason == "" {
+		managed.terminationReason = reason
+	}
+	managed.terminationMu.Unlock()
+}
+
+// setConvergenceReason 让已经取得 Manager fence 的 Revoke/Shutdown 覆盖 cleanup
+// 尚未提交 Disconnected 事件时写入的默认原因。Heartbeat、replacement 等更具体的
+// 先行原因仍保留；因此并发终止路径有稳定且可解释的优先级。
+func (managed *managedSession) setConvergenceReason(reason string) {
+	if managed == nil || reason == "" {
+		return
+	}
+	managed.terminationMu.Lock()
+	if managed.terminationReason == "" || managed.terminationReason == "control_session_closed" {
+		managed.terminationReason = reason
+	}
+	managed.terminationMu.Unlock()
+}
+
+func (managed *managedSession) termination() string {
+	if managed == nil {
+		return "control_session_closed"
+	}
+	managed.terminationMu.Lock()
+	reason := managed.terminationReason
+	managed.terminationMu.Unlock()
+	if reason == "" {
+		return "control_session_closed"
+	}
+	return reason
+}
+
 func resetTimer(timer *time.Timer, timeout time.Duration) {
 	stopTimer(timer)
 	timer.Reset(timeout)
@@ -640,7 +905,16 @@ func stopTimer(timer *time.Timer) {
 	}
 }
 
-func (manager *Manager) remove(managed *managedSession) {
+type cleanupMode uint8
+
+const (
+	cleanupNonActive cleanupMode = iota
+	cleanupAll
+)
+
+// removeLookup 只撤下 Current/WorkAuth 查找入口。liveSessions 必须继续保留 managed，
+// 直到 cleanupManaged 已完成全部外部资源操作并关闭 cleanupDone。
+func (manager *Manager) removeLookup(managed *managedSession) {
 	key := connectorKey{tunnelID: managed.session.TunnelID, connectorID: managed.session.ConnectorID}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -652,14 +926,123 @@ func (manager *Manager) remove(managed *managedSession) {
 	}
 }
 
+func (manager *Manager) finishCleanup(managed *managedSession) {
+	manager.mu.Lock()
+	delete(manager.liveSessions, managed)
+	manager.mu.Unlock()
+}
+
+// cleanupManaged 是 Authenticator、WorkPool 和 Registry cleanup 的唯一 owner。
+// sync.Once 让并发 Serve/Revoke/Shutdown 在锁外等待同一次 Close；cleanupDone
+// 关闭时 Control Owner 和外部资源已完成收敛，liveSessions 也已删除。
+func (manager *Manager) cleanupManaged(managed *managedSession, mode cleanupMode) error {
+	if manager.beforeCleanupForTest != nil {
+		manager.beforeCleanupForTest(managed.session)
+	}
+	managed.cleanupOnce.Do(func() {
+		// Serve 的正常退出路径已等待 Owner；重复 Wait 只会读取已关闭
+		// done。Revoke、Shutdown 和 replacement 则必须在返回前真正等待
+		// Owner 的 Control socket 与内部 goroutine 全部退出。
+		managed.setTerminationReason("control_session_closed")
+		manager.removeLookup(managed)
+		managed.cancel()
+		ownerErr := cleanupOwnerError(managed.owner.Wait())
+		managed.authenticator.Close()
+		var poolErr error
+		if mode == cleanupAll {
+			poolErr = managed.pool.Close()
+		} else {
+			// 普通 Control 断开或 replacement 只关闭旧代尚未进入 ACTIVE 的
+			// WorkConn；ACTIVE 由数据面 owner、Revoke 或 Shutdown 收敛。
+			poolErr = managed.pool.CloseNonActive()
+		}
+		disconnectEvent, disconnected := manager.registry.DisconnectIfCurrent(managed.session, managed.termination())
+		if disconnected {
+			manager.logLifecycle(disconnectEvent)
+		}
+		managed.cleanupErr = errors.Join(ownerErr, poolErr)
+		manager.finishCleanup(managed)
+		close(managed.cleanupDone)
+	})
+	<-managed.cleanupDone
+	return managed.cleanupErr
+}
+
+// cleanupOwnerError 只消除 cleanup 主动 cancel 产生的预期终止原因。
+// Owner 在同一 errors.Join 中返回的 Deadline/Close 错误仍必须传播。
+func cleanupOwnerError(err error) error {
+	if err == nil || err == context.Canceled {
+		return nil
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return err
+	}
+	remaining := make([]error, 0, len(joined.Unwrap()))
+	for _, nested := range joined.Unwrap() {
+		if nested == context.Canceled {
+			continue
+		}
+		remaining = append(remaining, nested)
+	}
+	return errors.Join(remaining...)
+}
+
 // markDraining 立即撤下 WorkAuth/Pool 查找入口；Registry 仍保留 Current 身份供
 // generation fencing，但 Tunnel eligibility predicate 会因 Pool 不可见而排除它。
 func (manager *Manager) markDraining(managed *managedSession) {
+	key := connectorKey{tunnelID: managed.session.TunnelID, connectorID: managed.session.ConnectorID}
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
+	if manager.byConnector[key] != managed {
+		manager.mu.Unlock()
+		return
+	}
 	if manager.bySession[managed.session.SessionID] == managed {
 		delete(manager.bySession, managed.session.SessionID)
 	}
+	manager.mu.Unlock()
+	if event, changed := manager.registry.ObserveDraining(managed.session); changed {
+		manager.logLifecycle(event)
+	}
+}
+
+func (manager *Manager) logLifecycle(event serverruntime.ConnectorLifecycleEvent) {
+	if manager == nil || manager.logger == nil || event.Name == "" {
+		return
+	}
+	snapshot := event.Snapshot
+	attributes := make([]any, 0, 20)
+	if snapshot.TunnelID != "" {
+		attributes = append(attributes, slog.String("tunnel_id", snapshot.TunnelID))
+	}
+	if snapshot.ConnectorID != "" {
+		attributes = append(attributes, slog.String("connector_id", snapshot.ConnectorID))
+	}
+	if snapshot.SessionID != "" {
+		attributes = append(attributes, slog.String("session_id", snapshot.SessionID))
+	}
+	if snapshot.Generation != 0 {
+		attributes = append(attributes, slog.Uint64("generation", snapshot.Generation))
+	}
+	if snapshot.Status != "" {
+		attributes = append(attributes, slog.String("connector_status", string(snapshot.Status)))
+	}
+	if snapshot.Hostname != "" {
+		attributes = append(attributes, slog.String("hostname", snapshot.Hostname))
+	}
+	if snapshot.OS != "" {
+		attributes = append(attributes, slog.String("os", snapshot.OS))
+	}
+	if snapshot.Arch != "" {
+		attributes = append(attributes, slog.String("arch", snapshot.Arch))
+	}
+	if snapshot.Version != "" {
+		attributes = append(attributes, slog.String("version", snapshot.Version))
+	}
+	if event.Reason != "" {
+		attributes = append(attributes, slog.String("reason", event.Reason))
+	}
+	manager.logger.Info(event.Name, attributes...)
 }
 
 func validSession(session serverruntime.Session) bool {

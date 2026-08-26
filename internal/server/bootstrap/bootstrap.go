@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -55,8 +56,8 @@ func executeWithRun(
 func run(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
 	return runWithStorageAndBootstrap(ctx, program, args, environ, stderr, func(ctx context.Context, dataDir string) (storage, error) {
 		return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
-	}, func(ctx context.Context, config serverconfig.Config, resources storage) (io.Closer, error) {
-		return openGatewayAndBootstrap(ctx, config, resources)
+	}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
+		return openGatewayAndBootstrap(ctx, config, resources, logger)
 	})
 }
 
@@ -70,7 +71,7 @@ func runWithStorageAndBootstrap(
 	args, environ []string,
 	stderr io.Writer,
 	openStorage func(context.Context, string) (storage, error),
-	openBootstrap func(context.Context, serverconfig.Config, storage) (io.Closer, error),
+	openBootstrap func(context.Context, serverconfig.Config, storage, *slog.Logger) (io.Closer, error),
 ) error {
 	options, err := parseConfigOptions(program, args, environ, stderr)
 	if err != nil {
@@ -102,7 +103,7 @@ func runWithStorageAndBootstrap(
 	}
 	var bootstrapSocket io.Closer
 	if openBootstrap != nil {
-		bootstrapSocket, err = openBootstrap(ctx, config, resources)
+		bootstrapSocket, err = openBootstrap(ctx, config, resources, logger)
 		if err != nil {
 			return errors.Join(fmt.Errorf("initialize admin bootstrap socket: %w", err), resources.Close())
 		}
