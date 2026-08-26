@@ -6,7 +6,7 @@ option go_package = "github.com/lifei6671/xtunnel/internal/protocol/gen;protocol
 
 import "common.proto";
 
-// ConnectionToken 是 Agent 唯一的启动输入。文本形式固定为
+// ConnectionToken 是 Tunnel 下所有 Connector 共享的唯一启动输入。文本形式固定为
 // "xta_" 加上本消息确定性 Protobuf 字节的无填充 Base64URL 编码。
 // 解析器必须拒绝未知字段、非规范 Base64URL、非确定性编码、缺失字段和多余字节；
 // integrity_tag 参与完整性验证，不是可选的附加字段。
@@ -20,8 +20,9 @@ message ConnectionToken {
   // tls_trust 是 Agent 建立 TLS 时唯一允许使用的信任描述。
   TlsTrustDescriptor tls_trust = 3;
 
-  // agent_id、token_id（tok_<ULID>）与 token_version 共同标识 Server 侧 Credential。
-  string agent_id = 4;
+  // tunnel_id、token_id（tok_<ULID>）与 token_version 共同标识 Server 侧 Credential。
+  // 同一 Tunnel 的多个 Connector 复用这份身份，不为每个运行副本签发独立 Token。
+  string tunnel_id = 4;
   string token_id = 5;
   uint64 token_version = 6;
 
@@ -62,10 +63,10 @@ message PinnedSPKITrust {
   bytes spki_sha256 = 1;
 }
 
-// AgentAuthRequest 是 TLS 建立后、ControlEnvelope 之前唯一允许的 Agent 请求。
-message AgentAuthRequest {
+// ConnectorAuthRequest 是 TLS 建立后、ControlEnvelope 之前唯一允许的 Connector 请求。
+message ConnectorAuthRequest {
   string connection_token = 1;
-  string instance_id = 2;
+  string connector_id = 2;
   string hostname = 3;
   string version = 4;
   string os = 5;
@@ -75,17 +76,17 @@ message AgentAuthRequest {
   repeated string capabilities = 9;
 }
 
-// AgentAuthResult 是 Server 在 AUTH 阶段唯一允许返回的认证结果。
-message AgentAuthResult {
+// ConnectorAuthResult 是 Server 在 AUTH 阶段唯一允许返回的认证结果。
+message ConnectorAuthResult {
   oneof result {
-    AgentAuthSuccess success = 1;
-    AgentAuthFailure failure = 2;
+    ConnectorAuthSuccess success = 1;
+    ConnectorAuthFailure failure = 2;
   }
 }
 
-// AgentAuthSuccess 是完整 flush 后双方切换至 ESTABLISHED 的提交载体。
-message AgentAuthSuccess {
-  string agent_id = 1;
+// ConnectorAuthSuccess 是完整 flush 后双方切换至 ESTABLISHED 的提交载体。
+message ConnectorAuthSuccess {
+  string tunnel_id = 1;
   string session_id = 2;
   // session_secret 必须恰为 32 字节，仅属于当前 Session。
   bytes session_secret = 3;
@@ -94,31 +95,31 @@ message AgentAuthSuccess {
   uint32 heartbeat_interval_ms = 6;
 }
 
-// AgentAuthFailure 在可安全写入时必须完整 flush，随后关闭 TLS 连接。
-message AgentAuthFailure {
+// ConnectorAuthFailure 在可安全写入时必须完整 flush，随后关闭 TLS 连接。
+message ConnectorAuthFailure {
   ErrorCode error_code = 1;
   uint32 retry_after_ms = 2;
 }
 
 // ControlEnvelope 仅用于 ESTABLISHED 或 DRAINING 状态。
-// Agent 到 Server：heartbeat、config_ack、tunnel_health_batch、drain_request、error。
-// Server 到 Agent：config_snapshot、work_demand、drain_ack、error。
+// Connector 到 Server：heartbeat、config_ack、service_health_batch、drain_request、error。
+// Server 到 Connector：config_snapshot、work_demand、drain_ack、error。
 message ControlEnvelope {
   uint32 protocol_version = 1;
 
   oneof payload {
     Heartbeat heartbeat = 10;
-    AgentSnapshot config_snapshot = 11;
+    TunnelSnapshot config_snapshot = 11;
     ConfigAck config_ack = 12;
     WorkDemand work_demand = 13;
-    TunnelHealthBatch tunnel_health_batch = 14;
+    ServiceHealthBatch service_health_batch = 14;
     DrainRequest drain_request = 15;
     Error error = 16;
     DrainAck drain_ack = 17;
   }
 }
 
-// Heartbeat 只由 Agent 在 ESTABLISHED 或 DRAINING 状态发送。
+// Heartbeat 只由 Connector 在 ESTABLISHED 或 DRAINING 状态发送。
 message Heartbeat {
   uint64 timestamp_ms = 1;
   uint64 observed_revision = 2;
@@ -129,16 +130,17 @@ message Heartbeat {
   uint32 tcp_connecting = 7;
 }
 
-// AgentSnapshot 是 Server 下发的完整远端 Desired State。
-message AgentSnapshot {
-  string agent_id = 1;
+// TunnelSnapshot 是 Server 向一个 Connector 下发的 Tunnel 完整远端 Desired State。
+// 同一 Tunnel 的所有在线 Connector 接收同一组 Service 配置。
+message TunnelSnapshot {
+  string tunnel_id = 1;
   uint64 revision = 2;
-  repeated TunnelBindingConfig bindings = 3;
+  repeated ServiceConfig services = 3;
 }
 
-// TunnelBindingConfig 是单个 Tunnel 在该 Agent 上的完整连接目标配置。
-message TunnelBindingConfig {
-  string tunnel_id = 1;
+// ServiceConfig 是挂载在 Tunnel 上的单个代理服务及其后端连接配置。
+message ServiceConfig {
+  string service_id = 1;
   string origin_scheme = 2;
   string origin_host = 3;
   uint32 origin_port = 4;
@@ -151,7 +153,7 @@ message TunnelBindingConfig {
   uint64 required_revision = 11;
 }
 
-// HealthCheckConfig 描述单个 Tunnel 的 Origin 健康检查策略。
+// HealthCheckConfig 描述单个 Service 的 Origin 健康检查策略。
 message HealthCheckConfig {
   HealthType type = 1;
   string path = 2;
@@ -163,7 +165,7 @@ message HealthCheckConfig {
   uint32 success_threshold = 8;
 }
 
-// ConfigAck 只在完整 Snapshot 原子应用成功或拒绝后由 Agent 发送。
+// ConfigAck 只在完整 Snapshot 原子应用成功或拒绝后由 Connector 发送。
 message ConfigAck {
   uint64 observed_revision = 1;
   ConfigApplyStatus apply_status = 2;
@@ -179,23 +181,23 @@ message WorkDemand {
   uint64 demand_generation = 5;
 }
 
-// TunnelHealth 是 Agent 对单个 Tunnel 的当前健康观测。
-message TunnelHealth {
-  string tunnel_id = 1;
+// ServiceHealth 是 Connector 对单个 Service 后端的当前健康观测。
+message ServiceHealth {
+  string service_id = 1;
   HealthStatus status = 2;
   uint32 latency_ms = 3;
   string error_code = 4;
   uint64 checked_at_ms = 5;
-  uint64 binding_revision = 6;
+  uint64 service_revision = 6;
 }
 
-// TunnelHealthBatch 在一个 Control Session 内按 generation 严格递增。
-message TunnelHealthBatch {
+// ServiceHealthBatch 在一个 Control Session 内按 generation 严格递增。
+message ServiceHealthBatch {
   uint64 generation = 1;
-  repeated TunnelHealth items = 2;
+  repeated ServiceHealth items = 2;
 }
 
-// DrainRequest 由 Agent 发起；重复相同 drain_id 与内容必须幂等。
+// DrainRequest 由 Connector 发起；重复相同 drain_id 与内容必须幂等。
 message DrainRequest {
   string drain_id = 1;
   uint32 drain_timeout_ms = 2;

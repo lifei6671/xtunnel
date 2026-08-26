@@ -21,7 +21,7 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// ConnectionToken 是 Agent 唯一的启动输入。文本形式固定为
+// ConnectionToken 是 Tunnel 下所有 Connector 共享的唯一启动输入。文本形式固定为
 // "xta_" 加上本消息确定性 Protobuf 字节的无填充 Base64URL 编码。
 // 解析器必须拒绝未知字段、非规范 Base64URL、非确定性编码、缺失字段和多余字节；
 // integrity_tag 参与完整性验证，不是可选的附加字段。
@@ -33,8 +33,9 @@ type ConnectionToken struct {
 	Endpoint *GatewayEndpoint `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
 	// tls_trust 是 Agent 建立 TLS 时唯一允许使用的信任描述。
 	TlsTrust *TlsTrustDescriptor `protobuf:"bytes,3,opt,name=tls_trust,json=tlsTrust,proto3" json:"tls_trust,omitempty"`
-	// agent_id、token_id（tok_<ULID>）与 token_version 共同标识 Server 侧 Credential。
-	AgentId      string `protobuf:"bytes,4,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	// tunnel_id、token_id（tok_<ULID>）与 token_version 共同标识 Server 侧 Credential。
+	// 同一 Tunnel 的多个 Connector 复用这份身份，不为每个运行副本签发独立 Token。
+	TunnelId     string `protobuf:"bytes,4,opt,name=tunnel_id,json=tunnelId,proto3" json:"tunnel_id,omitempty"`
 	TokenId      string `protobuf:"bytes,5,opt,name=token_id,json=tokenId,proto3" json:"token_id,omitempty"`
 	TokenVersion uint64 `protobuf:"varint,6,opt,name=token_version,json=tokenVersion,proto3" json:"token_version,omitempty"`
 	// authentication_secret 必须恰为 32 字节，由 CSPRNG 生成。
@@ -98,9 +99,9 @@ func (x *ConnectionToken) GetTlsTrust() *TlsTrustDescriptor {
 	return nil
 }
 
-func (x *ConnectionToken) GetAgentId() string {
+func (x *ConnectionToken) GetTunnelId() string {
 	if x != nil {
-		return x.AgentId
+		return x.TunnelId
 	}
 	return ""
 }
@@ -355,11 +356,11 @@ func (x *PinnedSPKITrust) GetSpkiSha256() []byte {
 	return nil
 }
 
-// AgentAuthRequest 是 TLS 建立后、ControlEnvelope 之前唯一允许的 Agent 请求。
-type AgentAuthRequest struct {
+// ConnectorAuthRequest 是 TLS 建立后、ControlEnvelope 之前唯一允许的 Connector 请求。
+type ConnectorAuthRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	ConnectionToken string                 `protobuf:"bytes,1,opt,name=connection_token,json=connectionToken,proto3" json:"connection_token,omitempty"`
-	InstanceId      string                 `protobuf:"bytes,2,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	ConnectorId     string                 `protobuf:"bytes,2,opt,name=connector_id,json=connectorId,proto3" json:"connector_id,omitempty"`
 	Hostname        string                 `protobuf:"bytes,3,opt,name=hostname,proto3" json:"hostname,omitempty"`
 	Version         string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
 	Os              string                 `protobuf:"bytes,5,opt,name=os,proto3" json:"os,omitempty"`
@@ -371,20 +372,20 @@ type AgentAuthRequest struct {
 	sizeCache       protoimpl.SizeCache
 }
 
-func (x *AgentAuthRequest) Reset() {
-	*x = AgentAuthRequest{}
+func (x *ConnectorAuthRequest) Reset() {
+	*x = ConnectorAuthRequest{}
 	mi := &file_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AgentAuthRequest) String() string {
+func (x *ConnectorAuthRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AgentAuthRequest) ProtoMessage() {}
+func (*ConnectorAuthRequest) ProtoMessage() {}
 
-func (x *AgentAuthRequest) ProtoReflect() protoreflect.Message {
+func (x *ConnectorAuthRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -396,100 +397,100 @@ func (x *AgentAuthRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AgentAuthRequest.ProtoReflect.Descriptor instead.
-func (*AgentAuthRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ConnectorAuthRequest.ProtoReflect.Descriptor instead.
+func (*ConnectorAuthRequest) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *AgentAuthRequest) GetConnectionToken() string {
+func (x *ConnectorAuthRequest) GetConnectionToken() string {
 	if x != nil {
 		return x.ConnectionToken
 	}
 	return ""
 }
 
-func (x *AgentAuthRequest) GetInstanceId() string {
+func (x *ConnectorAuthRequest) GetConnectorId() string {
 	if x != nil {
-		return x.InstanceId
+		return x.ConnectorId
 	}
 	return ""
 }
 
-func (x *AgentAuthRequest) GetHostname() string {
+func (x *ConnectorAuthRequest) GetHostname() string {
 	if x != nil {
 		return x.Hostname
 	}
 	return ""
 }
 
-func (x *AgentAuthRequest) GetVersion() string {
+func (x *ConnectorAuthRequest) GetVersion() string {
 	if x != nil {
 		return x.Version
 	}
 	return ""
 }
 
-func (x *AgentAuthRequest) GetOs() string {
+func (x *ConnectorAuthRequest) GetOs() string {
 	if x != nil {
 		return x.Os
 	}
 	return ""
 }
 
-func (x *AgentAuthRequest) GetArch() string {
+func (x *ConnectorAuthRequest) GetArch() string {
 	if x != nil {
 		return x.Arch
 	}
 	return ""
 }
 
-func (x *AgentAuthRequest) GetMinProtocol() uint32 {
+func (x *ConnectorAuthRequest) GetMinProtocol() uint32 {
 	if x != nil {
 		return x.MinProtocol
 	}
 	return 0
 }
 
-func (x *AgentAuthRequest) GetMaxProtocol() uint32 {
+func (x *ConnectorAuthRequest) GetMaxProtocol() uint32 {
 	if x != nil {
 		return x.MaxProtocol
 	}
 	return 0
 }
 
-func (x *AgentAuthRequest) GetCapabilities() []string {
+func (x *ConnectorAuthRequest) GetCapabilities() []string {
 	if x != nil {
 		return x.Capabilities
 	}
 	return nil
 }
 
-// AgentAuthResult 是 Server 在 AUTH 阶段唯一允许返回的认证结果。
-type AgentAuthResult struct {
+// ConnectorAuthResult 是 Server 在 AUTH 阶段唯一允许返回的认证结果。
+type ConnectorAuthResult struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Result:
 	//
-	//	*AgentAuthResult_Success
-	//	*AgentAuthResult_Failure
-	Result        isAgentAuthResult_Result `protobuf_oneof:"result"`
+	//	*ConnectorAuthResult_Success
+	//	*ConnectorAuthResult_Failure
+	Result        isConnectorAuthResult_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *AgentAuthResult) Reset() {
-	*x = AgentAuthResult{}
+func (x *ConnectorAuthResult) Reset() {
+	*x = ConnectorAuthResult{}
 	mi := &file_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AgentAuthResult) String() string {
+func (x *ConnectorAuthResult) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AgentAuthResult) ProtoMessage() {}
+func (*ConnectorAuthResult) ProtoMessage() {}
 
-func (x *AgentAuthResult) ProtoReflect() protoreflect.Message {
+func (x *ConnectorAuthResult) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -501,56 +502,56 @@ func (x *AgentAuthResult) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AgentAuthResult.ProtoReflect.Descriptor instead.
-func (*AgentAuthResult) Descriptor() ([]byte, []int) {
+// Deprecated: Use ConnectorAuthResult.ProtoReflect.Descriptor instead.
+func (*ConnectorAuthResult) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *AgentAuthResult) GetResult() isAgentAuthResult_Result {
+func (x *ConnectorAuthResult) GetResult() isConnectorAuthResult_Result {
 	if x != nil {
 		return x.Result
 	}
 	return nil
 }
 
-func (x *AgentAuthResult) GetSuccess() *AgentAuthSuccess {
+func (x *ConnectorAuthResult) GetSuccess() *ConnectorAuthSuccess {
 	if x != nil {
-		if x, ok := x.Result.(*AgentAuthResult_Success); ok {
+		if x, ok := x.Result.(*ConnectorAuthResult_Success); ok {
 			return x.Success
 		}
 	}
 	return nil
 }
 
-func (x *AgentAuthResult) GetFailure() *AgentAuthFailure {
+func (x *ConnectorAuthResult) GetFailure() *ConnectorAuthFailure {
 	if x != nil {
-		if x, ok := x.Result.(*AgentAuthResult_Failure); ok {
+		if x, ok := x.Result.(*ConnectorAuthResult_Failure); ok {
 			return x.Failure
 		}
 	}
 	return nil
 }
 
-type isAgentAuthResult_Result interface {
-	isAgentAuthResult_Result()
+type isConnectorAuthResult_Result interface {
+	isConnectorAuthResult_Result()
 }
 
-type AgentAuthResult_Success struct {
-	Success *AgentAuthSuccess `protobuf:"bytes,1,opt,name=success,proto3,oneof"`
+type ConnectorAuthResult_Success struct {
+	Success *ConnectorAuthSuccess `protobuf:"bytes,1,opt,name=success,proto3,oneof"`
 }
 
-type AgentAuthResult_Failure struct {
-	Failure *AgentAuthFailure `protobuf:"bytes,2,opt,name=failure,proto3,oneof"`
+type ConnectorAuthResult_Failure struct {
+	Failure *ConnectorAuthFailure `protobuf:"bytes,2,opt,name=failure,proto3,oneof"`
 }
 
-func (*AgentAuthResult_Success) isAgentAuthResult_Result() {}
+func (*ConnectorAuthResult_Success) isConnectorAuthResult_Result() {}
 
-func (*AgentAuthResult_Failure) isAgentAuthResult_Result() {}
+func (*ConnectorAuthResult_Failure) isConnectorAuthResult_Result() {}
 
-// AgentAuthSuccess 是完整 flush 后双方切换至 ESTABLISHED 的提交载体。
-type AgentAuthSuccess struct {
+// ConnectorAuthSuccess 是完整 flush 后双方切换至 ESTABLISHED 的提交载体。
+type ConnectorAuthSuccess struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
-	AgentId   string                 `protobuf:"bytes,1,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	TunnelId  string                 `protobuf:"bytes,1,opt,name=tunnel_id,json=tunnelId,proto3" json:"tunnel_id,omitempty"`
 	SessionId string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	// session_secret 必须恰为 32 字节，仅属于当前 Session。
 	SessionSecret       []byte `protobuf:"bytes,3,opt,name=session_secret,json=sessionSecret,proto3" json:"session_secret,omitempty"`
@@ -561,20 +562,20 @@ type AgentAuthSuccess struct {
 	sizeCache           protoimpl.SizeCache
 }
 
-func (x *AgentAuthSuccess) Reset() {
-	*x = AgentAuthSuccess{}
+func (x *ConnectorAuthSuccess) Reset() {
+	*x = ConnectorAuthSuccess{}
 	mi := &file_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AgentAuthSuccess) String() string {
+func (x *ConnectorAuthSuccess) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AgentAuthSuccess) ProtoMessage() {}
+func (*ConnectorAuthSuccess) ProtoMessage() {}
 
-func (x *AgentAuthSuccess) ProtoReflect() protoreflect.Message {
+func (x *ConnectorAuthSuccess) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -586,55 +587,55 @@ func (x *AgentAuthSuccess) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AgentAuthSuccess.ProtoReflect.Descriptor instead.
-func (*AgentAuthSuccess) Descriptor() ([]byte, []int) {
+// Deprecated: Use ConnectorAuthSuccess.ProtoReflect.Descriptor instead.
+func (*ConnectorAuthSuccess) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *AgentAuthSuccess) GetAgentId() string {
+func (x *ConnectorAuthSuccess) GetTunnelId() string {
 	if x != nil {
-		return x.AgentId
+		return x.TunnelId
 	}
 	return ""
 }
 
-func (x *AgentAuthSuccess) GetSessionId() string {
+func (x *ConnectorAuthSuccess) GetSessionId() string {
 	if x != nil {
 		return x.SessionId
 	}
 	return ""
 }
 
-func (x *AgentAuthSuccess) GetSessionSecret() []byte {
+func (x *ConnectorAuthSuccess) GetSessionSecret() []byte {
 	if x != nil {
 		return x.SessionSecret
 	}
 	return nil
 }
 
-func (x *AgentAuthSuccess) GetProtocolVersion() uint32 {
+func (x *ConnectorAuthSuccess) GetProtocolVersion() uint32 {
 	if x != nil {
 		return x.ProtocolVersion
 	}
 	return 0
 }
 
-func (x *AgentAuthSuccess) GetDesiredRevision() uint64 {
+func (x *ConnectorAuthSuccess) GetDesiredRevision() uint64 {
 	if x != nil {
 		return x.DesiredRevision
 	}
 	return 0
 }
 
-func (x *AgentAuthSuccess) GetHeartbeatIntervalMs() uint32 {
+func (x *ConnectorAuthSuccess) GetHeartbeatIntervalMs() uint32 {
 	if x != nil {
 		return x.HeartbeatIntervalMs
 	}
 	return 0
 }
 
-// AgentAuthFailure 在可安全写入时必须完整 flush，随后关闭 TLS 连接。
-type AgentAuthFailure struct {
+// ConnectorAuthFailure 在可安全写入时必须完整 flush，随后关闭 TLS 连接。
+type ConnectorAuthFailure struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ErrorCode     ErrorCode              `protobuf:"varint,1,opt,name=error_code,json=errorCode,proto3,enum=xtunnel.protocol.v1.ErrorCode" json:"error_code,omitempty"`
 	RetryAfterMs  uint32                 `protobuf:"varint,2,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
@@ -642,20 +643,20 @@ type AgentAuthFailure struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *AgentAuthFailure) Reset() {
-	*x = AgentAuthFailure{}
+func (x *ConnectorAuthFailure) Reset() {
+	*x = ConnectorAuthFailure{}
 	mi := &file_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AgentAuthFailure) String() string {
+func (x *ConnectorAuthFailure) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AgentAuthFailure) ProtoMessage() {}
+func (*ConnectorAuthFailure) ProtoMessage() {}
 
-func (x *AgentAuthFailure) ProtoReflect() protoreflect.Message {
+func (x *ConnectorAuthFailure) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -667,19 +668,19 @@ func (x *AgentAuthFailure) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AgentAuthFailure.ProtoReflect.Descriptor instead.
-func (*AgentAuthFailure) Descriptor() ([]byte, []int) {
+// Deprecated: Use ConnectorAuthFailure.ProtoReflect.Descriptor instead.
+func (*ConnectorAuthFailure) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *AgentAuthFailure) GetErrorCode() ErrorCode {
+func (x *ConnectorAuthFailure) GetErrorCode() ErrorCode {
 	if x != nil {
 		return x.ErrorCode
 	}
 	return ErrorCode_ERROR_CODE_OK
 }
 
-func (x *AgentAuthFailure) GetRetryAfterMs() uint32 {
+func (x *ConnectorAuthFailure) GetRetryAfterMs() uint32 {
 	if x != nil {
 		return x.RetryAfterMs
 	}
@@ -687,8 +688,8 @@ func (x *AgentAuthFailure) GetRetryAfterMs() uint32 {
 }
 
 // ControlEnvelope 仅用于 ESTABLISHED 或 DRAINING 状态。
-// Agent 到 Server：heartbeat、config_ack、tunnel_health_batch、drain_request、error。
-// Server 到 Agent：config_snapshot、work_demand、drain_ack、error。
+// Connector 到 Server：heartbeat、config_ack、service_health_batch、drain_request、error。
+// Server 到 Connector：config_snapshot、work_demand、drain_ack、error。
 type ControlEnvelope struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
@@ -698,7 +699,7 @@ type ControlEnvelope struct {
 	//	*ControlEnvelope_ConfigSnapshot
 	//	*ControlEnvelope_ConfigAck
 	//	*ControlEnvelope_WorkDemand
-	//	*ControlEnvelope_TunnelHealthBatch
+	//	*ControlEnvelope_ServiceHealthBatch
 	//	*ControlEnvelope_DrainRequest
 	//	*ControlEnvelope_Error
 	//	*ControlEnvelope_DrainAck
@@ -760,7 +761,7 @@ func (x *ControlEnvelope) GetHeartbeat() *Heartbeat {
 	return nil
 }
 
-func (x *ControlEnvelope) GetConfigSnapshot() *AgentSnapshot {
+func (x *ControlEnvelope) GetConfigSnapshot() *TunnelSnapshot {
 	if x != nil {
 		if x, ok := x.Payload.(*ControlEnvelope_ConfigSnapshot); ok {
 			return x.ConfigSnapshot
@@ -787,10 +788,10 @@ func (x *ControlEnvelope) GetWorkDemand() *WorkDemand {
 	return nil
 }
 
-func (x *ControlEnvelope) GetTunnelHealthBatch() *TunnelHealthBatch {
+func (x *ControlEnvelope) GetServiceHealthBatch() *ServiceHealthBatch {
 	if x != nil {
-		if x, ok := x.Payload.(*ControlEnvelope_TunnelHealthBatch); ok {
-			return x.TunnelHealthBatch
+		if x, ok := x.Payload.(*ControlEnvelope_ServiceHealthBatch); ok {
+			return x.ServiceHealthBatch
 		}
 	}
 	return nil
@@ -832,7 +833,7 @@ type ControlEnvelope_Heartbeat struct {
 }
 
 type ControlEnvelope_ConfigSnapshot struct {
-	ConfigSnapshot *AgentSnapshot `protobuf:"bytes,11,opt,name=config_snapshot,json=configSnapshot,proto3,oneof"`
+	ConfigSnapshot *TunnelSnapshot `protobuf:"bytes,11,opt,name=config_snapshot,json=configSnapshot,proto3,oneof"`
 }
 
 type ControlEnvelope_ConfigAck struct {
@@ -843,8 +844,8 @@ type ControlEnvelope_WorkDemand struct {
 	WorkDemand *WorkDemand `protobuf:"bytes,13,opt,name=work_demand,json=workDemand,proto3,oneof"`
 }
 
-type ControlEnvelope_TunnelHealthBatch struct {
-	TunnelHealthBatch *TunnelHealthBatch `protobuf:"bytes,14,opt,name=tunnel_health_batch,json=tunnelHealthBatch,proto3,oneof"`
+type ControlEnvelope_ServiceHealthBatch struct {
+	ServiceHealthBatch *ServiceHealthBatch `protobuf:"bytes,14,opt,name=service_health_batch,json=serviceHealthBatch,proto3,oneof"`
 }
 
 type ControlEnvelope_DrainRequest struct {
@@ -867,7 +868,7 @@ func (*ControlEnvelope_ConfigAck) isControlEnvelope_Payload() {}
 
 func (*ControlEnvelope_WorkDemand) isControlEnvelope_Payload() {}
 
-func (*ControlEnvelope_TunnelHealthBatch) isControlEnvelope_Payload() {}
+func (*ControlEnvelope_ServiceHealthBatch) isControlEnvelope_Payload() {}
 
 func (*ControlEnvelope_DrainRequest) isControlEnvelope_Payload() {}
 
@@ -875,7 +876,7 @@ func (*ControlEnvelope_Error) isControlEnvelope_Payload() {}
 
 func (*ControlEnvelope_DrainAck) isControlEnvelope_Payload() {}
 
-// Heartbeat 只由 Agent 在 ESTABLISHED 或 DRAINING 状态发送。
+// Heartbeat 只由 Connector 在 ESTABLISHED 或 DRAINING 状态发送。
 type Heartbeat struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	TimestampMs      uint64                 `protobuf:"varint,1,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
@@ -968,30 +969,31 @@ func (x *Heartbeat) GetTcpConnecting() uint32 {
 	return 0
 }
 
-// AgentSnapshot 是 Server 下发的完整远端 Desired State。
-type AgentSnapshot struct {
+// TunnelSnapshot 是 Server 向一个 Connector 下发的 Tunnel 完整远端 Desired State。
+// 同一 Tunnel 的所有在线 Connector 接收同一组 Service 配置。
+type TunnelSnapshot struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	AgentId       string                 `protobuf:"bytes,1,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	TunnelId      string                 `protobuf:"bytes,1,opt,name=tunnel_id,json=tunnelId,proto3" json:"tunnel_id,omitempty"`
 	Revision      uint64                 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
-	Bindings      []*TunnelBindingConfig `protobuf:"bytes,3,rep,name=bindings,proto3" json:"bindings,omitempty"`
+	Services      []*ServiceConfig       `protobuf:"bytes,3,rep,name=services,proto3" json:"services,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *AgentSnapshot) Reset() {
-	*x = AgentSnapshot{}
+func (x *TunnelSnapshot) Reset() {
+	*x = TunnelSnapshot{}
 	mi := &file_control_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AgentSnapshot) String() string {
+func (x *TunnelSnapshot) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AgentSnapshot) ProtoMessage() {}
+func (*TunnelSnapshot) ProtoMessage() {}
 
-func (x *AgentSnapshot) ProtoReflect() protoreflect.Message {
+func (x *TunnelSnapshot) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1003,36 +1005,36 @@ func (x *AgentSnapshot) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AgentSnapshot.ProtoReflect.Descriptor instead.
-func (*AgentSnapshot) Descriptor() ([]byte, []int) {
+// Deprecated: Use TunnelSnapshot.ProtoReflect.Descriptor instead.
+func (*TunnelSnapshot) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{11}
 }
 
-func (x *AgentSnapshot) GetAgentId() string {
+func (x *TunnelSnapshot) GetTunnelId() string {
 	if x != nil {
-		return x.AgentId
+		return x.TunnelId
 	}
 	return ""
 }
 
-func (x *AgentSnapshot) GetRevision() uint64 {
+func (x *TunnelSnapshot) GetRevision() uint64 {
 	if x != nil {
 		return x.Revision
 	}
 	return 0
 }
 
-func (x *AgentSnapshot) GetBindings() []*TunnelBindingConfig {
+func (x *TunnelSnapshot) GetServices() []*ServiceConfig {
 	if x != nil {
-		return x.Bindings
+		return x.Services
 	}
 	return nil
 }
 
-// TunnelBindingConfig 是单个 Tunnel 在该 Agent 上的完整连接目标配置。
-type TunnelBindingConfig struct {
+// ServiceConfig 是挂载在 Tunnel 上的单个代理服务及其后端连接配置。
+type ServiceConfig struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
-	TunnelId         string                 `protobuf:"bytes,1,opt,name=tunnel_id,json=tunnelId,proto3" json:"tunnel_id,omitempty"`
+	ServiceId        string                 `protobuf:"bytes,1,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
 	OriginScheme     string                 `protobuf:"bytes,2,opt,name=origin_scheme,json=originScheme,proto3" json:"origin_scheme,omitempty"`
 	OriginHost       string                 `protobuf:"bytes,3,opt,name=origin_host,json=originHost,proto3" json:"origin_host,omitempty"`
 	OriginPort       uint32                 `protobuf:"varint,4,opt,name=origin_port,json=originPort,proto3" json:"origin_port,omitempty"`
@@ -1047,20 +1049,20 @@ type TunnelBindingConfig struct {
 	sizeCache        protoimpl.SizeCache
 }
 
-func (x *TunnelBindingConfig) Reset() {
-	*x = TunnelBindingConfig{}
+func (x *ServiceConfig) Reset() {
+	*x = ServiceConfig{}
 	mi := &file_control_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *TunnelBindingConfig) String() string {
+func (x *ServiceConfig) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*TunnelBindingConfig) ProtoMessage() {}
+func (*ServiceConfig) ProtoMessage() {}
 
-func (x *TunnelBindingConfig) ProtoReflect() protoreflect.Message {
+func (x *ServiceConfig) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1072,89 +1074,89 @@ func (x *TunnelBindingConfig) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use TunnelBindingConfig.ProtoReflect.Descriptor instead.
-func (*TunnelBindingConfig) Descriptor() ([]byte, []int) {
+// Deprecated: Use ServiceConfig.ProtoReflect.Descriptor instead.
+func (*ServiceConfig) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{12}
 }
 
-func (x *TunnelBindingConfig) GetTunnelId() string {
+func (x *ServiceConfig) GetServiceId() string {
 	if x != nil {
-		return x.TunnelId
+		return x.ServiceId
 	}
 	return ""
 }
 
-func (x *TunnelBindingConfig) GetOriginScheme() string {
+func (x *ServiceConfig) GetOriginScheme() string {
 	if x != nil {
 		return x.OriginScheme
 	}
 	return ""
 }
 
-func (x *TunnelBindingConfig) GetOriginHost() string {
+func (x *ServiceConfig) GetOriginHost() string {
 	if x != nil {
 		return x.OriginHost
 	}
 	return ""
 }
 
-func (x *TunnelBindingConfig) GetOriginPort() uint32 {
+func (x *ServiceConfig) GetOriginPort() uint32 {
 	if x != nil {
 		return x.OriginPort
 	}
 	return 0
 }
 
-func (x *TunnelBindingConfig) GetConnectTimeoutMs() uint32 {
+func (x *ServiceConfig) GetConnectTimeoutMs() uint32 {
 	if x != nil {
 		return x.ConnectTimeoutMs
 	}
 	return 0
 }
 
-func (x *TunnelBindingConfig) GetTlsVerify() bool {
+func (x *ServiceConfig) GetTlsVerify() bool {
 	if x != nil {
 		return x.TlsVerify
 	}
 	return false
 }
 
-func (x *TunnelBindingConfig) GetTlsServerName() string {
+func (x *ServiceConfig) GetTlsServerName() string {
 	if x != nil {
 		return x.TlsServerName
 	}
 	return ""
 }
 
-func (x *TunnelBindingConfig) GetOriginHttpHost() string {
+func (x *ServiceConfig) GetOriginHttpHost() string {
 	if x != nil {
 		return x.OriginHttpHost
 	}
 	return ""
 }
 
-func (x *TunnelBindingConfig) GetHealth() *HealthCheckConfig {
+func (x *ServiceConfig) GetHealth() *HealthCheckConfig {
 	if x != nil {
 		return x.Health
 	}
 	return nil
 }
 
-func (x *TunnelBindingConfig) GetEnabled() bool {
+func (x *ServiceConfig) GetEnabled() bool {
 	if x != nil {
 		return x.Enabled
 	}
 	return false
 }
 
-func (x *TunnelBindingConfig) GetRequiredRevision() uint64 {
+func (x *ServiceConfig) GetRequiredRevision() uint64 {
 	if x != nil {
 		return x.RequiredRevision
 	}
 	return 0
 }
 
-// HealthCheckConfig 描述单个 Tunnel 的 Origin 健康检查策略。
+// HealthCheckConfig 描述单个 Service 的 Origin 健康检查策略。
 type HealthCheckConfig struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	Type              HealthType             `protobuf:"varint,1,opt,name=type,proto3,enum=xtunnel.protocol.v1.HealthType" json:"type,omitempty"`
@@ -1255,7 +1257,7 @@ func (x *HealthCheckConfig) GetSuccessThreshold() uint32 {
 	return 0
 }
 
-// ConfigAck 只在完整 Snapshot 原子应用成功或拒绝后由 Agent 发送。
+// ConfigAck 只在完整 Snapshot 原子应用成功或拒绝后由 Connector 发送。
 type ConfigAck struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	ObservedRevision uint64                 `protobuf:"varint,1,opt,name=observed_revision,json=observedRevision,proto3" json:"observed_revision,omitempty"`
@@ -1393,33 +1395,33 @@ func (x *WorkDemand) GetDemandGeneration() uint64 {
 	return 0
 }
 
-// TunnelHealth 是 Agent 对单个 Tunnel 的当前健康观测。
-type TunnelHealth struct {
+// ServiceHealth 是 Connector 对单个 Service 后端的当前健康观测。
+type ServiceHealth struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
-	TunnelId        string                 `protobuf:"bytes,1,opt,name=tunnel_id,json=tunnelId,proto3" json:"tunnel_id,omitempty"`
+	ServiceId       string                 `protobuf:"bytes,1,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
 	Status          HealthStatus           `protobuf:"varint,2,opt,name=status,proto3,enum=xtunnel.protocol.v1.HealthStatus" json:"status,omitempty"`
 	LatencyMs       uint32                 `protobuf:"varint,3,opt,name=latency_ms,json=latencyMs,proto3" json:"latency_ms,omitempty"`
 	ErrorCode       string                 `protobuf:"bytes,4,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
 	CheckedAtMs     uint64                 `protobuf:"varint,5,opt,name=checked_at_ms,json=checkedAtMs,proto3" json:"checked_at_ms,omitempty"`
-	BindingRevision uint64                 `protobuf:"varint,6,opt,name=binding_revision,json=bindingRevision,proto3" json:"binding_revision,omitempty"`
+	ServiceRevision uint64                 `protobuf:"varint,6,opt,name=service_revision,json=serviceRevision,proto3" json:"service_revision,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
 
-func (x *TunnelHealth) Reset() {
-	*x = TunnelHealth{}
+func (x *ServiceHealth) Reset() {
+	*x = ServiceHealth{}
 	mi := &file_control_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *TunnelHealth) String() string {
+func (x *ServiceHealth) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*TunnelHealth) ProtoMessage() {}
+func (*ServiceHealth) ProtoMessage() {}
 
-func (x *TunnelHealth) ProtoReflect() protoreflect.Message {
+func (x *ServiceHealth) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1431,76 +1433,76 @@ func (x *TunnelHealth) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use TunnelHealth.ProtoReflect.Descriptor instead.
-func (*TunnelHealth) Descriptor() ([]byte, []int) {
+// Deprecated: Use ServiceHealth.ProtoReflect.Descriptor instead.
+func (*ServiceHealth) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{16}
 }
 
-func (x *TunnelHealth) GetTunnelId() string {
+func (x *ServiceHealth) GetServiceId() string {
 	if x != nil {
-		return x.TunnelId
+		return x.ServiceId
 	}
 	return ""
 }
 
-func (x *TunnelHealth) GetStatus() HealthStatus {
+func (x *ServiceHealth) GetStatus() HealthStatus {
 	if x != nil {
 		return x.Status
 	}
 	return HealthStatus_HEALTH_STATUS_UNKNOWN
 }
 
-func (x *TunnelHealth) GetLatencyMs() uint32 {
+func (x *ServiceHealth) GetLatencyMs() uint32 {
 	if x != nil {
 		return x.LatencyMs
 	}
 	return 0
 }
 
-func (x *TunnelHealth) GetErrorCode() string {
+func (x *ServiceHealth) GetErrorCode() string {
 	if x != nil {
 		return x.ErrorCode
 	}
 	return ""
 }
 
-func (x *TunnelHealth) GetCheckedAtMs() uint64 {
+func (x *ServiceHealth) GetCheckedAtMs() uint64 {
 	if x != nil {
 		return x.CheckedAtMs
 	}
 	return 0
 }
 
-func (x *TunnelHealth) GetBindingRevision() uint64 {
+func (x *ServiceHealth) GetServiceRevision() uint64 {
 	if x != nil {
-		return x.BindingRevision
+		return x.ServiceRevision
 	}
 	return 0
 }
 
-// TunnelHealthBatch 在一个 Control Session 内按 generation 严格递增。
-type TunnelHealthBatch struct {
+// ServiceHealthBatch 在一个 Control Session 内按 generation 严格递增。
+type ServiceHealthBatch struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Generation    uint64                 `protobuf:"varint,1,opt,name=generation,proto3" json:"generation,omitempty"`
-	Items         []*TunnelHealth        `protobuf:"bytes,2,rep,name=items,proto3" json:"items,omitempty"`
+	Items         []*ServiceHealth       `protobuf:"bytes,2,rep,name=items,proto3" json:"items,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *TunnelHealthBatch) Reset() {
-	*x = TunnelHealthBatch{}
+func (x *ServiceHealthBatch) Reset() {
+	*x = ServiceHealthBatch{}
 	mi := &file_control_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *TunnelHealthBatch) String() string {
+func (x *ServiceHealthBatch) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*TunnelHealthBatch) ProtoMessage() {}
+func (*ServiceHealthBatch) ProtoMessage() {}
 
-func (x *TunnelHealthBatch) ProtoReflect() protoreflect.Message {
+func (x *ServiceHealthBatch) ProtoReflect() protoreflect.Message {
 	mi := &file_control_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1512,26 +1514,26 @@ func (x *TunnelHealthBatch) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use TunnelHealthBatch.ProtoReflect.Descriptor instead.
-func (*TunnelHealthBatch) Descriptor() ([]byte, []int) {
+// Deprecated: Use ServiceHealthBatch.ProtoReflect.Descriptor instead.
+func (*ServiceHealthBatch) Descriptor() ([]byte, []int) {
 	return file_control_proto_rawDescGZIP(), []int{17}
 }
 
-func (x *TunnelHealthBatch) GetGeneration() uint64 {
+func (x *ServiceHealthBatch) GetGeneration() uint64 {
 	if x != nil {
 		return x.Generation
 	}
 	return 0
 }
 
-func (x *TunnelHealthBatch) GetItems() []*TunnelHealth {
+func (x *ServiceHealthBatch) GetItems() []*ServiceHealth {
 	if x != nil {
 		return x.Items
 	}
 	return nil
 }
 
-// DrainRequest 由 Agent 发起；重复相同 drain_id 与内容必须幂等。
+// DrainRequest 由 Connector 发起；重复相同 drain_id 与内容必须幂等。
 type DrainRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	DrainId        string                 `protobuf:"bytes,1,opt,name=drain_id,json=drainId,proto3" json:"drain_id,omitempty"`
@@ -1694,12 +1696,12 @@ var File_control_proto protoreflect.FileDescriptor
 
 const file_control_proto_rawDesc = "" +
 	"\n" +
-	"\rcontrol.proto\x12\x13xtunnel.protocol.v1\x1a\fcommon.proto\"\xf5\x02\n" +
+	"\rcontrol.proto\x12\x13xtunnel.protocol.v1\x1a\fcommon.proto\"\xf7\x02\n" +
 	"\x0fConnectionToken\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x12@\n" +
 	"\bendpoint\x18\x02 \x01(\v2$.xtunnel.protocol.v1.GatewayEndpointR\bendpoint\x12D\n" +
-	"\ttls_trust\x18\x03 \x01(\v2'.xtunnel.protocol.v1.TlsTrustDescriptorR\btlsTrust\x12\x19\n" +
-	"\bagent_id\x18\x04 \x01(\tR\aagentId\x12\x19\n" +
+	"\ttls_trust\x18\x03 \x01(\v2'.xtunnel.protocol.v1.TlsTrustDescriptorR\btlsTrust\x12\x1b\n" +
+	"\ttunnel_id\x18\x04 \x01(\tR\btunnelId\x12\x19\n" +
 	"\btoken_id\x18\x05 \x01(\tR\atokenId\x12#\n" +
 	"\rtoken_version\x18\x06 \x01(\x04R\ftokenVersion\x123\n" +
 	"\x15authentication_secret\x18\a \x01(\fR\x14authenticationSecret\x12#\n" +
@@ -1714,44 +1716,43 @@ const file_control_proto_rawDesc = "" +
 	"\rPublicCATrust\"2\n" +
 	"\x0fPinnedSPKITrust\x12\x1f\n" +
 	"\vspki_sha256\x18\x01 \x01(\fR\n" +
-	"spkiSha256\"\xa2\x02\n" +
-	"\x10AgentAuthRequest\x12)\n" +
-	"\x10connection_token\x18\x01 \x01(\tR\x0fconnectionToken\x12\x1f\n" +
-	"\vinstance_id\x18\x02 \x01(\tR\n" +
-	"instanceId\x12\x1a\n" +
+	"spkiSha256\"\xa8\x02\n" +
+	"\x14ConnectorAuthRequest\x12)\n" +
+	"\x10connection_token\x18\x01 \x01(\tR\x0fconnectionToken\x12!\n" +
+	"\fconnector_id\x18\x02 \x01(\tR\vconnectorId\x12\x1a\n" +
 	"\bhostname\x18\x03 \x01(\tR\bhostname\x12\x18\n" +
 	"\aversion\x18\x04 \x01(\tR\aversion\x12\x0e\n" +
 	"\x02os\x18\x05 \x01(\tR\x02os\x12\x12\n" +
 	"\x04arch\x18\x06 \x01(\tR\x04arch\x12!\n" +
 	"\fmin_protocol\x18\a \x01(\rR\vminProtocol\x12!\n" +
 	"\fmax_protocol\x18\b \x01(\rR\vmaxProtocol\x12\"\n" +
-	"\fcapabilities\x18\t \x03(\tR\fcapabilities\"\xa1\x01\n" +
-	"\x0fAgentAuthResult\x12A\n" +
-	"\asuccess\x18\x01 \x01(\v2%.xtunnel.protocol.v1.AgentAuthSuccessH\x00R\asuccess\x12A\n" +
-	"\afailure\x18\x02 \x01(\v2%.xtunnel.protocol.v1.AgentAuthFailureH\x00R\afailureB\b\n" +
-	"\x06result\"\xfd\x01\n" +
-	"\x10AgentAuthSuccess\x12\x19\n" +
-	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12\x1d\n" +
+	"\fcapabilities\x18\t \x03(\tR\fcapabilities\"\xad\x01\n" +
+	"\x13ConnectorAuthResult\x12E\n" +
+	"\asuccess\x18\x01 \x01(\v2).xtunnel.protocol.v1.ConnectorAuthSuccessH\x00R\asuccess\x12E\n" +
+	"\afailure\x18\x02 \x01(\v2).xtunnel.protocol.v1.ConnectorAuthFailureH\x00R\afailureB\b\n" +
+	"\x06result\"\x83\x02\n" +
+	"\x14ConnectorAuthSuccess\x12\x1b\n" +
+	"\ttunnel_id\x18\x01 \x01(\tR\btunnelId\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x02 \x01(\tR\tsessionId\x12%\n" +
 	"\x0esession_secret\x18\x03 \x01(\fR\rsessionSecret\x12)\n" +
 	"\x10protocol_version\x18\x04 \x01(\rR\x0fprotocolVersion\x12)\n" +
 	"\x10desired_revision\x18\x05 \x01(\x04R\x0fdesiredRevision\x122\n" +
-	"\x15heartbeat_interval_ms\x18\x06 \x01(\rR\x13heartbeatIntervalMs\"w\n" +
-	"\x10AgentAuthFailure\x12=\n" +
+	"\x15heartbeat_interval_ms\x18\x06 \x01(\rR\x13heartbeatIntervalMs\"{\n" +
+	"\x14ConnectorAuthFailure\x12=\n" +
 	"\n" +
 	"error_code\x18\x01 \x01(\x0e2\x1e.xtunnel.protocol.v1.ErrorCodeR\terrorCode\x12$\n" +
-	"\x0eretry_after_ms\x18\x02 \x01(\rR\fretryAfterMs\"\xf1\x04\n" +
+	"\x0eretry_after_ms\x18\x02 \x01(\rR\fretryAfterMs\"\xf5\x04\n" +
 	"\x0fControlEnvelope\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12>\n" +
 	"\theartbeat\x18\n" +
-	" \x01(\v2\x1e.xtunnel.protocol.v1.HeartbeatH\x00R\theartbeat\x12M\n" +
-	"\x0fconfig_snapshot\x18\v \x01(\v2\".xtunnel.protocol.v1.AgentSnapshotH\x00R\x0econfigSnapshot\x12?\n" +
+	" \x01(\v2\x1e.xtunnel.protocol.v1.HeartbeatH\x00R\theartbeat\x12N\n" +
+	"\x0fconfig_snapshot\x18\v \x01(\v2#.xtunnel.protocol.v1.TunnelSnapshotH\x00R\x0econfigSnapshot\x12?\n" +
 	"\n" +
 	"config_ack\x18\f \x01(\v2\x1e.xtunnel.protocol.v1.ConfigAckH\x00R\tconfigAck\x12B\n" +
 	"\vwork_demand\x18\r \x01(\v2\x1f.xtunnel.protocol.v1.WorkDemandH\x00R\n" +
-	"workDemand\x12X\n" +
-	"\x13tunnel_health_batch\x18\x0e \x01(\v2&.xtunnel.protocol.v1.TunnelHealthBatchH\x00R\x11tunnelHealthBatch\x12H\n" +
+	"workDemand\x12[\n" +
+	"\x14service_health_batch\x18\x0e \x01(\v2'.xtunnel.protocol.v1.ServiceHealthBatchH\x00R\x12serviceHealthBatch\x12H\n" +
 	"\rdrain_request\x18\x0f \x01(\v2!.xtunnel.protocol.v1.DrainRequestH\x00R\fdrainRequest\x122\n" +
 	"\x05error\x18\x10 \x01(\v2\x1a.xtunnel.protocol.v1.ErrorH\x00R\x05error\x12<\n" +
 	"\tdrain_ack\x18\x11 \x01(\v2\x1d.xtunnel.protocol.v1.DrainAckH\x00R\bdrainAckB\t\n" +
@@ -1764,13 +1765,14 @@ const file_control_proto_rawDesc = "" +
 	"tcp_active\x18\x04 \x01(\rR\ttcpActive\x12#\n" +
 	"\ringress_bytes\x18\x05 \x01(\x04R\fingressBytes\x12!\n" +
 	"\fegress_bytes\x18\x06 \x01(\x04R\vegressBytes\x12%\n" +
-	"\x0etcp_connecting\x18\a \x01(\rR\rtcpConnecting\"\x8c\x01\n" +
-	"\rAgentSnapshot\x12\x19\n" +
-	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12\x1a\n" +
-	"\brevision\x18\x02 \x01(\x04R\brevision\x12D\n" +
-	"\bbindings\x18\x03 \x03(\v2(.xtunnel.protocol.v1.TunnelBindingConfigR\bbindings\"\xbf\x03\n" +
-	"\x13TunnelBindingConfig\x12\x1b\n" +
-	"\ttunnel_id\x18\x01 \x01(\tR\btunnelId\x12#\n" +
+	"\x0etcp_connecting\x18\a \x01(\rR\rtcpConnecting\"\x89\x01\n" +
+	"\x0eTunnelSnapshot\x12\x1b\n" +
+	"\ttunnel_id\x18\x01 \x01(\tR\btunnelId\x12\x1a\n" +
+	"\brevision\x18\x02 \x01(\x04R\brevision\x12>\n" +
+	"\bservices\x18\x03 \x03(\v2\".xtunnel.protocol.v1.ServiceConfigR\bservices\"\xbb\x03\n" +
+	"\rServiceConfig\x12\x1d\n" +
+	"\n" +
+	"service_id\x18\x01 \x01(\tR\tserviceId\x12#\n" +
 	"\rorigin_scheme\x18\x02 \x01(\tR\foriginScheme\x12\x1f\n" +
 	"\vorigin_host\x18\x03 \x01(\tR\n" +
 	"originHost\x12\x1f\n" +
@@ -1808,21 +1810,22 @@ const file_control_proto_rawDesc = "" +
 	"\x13max_new_connections\x18\x03 \x01(\rR\x11maxNewConnections\x12 \n" +
 	"\flease_ttl_ms\x18\x04 \x01(\rR\n" +
 	"leaseTtlMs\x12+\n" +
-	"\x11demand_generation\x18\x05 \x01(\x04R\x10demandGeneration\"\xf3\x01\n" +
-	"\fTunnelHealth\x12\x1b\n" +
-	"\ttunnel_id\x18\x01 \x01(\tR\btunnelId\x129\n" +
+	"\x11demand_generation\x18\x05 \x01(\x04R\x10demandGeneration\"\xf6\x01\n" +
+	"\rServiceHealth\x12\x1d\n" +
+	"\n" +
+	"service_id\x18\x01 \x01(\tR\tserviceId\x129\n" +
 	"\x06status\x18\x02 \x01(\x0e2!.xtunnel.protocol.v1.HealthStatusR\x06status\x12\x1d\n" +
 	"\n" +
 	"latency_ms\x18\x03 \x01(\rR\tlatencyMs\x12\x1d\n" +
 	"\n" +
 	"error_code\x18\x04 \x01(\tR\terrorCode\x12\"\n" +
 	"\rchecked_at_ms\x18\x05 \x01(\x04R\vcheckedAtMs\x12)\n" +
-	"\x10binding_revision\x18\x06 \x01(\x04R\x0fbindingRevision\"l\n" +
-	"\x11TunnelHealthBatch\x12\x1e\n" +
+	"\x10service_revision\x18\x06 \x01(\x04R\x0fserviceRevision\"n\n" +
+	"\x12ServiceHealthBatch\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x01 \x01(\x04R\n" +
-	"generation\x127\n" +
-	"\x05items\x18\x02 \x03(\v2!.xtunnel.protocol.v1.TunnelHealthR\x05items\"S\n" +
+	"generation\x128\n" +
+	"\x05items\x18\x02 \x03(\v2\".xtunnel.protocol.v1.ServiceHealthR\x05items\"S\n" +
 	"\fDrainRequest\x12\x19\n" +
 	"\bdrain_id\x18\x01 \x01(\tR\adrainId\x12(\n" +
 	"\x10drain_timeout_ms\x18\x02 \x01(\rR\x0edrainTimeoutMs\"P\n" +
@@ -1848,55 +1851,55 @@ func file_control_proto_rawDescGZIP() []byte {
 
 var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_control_proto_goTypes = []any{
-	(*ConnectionToken)(nil),     // 0: xtunnel.protocol.v1.ConnectionToken
-	(*GatewayEndpoint)(nil),     // 1: xtunnel.protocol.v1.GatewayEndpoint
-	(*TlsTrustDescriptor)(nil),  // 2: xtunnel.protocol.v1.TlsTrustDescriptor
-	(*PublicCATrust)(nil),       // 3: xtunnel.protocol.v1.PublicCATrust
-	(*PinnedSPKITrust)(nil),     // 4: xtunnel.protocol.v1.PinnedSPKITrust
-	(*AgentAuthRequest)(nil),    // 5: xtunnel.protocol.v1.AgentAuthRequest
-	(*AgentAuthResult)(nil),     // 6: xtunnel.protocol.v1.AgentAuthResult
-	(*AgentAuthSuccess)(nil),    // 7: xtunnel.protocol.v1.AgentAuthSuccess
-	(*AgentAuthFailure)(nil),    // 8: xtunnel.protocol.v1.AgentAuthFailure
-	(*ControlEnvelope)(nil),     // 9: xtunnel.protocol.v1.ControlEnvelope
-	(*Heartbeat)(nil),           // 10: xtunnel.protocol.v1.Heartbeat
-	(*AgentSnapshot)(nil),       // 11: xtunnel.protocol.v1.AgentSnapshot
-	(*TunnelBindingConfig)(nil), // 12: xtunnel.protocol.v1.TunnelBindingConfig
-	(*HealthCheckConfig)(nil),   // 13: xtunnel.protocol.v1.HealthCheckConfig
-	(*ConfigAck)(nil),           // 14: xtunnel.protocol.v1.ConfigAck
-	(*WorkDemand)(nil),          // 15: xtunnel.protocol.v1.WorkDemand
-	(*TunnelHealth)(nil),        // 16: xtunnel.protocol.v1.TunnelHealth
-	(*TunnelHealthBatch)(nil),   // 17: xtunnel.protocol.v1.TunnelHealthBatch
-	(*DrainRequest)(nil),        // 18: xtunnel.protocol.v1.DrainRequest
-	(*DrainAck)(nil),            // 19: xtunnel.protocol.v1.DrainAck
-	(*Error)(nil),               // 20: xtunnel.protocol.v1.Error
-	(ErrorCode)(0),              // 21: xtunnel.protocol.v1.ErrorCode
-	(HealthType)(0),             // 22: xtunnel.protocol.v1.HealthType
-	(ConfigApplyStatus)(0),      // 23: xtunnel.protocol.v1.ConfigApplyStatus
-	(HealthStatus)(0),           // 24: xtunnel.protocol.v1.HealthStatus
+	(*ConnectionToken)(nil),      // 0: xtunnel.protocol.v1.ConnectionToken
+	(*GatewayEndpoint)(nil),      // 1: xtunnel.protocol.v1.GatewayEndpoint
+	(*TlsTrustDescriptor)(nil),   // 2: xtunnel.protocol.v1.TlsTrustDescriptor
+	(*PublicCATrust)(nil),        // 3: xtunnel.protocol.v1.PublicCATrust
+	(*PinnedSPKITrust)(nil),      // 4: xtunnel.protocol.v1.PinnedSPKITrust
+	(*ConnectorAuthRequest)(nil), // 5: xtunnel.protocol.v1.ConnectorAuthRequest
+	(*ConnectorAuthResult)(nil),  // 6: xtunnel.protocol.v1.ConnectorAuthResult
+	(*ConnectorAuthSuccess)(nil), // 7: xtunnel.protocol.v1.ConnectorAuthSuccess
+	(*ConnectorAuthFailure)(nil), // 8: xtunnel.protocol.v1.ConnectorAuthFailure
+	(*ControlEnvelope)(nil),      // 9: xtunnel.protocol.v1.ControlEnvelope
+	(*Heartbeat)(nil),            // 10: xtunnel.protocol.v1.Heartbeat
+	(*TunnelSnapshot)(nil),       // 11: xtunnel.protocol.v1.TunnelSnapshot
+	(*ServiceConfig)(nil),        // 12: xtunnel.protocol.v1.ServiceConfig
+	(*HealthCheckConfig)(nil),    // 13: xtunnel.protocol.v1.HealthCheckConfig
+	(*ConfigAck)(nil),            // 14: xtunnel.protocol.v1.ConfigAck
+	(*WorkDemand)(nil),           // 15: xtunnel.protocol.v1.WorkDemand
+	(*ServiceHealth)(nil),        // 16: xtunnel.protocol.v1.ServiceHealth
+	(*ServiceHealthBatch)(nil),   // 17: xtunnel.protocol.v1.ServiceHealthBatch
+	(*DrainRequest)(nil),         // 18: xtunnel.protocol.v1.DrainRequest
+	(*DrainAck)(nil),             // 19: xtunnel.protocol.v1.DrainAck
+	(*Error)(nil),                // 20: xtunnel.protocol.v1.Error
+	(ErrorCode)(0),               // 21: xtunnel.protocol.v1.ErrorCode
+	(HealthType)(0),              // 22: xtunnel.protocol.v1.HealthType
+	(ConfigApplyStatus)(0),       // 23: xtunnel.protocol.v1.ConfigApplyStatus
+	(HealthStatus)(0),            // 24: xtunnel.protocol.v1.HealthStatus
 }
 var file_control_proto_depIdxs = []int32{
 	1,  // 0: xtunnel.protocol.v1.ConnectionToken.endpoint:type_name -> xtunnel.protocol.v1.GatewayEndpoint
 	2,  // 1: xtunnel.protocol.v1.ConnectionToken.tls_trust:type_name -> xtunnel.protocol.v1.TlsTrustDescriptor
 	3,  // 2: xtunnel.protocol.v1.TlsTrustDescriptor.public_ca:type_name -> xtunnel.protocol.v1.PublicCATrust
 	4,  // 3: xtunnel.protocol.v1.TlsTrustDescriptor.pinned_spki_sha256:type_name -> xtunnel.protocol.v1.PinnedSPKITrust
-	7,  // 4: xtunnel.protocol.v1.AgentAuthResult.success:type_name -> xtunnel.protocol.v1.AgentAuthSuccess
-	8,  // 5: xtunnel.protocol.v1.AgentAuthResult.failure:type_name -> xtunnel.protocol.v1.AgentAuthFailure
-	21, // 6: xtunnel.protocol.v1.AgentAuthFailure.error_code:type_name -> xtunnel.protocol.v1.ErrorCode
+	7,  // 4: xtunnel.protocol.v1.ConnectorAuthResult.success:type_name -> xtunnel.protocol.v1.ConnectorAuthSuccess
+	8,  // 5: xtunnel.protocol.v1.ConnectorAuthResult.failure:type_name -> xtunnel.protocol.v1.ConnectorAuthFailure
+	21, // 6: xtunnel.protocol.v1.ConnectorAuthFailure.error_code:type_name -> xtunnel.protocol.v1.ErrorCode
 	10, // 7: xtunnel.protocol.v1.ControlEnvelope.heartbeat:type_name -> xtunnel.protocol.v1.Heartbeat
-	11, // 8: xtunnel.protocol.v1.ControlEnvelope.config_snapshot:type_name -> xtunnel.protocol.v1.AgentSnapshot
+	11, // 8: xtunnel.protocol.v1.ControlEnvelope.config_snapshot:type_name -> xtunnel.protocol.v1.TunnelSnapshot
 	14, // 9: xtunnel.protocol.v1.ControlEnvelope.config_ack:type_name -> xtunnel.protocol.v1.ConfigAck
 	15, // 10: xtunnel.protocol.v1.ControlEnvelope.work_demand:type_name -> xtunnel.protocol.v1.WorkDemand
-	17, // 11: xtunnel.protocol.v1.ControlEnvelope.tunnel_health_batch:type_name -> xtunnel.protocol.v1.TunnelHealthBatch
+	17, // 11: xtunnel.protocol.v1.ControlEnvelope.service_health_batch:type_name -> xtunnel.protocol.v1.ServiceHealthBatch
 	18, // 12: xtunnel.protocol.v1.ControlEnvelope.drain_request:type_name -> xtunnel.protocol.v1.DrainRequest
 	20, // 13: xtunnel.protocol.v1.ControlEnvelope.error:type_name -> xtunnel.protocol.v1.Error
 	19, // 14: xtunnel.protocol.v1.ControlEnvelope.drain_ack:type_name -> xtunnel.protocol.v1.DrainAck
-	12, // 15: xtunnel.protocol.v1.AgentSnapshot.bindings:type_name -> xtunnel.protocol.v1.TunnelBindingConfig
-	13, // 16: xtunnel.protocol.v1.TunnelBindingConfig.health:type_name -> xtunnel.protocol.v1.HealthCheckConfig
+	12, // 15: xtunnel.protocol.v1.TunnelSnapshot.services:type_name -> xtunnel.protocol.v1.ServiceConfig
+	13, // 16: xtunnel.protocol.v1.ServiceConfig.health:type_name -> xtunnel.protocol.v1.HealthCheckConfig
 	22, // 17: xtunnel.protocol.v1.HealthCheckConfig.type:type_name -> xtunnel.protocol.v1.HealthType
 	23, // 18: xtunnel.protocol.v1.ConfigAck.apply_status:type_name -> xtunnel.protocol.v1.ConfigApplyStatus
 	21, // 19: xtunnel.protocol.v1.ConfigAck.error_code:type_name -> xtunnel.protocol.v1.ErrorCode
-	24, // 20: xtunnel.protocol.v1.TunnelHealth.status:type_name -> xtunnel.protocol.v1.HealthStatus
-	16, // 21: xtunnel.protocol.v1.TunnelHealthBatch.items:type_name -> xtunnel.protocol.v1.TunnelHealth
+	24, // 20: xtunnel.protocol.v1.ServiceHealth.status:type_name -> xtunnel.protocol.v1.HealthStatus
+	16, // 21: xtunnel.protocol.v1.ServiceHealthBatch.items:type_name -> xtunnel.protocol.v1.ServiceHealth
 	21, // 22: xtunnel.protocol.v1.Error.error_code:type_name -> xtunnel.protocol.v1.ErrorCode
 	23, // [23:23] is the sub-list for method output_type
 	23, // [23:23] is the sub-list for method input_type
@@ -1916,15 +1919,15 @@ func file_control_proto_init() {
 		(*TlsTrustDescriptor_PinnedSpkiSha256)(nil),
 	}
 	file_control_proto_msgTypes[6].OneofWrappers = []any{
-		(*AgentAuthResult_Success)(nil),
-		(*AgentAuthResult_Failure)(nil),
+		(*ConnectorAuthResult_Success)(nil),
+		(*ConnectorAuthResult_Failure)(nil),
 	}
 	file_control_proto_msgTypes[9].OneofWrappers = []any{
 		(*ControlEnvelope_Heartbeat)(nil),
 		(*ControlEnvelope_ConfigSnapshot)(nil),
 		(*ControlEnvelope_ConfigAck)(nil),
 		(*ControlEnvelope_WorkDemand)(nil),
-		(*ControlEnvelope_TunnelHealthBatch)(nil),
+		(*ControlEnvelope_ServiceHealthBatch)(nil),
 		(*ControlEnvelope_DrainRequest)(nil),
 		(*ControlEnvelope_Error)(nil),
 		(*ControlEnvelope_DrainAck)(nil),

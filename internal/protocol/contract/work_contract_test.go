@@ -28,8 +28,8 @@ func TestWorkProtoFreezesWireContract(t *testing.T) {
 
 	assertWorkMessages(t, text, []string{"WorkHello", "WorkReady", "OpenRequest", "OpenResponse"})
 	assertWorkMessageFields(t, text, "WorkHello", []string{
-		"string agent_id = 1;",
-		"string instance_id = 2;",
+		"string tunnel_id = 1;",
+		"string connector_id = 2;",
 		"string session_id = 3;",
 		"string work_id = 4;",
 		"reserved 5, 6;",
@@ -45,7 +45,7 @@ func TestWorkProtoFreezesWireContract(t *testing.T) {
 	assertWorkMessageFields(t, text, "OpenRequest", []string{
 		"uint32 protocol_version = 1;",
 		"string connection_id = 2;",
-		"string tunnel_id = 3;",
+		"string service_id = 3;",
 		"string trace_id = 4;",
 		"string client_addr = 5;",
 		"uint64 timestamp_ms = 6;",

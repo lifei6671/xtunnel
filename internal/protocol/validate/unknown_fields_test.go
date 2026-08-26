@@ -20,13 +20,13 @@ func TestRejectUnknownFieldsRejectsProtocolV1MessagesAtAnyDepth(t *testing.T) {
 	}{
 		{
 			name:    "Auth 自身未知字段",
-			message: &protocolv1.AgentAuthRequest{},
+			message: &protocolv1.ConnectorAuthRequest{},
 		},
 		{
 			name: "Auth 嵌套未知字段",
-			message: &protocolv1.AgentAuthResult{
-				Result: &protocolv1.AgentAuthResult_Success{
-					Success: &protocolv1.AgentAuthSuccess{},
+			message: &protocolv1.ConnectorAuthResult{
+				Result: &protocolv1.ConnectorAuthResult_Success{
+					Success: &protocolv1.ConnectorAuthSuccess{},
 				},
 			},
 		},
@@ -42,8 +42,8 @@ func TestRejectUnknownFieldsRejectsProtocolV1MessagesAtAnyDepth(t *testing.T) {
 			name: "ControlEnvelope 内的 Snapshot 深层未知字段",
 			message: &protocolv1.ControlEnvelope{
 				Payload: &protocolv1.ControlEnvelope_ConfigSnapshot{
-					ConfigSnapshot: &protocolv1.AgentSnapshot{
-						Bindings: []*protocolv1.TunnelBindingConfig{{
+					ConfigSnapshot: &protocolv1.TunnelSnapshot{
+						Services: []*protocolv1.ServiceConfig{{
 							Health: &protocolv1.HealthCheckConfig{},
 						}},
 					},
@@ -51,9 +51,9 @@ func TestRejectUnknownFieldsRejectsProtocolV1MessagesAtAnyDepth(t *testing.T) {
 			},
 		},
 		{
-			name: "AgentSnapshot 自身未知字段",
-			message: &protocolv1.AgentSnapshot{
-				Bindings: []*protocolv1.TunnelBindingConfig{{
+			name: "TunnelSnapshot 自身未知字段",
+			message: &protocolv1.TunnelSnapshot{
+				Services: []*protocolv1.ServiceConfig{{
 					Health: &protocolv1.HealthCheckConfig{},
 				}},
 			},
@@ -82,8 +82,8 @@ func TestRejectUnknownFieldsRejectsProtocolV1MessagesAtAnyDepth(t *testing.T) {
 func TestRejectUnknownFieldsAcceptsFullyKnownNestedMessage(t *testing.T) {
 	message := &protocolv1.ControlEnvelope{
 		Payload: &protocolv1.ControlEnvelope_ConfigSnapshot{
-			ConfigSnapshot: &protocolv1.AgentSnapshot{
-				Bindings: []*protocolv1.TunnelBindingConfig{{
+			ConfigSnapshot: &protocolv1.TunnelSnapshot{
+				Services: []*protocolv1.ServiceConfig{{
 					Health: &protocolv1.HealthCheckConfig{},
 				}},
 			},
@@ -105,6 +105,7 @@ func TestValidateID(t *testing.T) {
 		{name: "合法", value: "work_01J00000000000000000000000", prefix: "work_", wantOK: true},
 		{name: "错误前缀", value: "conn_01J00000000000000000000000", prefix: "work_"},
 		{name: "小写 ULID", value: "work_01j00000000000000000000000", prefix: "work_"},
+		{name: "首字符超出 128 位 ULID 范围", value: "work_Z1J00000000000000000000000", prefix: "work_"},
 		{name: "错误长度", value: "work_01J", prefix: "work_"},
 	}
 
@@ -122,16 +123,16 @@ func unknownFieldTarget(t *testing.T, message proto.Message) protoreflect.Messag
 	t.Helper()
 
 	switch typed := message.(type) {
-	case *protocolv1.AgentAuthRequest:
+	case *protocolv1.ConnectorAuthRequest:
 		return typed.ProtoReflect()
-	case *protocolv1.AgentAuthResult:
+	case *protocolv1.ConnectorAuthResult:
 		return typed.GetSuccess().ProtoReflect()
 	case *protocolv1.ControlEnvelope:
 		if snapshot := typed.GetConfigSnapshot(); snapshot != nil {
-			return snapshot.GetBindings()[0].GetHealth().ProtoReflect()
+			return snapshot.GetServices()[0].GetHealth().ProtoReflect()
 		}
 		return typed.ProtoReflect()
-	case *protocolv1.AgentSnapshot:
+	case *protocolv1.TunnelSnapshot:
 		return typed.ProtoReflect()
 	case *protocolv1.WorkHello:
 		return typed.ProtoReflect()

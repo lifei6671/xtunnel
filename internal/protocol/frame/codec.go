@@ -116,34 +116,79 @@ func WriteMessage(writer io.Writer, message proto.Message, limit uint64) error {
 	return WritePayload(writer, payload, limit)
 }
 
-// ReadAuth 读取 AUTH 阶段的裸 AgentAuthRequest 或 AgentAuthResult。
+// ReadAuth 读取 AUTH 阶段的裸 ConnectorAuthRequest 或 ConnectorAuthResult。
 func ReadAuth(reader io.Reader, message proto.Message) error {
-	return ReadMessage(reader, message, MaxAuthFrameSize)
+	return ReadAuthLimit(reader, message, MaxAuthFrameSize)
 }
 
-// WriteAuth 写入 AUTH 阶段的裸 AgentAuthRequest 或 AgentAuthResult。
+// WriteAuth 写入 AUTH 阶段的裸 ConnectorAuthRequest 或 ConnectorAuthResult。
 func WriteAuth(writer io.Writer, message proto.Message) error {
-	return WriteMessage(writer, message, MaxAuthFrameSize)
+	return WriteAuthLimit(writer, message, MaxAuthFrameSize)
 }
 
 // ReadControl 读取 ESTABLISHED 或 DRAINING 阶段的 ControlEnvelope。
 func ReadControl(reader io.Reader, envelope *protocolv1.ControlEnvelope) error {
-	return ReadMessage(reader, envelope, MaxControlFrameSize)
+	return ReadControlLimit(reader, envelope, MaxControlFrameSize)
 }
 
 // WriteControl 写入 ESTABLISHED 或 DRAINING 阶段的 ControlEnvelope。
 func WriteControl(writer io.Writer, envelope *protocolv1.ControlEnvelope) error {
-	return WriteMessage(writer, envelope, MaxControlFrameSize)
+	return WriteControlLimit(writer, envelope, MaxControlFrameSize)
 }
 
 // ReadWork 读取 WorkConn 在 RAW 前、由状态唯一确定的裸 Work 消息。
 func ReadWork(reader io.Reader, message proto.Message) error {
-	return ReadMessage(reader, message, MaxWorkFrameSize)
+	return ReadWorkLimit(reader, message, MaxWorkFrameSize)
 }
 
 // WriteWork 写入 WorkConn 在 RAW 前、由状态唯一确定的裸 Work 消息。
 func WriteWork(writer io.Writer, message proto.Message) error {
-	return WriteMessage(writer, message, MaxWorkFrameSize)
+	return WriteWorkLimit(writer, message, MaxWorkFrameSize)
+}
+
+// ReadAuthLimit 使用 Server 配置收紧 AUTH Frame 上限。limit 不能超过 Protocol v1
+// 的绝对上限；调用方传入更大值也不能扩大冻结协议的内存分配边界。
+func ReadAuthLimit(reader io.Reader, message proto.Message, limit uint64) error {
+	return readWithinProtocolLimit(reader, message, limit, MaxAuthFrameSize)
+}
+
+// WriteAuthLimit 使用与读取侧一致的 AUTH Frame 有效上限。
+func WriteAuthLimit(writer io.Writer, message proto.Message, limit uint64) error {
+	return writeWithinProtocolLimit(writer, message, limit, MaxAuthFrameSize)
+}
+
+// ReadControlLimit 使用 Server 配置收紧 Control Frame 上限。
+func ReadControlLimit(reader io.Reader, envelope *protocolv1.ControlEnvelope, limit uint64) error {
+	return readWithinProtocolLimit(reader, envelope, limit, MaxControlFrameSize)
+}
+
+// WriteControlLimit 使用与读取侧一致的 Control Frame 有效上限。
+func WriteControlLimit(writer io.Writer, envelope *protocolv1.ControlEnvelope, limit uint64) error {
+	return writeWithinProtocolLimit(writer, envelope, limit, MaxControlFrameSize)
+}
+
+// ReadWorkLimit 使用 Server 配置收紧 Work/OPEN Frame 上限。
+func ReadWorkLimit(reader io.Reader, message proto.Message, limit uint64) error {
+	return readWithinProtocolLimit(reader, message, limit, MaxWorkFrameSize)
+}
+
+// WriteWorkLimit 使用与读取侧一致的 Work/OPEN Frame 有效上限。
+func WriteWorkLimit(writer io.Writer, message proto.Message, limit uint64) error {
+	return writeWithinProtocolLimit(writer, message, limit, MaxWorkFrameSize)
+}
+
+func readWithinProtocolLimit(reader io.Reader, message proto.Message, configured, absolute uint64) error {
+	if configured == 0 || configured > absolute {
+		return fmt.Errorf("%w: configured limit=%d absolute=%d", ErrFrameTooLarge, configured, absolute)
+	}
+	return ReadMessage(reader, message, configured)
+}
+
+func writeWithinProtocolLimit(writer io.Writer, message proto.Message, configured, absolute uint64) error {
+	if configured == 0 || configured > absolute {
+		return fmt.Errorf("%w: configured limit=%d absolute=%d", ErrFrameTooLarge, configured, absolute)
+	}
+	return WriteMessage(writer, message, configured)
 }
 
 // readLength 读取并校验最短 UVarint 长度前缀，且不会触碰 payload 的任何字节。

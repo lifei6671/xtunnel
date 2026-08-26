@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-25
 >
-> **当前阶段**：M0 工程初始化
+> **当前阶段**：M1 Secure TCP Data Plane Baseline（用户授权在 M05-10 未 DONE 时提前开发；Gate 不视为通过）
 >
-> **当前结论**：`M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11` 已完成；`M0-02` 的 Token-only Bootstrap 已有新的跨平台 CI 证据，等待用户复审；`M0-09` 已有 Linux systemd、Windows 提升权限 SCM、Linux amd64/arm64 原生 OCI Smoke 与跨平台 CI 证据，仍缺 Compose IPv4/IPv6 Runtime Smoke 及复审，因此保持实施中。
+> **当前结论**：M1 核心能力已按 Tunnel→Connector→Service 模型实现并进入 Review：Tunnel 持有可重复取回的 ACTIVE Token，同一 Token 可启动多个 ephemeral Connector；Service 直接归属 Tunnel；新连接只在未排空且有 Idle Work 的 Connector 中按 Least Active + Round Robin 选择。本地全包 Test/Race/Vet、TCP Echo E2E 和 Linux FD 分支交叉编译已通过。M1-04 仍等待 M6 Metric/告警与 Security Audit Event 契约，M05-10 仍等待最新契约的 CI/独立复审，因此 M1 Gate 不标记 `DONE`，M2 保持 `NOT_STARTED`。
 
 ---
 
@@ -74,7 +74,7 @@ M0 核心基础项（M0-01 至 M0-08、M0-10、M0-11）
 M0.5 Protocol v1 Contract Freeze
  ↓
 M1 Secure TCP Data Plane Baseline
-├──→ M2 Replica & Credential Lifecycle ──┐
+├──→ M2 Credential Lifecycle & Failover Hardening ────┐
 └──→ M3 Configuration + Health ─────────┘
                     ↓
            M4 Product Data Plane
@@ -92,7 +92,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 
 - M0.5 是 M1 Protocol Handler 的强制入口 Gate。
 - M0-09 的 OCI/Compose、systemd 和 SCM 部署验收可在核心功能完成后推进；它不阻塞 M0.5 或 M1，但 M0-12 必须在 Alpha 发布 Gate 前完成。
-- M2 和 M3 在 M1 Gate 后可并行，但 M4 产品数据面必须同时等待 M2 的 Replica Selection/Failover 和 M3 的 Tunnel/Binding/Snapshot 契约。
+- M2 和 M3 在 M1 Gate 后可并行，但 M4 产品数据面必须同时等待 M2 的 Connector Selection/Failover 和 M3 的 Service/TunnelSnapshot 契约。
 - M5 的 OpenAPI Entry Gate 可在 M4 后半段提前准备，Handler 和 Web 实现必须等 Gate 通过。
 - M6 的 Logging/Metrics 骨架可从 M0/M1 纵向渗透，但 M6 Gate 要求完整产品链路可观测。
 - M7 只调优和验证已存在的正确性边界，不允许第一次实现 M1/M3 应有的上限与恢复机制。
@@ -105,8 +105,8 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | --- | ---: | ---: | --- | --- | --- |
 | M0 工程初始化 | 12 | 9 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
 | M0.5 Protocol Freeze | 10 | 0 | `IN_PROGRESS` | M0-06 | M05-10 |
-| M1 Secure TCP Baseline | 14 | 0 | `NOT_STARTED` | M05-10（各任务仍遵守其 M0 核心前置） | M1-14 |
-| M2 Replica/Credential | 8 | 0 | `NOT_STARTED` | M1-14 | M2-08 |
+| M1 Secure TCP Baseline | 14 | 0 | `IN_PROGRESS` | M05-10（用户允许提前实施；M1 Gate 仍须满足正式准入） | M1-14 |
+| M2 Credential/Failover Hardening | 8 | 0 | `NOT_STARTED` | M1-14 | M2-08 |
 | M3 Config/Health | 13 | 0 | `NOT_STARTED` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 0 | `NOT_STARTED` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
@@ -180,9 +180,9 @@ M0.5 Gate 通过前，禁止开发 Server/Agent Protocol Handler。可并行开�
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M05-01 | 冻结 Common Types | M0-06 | `api/proto/common.proto` | package/go_package、enum 数值、reserved range、ErrorCode 完整 | `REVIEW` |
-| M05-02 | 冻结 Connection Token + Auth/Control Contract | M05-01 | Connection Token v1 编码/解析契约、`api/proto/control.proto` | Token 仍是单个不透明 `xta_...`；冻结 Endpoint、TLS Trust、Agent/Token Identity、Secret 的精确编码/完整性/版本分派与失败语义；裸 Auth Frame、ControlEnvelope、Snapshot/ConfigAck、Health Batch 完整 | `REVIEW` |
+| M05-02 | 冻结 Connection Token + Auth/Control Contract | M05-01 | Connection Token v1 编码/解析契约、`api/proto/control.proto` | Token 仍是单个不透明 `xta_...`；冻结 Endpoint、TLS Trust、Tunnel/Token Identity、Secret 的精确编码/完整性/版本分派与失败语义；Connector 裸 Auth Frame、ControlEnvelope、TunnelSnapshot/ConfigAck、ServiceHealth Batch 完整 | `REVIEW` |
 | M05-03 | 冻结 Work Contract | M05-01 | `api/proto/work.proto` | WorkHello/Ready/Open/Response；RAW 切换；各状态唯一裸 Message | `REVIEW` |
-| M05-04 | 生成代码与 Breaking Baseline | M05-01至 M05-03 | `internal/protocol/gen`、Buf Initial Baseline | 明确记录“首次冻结无历史前代”的 Baseline 建立方式，禁止与自身比较伪装 Breaking 证据；生成结果提交；`lint/breaking/generate-check` 通过 | `REVIEW` |
+| M05-04 | 生成代码与 Breaking Baseline | M05-01至 M05-03 | `internal/protocol/gen`、Buf Initial Baseline | 明确记录“首次冻结无历史前代”的 Baseline 建立方式，禁止与自身比较伪装 Breaking 证据；生成结果提交；`lint/breaking/generate-check` 通过 | `IN_PROGRESS` |
 | M05-05 | Frame Codec 契约实现 | M05-04 | `internal/protocol/frame`、`codec` | UVarint 分片/合并、上限、EOF、Auth/Control/Work 分层测试 | `REVIEW` |
 | M05-06 | 递归 Unknown Field 拒绝 | M05-04 | 共享 Validator 与表驱动测试 | Auth、Control、Work、Snapshot 全覆盖 | `REVIEW` |
 | M05-07 | Deterministic Protobuf Bytes | M05-04、M05-06 | Snapshot/WorkHello 确定性字节构造器 | Snapshot 稳定排序并包含 Revision；WorkHello 清空 MAC 后重建已知字段；固定 Runtime 版本 | `REVIEW` |
@@ -194,40 +194,40 @@ M0.5 Gate 通过前，禁止开发 Server/Agent Protocol Handler。可并行开�
 
 - [x] `./tools/proto.sh lint` 通过。
 - [x] `./tools/proto.sh breaking` 通过。
-- [x] `./tools/proto.sh generate-check` 通过。
+- [ ] 新 Tunnel/Connector/Service Contract 在干净 checkout 执行 `./tools/proto.sh generate-check` 通过；当前脏工作区仅完成同版本连续生成 Hash 一致性校验，不冒充正式 Gate。
 - [x] Golden Vector 逐字节比较通过。
 - [x] Auth Success/Failure Transcript 及 Auth→Established 提交边界通过。
 - [x] Connection Token v1 编码、解析、版本、完整性和语义字段 Golden Vector 通过。
 - [x] Control/Work 方向、状态、乱序、重复、Unknown Field 全部测试通过。
 - [x] Snapshot Deterministic Bytes、Revision 与 ConfigAck 关联/幂等测试通过。
-- [x] Proto 变更已完成独立 Protocol Review。
+- [ ] 新 Tunnel/Connector/Service Contract 已完成独立 Protocol Review。
 
 ---
 
 # 7. M1：Secure TCP Data Plane Baseline
 
-M1 只要求“一个逻辑 Agent + 一个 Instance + 一个静态 TCP Tunnel”，但必须使用正式身份、安全协议和真实资源上限。
+M1 只要求“一个 Tunnel + 一个 Connector + 一个静态 TCP Service”，但必须从一开始使用最终的身份、安全协议和真实资源上限。
 
-身份链固定为“逻辑 Agent → 每次进程启动生成的 ephemeral Instance → 每次连接建立的 Session”。Agent 不持久化稳定机器身份、Instance 或 Session 身份，也不为这些运行态身份维护本地数据目录或锁。
+身份链固定为“持久 Tunnel → 每次 Agent 进程启动生成的 ephemeral Connector → 每次连接建立的 Session”。同一 Tunnel 的全部 Connector 复用同一枚当前 ACTIVE Token；Connector 和 Session 不落库，也不维护本地数据目录或锁。Service 是 Tunnel 下的持久代理配置，M1 的静态 Service 仍由 Integration Harness 注入。
 
 ## 7.1 任务清单
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M1-01 | Agent/Connection Token 领域模型 | M0-05、M05-02 | Server Domain/Repository | Agent 状态、Token Identity/Version、Secret Hash、签发时连接描述；完整 Token 不落库；边界测试 | `NOT_STARTED` |
-| M1-02 | Connection Token 创建与验证 | M1-01 | Application Service + Repository | 使用当前 Agent Gateway Endpoint/TLS Trust 签发单个 `xta_...`；CSPRNG、常量时间比较、一次性完整返回 | `NOT_STARTED` |
-| M1-03 | Ephemeral Instance/Session 身份 | M1-01 | Agent 内存身份、Server Registry Key | 身份链为 Agent→ephemeral Instance→Session；Instance 每次进程启动生成且仅驻留内存，Session 每次连接生成；ID 格式、冲突拒绝、重启更换 Instance、Session generation fencing 通过；Agent 不维护本地身份状态或目录锁 | `NOT_STARTED` |
-| M1-04 | Agent Gateway TLS/ALPN + Server Identity Rotation | M0-05、M0-11、M05-10 | Server Gateway、Token-derived Agent Dialer、`gateway rotate-key --maintenance`、Rotation Journal | 首个 Admin 完成前 Gateway 不启动；Agent 只从 Connection Token 取得 Endpoint/public-or-pinned Trust；TLS1.3；ALPN empty/unknown 拒绝；Handshake 上限；Server 停止并持 External Lock 时轮换；新 Pin 只进入后续新 Token；Journal 恢复与私钥 `0600` | `NOT_STARTED` |
-| M1-05 | Connection Token Auth 与 Control Session 建立 | M1-02至 M1-04 | Auth Handler、Session Secret、Session Registry | Token 连接描述/身份/Secret 作为整体校验；Auth Failure 可区分；Success flush 提交点；generation fencing | `NOT_STARTED` |
-| M1-06 | AgentRuntime 所有权与线性化 | M1-03、M1-05 | Runtime Registry、ActiveWork | 固定 Lock 规则；锁内无 IO/Close/阻塞；计数 exactly-once | `NOT_STARTED` |
-| M1-07 | Control Session Owner/Outbox | M1-05、M1-06 | Single Reader/Writer/Owner、有界队列 | 优先级、合并、Snapshot/ConfigAck 有序、队列满关闭、无 goroutine leak | `NOT_STARTED` |
-| M1-08 | WorkHello HMAC/Lease/Replay | M1-05、M05-08 | Work Auth Handler + Replay Cache | HMAC Vector；Lease 消费与 Replay 原子；无 wall-clock 依赖 | `NOT_STARTED` |
-| M1-09 | WorkPool 与 Budget Lease | M1-06、M1-08 | Server/Agent Work Pool | Connecting/Idle/Opening/Active 有界；Demand generation 合并；Lease 过期 | `NOT_STARTED` |
-| M1-10 | OPEN 状态机 | M1-09 | OpenRequest/OpenResponse 处理 | IDLE→OPENING→ACTIVE/CLOSED；RAW 前传输失败最多在同一 Instance 换 WorkConn 重试一次，M1 不引入 Replica 重选；已转发业务字节绝不重试；超时/reset/失败资源只释放一次 | `NOT_STARTED` |
-| M1-11 | RAW Streaming/Half-Close/Cancel | M1-10 | Bidirectional Proxy | `OPEN_OK + RAW` 同 Read 无丢失；Half-Close；Cancel 解除 IO 阻塞 | `NOT_STARTED` |
-| M1-12 | M1 Resource/Timeout/FD Limits | M1-04至 M1-11 | Limit Manager + 配置接入 | Frame/Auth/Queue/Conn/Pending Open/Replay/FD 在真实路径生效 | `NOT_STARTED` |
-| M1-13 | Baseline Reconnect/Graceful Shutdown | M1-07至 M1-12 | Agent Backoff、Server/Agent Drain | 网络/Server 容量错误使用 Jitter Backoff 且遵循 `retry_after`；Token/Pin/Version 永久错误停止快速重试；只在 Session 稳定运行后重置 Backoff；新 generation 不被旧 cleanup 破坏；deadline 后强制关闭 | `NOT_STARTED` |
-| M1-14 | M1 Gate：TCP Echo End-to-End | M1-01至 M1-13 | `tests/integration` 中的 ephemeral Public Listener、静态 Tunnel/Origin Fixture、Echo Origin | Public TCP→Server→Agent→Echo；Harness 不新增临时生产 Schema；下方 Checklist 全通过 | `NOT_STARTED` |
+| M1-01 | Tunnel/Connection Token 领域模型 | M0-05、M05-02 | Server Domain/Repository + Token Master Key | Tunnel 与唯一 ACTIVE Token；完整 Token AES-256-GCM 密文、Secret Hash；Connector/Session/实时状态不落库；独立主密钥权限、丢失快速失败与边界测试 | `REVIEW` |
+| M1-02 | Stable Connection Token 创建、获取与验证 | M1-01 | Application Service + Repository | 首次签发单个 `xta_...`；添加 Connector 重复获取逐字节相同 Token且不新增行/版本；CSPRNG、AEAD AAD、常量时间比较、篡改失败 | `REVIEW` |
+| M1-03 | Ephemeral Connector/Session 身份 | M1-01 | Agent 内存身份、Server Registry Key | 身份链为 Tunnel→ephemeral Connector→Session；Connector 每次进程启动生成且仅驻留内存，Session 每次连接生成；同一 Tunnel 多 Connector 并存、同 Connector 重连 generation fencing；无 Connector 持久化 | `REVIEW` |
+| M1-04 | Agent Gateway TLS/ALPN + Server Identity Rotation | M0-05、M0-11、M05-10 | Server Gateway、Token-derived Agent Dialer、`gateway rotate-key --maintenance`、Rotation Journal | 首个 Admin 完成前 Gateway 不启动；Agent 只从 Connection Token 取得 Endpoint/public-or-pinned Trust；TLS1.3；ALPN empty/unknown 拒绝；Handshake 上限；Server 停止并持 External Lock 时轮换；新 Pin 只进入后续新 Token；Journal 恢复与私钥 `0600` | `IN_PROGRESS` |
+| M1-05 | Tunnel Token Auth 与 Control Session 建立 | M1-02至 M1-04 | Connector Auth Handler、Session Secret、Session Registry | Token 连接描述/Tunnel 身份/Secret 作为整体校验；Auth Failure 可区分；Success flush 提交点；generation fencing | `REVIEW` |
+| M1-06 | TunnelRuntime 所有权与线性化 | M1-03、M1-05 | Runtime Registry、ActiveWork | 固定 Lock 规则；锁内无 IO/Close/阻塞；计数 exactly-once | `REVIEW` |
+| M1-07 | Control Session Owner/Outbox | M1-05、M1-06 | Single Reader/Writer/Owner、有界队列 | 优先级、合并、Snapshot/ConfigAck 有序、队列满关闭、无 goroutine leak | `REVIEW` |
+| M1-08 | WorkHello HMAC/Lease/Replay | M1-05、M05-08 | Work Auth Handler + Replay Cache | HMAC Vector；Lease 消费与 Replay 原子；无 wall-clock 依赖 | `REVIEW` |
+| M1-09 | WorkPool 与 Budget Lease | M1-06、M1-08 | Server/Agent Work Pool | Connecting/Idle/Opening/Active 有界；Demand generation 合并；Lease 过期 | `REVIEW` |
+| M1-10 | OPEN 状态机 | M1-09 | OpenRequest/OpenResponse 处理 | IDLE→OPENING→ACTIVE/CLOSED；OPEN 只携带 `service_id`；RAW 前传输失败最多在同一 Connector 换 WorkConn 重试一次，M1 不引入跨 Connector 重选；已转发业务字节绝不重试；超时/reset/失败资源只释放一次 | `REVIEW` |
+| M1-11 | RAW Streaming/Half-Close/Cancel | M1-10 | Bidirectional Proxy | `OPEN_OK + RAW` 同 Read 无丢失；Half-Close；Cancel 解除 IO 阻塞 | `REVIEW` |
+| M1-12 | M1 Resource/Timeout/FD Limits | M1-04至 M1-11 | Limit Manager + 配置接入 | Frame/Auth/Queue/Conn/Pending Open/Replay/FD 在真实路径生效 | `REVIEW` |
+| M1-13 | Baseline Reconnect/Graceful Shutdown | M1-07至 M1-12 | Agent Backoff、Server/Agent Drain | 网络/Server 容量错误使用 Jitter Backoff 且遵循 `retry_after`；Token/Pin/Version 永久错误停止快速重试；只在 Session 稳定运行后重置 Backoff；新 generation 不被旧 cleanup 破坏；deadline 后强制关闭 | `REVIEW` |
+| M1-14 | M1 Gate：TCP Echo End-to-End | M1-01至 M1-13 | `tests/integration` 中的 ephemeral Public Listener、静态 Tunnel/Origin Fixture、Echo Origin | Public TCP→Server→Agent→Echo；Harness 不新增临时生产 Schema；下方 Checklist 全通过 | `REVIEW` |
 
 ## 7.2 M1 Gate Checklist
 
@@ -239,32 +239,32 @@ M1 只要求“一个逻辑 Agent + 一个 Instance + 一个静态 TCP Tunnel”
 - [ ] 测试结束后 FD 和 goroutine 回到基线。
 - [ ] `go test ./...` 和 M1 Integration Suite 通过。
 
-M1 的静态 Tunnel 只能由 Integration Test Harness 注入，不得为过渡测试新增一套临时生产配置，也不得提前制造绕开 M3 Application Service 的持久化接口。
+M1 的静态 Service 只能由 Integration Test Harness 注入，不得为过渡测试新增一套临时生产配置，也不得提前制造绕开 M3 Application Service 的持久化接口。
 
 ---
 
-# 8. M2：Replica & Credential Lifecycle
+# 8. M2：Credential Lifecycle & Failover Hardening
 
 ## 8.1 任务清单
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M2-01 | Multi-Replica Runtime Registry | M1-14 | 多 Instance Registry | 同一逻辑 Agent/Token 可连接多个 ephemeral Instance；独立 Session/Pool/Counter | `NOT_STARTED` |
-| M2-02 | Instance Selection Baseline | M2-01 | Selection Strategy | 只按 Current Session、非 DRAINING、Idle/Capacity 过滤后 Least Active + RR tie-break；并发公平性测试；Revision/Health Eligible 留给 M3-09 接入 | `NOT_STARTED` |
-| M2-03 | Online Instance Lifecycle/Observability | M1-03、M2-01 | Runtime Lifecycle Events + Query/Metrics | 连接、Session Replacement、DRAINING、断开状态可查询并有结构化日志/指标；Agent 重启产生新 Instance；不维护机器/主机历史 | `NOT_STARTED` |
-| M2-04 | Token Rotate/Revoke | M1-02、M2-01 | Credential Lifecycle Service | Rotate 使用当前 Endpoint/TLS Trust 签发新 Connection Token 并进入并存期；Revoke 新认证失败；完整 Token 不落库/日志 | `NOT_STARTED` |
-| M2-05 | Agent Revoke | M2-04 | Agent Revoke Workflow | 阻止新 Auth；关闭全代 Session/ActiveWork；幂等 | `NOT_STARTED` |
-| M2-06 | Session Replacement 保留 ActiveWork | M2-01、M1-13 | Tombstone + Cross-generation Cleanup | 旧 Active 自然结束；旧 cleanup 只清 Idle/Opening；`closeOnce` | `NOT_STARTED` |
-| M2-07 | Replica Failover + Pre-RAW Reselect | M2-02、M2-06 | Failover Integration Test | Replica 崩溃后新连接选其他 Instance；RAW 前符合契约的失败可最多跨 Replica 重选一次；已进 RAW 或已转发业务字节不自动重放 | `NOT_STARTED` |
-| M2-08 | M2 Gate | M2-01至 M2-07 | M2 验收证据 | 多 Replica、Rotate/Revoke、Failover、ActiveWork 保留全通过 | `NOT_STARTED` |
+| M2-01 | Multi-Connector Scale/Isolation Suite | M1-14 | 并发 Connector/Session/Pool 测试矩阵 | 同一 Tunnel/Token 的 3 个以上 ephemeral Connector 在连接 churn 下保持独立 Session/Pool/Counter；无饥饿、无计数泄漏、无 Connector 持久化行 | `NOT_STARTED` |
+| M2-02 | Connector Selection Hardening | M2-01 | Selection Soak + Churn Suite | 在 Current Session 替换、DRAINING、Idle/Capacity 快速变化下保持 Least Active + RR 原子公平；Revision/Health Eligible 留给 M3-09 接入 | `NOT_STARTED` |
+| M2-03 | Online Connector Lifecycle/Observability | M1-03、M1-14 | Runtime Lifecycle Events + Query/Metrics | 连接、Session Replacement、DRAINING、断开状态可查询并有结构化日志/指标；Agent 重启产生新 Connector；不维护机器/主机历史 | `NOT_STARTED` |
+| M2-04 | Token Rotate/Revoke | M1-02、M1-14 | Credential Lifecycle Service | Rotate 使用当前 Endpoint/TLS Trust 签发新版本并撤销旧 Token 的新认证；普通 Add Connector 只返回当前同一 Token；Revoke 新认证失败；完整 Token 只加密入库且不入日志 | `NOT_STARTED` |
+| M2-05 | Tunnel Revoke | M2-04 | Tunnel Revoke Workflow | 阻止新 Auth；关闭该 Tunnel 全代 Session/ActiveWork；幂等 | `NOT_STARTED` |
+| M2-06 | Credential/Session Replacement 保留 ActiveWork | M2-04、M1-13 | Tombstone + Cross-generation Cleanup | Rotate 与 Session Replacement 期间旧 Active 自然结束；旧 cleanup 只清 Idle/Opening；`closeOnce` | `NOT_STARTED` |
+| M2-07 | Connector Failover + Pre-RAW Reselect | M2-02、M2-06 | Failover Integration Test | Connector 崩溃后新连接选其他 Connector；RAW 前符合契约的失败可最多跨 Connector 重选一次；已进 RAW 或已转发业务字节不自动重放 | `NOT_STARTED` |
+| M2-08 | M2 Gate | M2-01至 M2-07 | M2 验收证据 | 多 Connector 规模/抖动、Rotate/Revoke、Failover、ActiveWork 保留全通过 | `NOT_STARTED` |
 
 ## 8.2 M2 Gate Checklist
 
-- [ ] 同一 Token 启动多个 Agent Replica，Server 能独立识别。
-- [ ] 新连接按资格和负载分布，无单 Replica 饿饿/垄断。
-- [ ] Token Rotate/Revoke 和 Agent Revoke 的在线/离线路径通过。
+- [ ] 同一 Tunnel Token 并发启动 3 个以上 Connector，Server 能独立识别且 Token 文本完全相同。
+- [ ] 新连接在 Session churn 与容量变化下仍按资格、Least Active 和 RR tie-break 分布，无单 Connector 饥饿/垄断。
+- [ ] Token Rotate/Revoke 和 Tunnel Revoke 的在线/离线路径通过。
 - [ ] 旧 Session ActiveWork 自然完成，Revoke 可跨 generation 关闭。
-- [ ] Replica 崩溃/重连不造成计数泄漏、重复转发或新 Session 被旧 cleanup 清除。
+- [ ] Connector 崩溃/重连不造成计数泄漏、重复转发或新 Session 被旧 cleanup 清除。
 
 ---
 
@@ -274,30 +274,30 @@ M1 的静态 Tunnel 只能由 Integration Test Harness 注入，不得为过渡�
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M3-01 | Tunnel/Binding 领域与存储 | M1-14、M0-05 | Domain + SQLite Repository | 不变量、唯一性、引用关系和容量边界 | `NOT_STARTED` |
+| M3-01 | Service 领域与存储 | M1-14、M0-05 | Domain + SQLite Repository | Service 直接归属 Tunnel；Origin/Health/Enabled/RequiredRevision 不变量、引用关系和容量边界；无中间关联表 | `NOT_STARTED` |
 | M3-02 | Application Service + Version Transaction | M3-01 | Server Application Service | Service Aggregate 修改在单事务递增 version/revision；并发写不丢失 | `NOT_STARTED` |
-| M3-03 | Snapshot Builder/Size Gate | M3-02 | AgentSnapshot Builder | 稳定排序、绑定数/字节上限在事务前校验 | `NOT_STARTED` |
+| M3-03 | Snapshot Builder/Size Gate | M3-02 | TunnelSnapshot Builder | 稳定排序、Service 数/字节上限在事务提交前校验 | `NOT_STARTED` |
 | M3-04 | Agent In-Memory Atomic Apply | M3-03、M05-08、M1-07 | Agent Config Runtime + ConfigAck | 完整 Snapshot 校验成功后原子替换内存配置；Apply 失败保留当前运行 Revision 并返回稳定错误；不写 Agent 配置或信任状态文件 | `NOT_STARTED` |
 | M3-05 | Token-only Startup/Reconnect + Remote Config | M3-04、M1-05 | Agent Bootstrap/Reconnect Integration | Agent 仅凭 Connection Token 建连；每次启动或重连从 Server 获取完整 Desired Snapshot；Apply 成功并 Ack 前不进入 Eligible；Server 不可达时不上线且无本地配置回退 | `NOT_STARTED` |
 | M3-06 | Snapshot Reconcile/Observed Revision | M3-03至 M3-05、M1-07 | Reconciler + ConfigAck | 过期 Revision 拒绝；高 Revision 合并；完整 Apply 的 Ack 后才 Eligible；重连重新获取完整 Snapshot | `NOT_STARTED` |
 | M3-07 | Origin Resolver | M3-03、M3-04 | Agent Origin Resolver | 仅从当前已原子 Apply 的内存 Snapshot 解析 HTTP/HTTPS/TCP、DNS/IPv4/IPv6、TLS Server Name 与 SSRF 边界 | `NOT_STARTED` |
-| M3-08 | 中心 Health Scheduler | M3-07 | Heap/Wheel Scheduler + Semaphores | 全局/per-origin 并发、Rate、initial/interval jitter；无 per-binding ticker | `NOT_STARTED` |
-| M3-09 | Health Batch/Revision Fencing + Eligible Selection | M3-06、M3-08、M2-02 | Pending Accumulator、Batch Reporter、完整 Instance Eligible Filter | `tunnel_id` 合并；出队分配 generation；将 required/observed Revision 和 Per-Tunnel Health 接入 M2 Selection；旧 Revision Health 不放行 | `NOT_STARTED` |
-| M3-10 | Health Target Budget Manager | M3-01、M3-08、M2-06 | Reserve/Commit/Release Manager | `(agent_id,instance_id)` 所有权；固定锁顺序；重连不双计费/误释放 | `NOT_STARTED` |
-| M3-11 | Agent/Instance/Service Status | M3-06、M3-09、M3-10 | `internal/server/status` | 状态优先级唯一；Origin Health 不污染 Agent/Instance；Web 不重算 | `NOT_STARTED` |
-| M3-12 | Durable Operations：Backup/Restore | M0-05、M1-04、M3-02 | `backup create/restore`、Backup Manifest、Restore Journal | 在线 Create 通过本机控制通道建立 Config Write Barrier；离线 Create/Restore 使用同一 Stable Target External Lock；备份 SQLite + Gateway TLS Identity；Manifest/Hash/Schema 校验；同盘 staging/rollback/journal 可恢复 | `NOT_STARTED` |
+| M3-08 | 中心 Health Scheduler | M3-07 | Heap/Wheel Scheduler + Semaphores | 全局/per-origin 并发、Rate、initial/interval jitter；无 per-service ticker | `NOT_STARTED` |
+| M3-09 | Health Batch/Revision Fencing + Eligible Selection | M3-06、M3-08、M2-02 | Pending Accumulator、Batch Reporter、完整 Connector Eligible Filter | `service_id` 合并；出队分配 generation；将 required/observed Revision 和 Per-Service Health 接入 M2 Selection；旧 Revision Health 不放行 | `NOT_STARTED` |
+| M3-10 | Health Target Budget Manager | M3-01、M3-08、M2-06 | Reserve/Commit/Release Manager | `(tunnel_id,connector_id)` 所有权；固定锁顺序；重连不双计费/误释放 | `NOT_STARTED` |
+| M3-11 | Tunnel/Connector/Service Status | M3-06、M3-09、M3-10 | `internal/server/status` | 状态优先级唯一；Origin Health 不污染 Tunnel/Connector；Web 不重算 | `NOT_STARTED` |
+| M3-12 | Durable Operations：Backup/Restore | M0-05、M1-01、M1-04、M3-02 | `backup create/restore`、Backup Manifest、Restore Journal | 在线 Create 通过本机控制通道建立 Config Write Barrier；离线 Create/Restore 使用同一 Stable Target External Lock；把 SQLite + Gateway TLS Identity + Tunnel Token Master Key 作为同一一致性单元；Manifest/Hash/Schema 校验；同盘 staging/rollback/journal 可恢复 | `NOT_STARTED` |
 | M3-13 | M3 Gate | M3-01至 M3-12 | Application Service Integration + Server Durable Operation Crash Tests | 下方 Checklist 全部通过 | `NOT_STARTED` |
 
 ## 9.2 M3 Gate Checklist
 
 - [ ] 通过 Application Service 修改 Origin，Agent 无需重启即生效。
-- [ ] Snapshot 的 Deterministic Bytes、Revision、大小和 Binding 边界均可自动化验证。
+- [ ] Snapshot 的 Deterministic Bytes、Revision、大小和 Service Count 边界均可自动化验证。
 - [ ] Agent 完整校验后原子替换内存配置；失败保留当前 Revision 并返回明确 ConfigAck。
 - [ ] Agent 启动/重连必须拉取完整 Desired Snapshot；Server 不可达时不上线且无本地配置回退。
 - [ ] Health Rate/Concurrency/Jitter/Batch/Revision Fencing 通过。
-- [ ] 超过 Agent/Global Health Target Budget 的 Config Write 和 Replica Auth 被拒绝。
+- [ ] 超过 Tunnel/Global Health Target Budget 的 Config Write 和 Connector Auth 被拒绝。
 - [ ] 满容量 Session Replacement 不 Double Reserve，旧 cleanup 不释放新 Reservation。
-- [ ] `backup create/restore` 在线/离线路径通过，Manifest 覆盖 SQLite 与 Gateway TLS Identity，Restore 不与旧目录合并；Server Journal 在各提交点崩溃后可恢复。
+- [ ] `backup create/restore` 在线/离线路径通过，Manifest 覆盖 SQLite、Gateway TLS Identity 与 Tunnel Token Master Key，Restore 不与旧目录合并；Server Journal 在各提交点崩溃后可恢复。
 
 ---
 
@@ -315,7 +315,7 @@ M1 的静态 Tunnel 只能由 Integration Test Harness 注入，不得为过渡�
 | M4-06 | TCP Listener Manager | M3-02、M4-01 | Listener Reconciler | 数据库唯一性/端口范围/保留端口冲突在事务前拒绝；OS `Listen(port)` 失败不回滚 Desired State，只标记对应 Service `APPLY_FAILED` 并周期重试；其他 Listener 继续；新旧 Listener 原子交接；重启恢复 | `NOT_STARTED` |
 | M4-07 | Raw TCP/SSH Data Plane | M4-06、M1-11、M2-02 | TCP Ingress | SSH/Raw TCP 逐字节转发；无协议特判；错误映射稳定 | `NOT_STARTED` |
 | M4-08 | Caddy/Nginx HTTPS 集成 | M4-03、M4-05 | Deploy Example + E2E | HTTPS 在前置代理终止；Host/Origin/Forwarded 语义正确 | `NOT_STARTED` |
-| M4-09 | Public Ingress Limits | M4-03、M4-06 | Per-source/Agent/Tunnel/Global Limits | LRU 有界 + TTL；HTTP Rate/Body/Header；TCP Accept/Open/Active 上限 | `NOT_STARTED` |
+| M4-09 | Public Ingress Limits | M4-03、M4-06 | Per-source/Service/Tunnel/Global Limits | LRU 有界 + TTL；HTTP Rate/Body/Header；TCP Accept/Open/Active 上限 | `NOT_STARTED` |
 | M4-10 | M4 Gate | M4-01至 M4-09 | Product Data Plane E2E | HTTP/HTTPS/WebSocket/SSH/Raw TCP 全部通过 | `NOT_STARTED` |
 
 ## 10.2 M4 Gate Checklist
@@ -344,12 +344,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M5-01 | 冻结完整 OpenAPI | M3-02、M3-11、M4-02 | `api/openapi/openapi.yaml` | 全部 Schema/Required/Nullable/Error/Status/Pagination/PATCH/ETag 完整；Lint/Breaking PASS | `NOT_STARTED` |
 | M5-02 | 生成 Client/Server Contract | M5-01 | Go Server Types + TypeScript Client | 可重复生成；干净 checkout 零漂移 | `NOT_STARTED` |
 | M5-03 | Admin Login/Session/CSRF | M5-02、M0-08、M0-11 | Auth Handler + Web Login | Secure/HttpOnly/SameSite Cookie；Origin/Host 规则；Login/Logout/CSRF E2E | `NOT_STARTED` |
-| M5-04 | Agent/Replica/Credential API | M2-08、M5-02 | REST Handler | CRUD/Rotate/Revoke；Token 只显示一次；`Cache-Control: no-store` | `NOT_STARTED` |
-| M5-05 | Service/Tunnel/Binding API | M3-13、M4-10、M5-02 | REST Handler | 调用既有 Application Service；不在 Handler 重写事务逻辑 | `NOT_STARTED` |
-| M5-06 | PATCH/ETag/Pagination 并发契约 | M5-04、M5-05 | Handler + Repository Tests | Agent 和 Service Aggregate 均覆盖 428/412；omitted/null/value；opaque token 50/200；version 原子递增 | `NOT_STARTED` |
+| M5-04 | Tunnel/Connector/Credential API | M2-08、M5-02 | REST Handler | Tunnel CRUD/Rotate/Revoke；Add Connector/Reveal 返回当前同一 Token；Connector 列表只读运行态；`Cache-Control: no-store` | `NOT_STARTED` |
+| M5-05 | Service API | M3-13、M4-10、M5-02 | REST Handler | Service 直接归属 Tunnel；调用既有 Application Service；不在 Handler 重写事务逻辑 | `NOT_STARTED` |
+| M5-06 | PATCH/ETag/Pagination 并发契约 | M5-04、M5-05 | Handler + Repository Tests | Tunnel 和 Service Aggregate 均覆盖 428/412；omitted/null/value；opaque token 50/200；version 原子递增 | `NOT_STARTED` |
 | M5-07 | Settings/Read-only Runtime API | M5-02 | Settings Handler | 只返回允许公开的有效配置；不泄露 Secret | `NOT_STARTED` |
 | M5-08 | Dashboard/Status UI | M5-02、M5-04、M5-05 | React Pages | 直接渲染 Server Status；不在前端重算状态 | `NOT_STARTED` |
-| M5-09 | Agent/Service 管理 UI | M5-03至 M5-08 | CRUD/Rotate/Revoke/Replica View | 日常操作无需 SQLite 或手改 Agent Service Config | `NOT_STARTED` |
+| M5-09 | Tunnel/Connector/Service 管理 UI | M5-03至 M5-08 | Tunnel CRUD/Token/Connector View/Service CRUD | 日常操作无需 SQLite 或手改 Agent Service Config | `NOT_STARTED` |
 | M5-10 | Contract/E2E Test Suite | M5-02至 M5-09 | API Contract + Browser E2E | 错误码、并发 PATCH、CSRF、Token no-store、生成漂移全覆盖 | `NOT_STARTED` |
 | M5-11 | M5 Gate | M5-01至 M5-10 | M5 验收证据 | 下方 Checklist 全部通过 | `NOT_STARTED` |
 
@@ -360,7 +360,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - [ ] 并发 PATCH 不丢失更新，缺少 If-Match 返回 428，冲突返回 412。
 - [ ] 分页 Token 不可由前端解析，默认 50，最大 200。
 - [ ] Login/Secure Cookie/CSRF/Logout 完整 E2E 通过。
-- [ ] Agent/Service/Replica/Token 日常工作流可在 Web 中完成。
+- [ ] Tunnel/Create Connector Guide/Service/Token 日常工作流可在 Web 中完成。
 
 ---
 
@@ -374,7 +374,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；低基数 Label | `NOT_STARTED` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `NOT_STARTED` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；重启无负数/重复 | `NOT_STARTED` |
-| M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Agent Offline/Replica Offline/Origin Down/No Capacity/Protocol Error 可区分 | `NOT_STARTED` |
+| M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `NOT_STARTED` |
 | M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard | 从报警可定位到状态、Metric、Trace 和日志；覆盖 Linux systemd 与 Windows SCM 的启动失败、恢复重启和 30s Stop/Shutdown 超时诊断 | `NOT_STARTED` |
 | M6-07 | M6 Gate | M6-01至 M6-06 | Observability 验收证据 | 故障注入下五类核心问题均可唯一定位 | `NOT_STARTED` |
 
@@ -396,7 +396,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 只调整 Schema 默认值；不删除预算维度；记录 CPU/RAM/FD 环境 | `NOT_STARTED` |
-| M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 大量 Replica 重连无同步风暴；永久错误不快速重试；旧代无污染 | `NOT_STARTED` |
+| M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 大量 Connector 重连无同步风暴；永久错误不快速重试；旧代无污染 | `NOT_STARTED` |
 | M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 每个 Drain 阶段丢包/延迟/对端消失；deadline 后无残留 FD/goroutine | `NOT_STARTED` |
 | M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `NOT_STARTED` |
 | M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile | `NOT_STARTED` |
@@ -702,3 +702,62 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 验收命令：Windows `go1.27.0` / `GOTOOLCHAIN=local` 下执行 `go mod verify`、`go test -count=1 ./...`、`go test -race -count=1 ./internal/protocol/...`、`go vet ./...`、`git diff --cached --check` 均通过。以该 Commit 创建原生 WSL 干净 Git 克隆，复制受管但被忽略的 `.tools/bin` 后确认工作树为空，并执行 `./tools/proto.sh lint`、`breaking`、`generate-check`，均通过；临时克隆已删除。
 - CI 与 Gate：本提交未推送，GitHub Actions 无法取得该 Commit，故没有新的 CI Run；按 M0-10 的全局证据规则，M05-10 仍保持 `IN_PROGRESS`，M05-01 至 M05-09 仍保持 `REVIEW`，M0.5 与全局 `DONE` 计数不变，M1 继续锁定。本轮不勾选任何产品任务。
 - 解锁条件：用户若授权推送此提交，待 GitHub Actions 对 `0294999` 的 CI 全绿后，再将 M05-10 置为 `DONE`；随后按用户的阶段 Review 规则停下，等待继续 M1 的明确指令。
+
+## 2026-08-25 · M1-EARLY-START · 用户授权
+
+- 决策：用户明确授权“允许 M05-10 未 DONE 时开始 M1”。该授权仅解除 M1 的开发顺序阻塞，绝不把 M05-10 的 `REVIEW` 状态、缺失 CI 证据或任何 M0/M0.5/M1 发布 Gate 伪装为通过。
+- 实施范围：M1 里程碑转为 `IN_PROGRESS`，先启动不依赖数据库 Schema 或 Protocol 字段变更的 M1-04。Connection Token、Proto 和 Server 配置继续以既有机器契约为准；若后续任务需要数据库迁移、依赖、公共 API、Protocol 或配置变更，仍按项目确认规则单独请求授权。
+- 验收边界：M1-14 和任何 `DONE` 状态仍须满足原有依赖、关键测试与 CI 证据；M05-10 的正式完成继续等待用户自行推送后产生的 CI Run。
+
+## 2026-08-25 · M1-01 · REVIEW
+
+- 负责人：Codex；用户已明确确认新增 SQLite Schema/Migration。新增前向 Migration `000002_agents.sql`，为逻辑 Agent 与 Connection Token 元数据建立 `agents`、`agent_tokens`、外键、Token Version/Hash 唯一性和每 Agent 单 ACTIVE Token 约束；未修改既有 Migration。
+- 产物：新增 Repository 领域模型、SQLite `BEGIN IMMEDIATE` 事务边界和表驱动的领域/Schema/迁移升级/事务回滚测试。完整 `xta_...`、Endpoint、TLS Trust、认证 Secret、Instance、Session 与实时 Agent Status 均不落库；Token Secret Hash 固定为 32 字节，错误路径不输出其内容。
+- 验收命令：`GOTOOLCHAIN=local go test -count=1 ./internal/repository/...`、`go test -race -count=1 ./internal/repository/...`、`go vet ./internal/repository/...`，以及整合后的 `go test -count=1 ./...`、`go test -race -count=1 ./internal/repository/... ./internal/server/gateway ./internal/agent/gateway ./internal/server/bootstrap`、`go vet ./...`、`git diff --check` 均通过。
+- 状态影响：M1-01 转为 `REVIEW`；M1 里程碑仍为 `IN_PROGRESS`，计数不增加。M1-02 的 Token 签发与认证接入、M1-03 的运行身份仍按其依赖和任务边界后续实施。
+
+## 2026-08-25 · M1-04 · IN_PROGRESS
+
+- 负责人：Codex；用户已明确确认实现冻结的 `gateway rotate-key --maintenance` 命令。当前落地 Pinned/Public TLS Identity、TLS 1.3、Control/Work 精确 ALPN、10 秒有界握手、Pending Handshake 上限、Rotation Journal/同盘原子替换、Agent Token-derived Dialer，以及“首个 Admin 前不监听、成功创建后只启动一次”的生命周期接入。
+- 续签与热加载：Pinned 证书在启动及常驻 Server 的 24 小时检查中，于剩余 `<=30` 天时复用原私钥签发新证书；新证书先同目录临时写入/fsync/原子替换，再经 `tls.Config.GetCertificate` 发布给后续握手，旧连接不受影响。失败保留旧有效身份并暴露最近续签错误，供后续 M6 日志与 Metric 接入；不新增配置项、依赖或 Protocol。
+- 验收：Gateway Identity/ALPN/预算、自动续签/同 SPKI/热加载/失败保留旧身份、Agent Pinned SPKI 与未知 ALPN、首个 Admin 后实际监听、以及 External Lock 冲突不换钥/释放后成功轮换的定向测试均通过；整合后 Windows `go mod verify`、全包 Test、相关 Race、Vet 与双 Diff Check 通过。Linux 专属 Bootstrap E2E 已以 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c` 和 `GOOS=linux GOARCH=amd64 go vet` 编译/静态检查，但 WSL 未安装 Go 且 Docker 不可用，未获得真实 Linux 运行证据。
+- 未完成：技术方案要求的 `xtunnel_gateway_certificate_expiry_seconds` 与 30/7/1 天告警，依赖尚未启动的 M6 Prometheus Registry/`/metrics`；`gateway rotate-key` 成功后的 Security Audit Event 缺少已冻结的 Event 持久化/查询契约。两者若在 M1 提前实现将新增 M6/M5 范围的公开可观测或持久化设计，必须由用户明确裁定。M1-04 因此保持 `IN_PROGRESS`，M1-05 不提前开始。
+
+## 2026-08-25 · M1-02 · REVIEW
+
+- 负责人：Codex。新增 Connection Token 首次签发与验证应用服务，并扩展事务内 Repository 查询；M1 只允许每个 Agent 签发第 1 代唯一 `ACTIVE` Token，Rotate/Revoke 保留给 M2，未提前实现。
+- 安全边界：认证 Secret 由 `crypto/rand` 生成 32 字节，持久化层只接收 SHA-256 摘要；完整 `xta_...` 只随成功结果一次性返回。服务端先使用冻结的 Protocol v1 Parse 校验文本 Token，再精确核对 Agent/Token/Version，并以常量时间比较摘要；Endpoint 与 TLS Trust 不写入 Repository。
+- 验收命令：`GOTOOLCHAIN=local go test -count=1 ./...`、`go test -race -count=1 ./internal/application ./internal/repository ./internal/repository/sqlite`、`go vet ./...`、`go mod verify`、`git diff --check`、`git diff --cached --check` 均通过；覆盖 CSPRNG 失败、Agent 不可用、重复 ACTIVE/版本、身份/摘要不符、失效 Token、畸形 Token 和 ULID 边界。
+- 状态影响：M1-02 转为 `REVIEW`，无 CI Run、未完成 M1-04，故不进入 M1-05，也不增加任何 `DONE` 计数。
+
+## 2026-08-25 · M1-03 · REVIEW
+
+- 负责人：Codex。新增仅驻留内存的 Agent Instance 身份和 Server Session Registry：`ai_`/`sess_` 均为 CSPRNG 生成的 26 位大写 Crockford ULID；同一进程重连复用 Instance，新进程重新生成，未提供持久化、导入、恢复或目录锁接口。
+- 并发边界：认证成功后才原子安装 Session；同一 `(agent_id, instance_id)` 重连递增 generation，旧连接只能在 Agent、Instance、Session 和 generation 全部相等时清理当前项。重复 Session ID 明确拒绝，锁内不执行认证、IO 或连接关闭。
+- 验收命令：`GOTOOLCHAIN=local go test -count=1 ./internal/identity ./internal/server/runtime`、`go test -race -count=1 ./internal/identity ./internal/server/runtime`、`go vet ./internal/identity ./internal/server/runtime`，以及本轮整合的全量 Test/Race/Vet、`go mod verify` 和双 Diff Check 均通过；覆盖非法 ID、随机源失败、进程重启、64 路并发替换、旧 cleanup fencing 与 Session ID 冲突。
+- 状态影响：M1-03 转为 `REVIEW`。认证 Handler 尚未接入（M1-05），无 CI Run，M1 里程碑仍为 `IN_PROGRESS` 且 `DONE=0`。
+
+## 2026-08-25 · ARCH-RESET · Tunnel / Connector / Service 对齐 Cloudflare
+
+- 用户决策：管理端创建 Tunnel；Tunnel 下可添加多个 Connector；同一 Tunnel 的全部 Connector 使用完全相同的当前 Token，默认共同承载新连接并互为备份；全部代理 Service 直接挂在 Tunnel 下。旧记录中的“逻辑 Agent / Instance / 旧 Tunnel / Binding”语义由本记录明确废止，分别替换为“Tunnel / Connector / Service / 无 Binding”。`xtunnel-agent` 只保留为 Binary 名称。
+- 契约变更：Protocol v1 改为 `tunnel_id=tun_...`、`connector_id=con_...`、`service_id=svc_...`；`ConnectorAuth*`、`TunnelSnapshot/ServiceConfig`、`ServiceHealth*` 与 `OpenRequest.service_id` 成为新机器契约。M05-01 至 M05-03、M05-05 至 M05-09 完成产物并保持 `REVIEW`；M05-04 因新契约正式 `generate-check` 未完成而回到 `IN_PROGRESS`，M05-10 同样保持 `IN_PROGRESS`。旧干净 checkout/CI 证据不能证明新语义 Gate。
+- M1 产物：未发布 `000002` Migration 重做为 `tunnels/tunnel_tokens`；Connector/Session/实时状态不落库。完整 Token 使用 AES-256-GCM 密文保存，AAD 绑定 Tunnel/Token/Version，认证仍使用 SHA-256 Secret Hash 常量时间比较。创建后的 `Current` 每次返回与首次签发逐字节相同的 ACTIVE Token，不新增行或 Version。独立 32 字节主密钥使用 `credentials/tunnel-token.key`，Linux 权限 `0600`；已有密文但密钥缺失/损坏时启动失败。
+- Runtime 与负载：Registry Key 改为 `(tunnel_id, connector_id)`；同 Connector 重连使用 generation fencing，同 Tunnel 多 Connector 可并存。M1 已在真实 TCP Echo 数据面接入 Current Session、DRAINING、Idle/Capacity 过滤与 `Least Active + Round Robin tie-break` 原子租约，并保留旧 generation ActiveWork tombstone；M2-02 改为覆盖 Session churn 与容量快速变化的规模化公平性加固，不重复实现默认负载基线。
+- 本地验收：`go1.27.0`、`GOTOOLCHAIN=local`；`go test -count=1 ./...`、`go test -race -count=1 ./...`、`go vet ./...`、`git diff --check`、`git diff --cached --check` 通过。Protocol `lint/breaking`、Golden 与连续生成 Hash 由同版本受管工具通过；新契约的正式 `generate-check` 和独立 Review 仍待干净 checkout/CI，因此不勾选 M05-10 或任何 M1 DONE。
+- 工作区边界：本轮未暂存、未提交、未推送。原有 staged 文件仍是旧快照，且旧 `000002_agents.sql` 显示为 staged-add/worktree-delete；提交前必须由用户自行重新暂存全部最新文件，禁止直接提交当前 Index。
+
+## 2026-08-25 · M1-05 至 M1-14 · REVIEW（核心能力）
+
+- 负责人：Codex；用户授权在 M05-10 尚未 `DONE` 时先完成核心能力，并要求每个阶段完成后停下等待 Review。本轮只完成 M1，不进入 M2，也未暂存、提交或推送。
+- Control 与身份：同一 Tunnel 的当前 Token 可被多个 ephemeral Connector 同时使用；Control Auth 在 Success flush 前以可回滚 replacement 链原子预安装 Session 并执行 Connector 配额准入，写入失败恢复最近仍健康的旧代，嵌套重连会跳过已失败或已清理节点且不覆盖更新 Current。Success Frame 完整写出后立即终结旧链，后续协议状态或交接失败只清理新 Session，不会复活旧代；同 Connector 重连继续由完整 generation identity fencing。Control Reader、Writer 与 Owner 单一化，有界 Outbox 支持优先级、合并、满载关闭，并按实际 Wire Size 拆分 Health Batch、拒绝单项超限。
+- Work 与数据面：WorkHello 使用 Session Secret HMAC、一次性 Lease 与 Replay 原子校验；Server/Agent WorkPool 覆盖 Connecting、Idle、Opening、Active。Server 使用本地单调 Heartbeat Timeout 清理失联 Session，并在 Heartbeat 上对账已耗尽 Demand 与池缺口；有效 Lease 继续合并，已消费 WorkConn 形成缺口时发送更高 generation 的补充 Demand。Tunnel 数据面优先从有 Idle Work 的 Eligible Connector 执行 Least Active + Round Robin；候选 Idle 被并发抢走时立即回到 Tunnel 级选择，只有全部暂时无 Idle 才按 Tunnel 共享一个 Pending Group，选择一个最佳 Connector，发布绝对 Pending 目标并在统一 `work_acquire_timeout` 内等待；Drain/Session 关闭仍在同一总超时内重选。目标下降立即发送无 Grant 的更高 generation，并撤销 Server 侧旧 Budget Lease；OPEN 仍只传 `service_id`，RAW 前仅允许在同一 Connector 内换一个 WorkConn 重试一次，业务字节开始后不重试。
+- 流式与退出：双向 RAW Proxy 覆盖同读缓冲保留、TCP Half-Close、Context Cancel、Origin Timeout/Reset。Agent 收到进程退出信号后发送唯一 DrainRequest；Server 立即撤下 WorkAuth 与选路资格，等待 OPENING 收束、关闭非 ACTIVE WorkConn 并返回匹配且幂等的 DrainAck；ACTIVE 自然结束，固定 Deadline 后才强制关闭。
+- 资源限制：共享 Limit Manager 覆盖 Connector 全局/单 Tunnel、Work 全状态、PendingOpen 与 Active 的 global/tunnel/service/source IP 预算，所有 Lease 均 exactly-once 归还。AUTH/Control/Work Frame 使用 Schema 上限；Pending TLS/Auth 使用独立非阻塞 Gate。Linux 启动检查 `RLIMIT_NOFILE`，错误逐项列出 Work、Public Active、Pending Open、Control、TLS、Auth、Listener、SQLite、Management、Metrics 与安全余量预算；其他平台明确不执行该 Linux 专属检查。
+- E2E 证据：`tests/integration/tcp_echo_test.go` 使用真实 SQLite Tunnel/Token、TLS Gateway、同一 Token 派生的 Agent Control/Work、8 条 WorkConn、静态测试 Service、ephemeral Public Listener 与 Echo Origin，验证二进制载荷、客户端 Half-Close、快速 Drain 退出、goroutine 回基线，并在 Linux 环境可用时检查 `/proc/self/fd` 回基线；没有新增临时生产 Schema 或绕过 M3 的生产配置接口。
+- 本地主验证：`go1.27.0`、`GOTOOLCHAIN=local`；核心 13 个包执行 `go test -count=20` 全通过，随后执行 `go test -race -count=2` 全通过；整仓 `go test -count=1 ./...`、`go test -race -count=1 ./...`、`go vet ./...`、`go mod verify`、`git diff --check` 全通过。`internal/server/limits` 与 `internal/server/bootstrap` 使用 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c` 交叉编译通过。
+- Review 修复验证：补充并发 Revoke/Success、Health Frame 上限、Heartbeat Timeout、Demand 实际消费后补池、Pending Open FD、Admin 提交后 Gateway 启动失败退出与重启、SQLite 约束失败分支；随后补充 replacement 写失败恢复旧 Current、嵌套回滚跳过失效代、post-flush 不复活旧代、9 条并发 Pending 聚合补池、Timeout/Cancel 配额归还、Drain 重选、Demand 降低立即撤销旧 Lease 等回归。相关 5 包 `go test -count=20`、整仓 Test/Race/Vet 均通过；既有 Linux amd64 交叉 Vet/测试编译与 Proto lint/breaking 证据保持有效，`generate-check` 仍只允许在包含当前生成物的干净 checkout 或 CI 中作为正式证据。
+- 二次 Review 修复：Connection Token 先完成 Credential/Secret/ACTIVE 校验再裁决 Tunnel 撤销，Gateway Host 拒绝内部空白与控制字符，Control AUTH 阻塞 IO 响应 Context 取消；Server SIGTERM 分离停止 Accept、排空 ACTIVE、Deadline 强关和 Session 收束，Owner 退出先取消对端 Drain 等待；Agent 普通 Control 断开保留旧代 ACTIVE，WorkPool 在 IDLE 提交点执行 canceled/generation/drain fence；Half-Close 即使 `CloseRead` 失败也继续 `CloseWrite`。新增对应失败分支和并发测试，并修正 Pending Group 测试未在锁内取得稳定快照造成的 Race。相关 9 包 `go test -count=10`、相关 9 包 Race、`internal/tunnel` Race `-count=20`、整仓 Test/Race/Vet、`go mod verify` 与双 Diff Check 均通过；未执行真实 OS SIGTERM 进程 Smoke，未新增或修改 Proto、Schema、依赖和配置。
+- 三次 Review 修复：Agent 使用跨 Control generation 的 Binary 级共享 WorkConn Budget，旧代 detached ACTIVE 在 worker 真正退出前持续占用 `max_total=256`，槽位释放后唤醒当前代补池；heartbeat `Enqueue(ErrOwnerClosed)` 按普通 Session 结束处理，retired Pool 由 Runtime 统一登记、取消并等待。Tunnel 在 Idle 选择与提交竞争失败后执行非阻塞重选，不再把总等待时间耗在已空 Pool；RAW Proxy 将 `CloseRead` 清理错误延后到双向复制结束后报告，只有复制或 `CloseWrite` 错误立即中断。新增跨代预算、OwnerClosed 竞争、retired Pool 等待、非阻塞 Idle 提交和真实 TCP 反向流回归测试；Go 1.27.0 / `GOTOOLCHAIN=local` 下定向 5 包 `go test -count=5`、定向 Race `-count=2`、定向 Vet、整仓 Test/Race/Vet 与 `go mod verify` 通过。证据来自脏工作区，未执行 Linux Proto Wrapper、真实 OS SIGTERM 或 CI，不替代 Gate 证据；未新增或修改 Proto、Schema、依赖和配置。
+- 四次 Review 修复：Agent retired Pool 不再直接监听已经取消的进程 Context；进程取消时记录单一固定 Deadline，当前 generation 结束两阶段 Drain 后，旧 generation ACTIVE 只等待该 Deadline 的剩余窗口，自然结束则不取消，到期才统一强关并等待 `Pool.Done`。Tunnel 在 Pending Group 选定旧 Session 后遇到 generation replacement 时，先 exactly-once 释放旧 membership，再将陈旧选择转换为可重试结果，在剩余 `work_acquire_timeout` 内回到全 Tunnel 选择。新增 retired Pool 自然结束、Deadline 强关及 `TestAcquireWorkRetriesStalePendingSessionAfterGenerationReplacement` 确定性回归；Go 1.27.0 / `GOTOOLCHAIN=local` 下 Connector `go test -count=20`、Race `-count=5`，Tunnel `go test -count=10`、Race `-count=2`，以及整仓 Test/Race/Vet、`go mod verify` 与双 Diff Check 全部通过。证据来自脏工作区，未执行 Linux Proto Wrapper、真实 OS SIGTERM 或 CI，不替代 Gate 证据；未新增或修改 Proto、Schema、依赖和配置。
+- 状态影响：M1-05 至 M1-14 转为 `REVIEW`；M1-01 至 M1-03 继续为 `REVIEW`，M1-04 因证书到期 Metric/30-7-1 告警及 Rotation Security Audit Event 尚待 M6/M5 契约而保持 `IN_PROGRESS`。M05-10 仍缺最新 Tunnel/Connector/Service 契约的 CI 与独立 Review；因此 M1 里程碑保持 `IN_PROGRESS`、`DONE=0`，M1 Gate Checklist 暂不勾选，M2 保持 `NOT_STARTED`。
+- Review 边界：本地实现与失败分支已具备 Review 条件，但必须由用户完成本阶段代码/架构 Review；之后若要把任务置为 `DONE`，还需补齐 M1-04、M05-10 与项目规则要求的 CI/独立复审证据。当前 Index 是重构前后的混合旧快照，提交前必须重新暂存完整工作树，禁止直接提交现有暂存区。

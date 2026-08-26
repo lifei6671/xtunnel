@@ -10,11 +10,11 @@ import (
 )
 
 func TestMarshalSnapshotSortsCopyWithoutMutatingSource(t *testing.T) {
-	snapshot := &protocolv1.AgentSnapshot{
-		AgentId: "ag_01J00000000000000000000000",
-		Bindings: []*protocolv1.TunnelBindingConfig{
-			{TunnelId: "tunnel-b"},
-			{TunnelId: "tunnel-a"},
+	snapshot := &protocolv1.TunnelSnapshot{
+		TunnelId: "tun_01J00000000000000000000000",
+		Services: []*protocolv1.ServiceConfig{
+			{ServiceId: "svc_01J00000000000000000000001"},
+			{ServiceId: "svc_01J00000000000000000000000"},
 		},
 	}
 
@@ -22,15 +22,15 @@ func TestMarshalSnapshotSortsCopyWithoutMutatingSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalSnapshot() error = %v", err)
 	}
-	if got := snapshot.GetBindings()[0].GetTunnelId(); got != "tunnel-b" {
-		t.Fatalf("MarshalSnapshot() 改写了源 Binding 顺序: got %q", got)
+	if got := snapshot.GetServices()[0].GetServiceId(); got != "svc_01J00000000000000000000001" {
+		t.Fatalf("MarshalSnapshot() 改写了源 Service 顺序: got %q", got)
 	}
 
-	expected := &protocolv1.AgentSnapshot{
-		AgentId: "ag_01J00000000000000000000000",
-		Bindings: []*protocolv1.TunnelBindingConfig{
-			{TunnelId: "tunnel-a"},
-			{TunnelId: "tunnel-b"},
+	expected := &protocolv1.TunnelSnapshot{
+		TunnelId: "tun_01J00000000000000000000000",
+		Services: []*protocolv1.ServiceConfig{
+			{ServiceId: "svc_01J00000000000000000000000"},
+			{ServiceId: "svc_01J00000000000000000000001"},
 		},
 	}
 	want, err := Marshal(expected)
@@ -44,8 +44,8 @@ func TestMarshalSnapshotSortsCopyWithoutMutatingSource(t *testing.T) {
 
 func TestWorkHelloMACIgnoresExistingMACAndRejectsInvalidSecret(t *testing.T) {
 	hello := &protocolv1.WorkHello{
-		AgentId:       "ag_01J00000000000000000000000",
-		InstanceId:    "ai_01J00000000000000000000000",
+		TunnelId:      "tun_01J00000000000000000000000",
+		ConnectorId:   "con_01J00000000000000000000000",
 		SessionId:     "sess_01J00000000000000000000000",
 		WorkId:        "work_01J00000000000000000000000",
 		BudgetLeaseId: "lease_01J00000000000000000000000",
@@ -73,8 +73,8 @@ func TestWorkHelloMACIgnoresExistingMACAndRejectsInvalidSecret(t *testing.T) {
 
 func TestComputeWorkHelloMACRejectsInvalidIDBeforeMAC(t *testing.T) {
 	hello := &protocolv1.WorkHello{
-		AgentId:       "ag_01J00000000000000000000000",
-		InstanceId:    "ai_01J00000000000000000000000",
+		TunnelId:      "tun_01J00000000000000000000000",
+		ConnectorId:   "con_01J00000000000000000000000",
 		SessionId:     "sess_01J00000000000000000000000",
 		WorkId:        "work_invalid",
 		BudgetLeaseId: "lease_01J00000000000000000000000",

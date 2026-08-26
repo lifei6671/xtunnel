@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
@@ -114,7 +116,7 @@ func marshalDeterministic(message proto.Message) ([]byte, error) {
 
 func validateSemantics(connectionToken *protocolv1.ConnectionToken, requireIntegrityTag bool) error {
 	if connectionToken == nil || connectionToken.GetFormatVersion() != FormatVersionV1 ||
-		!validate.ValidID(connectionToken.GetAgentId(), "ag_") || !validate.ValidID(connectionToken.GetTokenId(), "tok_") ||
+		!validate.ValidID(connectionToken.GetTunnelId(), "tun_") || !validate.ValidID(connectionToken.GetTokenId(), "tok_") ||
 		connectionToken.GetTokenVersion() == 0 || len(connectionToken.GetAuthenticationSecret()) != sha256.Size {
 		return ErrMalformed
 	}
@@ -146,7 +148,10 @@ func validateSemantics(connectionToken *protocolv1.ConnectionToken, requireInteg
 }
 
 func validGatewayHost(host string) bool {
-	if host == "" || host != strings.TrimSpace(host) || strings.ContainsAny(host, "/\\") {
+	if host == "" || !utf8.ValidString(host) || strings.ContainsAny(host, "/\\") ||
+		strings.IndexFunc(host, func(character rune) bool {
+			return unicode.IsSpace(character) || unicode.IsControl(character)
+		}) >= 0 {
 		return false
 	}
 	if _, err := netip.ParseAddr(host); err == nil {

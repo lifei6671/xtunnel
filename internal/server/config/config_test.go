@@ -33,8 +33,8 @@ logging:
 	if result.Management.Listen != "127.0.0.1:8080" {
 		t.Fatalf("Management.Listen = %q, want default", result.Management.Listen)
 	}
-	if result.Limits.MaxAgents != 1000 {
-		t.Fatalf("Limits.MaxAgents = %d, want 1000", result.Limits.MaxAgents)
+	if result.Limits.MaxTunnels != 1000 {
+		t.Fatalf("Limits.MaxTunnels = %d, want 1000", result.Limits.MaxTunnels)
 	}
 	if result.Transport.TCP.WorkAcquireTimeout.String() != "2s" {
 		t.Fatalf("WorkAcquireTimeout = %s, want 2s", result.Transport.TCP.WorkAcquireTimeout)
@@ -84,7 +84,7 @@ func TestLoadRejectsCrossFieldViolations(t *testing.T) {
 		},
 		{
 			name:  "heartbeat ratio",
-			yaml:  "agent_runtime:\n  heartbeat_interval: 11s\n  heartbeat_timeout: 30s\n",
+			yaml:  "connector_runtime:\n  heartbeat_interval: 11s\n  heartbeat_timeout: 30s\n",
 			match: "one third",
 		},
 		{

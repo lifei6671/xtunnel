@@ -1,0 +1,310 @@
+package sqlite
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"gorm.io/gorm"
+
+	"github.com/lifei6671/xtunnel/internal/protocol/validate"
+	"github.com/lifei6671/xtunnel/internal/repository"
+)
+
+const (
+	// TunnelTable 是 tunnels 的固定表名。
+	TunnelTable = "tunnels"
+	// TunnelTokenTable 是 tunnel_tokens 的固定表名。
+	TunnelTokenTable = "tunnel_tokens"
+
+	// rollbackTimeout 独立约束事务清理，避免调用请求已取消时把未回滚连接放回池中。
+	rollbackTimeout = 5 * time.Second
+)
+
+var (
+	// 编译期确认 SQLite Store 暴露的是领域 Repository 的事务边界。
+	_ repository.Store          = (*Store)(nil)
+	_ repository.RepositoryView = (*transactionStore)(nil)
+	_ repository.TxStore        = (*transactionStore)(nil)
+)
+
+// TunnelColumns 集中定义 tunnels 的列名，避免查询条件分散硬编码。
+var TunnelColumns = struct {
+	ID              string
+	Name            string
+	Version         string
+	DesiredRevision string
+	RevokedAt       string
+	CreatedAt       string
+	UpdatedAt       string
+}{
+	ID:              "id",
+	Name:            "name",
+	Version:         "version",
+	DesiredRevision: "desired_revision",
+	RevokedAt:       "revoked_at",
+	CreatedAt:       "created_at",
+	UpdatedAt:       "updated_at",
+}
+
+// TunnelTokenColumns 集中定义 tunnel_tokens 的列名，避免泄漏或误用敏感列。
+var TunnelTokenColumns = struct {
+	ID              string
+	TunnelID        string
+	SecretHash      string
+	TokenCiphertext string
+	Version         string
+	Status          string
+	CreatedAt       string
+	RevokedAt       string
+}{
+	ID:              "id",
+	TunnelID:        "tunnel_id",
+	SecretHash:      "secret_hash",
+	TokenCiphertext: "token_ciphertext",
+	Version:         "version",
+	Status:          "status",
+	CreatedAt:       "created_at",
+	RevokedAt:       "revoked_at",
+}
+
+// tunnelRecord 是 tunnels 表的内部 GORM 映射。
+type tunnelRecord struct {
+	ID              string `gorm:"column:id;primaryKey"`
+	Name            string `gorm:"column:name"`
+	Version         int64  `gorm:"column:version"`
+	DesiredRevision int64  `gorm:"column:desired_revision"`
+	RevokedAt       *int64 `gorm:"column:revoked_at"`
+	CreatedAt       int64  `gorm:"column:created_at"`
+	UpdatedAt       int64  `gorm:"column:updated_at"`
+}
+
+func (tunnelRecord) TableName() string { return TunnelTable }
+
+// tunnelTokenRecord 是 tunnel_tokens 表的内部 GORM 映射。
+// 敏感字节只在这一内部映射中进入数据库，错误路径绝不格式化其内容。
+type tunnelTokenRecord struct {
+	ID              string `gorm:"column:id;primaryKey"`
+	TunnelID        string `gorm:"column:tunnel_id"`
+	SecretHash      []byte `gorm:"column:secret_hash"`
+	TokenCiphertext []byte `gorm:"column:token_ciphertext"`
+	Version         int64  `gorm:"column:version"`
+	Status          string `gorm:"column:status"`
+	CreatedAt       int64  `gorm:"column:created_at"`
+	RevokedAt       *int64 `gorm:"column:revoked_at"`
+}
+
+func (tunnelTokenRecord) TableName() string { return TunnelTokenTable }
+
+// transactionStore 将同一个 BEGIN IMMEDIATE 事务连接交给各 Repository。
+type transactionStore struct {
+	database *gorm.DB
+}
+
+// Read 在普通 GORM 连接池视图上运行只读回调，不开启 SQLite 写事务。
+// Connector Auth 和 Token Reveal 属于高频只读路径；若使用 BEGIN IMMEDIATE，
+// 每次认证都会争抢全库写锁，导致多 Connector 重连被无谓串行化。
+func (store *Store) Read(ctx context.Context, fn func(repository.RepositoryView) error) error {
+	if fn == nil {
+		return errors.New("repository read callback must not be nil")
+	}
+	return fn(&transactionStore{database: store.database.WithContext(ctx)})
+}
+
+// WithTx 使用 SQLite BEGIN IMMEDIATE 取得写入权后运行 fn。
+//
+// 这里不能改用 GORM 默认的 Begin：SQLite 的普通 BEGIN 是延迟事务，两个并发签发
+// 可能同时读到“该 Tunnel 尚无 ACTIVE Token”，随后才在写入阶段竞争。业务要求同一
+// Tunnel 的所有 Connector 共用唯一 ACTIVE Token，所以必须在检查与创建之前取得写锁。
+// GORM 没有公开的 SQLite 事务模式参数，因此在独占连接上显式执行 BEGIN IMMEDIATE。
+// 已经由外层开启事务后，还必须关闭 GORM Create 的默认事务，避免嵌套 BEGIN 破坏边界。
+func (store *Store) WithTx(ctx context.Context, fn func(repository.TxStore) error) error {
+	if fn == nil {
+		return errors.New("repository transaction callback must not be nil")
+	}
+
+	return store.database.WithContext(ctx).Connection(func(connection *gorm.DB) (resultErr error) {
+		if err := connection.Exec("BEGIN IMMEDIATE").Error; err != nil {
+			return fmt.Errorf("begin immediate repository transaction: %w", err)
+		}
+
+		committed := false
+		defer func() {
+			if committed {
+				return
+			}
+			// fn 可能正是因为请求 ctx 已取消而返回。Rollback 是数据库资源清理，
+			// 必须使用不继承取消信号、但仍有短超时的 Context；否则 raw
+			// BEGIN IMMEDIATE 会随连接回到池中并继续占用写锁。
+			rollbackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+			defer cancel()
+			if err := connection.WithContext(rollbackContext).Exec("ROLLBACK").Error; err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("rollback repository transaction: %w", err))
+			}
+		}()
+
+		transaction := connection.Session(&gorm.Session{SkipDefaultTransaction: true})
+		if err := fn(&transactionStore{database: transaction}); err != nil {
+			return err
+		}
+		if err := connection.Exec("COMMIT").Error; err != nil {
+			return fmt.Errorf("commit repository transaction: %w", err)
+		}
+		committed = true
+		return nil
+	})
+}
+
+// Tunnels 返回当前事务作用域的 Tunnel Repository。
+func (store *transactionStore) Tunnels() repository.TunnelRepository {
+	return tunnelRepository{database: store.database}
+}
+
+// TunnelTokens 返回当前事务作用域的 Tunnel Token Repository。
+func (store *transactionStore) TunnelTokens() repository.TunnelTokenRepository {
+	return tunnelTokenRepository{database: store.database}
+}
+
+type tunnelRepository struct{ database *gorm.DB }
+
+func (store tunnelRepository) Create(ctx context.Context, tunnel repository.Tunnel) error {
+	if err := tunnel.Validate(); err != nil {
+		return err
+	}
+	if err := store.database.WithContext(ctx).Create(tunnelRecordFromDomain(tunnel)).Error; err != nil {
+		return fmt.Errorf("create tunnel: %w", err)
+	}
+	return nil
+}
+
+func (store tunnelRepository) Get(ctx context.Context, id string) (repository.Tunnel, error) {
+	if !validate.ValidID(id, "tun_") {
+		return repository.Tunnel{}, repository.ErrInvalidTunnel
+	}
+	var record tunnelRecord
+	if err := store.database.WithContext(ctx).Where(TunnelColumns.ID+" = ?", id).Take(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return repository.Tunnel{}, repository.ErrNotFound
+		}
+		return repository.Tunnel{}, fmt.Errorf("get tunnel: %w", err)
+	}
+	return record.toDomain(), nil
+}
+
+type tunnelTokenRepository struct{ database *gorm.DB }
+
+func (store tunnelTokenRepository) Create(ctx context.Context, token repository.TunnelToken) error {
+	if err := token.Validate(); err != nil {
+		return err
+	}
+	if err := store.database.WithContext(ctx).Create(tunnelTokenRecordFromDomain(token)).Error; err != nil {
+		return fmt.Errorf("create tunnel token: %w", err)
+	}
+	return nil
+}
+
+func (store tunnelTokenRepository) GetByIdentity(ctx context.Context, tunnelID, tokenID string, version int64) (repository.TunnelToken, error) {
+	if !validate.ValidID(tunnelID, "tun_") || !validate.ValidID(tokenID, "tok_") || version < 1 {
+		return repository.TunnelToken{}, repository.ErrInvalidTunnelToken
+	}
+	var record tunnelTokenRecord
+	if err := store.database.WithContext(ctx).
+		Where(TunnelTokenColumns.TunnelID+" = ?", tunnelID).
+		Where(TunnelTokenColumns.ID+" = ?", tokenID).
+		Where(TunnelTokenColumns.Version+" = ?", version).
+		Take(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return repository.TunnelToken{}, repository.ErrNotFound
+		}
+		return repository.TunnelToken{}, fmt.Errorf("get tunnel token by identity: %w", err)
+	}
+	return record.toDomain(), nil
+}
+
+// GetActiveByTunnel 返回指定 Tunnel 当前供全部 Connector 共用的唯一 ACTIVE Token。
+func (store tunnelTokenRepository) GetActiveByTunnel(ctx context.Context, tunnelID string) (repository.TunnelToken, error) {
+	if !validate.ValidID(tunnelID, "tun_") {
+		return repository.TunnelToken{}, repository.ErrInvalidTunnelToken
+	}
+	var record tunnelTokenRecord
+	if err := store.database.WithContext(ctx).
+		Where(TunnelTokenColumns.TunnelID+" = ?", tunnelID).
+		Where(TunnelTokenColumns.Status+" = ?", repository.TunnelTokenStatusActive).
+		Take(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return repository.TunnelToken{}, repository.ErrNotFound
+		}
+		return repository.TunnelToken{}, fmt.Errorf("get active tunnel token: %w", err)
+	}
+	return record.toDomain(), nil
+}
+
+func (store tunnelTokenRepository) GetByTunnelVersion(ctx context.Context, tunnelID string, version int64) (repository.TunnelToken, error) {
+	if !validate.ValidID(tunnelID, "tun_") || version < 1 {
+		return repository.TunnelToken{}, repository.ErrInvalidTunnelToken
+	}
+	var record tunnelTokenRecord
+	if err := store.database.WithContext(ctx).
+		Where(TunnelTokenColumns.TunnelID+" = ?", tunnelID).
+		Where(TunnelTokenColumns.Version+" = ?", version).
+		Take(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return repository.TunnelToken{}, repository.ErrNotFound
+		}
+		return repository.TunnelToken{}, fmt.Errorf("get tunnel token by version: %w", err)
+	}
+	return record.toDomain(), nil
+}
+
+func tunnelRecordFromDomain(tunnel repository.Tunnel) tunnelRecord {
+	return tunnelRecord{
+		ID:              tunnel.ID,
+		Name:            tunnel.Name,
+		Version:         tunnel.Version,
+		DesiredRevision: tunnel.DesiredRevision,
+		RevokedAt:       tunnel.RevokedAt,
+		CreatedAt:       tunnel.CreatedAt,
+		UpdatedAt:       tunnel.UpdatedAt,
+	}
+}
+
+func (record tunnelRecord) toDomain() repository.Tunnel {
+	return repository.Tunnel{
+		ID:              record.ID,
+		Name:            record.Name,
+		Version:         record.Version,
+		DesiredRevision: record.DesiredRevision,
+		RevokedAt:       record.RevokedAt,
+		CreatedAt:       record.CreatedAt,
+		UpdatedAt:       record.UpdatedAt,
+	}
+}
+
+func tunnelTokenRecordFromDomain(token repository.TunnelToken) tunnelTokenRecord {
+	return tunnelTokenRecord{
+		ID:              token.ID,
+		TunnelID:        token.TunnelID,
+		SecretHash:      append([]byte(nil), token.SecretHash[:]...),
+		TokenCiphertext: append([]byte(nil), token.TokenCiphertext...),
+		Version:         token.Version,
+		Status:          string(token.Status),
+		CreatedAt:       token.CreatedAt,
+		RevokedAt:       token.RevokedAt,
+	}
+}
+
+func (record tunnelTokenRecord) toDomain() repository.TunnelToken {
+	var secretHash [32]byte
+	copy(secretHash[:], record.SecretHash)
+	return repository.TunnelToken{
+		ID:              record.ID,
+		TunnelID:        record.TunnelID,
+		SecretHash:      secretHash,
+		TokenCiphertext: append([]byte(nil), record.TokenCiphertext...),
+		Version:         record.Version,
+		Status:          repository.TunnelTokenStatus(record.Status),
+		CreatedAt:       record.CreatedAt,
+		RevokedAt:       record.RevokedAt,
+	}
+}

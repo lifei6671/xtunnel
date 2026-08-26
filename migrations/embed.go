@@ -9,3 +9,8 @@ import (
 //
 //go:embed 000001_schema_migrations.sql
 var SchemaMigrations string
+
+// TunnelDomain 包含 M1-01 的 Tunnel 与 Connection Token 前向 Migration。
+//
+//go:embed 000002_tunnels.sql
+var TunnelDomain string

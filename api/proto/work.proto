@@ -6,13 +6,13 @@ option go_package = "github.com/lifei6671/xtunnel/internal/protocol/gen;protocol
 
 import "common.proto";
 
-// WorkHello 是 Agent 在 TLS WorkConn 建立后发送的首个裸消息。
+// WorkHello 是 Connector 在 TLS WorkConn 建立后发送的首个裸消息。
 // 所有标识符必须先通过共享 ID 格式校验；mac 的计算输入是清空 mac 后的
 // 已知字段确定性编码，并由当前 Session Secret 使用 xtunnel-work-v1 域分隔计算。
 // 字段 5 和 6 永久保留：Protocol v1 不使用跨主机 wall clock 认证 WorkConn。
 message WorkHello {
-  string agent_id = 1;
-  string instance_id = 2;
+  string tunnel_id = 1;
+  string connector_id = 2;
   string session_id = 3;
   string work_id = 4;
   reserved 5, 6;
@@ -30,11 +30,11 @@ message WorkReady {
 }
 
 // OpenRequest 是 Server 在 IDLE 状态发送的唯一裸消息。
-// Agent 仅能按 tunnel_id 从已验证 Snapshot 解析 Origin，禁止通过本消息传递 Origin 地址。
+// Connector 仅能按 service_id 从已验证 Snapshot 解析 Origin，禁止通过本消息传递 Origin 地址。
 message OpenRequest {
   uint32 protocol_version = 1;
   string connection_id = 2;
-  string tunnel_id = 3;
+  string service_id = 3;
   string trace_id = 4;
   string client_addr = 5;
   uint64 timestamp_ms = 6;
@@ -43,7 +43,7 @@ message OpenRequest {
   string tracestate = 9;
 }
 
-// OpenResponse 是 Agent 在 OPENING 状态发送的唯一裸消息。
+// OpenResponse 是 Connector 在 OPENING 状态发送的唯一裸消息。
 // 只有 status 为 OPEN_STATUS_OK 时双方才切入 RAW；失败结果发送后关闭 WorkConn。
 message OpenResponse {
   string connection_id = 1;

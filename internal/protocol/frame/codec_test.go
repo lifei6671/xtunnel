@@ -142,7 +142,7 @@ func TestReadPayloadRejectsMalformedInput(t *testing.T) {
 // 错误不会被当作空消息接受。
 func TestReadMessageRejectsMalformedProtobuf(t *testing.T) {
 	// 第一字节是长度 1，payload 0xff 是带 continuation bit 的不完整 field key。
-	err := ReadAuth(bytes.NewReader([]byte{0x01, 0xff}), &protocolv1.AgentAuthRequest{})
+	err := ReadAuth(bytes.NewReader([]byte{0x01, 0xff}), &protocolv1.ConnectorAuthRequest{})
 	if !errors.Is(err, ErrMalformedMessage) {
 		t.Fatalf("ReadAuth() error = %v, want ErrMalformedMessage", err)
 	}
@@ -164,8 +164,8 @@ func TestTransportWrappers(t *testing.T) {
 			name:  "auth",
 			write: WriteAuth,
 			read:  ReadAuth,
-			sent:  &protocolv1.AgentAuthRequest{ConnectionToken: "xta_example"},
-			recv:  &protocolv1.AgentAuthRequest{},
+			sent:  &protocolv1.ConnectorAuthRequest{ConnectionToken: "xta_example"},
+			recv:  &protocolv1.ConnectorAuthRequest{},
 		},
 		{
 			name: "control",
@@ -182,7 +182,7 @@ func TestTransportWrappers(t *testing.T) {
 			name:  "work",
 			write: WriteWork,
 			read:  ReadWork,
-			sent:  &protocolv1.WorkHello{AgentId: "ag_example"},
+			sent:  &protocolv1.WorkHello{TunnelId: "tun_example"},
 			recv:  &protocolv1.WorkHello{},
 		},
 	}
@@ -202,6 +202,20 @@ func TestTransportWrappers(t *testing.T) {
 				t.Fatalf("decoded message = %v, want %v", test.recv, test.sent)
 			}
 		})
+	}
+}
+
+func TestConfiguredFrameLimitCanOnlyTightenProtocolMaximum(t *testing.T) {
+	message := &protocolv1.WorkHello{WorkId: string(bytes.Repeat([]byte{'x'}, 64))}
+	var encoded bytes.Buffer
+	if err := WriteWorkLimit(&encoded, message, 8); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("WriteWorkLimit(smaller) error = %v, want ErrFrameTooLarge", err)
+	}
+	if err := WriteWorkLimit(&encoded, message, MaxWorkFrameSize+1); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("WriteWorkLimit(above protocol) error = %v, want ErrFrameTooLarge", err)
+	}
+	if err := WriteWorkLimit(&encoded, message, 0); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("WriteWorkLimit(zero) error = %v, want ErrFrameTooLarge", err)
 	}
 }
 

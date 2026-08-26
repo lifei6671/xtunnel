@@ -39,6 +39,12 @@ func ValidID(value, prefix string) bool {
 	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+26 {
 		return false
 	}
+	// ULID 用 26 个 Base32 字符承载 128 位数据，首字符只有低 3 位可用。
+	// 若允许 8..Z，多个字符串会表示超出 128 位范围的非标准值，并让各模块
+	// 对同一 ID 得出不同结论，因此共享校验必须先锁定首字符为 0..7。
+	if !strings.ContainsRune("01234567", rune(value[len(prefix)])) {
+		return false
+	}
 	for _, character := range value[len(prefix):] {
 		if !strings.ContainsRune(crockfordBase32, character) {
 			return false

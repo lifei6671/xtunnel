@@ -1,0 +1,377 @@
+//go:build linux
+
+package bootstrap
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	baseconfig "github.com/lifei6671/xtunnel/internal/config"
+	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
+	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
+	"github.com/lifei6671/xtunnel/internal/server/datadir"
+	"github.com/lifei6671/xtunnel/internal/server/externallock"
+	"github.com/lifei6671/xtunnel/internal/server/gateway"
+)
+
+const gatewayLockHelperEnvironment = "XTUNNEL_GATEWAY_ROTATE_LOCK_HELPER"
+
+// TestFirstAdminCreationStartsGateway 验证首个管理员提交成功之后才真正开始监听 Gateway。
+// 测试使用允许任意本机连接的测试授权器，避免把运行时 root 对等校验误当作生命周期结论。
+func TestFirstAdminCreationStartsGateway(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	runtimeDir := newRuntimeDirectory(t)
+	dataDir := t.TempDir()
+	resources, err := openServerStorage(ctx, dataDir, runtimeDir)
+	if err != nil {
+		t.Fatalf("openServerStorage() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := resources.Close(); err != nil {
+			t.Errorf("server storage Close() error = %v", err)
+		}
+	})
+	config := gatewayLifecycleTestConfig(dataDir, "127.0.0.1:0")
+	closer, err := openGatewayAndBootstrapWith(
+		ctx,
+		config,
+		resources,
+		runtimeDir,
+		func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (io.Closer, error) {
+			return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, func(*net.UnixConn) error { return nil }, afterCreate)
+		},
+	)
+	if err != nil {
+		t.Fatalf("openGatewayAndBootstrapWith() error = %v", err)
+	}
+	gatewayCloser, ok := closer.(*gatewayBootstrapCloser)
+	if !ok {
+		t.Fatalf("gateway closer type = %T, want *gatewayBootstrapCloser", closer)
+	}
+	t.Cleanup(func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("gateway Bootstrap Closer Close() error = %v", err)
+		}
+	})
+	if address := gatewayCloser.gateway.Addr(); address != nil {
+		t.Fatalf("gateway address before first admin = %v, want nil", address)
+	}
+
+	socketPath := filepath.Join(runtimeDir, adminBootstrapSocketName)
+	handled, err := requestAdminBootstrap(ctx, socketPath, resources.targetHash, "admin", "gateway lifecycle password")
+	if !handled || err != nil {
+		t.Fatalf("requestAdminBootstrap() = handled %t, error %v", handled, err)
+	}
+	address := gatewayCloser.gateway.Addr()
+	if address == nil {
+		t.Fatal("gateway did not start after first admin creation")
+	}
+	connection, err := net.DialTimeout("tcp", address.String(), time.Second)
+	if err != nil {
+		t.Fatalf("dial started gateway %q error = %v", address, err)
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatalf("close gateway test connection error = %v", err)
+	}
+}
+
+// TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun 锁定“Admin 事务已提交，
+// Gateway 绑定失败”的不可回滚边界：当前进程必须停止 Bootstrap 并返回错误，
+// 重启后则应识别已有 Admin，直接启动 Gateway。
+func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
+	runContext, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	runtimeDir := newRuntimeDirectory(t)
+	dataDir := t.TempDir()
+	blockedListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve blocked gateway address error = %v", err)
+	}
+	blockedAddress := blockedListener.Addr().String()
+	listenerClosed := false
+	t.Cleanup(func() {
+		if !listenerClosed {
+			_ = blockedListener.Close()
+		}
+	})
+
+	target, err := datadir.Resolve(dataDir)
+	if err != nil {
+		t.Fatalf("datadir.Resolve() error = %v", err)
+	}
+	configPath := writeConfig(t, "management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: gateway.example.test\n")
+	gatewayConfig := gatewayLifecycleTestConfig(dataDir, blockedAddress)
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- runWithStorageAndBootstrap(
+			runContext,
+			"xtunnel-server",
+			[]string{"--config", configPath, "--set", "server.data_dir=" + dataDir},
+			nil,
+			&bytes.Buffer{},
+			func(ctx context.Context, dataDir string) (storage, error) {
+				return openServerStorage(ctx, dataDir, runtimeDir)
+			},
+			func(ctx context.Context, _ serverconfig.Config, resources storage) (io.Closer, error) {
+				return openGatewayAndBootstrapWith(
+					ctx,
+					gatewayConfig,
+					resources,
+					runtimeDir,
+					func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (io.Closer, error) {
+						return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, func(*net.UnixConn) error { return nil }, afterCreate)
+					},
+				)
+			},
+		)
+	}()
+
+	socketPath := filepath.Join(runtimeDir, adminBootstrapSocketName)
+	waitForFile(t, socketPath, 2*time.Second)
+	handled, requestErr := requestAdminBootstrap(
+		runContext,
+		socketPath,
+		target.Hash,
+		"admin",
+		"gateway failure lifecycle password",
+	)
+	if !handled || requestErr == nil {
+		t.Fatalf("requestAdminBootstrap() = handled %t, error %v; want handled rejection", handled, requestErr)
+	}
+	select {
+	case runErr := <-runDone:
+		if runErr == nil || !strings.Contains(runErr.Error(), "start agent gateway after admin bootstrap") {
+			t.Fatalf("runWithStorageAndBootstrap() error = %v, want gateway startup failure", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runWithStorageAndBootstrap() did not exit after Gateway startup failure")
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Bootstrap Socket remained after Gateway startup failure: os.Lstat() error = %v", err)
+	}
+
+	if err := blockedListener.Close(); err != nil {
+		t.Fatalf("release blocked gateway address error = %v", err)
+	}
+	listenerClosed = true
+
+	restartContext, cancelRestart := context.WithCancel(context.Background())
+	defer cancelRestart()
+	restartedResources, err := openServerStorage(restartContext, dataDir, runtimeDir)
+	if err != nil {
+		t.Fatalf("openServerStorage() after failed first start error = %v", err)
+	}
+	restartedCloser, err := openGatewayAndBootstrapWith(
+		restartContext,
+		gatewayLifecycleTestConfig(dataDir, blockedAddress),
+		restartedResources,
+		runtimeDir,
+		func(context.Context, string, string, *sqlite.Store, func() error) (io.Closer, error) {
+			return nil, errors.New("unexpected Bootstrap Socket after Admin was committed")
+		},
+	)
+	if err != nil {
+		_ = restartedResources.Close()
+		t.Fatalf("openGatewayAndBootstrapWith() restart error = %v", err)
+	}
+	restartedGateway := restartedCloser.(*gatewayBootstrapCloser)
+	if restartedGateway.gateway.Addr() == nil {
+		t.Fatal("restart with existing Admin did not start Gateway")
+	}
+	if err := restartedCloser.Close(); err != nil {
+		t.Errorf("restart gateway closer Close() error = %v", err)
+	}
+	if err := restartedResources.Close(); err != nil {
+		t.Errorf("restart server storage Close() error = %v", err)
+	}
+}
+
+func gatewayLifecycleTestConfig(dataDir, listen string) serverconfig.Config {
+	return serverconfig.Config{
+		Server: serverconfig.Server{DataDir: dataDir},
+		AgentGateway: serverconfig.AgentGateway{
+			Listen:         listen,
+			PublicHostname: "gateway.example.test",
+			TLS:            serverconfig.AgentGatewayTLS{Mode: gateway.PinnedMode},
+		},
+		Control: serverconfig.Control{
+			HighPriorityQueue: 8, NormalQueue: 8,
+			WriteTimeout: baseconfig.Duration{Duration: time.Second},
+		},
+		ConnectorRuntime: serverconfig.ConnectorRuntime{
+			HeartbeatInterval: baseconfig.Duration{Duration: time.Second},
+			HeartbeatTimeout:  baseconfig.Duration{Duration: 3 * time.Second},
+		},
+		Limits: serverconfig.Limits{
+			MaxConnectors:                8,
+			MaxConnectorsPerTunnel:       4,
+			MaxPendingTLSHandshakes:      1,
+			MaxPendingAuth:               2,
+			MaxReplayEntriesPerSession:   32,
+			MaxWorkConnections:           64,
+			MaxIdleWorkConnections:       32,
+			MaxConnectingWorkConnections: 16,
+			MaxPendingOpens:              16,
+			MaxActiveConnections:         32,
+			MaxConnectionsPerTunnel:      16,
+			MaxConnectionsPerService:     16,
+			MaxConnectionsPerSourceIP:    8,
+		},
+	}
+}
+
+// TestGatewayRotateKeyExternalLock 覆盖维护命令的真实跨进程 External Lock 互斥，
+// 并确认冲突路径不会改变原有身份，释放锁后才允许完成离线换钥。
+func TestGatewayRotateKeyExternalLock(t *testing.T) {
+	if os.Getenv(gatewayLockHelperEnvironment) == "1" {
+		runGatewayLockHelper(t)
+		return
+	}
+
+	runtimeDir := newRuntimeDirectory(t)
+	dataDir := t.TempDir()
+	store, err := sqlite.Open(context.Background(), dataDir)
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Store.Close() error = %v", err)
+	}
+	before, err := gateway.LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, time.Now())
+	if err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
+	}
+	target, err := datadir.Resolve(dataDir)
+	if err != nil {
+		t.Fatalf("datadir.Resolve() error = %v", err)
+	}
+	readyPath := filepath.Join(t.TempDir(), "lock-ready")
+	releasePath := filepath.Join(t.TempDir(), "lock-release")
+	helper := exec.Command(os.Args[0], "-test.run=^TestGatewayRotateKeyExternalLock$")
+	helper.Env = append(os.Environ(),
+		gatewayLockHelperEnvironment+"=1",
+		"XTUNNEL_GATEWAY_ROTATE_LOCK_RUNTIME_DIR="+runtimeDir,
+		"XTUNNEL_GATEWAY_ROTATE_LOCK_TARGET_HASH="+target.Hash,
+		"XTUNNEL_GATEWAY_ROTATE_LOCK_READY="+readyPath,
+		"XTUNNEL_GATEWAY_ROTATE_LOCK_RELEASE="+releasePath,
+	)
+	var helperOutput bytes.Buffer
+	helper.Stdout = &helperOutput
+	helper.Stderr = &helperOutput
+	if err := helper.Start(); err != nil {
+		t.Fatalf("start external lock helper error = %v", err)
+	}
+	helperFinished := false
+	t.Cleanup(func() {
+		if helperFinished {
+			return
+		}
+		if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil && !errors.Is(err, os.ErrExist) {
+			t.Errorf("release external lock helper error = %v", err)
+		}
+		if err := helper.Wait(); err != nil {
+			t.Errorf("external lock helper error = %v; output: %s", err, helperOutput.String())
+		}
+	})
+	waitForFile(t, readyPath, 2*time.Second)
+
+	configPath := writeConfig(t, "management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: gateway.example.test\n")
+	commandArgs := []string{"--maintenance", "--config", configPath, "--set", "server.data_dir=" + dataDir}
+	startedAt := time.Now()
+	err = runGatewayRotateKey(context.Background(), "xtunnel-server", commandArgs, nil, &bytes.Buffer{}, runtimeDir, time.Now())
+	if !errors.Is(err, externallock.ErrAlreadyLocked) {
+		t.Fatalf("runGatewayRotateKey() under external lock error = %v, want ErrAlreadyLocked", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= time.Second {
+		t.Fatalf("runGatewayRotateKey() lock conflict took %s, want fast failure", elapsed)
+	}
+	afterConflict, err := gateway.LoadPinnedIdentity(dataDir)
+	if err != nil {
+		t.Fatalf("LoadPinnedIdentity() after lock conflict error = %v", err)
+	}
+	if afterConflict.SPKIHash() != before.SPKIHash() {
+		t.Fatal("lock-conflicted gateway rotation changed the pinned identity")
+	}
+
+	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release external lock helper error = %v", err)
+	}
+	helperErr := helper.Wait()
+	helperFinished = true
+	if helperErr != nil {
+		t.Fatalf("external lock helper error = %v; output: %s", helperErr, helperOutput.String())
+	}
+	// 进程已回收，Cleanup 不再重复 Wait，只保留路径清理由 TempDir 负责。
+
+	if err := runGatewayRotateKey(context.Background(), "xtunnel-server", commandArgs, nil, &bytes.Buffer{}, runtimeDir, time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("runGatewayRotateKey() after lock release error = %v", err)
+	}
+	afterRotation, err := gateway.LoadPinnedIdentity(dataDir)
+	if err != nil {
+		t.Fatalf("LoadPinnedIdentity() after successful rotation error = %v", err)
+	}
+	if afterRotation.SPKIHash() == before.SPKIHash() {
+		t.Fatal("successful gateway rotation did not change pinned identity")
+	}
+}
+
+// runGatewayLockHelper 在独立测试进程中持有锁，通过受控临时文件与父进程同步。
+func runGatewayLockHelper(t *testing.T) {
+	t.Helper()
+	runtimeDir := os.Getenv("XTUNNEL_GATEWAY_ROTATE_LOCK_RUNTIME_DIR")
+	targetHash := os.Getenv("XTUNNEL_GATEWAY_ROTATE_LOCK_TARGET_HASH")
+	readyPath := os.Getenv("XTUNNEL_GATEWAY_ROTATE_LOCK_READY")
+	releasePath := os.Getenv("XTUNNEL_GATEWAY_ROTATE_LOCK_RELEASE")
+	lock, err := externallock.Acquire(runtimeDir, targetHash)
+	if err != nil {
+		t.Fatalf("external lock helper Acquire() error = %v", err)
+	}
+	defer func() {
+		if err := lock.Close(); err != nil {
+			t.Errorf("external lock helper Close() error = %v", err)
+		}
+	}()
+	if err := os.WriteFile(readyPath, []byte("ready"), 0o600); err != nil {
+		t.Fatalf("external lock helper write ready error = %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(releasePath); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("external lock helper inspect release file error = %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("external lock helper timed out waiting for release")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForFile 在有限时间内等待辅助进程完成就绪信号，防止测试无限阻塞。
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("inspect helper ready signal error = %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("external lock helper did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

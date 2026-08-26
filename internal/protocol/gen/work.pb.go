@@ -21,14 +21,14 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// WorkHello 是 Agent 在 TLS WorkConn 建立后发送的首个裸消息。
+// WorkHello 是 Connector 在 TLS WorkConn 建立后发送的首个裸消息。
 // 所有标识符必须先通过共享 ID 格式校验；mac 的计算输入是清空 mac 后的
 // 已知字段确定性编码，并由当前 Session Secret 使用 xtunnel-work-v1 域分隔计算。
 // 字段 5 和 6 永久保留：Protocol v1 不使用跨主机 wall clock 认证 WorkConn。
 type WorkHello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	AgentId       string                 `protobuf:"bytes,1,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
-	InstanceId    string                 `protobuf:"bytes,2,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	TunnelId      string                 `protobuf:"bytes,1,opt,name=tunnel_id,json=tunnelId,proto3" json:"tunnel_id,omitempty"`
+	ConnectorId   string                 `protobuf:"bytes,2,opt,name=connector_id,json=connectorId,proto3" json:"connector_id,omitempty"`
 	SessionId     string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	WorkId        string                 `protobuf:"bytes,4,opt,name=work_id,json=workId,proto3" json:"work_id,omitempty"`
 	Nonce         []byte                 `protobuf:"bytes,7,opt,name=nonce,proto3" json:"nonce,omitempty"`
@@ -68,16 +68,16 @@ func (*WorkHello) Descriptor() ([]byte, []int) {
 	return file_work_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *WorkHello) GetAgentId() string {
+func (x *WorkHello) GetTunnelId() string {
 	if x != nil {
-		return x.AgentId
+		return x.TunnelId
 	}
 	return ""
 }
 
-func (x *WorkHello) GetInstanceId() string {
+func (x *WorkHello) GetConnectorId() string {
 	if x != nil {
-		return x.InstanceId
+		return x.ConnectorId
 	}
 	return ""
 }
@@ -180,12 +180,12 @@ func (x *WorkReady) GetErrorCode() ErrorCode {
 }
 
 // OpenRequest 是 Server 在 IDLE 状态发送的唯一裸消息。
-// Agent 仅能按 tunnel_id 从已验证 Snapshot 解析 Origin，禁止通过本消息传递 Origin 地址。
+// Connector 仅能按 service_id 从已验证 Snapshot 解析 Origin，禁止通过本消息传递 Origin 地址。
 type OpenRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	ConnectionId    string                 `protobuf:"bytes,2,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
-	TunnelId        string                 `protobuf:"bytes,3,opt,name=tunnel_id,json=tunnelId,proto3" json:"tunnel_id,omitempty"`
+	ServiceId       string                 `protobuf:"bytes,3,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
 	TraceId         string                 `protobuf:"bytes,4,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
 	ClientAddr      string                 `protobuf:"bytes,5,opt,name=client_addr,json=clientAddr,proto3" json:"client_addr,omitempty"`
 	TimestampMs     uint64                 `protobuf:"varint,6,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
@@ -240,9 +240,9 @@ func (x *OpenRequest) GetConnectionId() string {
 	return ""
 }
 
-func (x *OpenRequest) GetTunnelId() string {
+func (x *OpenRequest) GetServiceId() string {
 	if x != nil {
-		return x.TunnelId
+		return x.ServiceId
 	}
 	return ""
 }
@@ -289,7 +289,7 @@ func (x *OpenRequest) GetTracestate() string {
 	return ""
 }
 
-// OpenResponse 是 Agent 在 OPENING 状态发送的唯一裸消息。
+// OpenResponse 是 Connector 在 OPENING 状态发送的唯一裸消息。
 // 只有 status 为 OPEN_STATUS_OK 时双方才切入 RAW；失败结果发送后关闭 WorkConn。
 type OpenResponse struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
@@ -364,11 +364,10 @@ var File_work_proto protoreflect.FileDescriptor
 const file_work_proto_rawDesc = "" +
 	"\n" +
 	"\n" +
-	"work.proto\x12\x13xtunnel.protocol.v1\x1a\fcommon.proto\"\xdb\x01\n" +
-	"\tWorkHello\x12\x19\n" +
-	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12\x1f\n" +
-	"\vinstance_id\x18\x02 \x01(\tR\n" +
-	"instanceId\x12\x1d\n" +
+	"work.proto\x12\x13xtunnel.protocol.v1\x1a\fcommon.proto\"\xdf\x01\n" +
+	"\tWorkHello\x12\x1b\n" +
+	"\ttunnel_id\x18\x01 \x01(\tR\btunnelId\x12!\n" +
+	"\fconnector_id\x18\x02 \x01(\tR\vconnectorId\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x03 \x01(\tR\tsessionId\x12\x17\n" +
 	"\awork_id\x18\x04 \x01(\tR\x06workId\x12\x14\n" +
@@ -379,11 +378,12 @@ const file_work_proto_rawDesc = "" +
 	"\awork_id\x18\x01 \x01(\tR\x06workId\x12<\n" +
 	"\x06status\x18\x02 \x01(\x0e2$.xtunnel.protocol.v1.WorkReadyStatusR\x06status\x12=\n" +
 	"\n" +
-	"error_code\x18\x03 \x01(\x0e2\x1e.xtunnel.protocol.v1.ErrorCodeR\terrorCode\"\xe0\x02\n" +
+	"error_code\x18\x03 \x01(\x0e2\x1e.xtunnel.protocol.v1.ErrorCodeR\terrorCode\"\xe2\x02\n" +
 	"\vOpenRequest\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12#\n" +
-	"\rconnection_id\x18\x02 \x01(\tR\fconnectionId\x12\x1b\n" +
-	"\ttunnel_id\x18\x03 \x01(\tR\btunnelId\x12\x19\n" +
+	"\rconnection_id\x18\x02 \x01(\tR\fconnectionId\x12\x1d\n" +
+	"\n" +
+	"service_id\x18\x03 \x01(\tR\tserviceId\x12\x19\n" +
 	"\btrace_id\x18\x04 \x01(\tR\atraceId\x12\x1f\n" +
 	"\vclient_addr\x18\x05 \x01(\tR\n" +
 	"clientAddr\x12!\n" +

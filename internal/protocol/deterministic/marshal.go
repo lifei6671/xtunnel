@@ -40,16 +40,16 @@ func Marshal(message proto.Message) ([]byte, error) {
 	return proto.MarshalOptions{Deterministic: true}.Marshal(message)
 }
 
-// MarshalSnapshot 复制并按 tunnel_id 稳定排序 Snapshot Binding，再做确定性编码。
+// MarshalSnapshot 复制并按 service_id 稳定排序 Tunnel Snapshot 中的 Service，再做确定性编码。
 // 它绝不改写调用方的运行中 Snapshot，避免编码或大小检查改变实际配置顺序。
-func MarshalSnapshot(snapshot *protocolv1.AgentSnapshot) ([]byte, error) {
+func MarshalSnapshot(snapshot *protocolv1.TunnelSnapshot) ([]byte, error) {
 	if snapshot == nil {
 		return nil, ErrNilMessage
 	}
 
-	copySnapshot := proto.Clone(snapshot).(*protocolv1.AgentSnapshot)
-	sort.SliceStable(copySnapshot.Bindings, func(left, right int) bool {
-		return copySnapshot.Bindings[left].GetTunnelId() < copySnapshot.Bindings[right].GetTunnelId()
+	copySnapshot := proto.Clone(snapshot).(*protocolv1.TunnelSnapshot)
+	sort.SliceStable(copySnapshot.Services, func(left, right int) bool {
+		return copySnapshot.Services[left].GetServiceId() < copySnapshot.Services[right].GetServiceId()
 	})
 	return Marshal(copySnapshot)
 }
@@ -63,8 +63,8 @@ func WorkHelloBytesWithoutMAC(hello *protocolv1.WorkHello) ([]byte, error) {
 		value  string
 		prefix string
 	}{
-		{value: hello.GetAgentId(), prefix: "ag_"},
-		{value: hello.GetInstanceId(), prefix: "ai_"},
+		{value: hello.GetTunnelId(), prefix: "tun_"},
+		{value: hello.GetConnectorId(), prefix: "con_"},
 		{value: hello.GetSessionId(), prefix: "sess_"},
 		{value: hello.GetWorkId(), prefix: "work_"},
 		{value: hello.GetBudgetLeaseId(), prefix: "lease_"},

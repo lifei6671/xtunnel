@@ -57,6 +57,33 @@ func TestParseRejectsTamperingBeforeUse(t *testing.T) {
 	}
 }
 
+// TestEncodeRejectsLegacyAgentIdentity 锁定 Token 的 Credential 所有者是 Tunnel，
+// 防止旧 ag_ 身份被误当成新增 Connector 的独立 Token 身份继续写入线协议。
+func TestEncodeRejectsLegacyAgentIdentity(t *testing.T) {
+	connectionToken := testToken()
+	connectionToken.TunnelId = "ag_01J00000000000000000000000"
+
+	if _, err := Encode(connectionToken); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("Encode() error = %v, want ErrMalformed", err)
+	}
+}
+
+func TestEncodeRejectsGatewayHostWhitespaceAndControlCharacters(t *testing.T) {
+	for name, host := range map[string]string{
+		"internal whitespace": "gateway .example.test",
+		"control character":   "gateway\x00.example.test",
+	} {
+		t.Run(name, func(t *testing.T) {
+			connectionToken := testToken()
+			connectionToken.Endpoint.Host = host
+
+			if _, err := Encode(connectionToken); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("Encode() error = %v, want ErrMalformed", err)
+			}
+		})
+	}
+}
+
 func testToken() *protocolv1.ConnectionToken {
 	return &protocolv1.ConnectionToken{
 		FormatVersion: FormatVersionV1,
@@ -66,7 +93,7 @@ func testToken() *protocolv1.ConnectionToken {
 				PinnedSpkiSha256: &protocolv1.PinnedSPKITrust{SpkiSha256: bytes32(0x22)},
 			},
 		},
-		AgentId:              "ag_01J00000000000000000000000",
+		TunnelId:             "tun_01J00000000000000000000000",
 		TokenId:              "tok_01J00000000000000000000000",
 		TokenVersion:         1,
 		AuthenticationSecret: bytes32(0x11),

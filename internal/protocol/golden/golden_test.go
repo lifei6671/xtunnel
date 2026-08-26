@@ -20,8 +20,8 @@ func TestProtocolV1GoldenVectors(t *testing.T) {
 	assertGoldenText(t, "connection-token-v1.txt", tokenText)
 
 	workHello := &protocolv1.WorkHello{
-		AgentId:       "ag_01J00000000000000000000000",
-		InstanceId:    "ai_01J00000000000000000000000",
+		TunnelId:      "tun_01J00000000000000000000000",
+		ConnectorId:   "con_01J00000000000000000000000",
 		SessionId:     "sess_01J00000000000000000000000",
 		WorkId:        "work_01J00000000000000000000000",
 		BudgetLeaseId: "lease_01J00000000000000000000000",
@@ -38,12 +38,12 @@ func TestProtocolV1GoldenVectors(t *testing.T) {
 	}
 	assertGoldenText(t, "work-hello-v1.hex", hex.EncodeToString(workBytes))
 
-	snapshot := &protocolv1.AgentSnapshot{
-		AgentId:  "ag_01J00000000000000000000000",
+	snapshot := &protocolv1.TunnelSnapshot{
+		TunnelId: "tun_01J00000000000000000000000",
 		Revision: 7,
-		Bindings: []*protocolv1.TunnelBindingConfig{
-			{TunnelId: "tunnel-b", OriginScheme: "http", OriginHost: "127.0.0.1", OriginPort: 8080, Enabled: true, RequiredRevision: 7},
-			{TunnelId: "tunnel-a", OriginScheme: "tcp", OriginHost: "::1", OriginPort: 22, Enabled: true, RequiredRevision: 7},
+		Services: []*protocolv1.ServiceConfig{
+			{ServiceId: "svc_01J00000000000000000000001", OriginScheme: "http", OriginHost: "127.0.0.1", OriginPort: 8080, Enabled: true, RequiredRevision: 7},
+			{ServiceId: "svc_01J00000000000000000000000", OriginScheme: "tcp", OriginHost: "::1", OriginPort: 22, Enabled: true, RequiredRevision: 7},
 		},
 	}
 	snapshotBytes, err := deterministic.MarshalSnapshot(snapshot)
@@ -87,7 +87,7 @@ func goldenToken() *protocolv1.ConnectionToken {
 				PinnedSpkiSha256: &protocolv1.PinnedSPKITrust{SpkiSha256: bytes32(0x22)},
 			},
 		},
-		AgentId:              "ag_01J00000000000000000000000",
+		TunnelId:             "tun_01J00000000000000000000000",
 		TokenId:              "tok_01J00000000000000000000000",
 		TokenVersion:         1,
 		AuthenticationSecret: bytes32(0x11),

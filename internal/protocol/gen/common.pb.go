@@ -21,58 +21,57 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// ErrorCode is the stable Protocol v1 outcome vocabulary.
-// Numeric values are never reused. Values deleted in a later protocol revision
-// must be reserved in this enum before their names are removed.
+// ErrorCode 是稳定的 Protocol v1 结果词汇表。数值永久不得复用；如果后续协议
+// 修订删除某个名称，必须先在本枚举中保留其数值。
 type ErrorCode int32
 
 const (
-	ErrorCode_ERROR_CODE_OK                         ErrorCode = 0
-	ErrorCode_ERROR_CODE_TUNNEL_NOT_FOUND           ErrorCode = 4097
-	ErrorCode_ERROR_CODE_TUNNEL_DISABLED            ErrorCode = 4098
-	ErrorCode_ERROR_CODE_AGENT_OFFLINE              ErrorCode = 4099
-	ErrorCode_ERROR_CODE_NO_HEALTHY_INSTANCE        ErrorCode = 4100
-	ErrorCode_ERROR_CODE_CONFIG_NOT_OBSERVED        ErrorCode = 4101
-	ErrorCode_ERROR_CODE_ORIGIN_REFUSED             ErrorCode = 8193
-	ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT             ErrorCode = 8194
-	ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE         ErrorCode = 8195
-	ErrorCode_ERROR_CODE_ORIGIN_RESET               ErrorCode = 8196
-	ErrorCode_ERROR_CODE_ORIGIN_TLS_ERROR           ErrorCode = 8197
-	ErrorCode_ERROR_CODE_WORK_POOL_EXHAUSTED        ErrorCode = 12289
-	ErrorCode_ERROR_CODE_AGENT_BUSY                 ErrorCode = 12290
-	ErrorCode_ERROR_CODE_OPEN_DRAINING              ErrorCode = 12291
-	ErrorCode_ERROR_CODE_HEALTH_BUDGET_EXCEEDED     ErrorCode = 12292
-	ErrorCode_ERROR_CODE_TOKEN_INVALID              ErrorCode = 16385
-	ErrorCode_ERROR_CODE_TOKEN_REVOKED              ErrorCode = 16386
-	ErrorCode_ERROR_CODE_AGENT_REVOKED              ErrorCode = 16387
-	ErrorCode_ERROR_CODE_SESSION_INVALID            ErrorCode = 16388
-	ErrorCode_ERROR_CODE_SESSION_RESOURCE_EXHAUSTED ErrorCode = 16389
-	ErrorCode_ERROR_CODE_PROTOCOL_ERROR             ErrorCode = 20481
-	ErrorCode_ERROR_CODE_VERSION_UNSUPPORTED        ErrorCode = 20482
-	ErrorCode_ERROR_CODE_INTERNAL_ERROR             ErrorCode = 24577
+	ErrorCode_ERROR_CODE_OK                          ErrorCode = 0
+	ErrorCode_ERROR_CODE_SERVICE_NOT_FOUND           ErrorCode = 4097
+	ErrorCode_ERROR_CODE_SERVICE_DISABLED            ErrorCode = 4098
+	ErrorCode_ERROR_CODE_TUNNEL_OFFLINE              ErrorCode = 4099
+	ErrorCode_ERROR_CODE_NO_HEALTHY_CONNECTOR        ErrorCode = 4100
+	ErrorCode_ERROR_CODE_SERVICE_CONFIG_NOT_OBSERVED ErrorCode = 4101
+	ErrorCode_ERROR_CODE_ORIGIN_REFUSED              ErrorCode = 8193
+	ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT              ErrorCode = 8194
+	ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE          ErrorCode = 8195
+	ErrorCode_ERROR_CODE_ORIGIN_RESET                ErrorCode = 8196
+	ErrorCode_ERROR_CODE_ORIGIN_TLS_ERROR            ErrorCode = 8197
+	ErrorCode_ERROR_CODE_WORK_POOL_EXHAUSTED         ErrorCode = 12289
+	ErrorCode_ERROR_CODE_CONNECTOR_BUSY              ErrorCode = 12290
+	ErrorCode_ERROR_CODE_OPEN_DRAINING               ErrorCode = 12291
+	ErrorCode_ERROR_CODE_HEALTH_BUDGET_EXCEEDED      ErrorCode = 12292
+	ErrorCode_ERROR_CODE_TOKEN_INVALID               ErrorCode = 16385
+	ErrorCode_ERROR_CODE_TOKEN_REVOKED               ErrorCode = 16386
+	ErrorCode_ERROR_CODE_TUNNEL_REVOKED              ErrorCode = 16387
+	ErrorCode_ERROR_CODE_SESSION_INVALID             ErrorCode = 16388
+	ErrorCode_ERROR_CODE_SESSION_RESOURCE_EXHAUSTED  ErrorCode = 16389
+	ErrorCode_ERROR_CODE_PROTOCOL_ERROR              ErrorCode = 20481
+	ErrorCode_ERROR_CODE_VERSION_UNSUPPORTED         ErrorCode = 20482
+	ErrorCode_ERROR_CODE_INTERNAL_ERROR              ErrorCode = 24577
 )
 
 // Enum value maps for ErrorCode.
 var (
 	ErrorCode_name = map[int32]string{
 		0:     "ERROR_CODE_OK",
-		4097:  "ERROR_CODE_TUNNEL_NOT_FOUND",
-		4098:  "ERROR_CODE_TUNNEL_DISABLED",
-		4099:  "ERROR_CODE_AGENT_OFFLINE",
-		4100:  "ERROR_CODE_NO_HEALTHY_INSTANCE",
-		4101:  "ERROR_CODE_CONFIG_NOT_OBSERVED",
+		4097:  "ERROR_CODE_SERVICE_NOT_FOUND",
+		4098:  "ERROR_CODE_SERVICE_DISABLED",
+		4099:  "ERROR_CODE_TUNNEL_OFFLINE",
+		4100:  "ERROR_CODE_NO_HEALTHY_CONNECTOR",
+		4101:  "ERROR_CODE_SERVICE_CONFIG_NOT_OBSERVED",
 		8193:  "ERROR_CODE_ORIGIN_REFUSED",
 		8194:  "ERROR_CODE_ORIGIN_TIMEOUT",
 		8195:  "ERROR_CODE_ORIGIN_UNREACHABLE",
 		8196:  "ERROR_CODE_ORIGIN_RESET",
 		8197:  "ERROR_CODE_ORIGIN_TLS_ERROR",
 		12289: "ERROR_CODE_WORK_POOL_EXHAUSTED",
-		12290: "ERROR_CODE_AGENT_BUSY",
+		12290: "ERROR_CODE_CONNECTOR_BUSY",
 		12291: "ERROR_CODE_OPEN_DRAINING",
 		12292: "ERROR_CODE_HEALTH_BUDGET_EXCEEDED",
 		16385: "ERROR_CODE_TOKEN_INVALID",
 		16386: "ERROR_CODE_TOKEN_REVOKED",
-		16387: "ERROR_CODE_AGENT_REVOKED",
+		16387: "ERROR_CODE_TUNNEL_REVOKED",
 		16388: "ERROR_CODE_SESSION_INVALID",
 		16389: "ERROR_CODE_SESSION_RESOURCE_EXHAUSTED",
 		20481: "ERROR_CODE_PROTOCOL_ERROR",
@@ -80,29 +79,29 @@ var (
 		24577: "ERROR_CODE_INTERNAL_ERROR",
 	}
 	ErrorCode_value = map[string]int32{
-		"ERROR_CODE_OK":                         0,
-		"ERROR_CODE_TUNNEL_NOT_FOUND":           4097,
-		"ERROR_CODE_TUNNEL_DISABLED":            4098,
-		"ERROR_CODE_AGENT_OFFLINE":              4099,
-		"ERROR_CODE_NO_HEALTHY_INSTANCE":        4100,
-		"ERROR_CODE_CONFIG_NOT_OBSERVED":        4101,
-		"ERROR_CODE_ORIGIN_REFUSED":             8193,
-		"ERROR_CODE_ORIGIN_TIMEOUT":             8194,
-		"ERROR_CODE_ORIGIN_UNREACHABLE":         8195,
-		"ERROR_CODE_ORIGIN_RESET":               8196,
-		"ERROR_CODE_ORIGIN_TLS_ERROR":           8197,
-		"ERROR_CODE_WORK_POOL_EXHAUSTED":        12289,
-		"ERROR_CODE_AGENT_BUSY":                 12290,
-		"ERROR_CODE_OPEN_DRAINING":              12291,
-		"ERROR_CODE_HEALTH_BUDGET_EXCEEDED":     12292,
-		"ERROR_CODE_TOKEN_INVALID":              16385,
-		"ERROR_CODE_TOKEN_REVOKED":              16386,
-		"ERROR_CODE_AGENT_REVOKED":              16387,
-		"ERROR_CODE_SESSION_INVALID":            16388,
-		"ERROR_CODE_SESSION_RESOURCE_EXHAUSTED": 16389,
-		"ERROR_CODE_PROTOCOL_ERROR":             20481,
-		"ERROR_CODE_VERSION_UNSUPPORTED":        20482,
-		"ERROR_CODE_INTERNAL_ERROR":             24577,
+		"ERROR_CODE_OK":                          0,
+		"ERROR_CODE_SERVICE_NOT_FOUND":           4097,
+		"ERROR_CODE_SERVICE_DISABLED":            4098,
+		"ERROR_CODE_TUNNEL_OFFLINE":              4099,
+		"ERROR_CODE_NO_HEALTHY_CONNECTOR":        4100,
+		"ERROR_CODE_SERVICE_CONFIG_NOT_OBSERVED": 4101,
+		"ERROR_CODE_ORIGIN_REFUSED":              8193,
+		"ERROR_CODE_ORIGIN_TIMEOUT":              8194,
+		"ERROR_CODE_ORIGIN_UNREACHABLE":          8195,
+		"ERROR_CODE_ORIGIN_RESET":                8196,
+		"ERROR_CODE_ORIGIN_TLS_ERROR":            8197,
+		"ERROR_CODE_WORK_POOL_EXHAUSTED":         12289,
+		"ERROR_CODE_CONNECTOR_BUSY":              12290,
+		"ERROR_CODE_OPEN_DRAINING":               12291,
+		"ERROR_CODE_HEALTH_BUDGET_EXCEEDED":      12292,
+		"ERROR_CODE_TOKEN_INVALID":               16385,
+		"ERROR_CODE_TOKEN_REVOKED":               16386,
+		"ERROR_CODE_TUNNEL_REVOKED":              16387,
+		"ERROR_CODE_SESSION_INVALID":             16388,
+		"ERROR_CODE_SESSION_RESOURCE_EXHAUSTED":  16389,
+		"ERROR_CODE_PROTOCOL_ERROR":              20481,
+		"ERROR_CODE_VERSION_UNSUPPORTED":         20482,
+		"ERROR_CODE_INTERNAL_ERROR":              24577,
 	}
 )
 
@@ -434,26 +433,26 @@ var File_common_proto protoreflect.FileDescriptor
 
 const file_common_proto_rawDesc = "" +
 	"\n" +
-	"\fcommon.proto\x12\x13xtunnel.protocol.v1*\x8d\x06\n" +
+	"\fcommon.proto\x12\x13xtunnel.protocol.v1*\x9e\x06\n" +
 	"\tErrorCode\x12\x11\n" +
-	"\rERROR_CODE_OK\x10\x00\x12 \n" +
-	"\x1bERROR_CODE_TUNNEL_NOT_FOUND\x10\x81 \x12\x1f\n" +
-	"\x1aERROR_CODE_TUNNEL_DISABLED\x10\x82 \x12\x1d\n" +
-	"\x18ERROR_CODE_AGENT_OFFLINE\x10\x83 \x12#\n" +
-	"\x1eERROR_CODE_NO_HEALTHY_INSTANCE\x10\x84 \x12#\n" +
-	"\x1eERROR_CODE_CONFIG_NOT_OBSERVED\x10\x85 \x12\x1e\n" +
+	"\rERROR_CODE_OK\x10\x00\x12!\n" +
+	"\x1cERROR_CODE_SERVICE_NOT_FOUND\x10\x81 \x12 \n" +
+	"\x1bERROR_CODE_SERVICE_DISABLED\x10\x82 \x12\x1e\n" +
+	"\x19ERROR_CODE_TUNNEL_OFFLINE\x10\x83 \x12$\n" +
+	"\x1fERROR_CODE_NO_HEALTHY_CONNECTOR\x10\x84 \x12+\n" +
+	"&ERROR_CODE_SERVICE_CONFIG_NOT_OBSERVED\x10\x85 \x12\x1e\n" +
 	"\x19ERROR_CODE_ORIGIN_REFUSED\x10\x81@\x12\x1e\n" +
 	"\x19ERROR_CODE_ORIGIN_TIMEOUT\x10\x82@\x12\"\n" +
 	"\x1dERROR_CODE_ORIGIN_UNREACHABLE\x10\x83@\x12\x1c\n" +
 	"\x17ERROR_CODE_ORIGIN_RESET\x10\x84@\x12 \n" +
 	"\x1bERROR_CODE_ORIGIN_TLS_ERROR\x10\x85@\x12#\n" +
-	"\x1eERROR_CODE_WORK_POOL_EXHAUSTED\x10\x81`\x12\x1a\n" +
-	"\x15ERROR_CODE_AGENT_BUSY\x10\x82`\x12\x1d\n" +
+	"\x1eERROR_CODE_WORK_POOL_EXHAUSTED\x10\x81`\x12\x1e\n" +
+	"\x19ERROR_CODE_CONNECTOR_BUSY\x10\x82`\x12\x1d\n" +
 	"\x18ERROR_CODE_OPEN_DRAINING\x10\x83`\x12&\n" +
 	"!ERROR_CODE_HEALTH_BUDGET_EXCEEDED\x10\x84`\x12\x1e\n" +
 	"\x18ERROR_CODE_TOKEN_INVALID\x10\x81\x80\x01\x12\x1e\n" +
-	"\x18ERROR_CODE_TOKEN_REVOKED\x10\x82\x80\x01\x12\x1e\n" +
-	"\x18ERROR_CODE_AGENT_REVOKED\x10\x83\x80\x01\x12 \n" +
+	"\x18ERROR_CODE_TOKEN_REVOKED\x10\x82\x80\x01\x12\x1f\n" +
+	"\x19ERROR_CODE_TUNNEL_REVOKED\x10\x83\x80\x01\x12 \n" +
 	"\x1aERROR_CODE_SESSION_INVALID\x10\x84\x80\x01\x12+\n" +
 	"%ERROR_CODE_SESSION_RESOURCE_EXHAUSTED\x10\x85\x80\x01\x12\x1f\n" +
 	"\x19ERROR_CODE_PROTOCOL_ERROR\x10\x81\xa0\x01\x12$\n" +

@@ -65,6 +65,21 @@ func (store *Store) Close() error {
 	return nil
 }
 
+// HasTunnelTokens 返回数据库是否已经保存过 Tunnel Credential。
+//
+// Server Bootstrap 用它判断 Token 保护主密钥能否首次生成：空表允许创建密钥；
+// 表中已有密文但密钥缺失时必须快速失败。查询只读取 EXISTS 布尔值，不接触
+// secret_hash、token_ciphertext 或其他敏感列。
+func (store *Store) HasTunnelTokens(ctx context.Context) (bool, error) {
+	var exists bool
+	if err := store.database.WithContext(ctx).Raw(
+		"SELECT EXISTS(SELECT 1 FROM " + TunnelTokenTable + " LIMIT 1)",
+	).Scan(&exists).Error; err != nil {
+		return false, fmt.Errorf("inspect tunnel token presence: %w", err)
+	}
+	return exists, nil
+}
+
 func (store *Store) verifyConnection(ctx context.Context) (resultErr error) {
 	connection, err := store.pool.Conn(ctx)
 	if err != nil {

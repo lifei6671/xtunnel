@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/agent/service"
+	"github.com/lifei6671/xtunnel/internal/logging"
 )
 
 func TestResolveTokenSourcesAndPrecedence(t *testing.T) {
@@ -175,8 +177,20 @@ func TestRunWaitsForContextCancellationWithoutLeakingToken(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	var stderr bytes.Buffer
+	var receivedToken string
 	go func() {
-		done <- run(ctx, "xtunnel-agent", []string{"--token", token}, nil, &stderr)
+		done <- runWithLifecycle(ctx, "xtunnel-agent", []string{"--token", token}, nil, &stderr,
+			func(ctx context.Context, currentToken string, writer io.Writer) error {
+				receivedToken = currentToken
+				logger, err := logging.New(writer, logging.Options{Level: "info", Format: "json", Component: "agent"})
+				if err != nil {
+					return err
+				}
+				logger.InfoContext(ctx, "process_started")
+				<-ctx.Done()
+				logger.Info("process_stopped")
+				return nil
+			})
 	}()
 
 	select {
@@ -197,6 +211,9 @@ func TestRunWaitsForContextCancellationWithoutLeakingToken(t *testing.T) {
 
 	if strings.Contains(stderr.String(), token) {
 		t.Fatal("lifecycle logs leaked Token")
+	}
+	if receivedToken != token {
+		t.Fatalf("lifecycle token = %q, want resolved token", receivedToken)
 	}
 	assertLifecycleLogs(t, stderr.String(), "agent")
 }

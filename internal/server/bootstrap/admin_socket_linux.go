@@ -82,11 +82,12 @@ func requestAdminBootstrap(ctx context.Context, socketPath, dataTargetHash, user
 }
 
 type adminBootstrapSocket struct {
-	listener   *net.UnixListener
-	path       string
-	store      *sqlite.Store
-	targetHash string
-	authorize  func(*net.UnixConn) error
+	listener    *net.UnixListener
+	path        string
+	store       *sqlite.Store
+	targetHash  string
+	authorize   func(*net.UnixConn) error
+	afterCreate func() error
 
 	stopOnce sync.Once
 	done     chan struct{}
@@ -94,10 +95,20 @@ type adminBootstrapSocket struct {
 }
 
 func openAdminBootstrapSocket(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store) (*adminBootstrapSocket, error) {
-	return openAdminBootstrapSocketWith(ctx, runtimeDir, targetHash, store, requireRootBootstrapPeer)
+	return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, requireRootBootstrapPeer, nil)
 }
 
 func openAdminBootstrapSocketWith(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, authorize func(*net.UnixConn) error) (*adminBootstrapSocket, error) {
+	return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, authorize, nil)
+}
+
+// openAdminBootstrapSocketAfter 在首个管理员事务提交后启动依赖 Admin 的运行资源。
+// 回调只会由成功创建管理员的请求调用一次；失败会显式反馈给请求方，绝不默认忽略。
+func openAdminBootstrapSocketAfter(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error) (*adminBootstrapSocket, error) {
+	return openAdminBootstrapSocketWithAfter(ctx, runtimeDir, targetHash, store, requireRootBootstrapPeer, afterCreate)
+}
+
+func openAdminBootstrapSocketWithAfter(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, authorize func(*net.UnixConn) error, afterCreate func() error) (*adminBootstrapSocket, error) {
 	path := runtimeDir + "/" + adminBootstrapSocketName
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
@@ -121,12 +132,13 @@ func openAdminBootstrapSocketWith(ctx context.Context, runtimeDir, targetHash st
 	}
 
 	socket := &adminBootstrapSocket{
-		listener:   listener,
-		path:       path,
-		store:      store,
-		targetHash: targetHash,
-		authorize:  authorize,
-		done:       make(chan struct{}),
+		listener:    listener,
+		path:        path,
+		store:       store,
+		targetHash:  targetHash,
+		authorize:   authorize,
+		afterCreate: afterCreate,
+		done:        make(chan struct{}),
 	}
 	socket.wait.Add(2)
 	go socket.serve(ctx)
@@ -188,6 +200,16 @@ func (socket *adminBootstrapSocket) handle(ctx context.Context, connection *net.
 		}
 		_ = json.NewEncoder(connection).Encode(adminBootstrapResponse{Status: adminBootstrapStatusRejected})
 		return
+	}
+	if socket.afterCreate != nil {
+		if err := socket.afterCreate(); err != nil {
+			// Admin 事务已经提交，同一进程不能再回到 SETUP_REQUIRED。
+			// 停止 Socket，由 afterCreate 的运行时错误通道让主生命周期退出；
+			// 下次启动将通过 HasAdmin 重试 Gateway 启动。
+			socket.stop()
+			_ = json.NewEncoder(connection).Encode(adminBootstrapResponse{Status: adminBootstrapStatusRejected})
+			return
+		}
 	}
 	socket.stop()
 	_ = json.NewEncoder(connection).Encode(adminBootstrapResponse{Status: adminBootstrapStatusCreated})

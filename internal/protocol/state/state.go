@@ -65,7 +65,7 @@ const (
 type ControlPhase uint8
 
 const (
-	// ControlAuth 只允许裸 AgentAuthRequest 与 AgentAuthResult。
+	// ControlAuth 只允许裸 ConnectorAuthRequest 与 ConnectorAuthResult。
 	ControlAuth ControlPhase = iota + 1
 	// ControlEstablished 只允许方向矩阵定义的 ControlEnvelope。
 	ControlEstablished
@@ -162,7 +162,7 @@ func (control *Control) AcceptOutbound(message proto.Message) (Result, error) {
 }
 
 // CommitAuthSuccessAfterFlush 是 Server 在完整 success Frame flush 成功后的提交点。
-func (control *Control) CommitAuthSuccessAfterFlush(result *protocolv1.AgentAuthResult) error {
+func (control *Control) CommitAuthSuccessAfterFlush(result *protocolv1.ConnectorAuthResult) error {
 	if control.endpoint != EndpointServer {
 		return ErrIllegalDirection
 	}
@@ -170,7 +170,7 @@ func (control *Control) CommitAuthSuccessAfterFlush(result *protocolv1.AgentAuth
 }
 
 // CommitAuthSuccessAfterDecode 是 Agent 完整解码并验证 success Frame 后的提交点。
-func (control *Control) CommitAuthSuccessAfterDecode(result *protocolv1.AgentAuthResult) error {
+func (control *Control) CommitAuthSuccessAfterDecode(result *protocolv1.ConnectorAuthResult) error {
 	if control.endpoint != EndpointAgent {
 		return ErrIllegalDirection
 	}
@@ -178,7 +178,7 @@ func (control *Control) CommitAuthSuccessAfterDecode(result *protocolv1.AgentAut
 }
 
 // CommitAuthFailureAfterFlush 将 Server 的认证失败结果提交为 CLOSED。
-func (control *Control) CommitAuthFailureAfterFlush(result *protocolv1.AgentAuthResult) error {
+func (control *Control) CommitAuthFailureAfterFlush(result *protocolv1.ConnectorAuthResult) error {
 	if control.endpoint != EndpointServer {
 		return ErrIllegalDirection
 	}
@@ -186,7 +186,7 @@ func (control *Control) CommitAuthFailureAfterFlush(result *protocolv1.AgentAuth
 }
 
 // CommitAuthFailureAfterDecode 将 Agent 收到的认证失败结果提交为 CLOSED。
-func (control *Control) CommitAuthFailureAfterDecode(result *protocolv1.AgentAuthResult) error {
+func (control *Control) CommitAuthFailureAfterDecode(result *protocolv1.ConnectorAuthResult) error {
 	if control.endpoint != EndpointAgent {
 		return ErrIllegalDirection
 	}
@@ -204,12 +204,12 @@ func (control *Control) accept(sender Endpoint, message proto.Message) (Result, 
 	}
 
 	switch typed := message.(type) {
-	case *protocolv1.AgentAuthRequest:
+	case *protocolv1.ConnectorAuthRequest:
 		if typed == nil {
 			return Result{}, ErrUnexpectedMessage
 		}
 		return control.acceptAuthRequest(sender)
-	case *protocolv1.AgentAuthResult:
+	case *protocolv1.ConnectorAuthResult:
 		if typed == nil || !validAuthResult(typed) {
 			return Result{}, ErrInvalidAuthResult
 		}
@@ -268,7 +268,7 @@ func (control *Control) acceptEnvelope(sender Endpoint, envelope *protocolv1.Con
 		return control.acceptConfigAck(payload.ConfigAck)
 	case *protocolv1.ControlEnvelope_WorkDemand:
 		return control.acceptEstablishedMessage(sender, EndpointServer, control.phase == ControlEstablished)
-	case *protocolv1.ControlEnvelope_TunnelHealthBatch:
+	case *protocolv1.ControlEnvelope_ServiceHealthBatch:
 		return control.acceptEstablishedMessage(sender, EndpointAgent, control.phase != ControlClosed)
 	case *protocolv1.ControlEnvelope_DrainRequest:
 		result, err := control.acceptEstablishedMessage(sender, EndpointAgent, control.phase == ControlEstablished || control.phase == ControlDraining)
@@ -373,7 +373,7 @@ func (control *Control) acceptConfigAck(ack *protocolv1.ConfigAck) (Result, erro
 	return Result{}, nil
 }
 
-func (control *Control) commitAuthSuccess(result *protocolv1.AgentAuthResult) error {
+func (control *Control) commitAuthSuccess(result *protocolv1.ConnectorAuthResult) error {
 	if control.phase != ControlAuth {
 		return ErrIllegalState
 	}
@@ -387,7 +387,7 @@ func (control *Control) commitAuthSuccess(result *protocolv1.AgentAuthResult) er
 	return nil
 }
 
-func (control *Control) commitAuthFailure(result *protocolv1.AgentAuthResult) error {
+func (control *Control) commitAuthFailure(result *protocolv1.ConnectorAuthResult) error {
 	if control.phase != ControlAuth {
 		return ErrIllegalState
 	}
@@ -398,7 +398,7 @@ func (control *Control) commitAuthFailure(result *protocolv1.AgentAuthResult) er
 	return nil
 }
 
-func validAuthResult(result *protocolv1.AgentAuthResult) bool {
+func validAuthResult(result *protocolv1.ConnectorAuthResult) bool {
 	return (result.GetSuccess() == nil) != (result.GetFailure() == nil)
 }
 
@@ -503,8 +503,8 @@ func (work *Work) acceptHello(sender Endpoint, hello *protocolv1.WorkHello) erro
 		value  string
 		prefix string
 	}{
-		{value: hello.GetAgentId(), prefix: "ag_"},
-		{value: hello.GetInstanceId(), prefix: "ai_"},
+		{value: hello.GetTunnelId(), prefix: "tun_"},
+		{value: hello.GetConnectorId(), prefix: "con_"},
 		{value: hello.GetSessionId(), prefix: "sess_"},
 		{value: hello.GetWorkId(), prefix: "work_"},
 		{value: hello.GetBudgetLeaseId(), prefix: "lease_"},
@@ -557,6 +557,11 @@ func (work *Work) acceptOpenRequest(sender Endpoint, request *protocolv1.OpenReq
 		return ErrIllegalState
 	}
 	if err := validate.ValidateID(request.GetConnectionId(), "conn_"); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidIdentifier, err)
+	}
+	// OpenRequest 只携带 Service 身份；Connector 必须从已认证的 TunnelSnapshot
+	// 查找该 Service 的后端配置，线协议禁止把 Tunnel ID 当作服务路由键复用。
+	if err := validate.ValidateID(request.GetServiceId(), "svc_"); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidIdentifier, err)
 	}
 	work.connectionID = request.GetConnectionId()

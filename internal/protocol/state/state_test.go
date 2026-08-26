@@ -11,8 +11,9 @@ import (
 const negotiatedVersion = 1
 
 const (
-	testAgentID       = "ag_01J00000000000000000000000"
-	testInstanceID    = "ai_01J00000000000000000000000"
+	testTunnelID      = "tun_01J00000000000000000000000"
+	testConnectorID   = "con_01J00000000000000000000000"
+	testServiceID     = "svc_01J00000000000000000000000"
 	testSessionID     = "sess_01J00000000000000000000000"
 	testWorkID        = "work_01J00000000000000000000000"
 	otherWorkID       = "work_01J00000000000000000000001"
@@ -28,19 +29,19 @@ func TestControlAuthBareFrameAndCommitBoundary(t *testing.T) {
 	server := newControl(t, EndpointServer)
 	agent := newControl(t, EndpointAgent)
 
-	if _, err := server.AcceptInbound(&protocolv1.AgentAuthRequest{}); err != nil {
-		t.Fatalf("Server AcceptInbound(AgentAuthRequest) error = %v", err)
+	if _, err := server.AcceptInbound(&protocolv1.ConnectorAuthRequest{}); err != nil {
+		t.Fatalf("Server AcceptInbound(ConnectorAuthRequest) error = %v", err)
 	}
-	if _, err := agent.AcceptOutbound(&protocolv1.AgentAuthRequest{}); err != nil {
-		t.Fatalf("Agent AcceptOutbound(AgentAuthRequest) error = %v", err)
+	if _, err := agent.AcceptOutbound(&protocolv1.ConnectorAuthRequest{}); err != nil {
+		t.Fatalf("Agent AcceptOutbound(ConnectorAuthRequest) error = %v", err)
 	}
 
 	success := authSuccess()
 	if _, err := server.AcceptOutbound(success); err != nil {
-		t.Fatalf("Server AcceptOutbound(AgentAuthResult) error = %v", err)
+		t.Fatalf("Server AcceptOutbound(ConnectorAuthResult) error = %v", err)
 	}
 	if _, err := agent.AcceptInbound(success); err != nil {
-		t.Fatalf("Agent AcceptInbound(AgentAuthResult) error = %v", err)
+		t.Fatalf("Agent AcceptInbound(ConnectorAuthResult) error = %v", err)
 	}
 	if got := server.Phase(); got != ControlAuth {
 		t.Fatalf("Server Phase() before flush = %v, want AUTH", got)
@@ -66,11 +67,11 @@ func TestControlAuthBareFrameAndCommitBoundary(t *testing.T) {
 	if _, err := unauthorized.AcceptInbound(controlEnvelope(&protocolv1.ControlEnvelope_Heartbeat{})); !errors.Is(err, ErrIllegalState) {
 		t.Fatalf("AUTH AcceptInbound(ControlEnvelope) error = %v, want ErrIllegalState", err)
 	}
-	if err := unauthorized.CommitAuthSuccessAfterFlush(&protocolv1.AgentAuthResult{}); !errors.Is(err, ErrInvalidAuthResult) {
+	if err := unauthorized.CommitAuthSuccessAfterFlush(&protocolv1.ConnectorAuthResult{}); !errors.Is(err, ErrInvalidAuthResult) {
 		t.Fatalf("CommitAuthSuccessAfterFlush(empty) error = %v, want ErrInvalidAuthResult", err)
 	}
-	if err := unauthorized.CommitAuthSuccessAfterFlush(&protocolv1.AgentAuthResult{
-		Result: &protocolv1.AgentAuthResult_Success{Success: &protocolv1.AgentAuthSuccess{}},
+	if err := unauthorized.CommitAuthSuccessAfterFlush(&protocolv1.ConnectorAuthResult{
+		Result: &protocolv1.ConnectorAuthResult_Success{Success: &protocolv1.ConnectorAuthSuccess{}},
 	}); !errors.Is(err, ErrInvalidSessionSecret) {
 		t.Fatalf("CommitAuthSuccessAfterFlush(short secret) error = %v, want ErrInvalidSessionSecret", err)
 	}
@@ -199,7 +200,7 @@ func TestWorkStateMachineAndRawHandoff(t *testing.T) {
 		t.Fatalf("Server Phase() = %v, want IDLE", got)
 	}
 
-	request := &protocolv1.OpenRequest{ConnectionId: testConnectionID, TunnelId: "tun_test"}
+	request := &protocolv1.OpenRequest{ConnectionId: testConnectionID, ServiceId: testServiceID}
 	mustAcceptWork(t, server.AcceptOutbound(request))
 	mustAcceptWork(t, agent.AcceptInbound(request))
 	response := &protocolv1.OpenResponse{ConnectionId: testConnectionID, Status: protocolv1.OpenStatus_OPEN_STATUS_OK}
@@ -233,6 +234,24 @@ func TestWorkProtocolViolationsCloseConnection(t *testing.T) {
 			wantErr: ErrInvalidIdentifier,
 		},
 		{
+			name: "WorkHello 拒绝旧 Agent ID",
+			accept: func(_ *testing.T, work *Work) error {
+				hello := workHello()
+				hello.TunnelId = "ag_01J00000000000000000000000"
+				return work.AcceptInbound(hello)
+			},
+			wantErr: ErrInvalidIdentifier,
+		},
+		{
+			name: "WorkHello 拒绝旧 Instance ID",
+			accept: func(_ *testing.T, work *Work) error {
+				hello := workHello()
+				hello.ConnectorId = "ai_01J00000000000000000000000"
+				return work.AcceptInbound(hello)
+			},
+			wantErr: ErrInvalidIdentifier,
+		},
+		{
 			name: "重复 WorkHello",
 			accept: func(t *testing.T, work *Work) error {
 				mustAcceptWork(t, work.AcceptInbound(workHello()))
@@ -256,11 +275,20 @@ func TestWorkProtocolViolationsCloseConnection(t *testing.T) {
 			wantErr: ErrWorkIDMismatch,
 		},
 		{
+			name: "非法 Service ID",
+			accept: func(t *testing.T, work *Work) error {
+				mustAcceptWork(t, work.AcceptInbound(workHello()))
+				mustAcceptWork(t, work.AcceptOutbound(&protocolv1.WorkReady{WorkId: testWorkID, Status: protocolv1.WorkReadyStatus_WORK_READY_STATUS_READY}))
+				return work.AcceptOutbound(&protocolv1.OpenRequest{ConnectionId: testConnectionID, ServiceId: "svc-invalid"})
+			},
+			wantErr: ErrInvalidIdentifier,
+		},
+		{
 			name: "OpenResponse ID 不匹配",
 			accept: func(t *testing.T, work *Work) error {
 				mustAcceptWork(t, work.AcceptInbound(workHello()))
 				mustAcceptWork(t, work.AcceptOutbound(&protocolv1.WorkReady{WorkId: testWorkID, Status: protocolv1.WorkReadyStatus_WORK_READY_STATUS_READY}))
-				mustAcceptWork(t, work.AcceptOutbound(&protocolv1.OpenRequest{ConnectionId: testConnectionID, TunnelId: "tun_test"}))
+				mustAcceptWork(t, work.AcceptOutbound(&protocolv1.OpenRequest{ConnectionId: testConnectionID, ServiceId: testServiceID}))
 				return work.AcceptInbound(&protocolv1.OpenResponse{ConnectionId: otherConnectionID, Status: protocolv1.OpenStatus_OPEN_STATUS_OK})
 			},
 			wantErr: ErrConnectionIDMismatch,
@@ -295,7 +323,7 @@ func TestWorkReadyStatusErrorCodeCombinations(t *testing.T) {
 		},
 		{
 			name:      "READY 携带失败码关闭连接",
-			ready:     &protocolv1.WorkReady{WorkId: testWorkID, Status: protocolv1.WorkReadyStatus_WORK_READY_STATUS_READY, ErrorCode: protocolv1.ErrorCode_ERROR_CODE_AGENT_BUSY},
+			ready:     &protocolv1.WorkReady{WorkId: testWorkID, Status: protocolv1.WorkReadyStatus_WORK_READY_STATUS_READY, ErrorCode: protocolv1.ErrorCode_ERROR_CODE_CONNECTOR_BUSY},
 			wantPhase: WorkClosed,
 			wantError: true,
 		},
@@ -313,7 +341,7 @@ func TestWorkReadyStatusErrorCodeCombinations(t *testing.T) {
 		},
 		{
 			name:      "REJECTED 携带失败码后关闭连接",
-			ready:     &protocolv1.WorkReady{WorkId: testWorkID, Status: protocolv1.WorkReadyStatus_WORK_READY_STATUS_REJECTED, ErrorCode: protocolv1.ErrorCode_ERROR_CODE_AGENT_BUSY},
+			ready:     &protocolv1.WorkReady{WorkId: testWorkID, Status: protocolv1.WorkReadyStatus_WORK_READY_STATUS_REJECTED, ErrorCode: protocolv1.ErrorCode_ERROR_CODE_CONNECTOR_BUSY},
 			wantPhase: WorkClosed,
 		},
 	}
@@ -340,7 +368,7 @@ func TestWorkRejectPaths(t *testing.T) {
 	mustAcceptWork(t, work.AcceptOutbound(&protocolv1.WorkReady{
 		WorkId:    testWorkID,
 		Status:    protocolv1.WorkReadyStatus_WORK_READY_STATUS_REJECTED,
-		ErrorCode: protocolv1.ErrorCode_ERROR_CODE_AGENT_BUSY,
+		ErrorCode: protocolv1.ErrorCode_ERROR_CODE_CONNECTOR_BUSY,
 	}))
 	if got := work.Phase(); got != WorkClosed {
 		t.Fatalf("rejected WorkReady Phase() = %v, want CLOSED", got)
@@ -349,7 +377,7 @@ func TestWorkRejectPaths(t *testing.T) {
 	opening := newWork(t, EndpointServer)
 	mustAcceptWork(t, opening.AcceptInbound(workHello()))
 	mustAcceptWork(t, opening.AcceptOutbound(&protocolv1.WorkReady{WorkId: testWorkID, Status: protocolv1.WorkReadyStatus_WORK_READY_STATUS_READY}))
-	mustAcceptWork(t, opening.AcceptOutbound(&protocolv1.OpenRequest{ConnectionId: testConnectionID, TunnelId: "tun_test"}))
+	mustAcceptWork(t, opening.AcceptOutbound(&protocolv1.OpenRequest{ConnectionId: testConnectionID, ServiceId: testServiceID}))
 	mustAcceptWork(t, opening.AcceptInbound(&protocolv1.OpenResponse{
 		ConnectionId: testConnectionID,
 		Status:       protocolv1.OpenStatus_OPEN_STATUS_ERROR,
@@ -363,8 +391,8 @@ func TestWorkRejectPaths(t *testing.T) {
 // workHello 返回状态机测试所需的最小合法 WorkHello。
 func workHello() *protocolv1.WorkHello {
 	return &protocolv1.WorkHello{
-		AgentId:       testAgentID,
-		InstanceId:    testInstanceID,
+		TunnelId:      testTunnelID,
+		ConnectorId:   testConnectorID,
 		SessionId:     testSessionID,
 		WorkId:        testWorkID,
 		BudgetLeaseId: testLeaseID,
@@ -428,8 +456,8 @@ func controlEnvelope(payload any) *protocolv1.ControlEnvelope {
 }
 
 // authSuccess 返回符合 AUTH 成功提交类型的最小消息。
-func authSuccess() *protocolv1.AgentAuthResult {
-	return &protocolv1.AgentAuthResult{Result: &protocolv1.AgentAuthResult_Success{Success: &protocolv1.AgentAuthSuccess{
+func authSuccess() *protocolv1.ConnectorAuthResult {
+	return &protocolv1.ConnectorAuthResult{Result: &protocolv1.ConnectorAuthResult_Success{Success: &protocolv1.ConnectorAuthSuccess{
 		SessionSecret: make([]byte, 32),
 	}}}
 }

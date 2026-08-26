@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/lifei6671/xtunnel/internal/agent/connector"
+	"github.com/lifei6671/xtunnel/internal/agent/open"
 	"github.com/lifei6671/xtunnel/internal/agent/service"
 	"github.com/lifei6671/xtunnel/internal/logging"
 )
@@ -22,7 +24,10 @@ const (
 	tokenEnvironment      = "XTUNNEL_TOKEN"
 	credentialsDirectory  = "CREDENTIALS_DIRECTORY"
 	systemdCredentialName = "xtunnel-agent.token"
+	agentVersion          = "v0.1.0-dev"
 )
+
+type lifecycleRunner func(context.Context, string, io.Writer) error
 
 type serviceOperations interface {
 	Install(context.Context, string) error
@@ -167,14 +172,27 @@ func executeServiceInstall(
 	return nil
 }
 
-// run 完成 Agent 进程当前阶段的 Token 和日志初始化，并保持前台运行直到收到退出信号。
-// 后续任务会在等待 Context 取消前依次接入身份、Control Session 和 WorkPool。
+// run 解析唯一的 Tunnel Token 来源，并把同一个 Token 交给进程内唯一 Connector。
 func run(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
+	return runWithLifecycle(ctx, program, args, environ, stderr, runLifecycle)
+}
+
+func runWithLifecycle(
+	ctx context.Context,
+	program string,
+	args, environ []string,
+	stderr io.Writer,
+	lifecycle lifecycleRunner,
+) error {
+	if lifecycle == nil {
+		return errors.New("Agent lifecycle runner must not be nil")
+	}
 	handled, err := service.RunIfManagedService(func(serviceContext context.Context, token string) error {
-		if _, err := validateToken(token); err != nil {
+		validatedToken, err := validateToken(token)
+		if err != nil {
 			return fmt.Errorf("validate Windows service credential: %w", err)
 		}
-		return runLifecycle(serviceContext, stderr)
+		return lifecycle(serviceContext, validatedToken, stderr)
 	})
 	if err != nil {
 		return fmt.Errorf("run Agent as native service: %w", err)
@@ -182,13 +200,14 @@ func run(ctx context.Context, program string, args, environ []string, stderr io.
 	if handled {
 		return nil
 	}
-	if _, err := resolveToken(program, args, environ, stderr); err != nil {
+	token, err := resolveToken(program, args, environ, stderr)
+	if err != nil {
 		return fmt.Errorf("load agent token: %w", err)
 	}
-	return runLifecycle(ctx, stderr)
+	return lifecycle(ctx, token, stderr)
 }
 
-func runLifecycle(ctx context.Context, stderr io.Writer) error {
+func runLifecycle(ctx context.Context, token string, stderr io.Writer) error {
 	logger, err := logging.New(stderr, logging.Options{
 		Level:     "info",
 		Format:    "json",
@@ -199,8 +218,19 @@ func runLifecycle(ctx context.Context, stderr io.Writer) error {
 	}
 
 	logger.InfoContext(ctx, "process_started")
-	<-ctx.Done()
-	logger.Info("process_stopped")
+	defer logger.Info("process_stopped")
+
+	config, err := connector.HostConfig(token, agentVersion, open.OriginDialerFunc(connector.UnobservedOriginDialer))
+	if err != nil {
+		return fmt.Errorf("create ephemeral Connector identity: %w", err)
+	}
+	runtime, err := connector.New(config)
+	if err != nil {
+		return fmt.Errorf("initialize Connector runtime: %w", err)
+	}
+	if err := runtime.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("run Connector lifecycle: %w", err)
+	}
 	return nil
 }
 

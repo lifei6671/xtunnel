@@ -4,26 +4,25 @@ package xtunnel.protocol.v1;
 
 option go_package = "github.com/lifei6671/xtunnel/internal/protocol/gen;protocolv1";
 
-// Protocol v1 identifier values are ASCII strings with a fixed, lowercase
-// prefix followed by a 26-character uppercase Crockford Base32 ULID body.
-// Receivers reject an incorrect prefix, case, length, character, or whitespace
-// before using an identifier as a log field, map key, HMAC input, or state key.
+// Protocol v1 标识符是 ASCII 字符串：固定小写前缀后接 26 位大写
+// Crockford Base32 ULID。接收方把标识符用于日志字段、Map Key、HMAC 输入或
+// 状态键之前，必须拒绝错误前缀、大小写、长度、字符以及任何空白。
 //
-// agent_id=ag_<ULID>; instance_id=ai_<ULID>; session_id=sess_<ULID>;
+// tunnel_id=tun_<ULID>; connector_id=con_<ULID>; service_id=svc_<ULID>;
+// session_id=sess_<ULID>;
 // work_id=work_<ULID>; connection_id=conn_<ULID>;
 // budget_lease_id=lease_<ULID>; drain_id=drain_<ULID>; token_id=tok_<ULID>.
 
-// ErrorCode is the stable Protocol v1 outcome vocabulary.
-// Numeric values are never reused. Values deleted in a later protocol revision
-// must be reserved in this enum before their names are removed.
+// ErrorCode 是稳定的 Protocol v1 结果词汇表。数值永久不得复用；如果后续协议
+// 修订删除某个名称，必须先在本枚举中保留其数值。
 enum ErrorCode {
   ERROR_CODE_OK = 0;
 
-  ERROR_CODE_TUNNEL_NOT_FOUND = 0x1001;
-  ERROR_CODE_TUNNEL_DISABLED = 0x1002;
-  ERROR_CODE_AGENT_OFFLINE = 0x1003;
-  ERROR_CODE_NO_HEALTHY_INSTANCE = 0x1004;
-  ERROR_CODE_CONFIG_NOT_OBSERVED = 0x1005;
+  ERROR_CODE_SERVICE_NOT_FOUND = 0x1001;
+  ERROR_CODE_SERVICE_DISABLED = 0x1002;
+  ERROR_CODE_TUNNEL_OFFLINE = 0x1003;
+  ERROR_CODE_NO_HEALTHY_CONNECTOR = 0x1004;
+  ERROR_CODE_SERVICE_CONFIG_NOT_OBSERVED = 0x1005;
 
   ERROR_CODE_ORIGIN_REFUSED = 0x2001;
   ERROR_CODE_ORIGIN_TIMEOUT = 0x2002;
@@ -32,13 +31,13 @@ enum ErrorCode {
   ERROR_CODE_ORIGIN_TLS_ERROR = 0x2005;
 
   ERROR_CODE_WORK_POOL_EXHAUSTED = 0x3001;
-  ERROR_CODE_AGENT_BUSY = 0x3002;
+  ERROR_CODE_CONNECTOR_BUSY = 0x3002;
   ERROR_CODE_OPEN_DRAINING = 0x3003;
   ERROR_CODE_HEALTH_BUDGET_EXCEEDED = 0x3004;
 
   ERROR_CODE_TOKEN_INVALID = 0x4001;
   ERROR_CODE_TOKEN_REVOKED = 0x4002;
-  ERROR_CODE_AGENT_REVOKED = 0x4003;
+  ERROR_CODE_TUNNEL_REVOKED = 0x4003;
   ERROR_CODE_SESSION_INVALID = 0x4004;
   ERROR_CODE_SESSION_RESOURCE_EXHAUSTED = 0x4005;
 

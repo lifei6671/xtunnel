@@ -3,7 +3,7 @@
 > **文档状态**：开发基线
 > **目标状态**：完成后可作为 XTunnel Alpha 发布
 > **核心语言**：Go 1.27
-> **部署形态**：单 Server + 多逻辑 Agent + 多 Agent Replica
+> **部署形态**：单 Server + 多 Tunnel + 每 Tunnel 多 Connector
 > **数据存储**：SQLite
 > **数据传输**：TLS/TCP
 > **Web**：React + TypeScript + Vite + Tailwind CSS + shadcn/ui
@@ -11,7 +11,7 @@
 > **Agent Gateway 默认端口**：TCP 7443，可配置
 > **核心定位**：可直接部署使用的集中式反向隧道 Standalone 产品
 > **修订日期**：2026-08-25
-> **本次修订**：将 Agent 收敛为 Token-only、远端托管的轻状态 Replica，并冻结 Linux systemd + Windows SCM 跨平台 Binary Self-install；用户只需一个版本化 Connection Token，Agent 无 YAML、无用户管理的 Token 文件、无本地业务或配置状态
+> **本次修订**：领域模型对齐 Cloudflare Tunnel：Tunnel 持有一枚可重复取回的 ACTIVE Token，同一 Token 可启动多个临时 Connector；全部 Service 挂在 Tunnel 下，新连接默认按 Least Active + RR Tie-break 选择 Connector。Agent Binary 保持 Token-only、远端托管、无本地业务或配置状态
 
 ---
 
@@ -47,13 +47,13 @@
 即可完成：
 
 ```text
-创建逻辑 Agent
+创建 Tunnel
         ↓
-获得 Agent Token
+获得 Tunnel Token
         ↓
-启动一个或多个 Agent Instance
+使用同一 Token 启动一个或多个 Connector
         ↓
-Server 识别 Agent ONLINE
+Server 识别 Tunnel ONLINE
         ↓
 创建代理服务
         ↓
@@ -92,21 +92,19 @@ SQLite
 
 Web Console
 
-Agent 管理
+Tunnel 管理
 
-Agent Token
+Tunnel Token
 
-Agent Replica
+Connector 运行副本
 
-Agent Instance 状态
+Connector 状态
 
 Agent Control Session
 
 TCP Work Pool
 
-Tunnel
-
-Tunnel Binding
+Service
 
 HTTP Route
 
@@ -136,9 +134,9 @@ Graceful Shutdown
 ### Agent
 
 ```text
-Agent Token 认证
+Tunnel Token 认证
 
-Ephemeral Instance Identity
+Ephemeral Connector Identity
 
 Control Session
 
@@ -263,7 +261,7 @@ Server 间业务流量转发
              ┌───────┴───────┐
              │               │
              ▼               ▼
-        Agent Instance   Agent Instance
+         Connector A     Connector B
              │               │
              ▼               ▼
            Origin          Origin
@@ -280,10 +278,13 @@ XTunnel Server
 TCP Listener
    │
    ▼
+Service
+   │
+   ▼
 Tunnel
    │
    ▼
-Agent Instance
+Eligible Connector
    │
    ▼
 Origin :22
@@ -347,16 +348,13 @@ Origin Proxy
 Route
   │
   ▼
+Service
+  │
+  ▼
 Tunnel
   │
   ▼
-TunnelBinding
-  │
-  ▼
-Agent
-  │
-  ▼
-Agent Instance
+Connector
   │
   ▼
 Origin
@@ -376,50 +374,32 @@ V0.1 的 HTTP 协议边界是：Public Client 到 Caddy/Nginx 可以使用 HTTP/
 
 ---
 
-# 7. Agent 的定义
+# 7. Tunnel、Connector 与 Service
 
-第一阶段必须明确：
-
-> Agent 不是一台机器，也不是一个运行进程。
-
-Agent 是：
-
-> 一组共享相同 Tunnel Binding 和 Origin Configuration，并被视为等价流量入口的逻辑 Connector。
-
-因此：
+管理平面的顶层对象是 Tunnel。Tunnel 持有一枚当前 ACTIVE Connection Token、一个 Connector 运行池以及零到多个代理 Service：
 
 ```text
-Agent
-│
-├── Instance A
-├── Instance B
-└── Instance C
+Tunnel
+├── Stable Connection Token
+├── Connector A / B / C
+└── Service A / B / C
+    └── Origin / Route
 ```
 
-多个 Instance 可以：
+Connector 是运行 `xtunnel-agent` 的具体进程副本，不是需要预创建的持久化 Credential。管理端的“添加 Connector”是部署向导：读取并展示该 Tunnel 当前完全相同的 ACTIVE Token，不创建数据库 Connector 行、不生成新 Token，也不递增 Token Version。Connector 只有在认证成功后才出现在运行时列表中。
 
-```text
-运行在同一台机器
+Service 是 Tunnel 下的代理服务配置。HTTP、TCP、SSH 等公网 Route 都指向 Service；Service 保存 Origin、Health 和 Revision。流量先解析 Service，再从其所属 Tunnel 的 Eligible Connector 中选择一条 WorkConn。
 
-运行在多台机器
-
-运行在多个 Container
-
-未来运行在多个 Kubernetes Pod
-```
-
-只要它们能够按照相同配置访问相同语义的 Origin。
+`xtunnel-agent` 继续作为客户端 Binary 名称；产品领域不再存在独立的“逻辑 Agent”聚合。
 
 ---
 
 # 8. 身份层次
 
-XTunnel 第一阶段定义三级身份：
-
 ```text
-Agent
+Tunnel
     ↓
-Instance
+Connector
     ↓
 Session
 ```
@@ -427,368 +407,155 @@ Session
 对应：
 
 ```text
-agent_id
-
-instance_id
-
-session_id
+tunnel_id = tun_<ULID>
+connector_id = con_<ULID>
+session_id = sess_<ULID>
 ```
+
+Tunnel 由 Server 创建并持久化。每次启动 `xtunnel-agent` 进程都会在内存中生成新的 Connector ID；同一进程重连保持 Connector ID，进程重启重新生成。每次成功建立 Control Session 都生成新的 Session ID。
+
+Server 使用 `tunnel_id + connector_id + session_id + generation` 做 Session fencing、WorkConn 归属和日志关联。Connector 与 Session 均不落库、不绑定物理机器、安装目录或长期设备记录。
 
 ---
 
-# 9. agent_id
+# 9. tunnel_id
 
-代表：
-
-```text
-逻辑 Agent
-```
-
-由 Server 创建。
-
-例如：
-
-```text
-ag_01ARZ3NDEKTSV4RRFFQ69G5FAV
-```
-
-它拥有：
-
-```text
-Agent Name
-
-Agent Token
-
-Tunnel Bindings
-
-Desired Revision
-
-Configuration
-```
-
-例如：
-
-```text
-Agent:
-production-office
-
-Services:
-├── Jenkins
-├── GitLab
-└── SSH
-```
+`tunnel_id` 是 Server 创建并持久化的 Tunnel 主键，格式为 `tun_<ULID>`。Tunnel 拥有名称、Token、Desired Revision、Connector 运行池和 Service 集合，是管理 API 的 Aggregate Root。
 
 ---
 
-# 10. instance_id
+# 10. connector_id
 
-每启动一个 `xtunnel-agent` 进程，就在内存中生成新的：
-
-```text
-ai_01ARZ3NDEKTSV4RRFFQ69G5FAV
-```
-
-它代表当前运行中的具体 Agent Replica。`instance_id` 不落盘、不绑定物理机器或安装目录；进程重启后重新生成。
+每次启动 `xtunnel-agent` 进程都会在内存中生成 `con_<ULID>`。同一进程重连保持 Connector ID，进程重启重新生成；它不是独立 Credential，也不建立持久化 Connector 表。
 
 ---
 
 # 11. session_id
 
-Agent 每次成功建立 Control Session：
-
-```text
-Server
-↓
-Generate Session ID
-```
-
-例如：
-
-```text
-sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
-```
-
-断网重连：
-
-```text
-Instance ID
-保持
-
-Session ID
-重新生成
-```
-
-如果进程重启：
-
-```text
-Instance ID
-重新生成
-
-Session ID
-重新生成
-```
+每次 Control Session 认证成功后由 Server 生成 `sess_<ULID>`。同一 Connector 重连会得到新 Session ID，并递增该 `(tunnel_id, connector_id)` 的 Session Generation。
 
 ---
 
-# 12. 身份树示例
+# 12. 身份树与多 Connector
+
+同一 Tunnel 的所有 Connector 使用完全相同的当前 Token，并获得该 Tunnel 的完整 Service Snapshot。它们可以运行在同机、多机、容器或未来的 Kubernetes Pod 中，但必须能够按相同 Service 配置访问相同语义的 Origin。
 
 ```text
-Agent
-ag_01ARZ3NDEKTSV4RRFFQ69G5FAV
+Tunnel tun_...
 │
-├── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAV
-│      └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
-│
-├── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAW
-│      └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAW
-│
-└── Instance ai_01ARZ3NDEKTSV4RRFFQ69G5FAX
-       └── Session sess_01ARZ3NDEKTSV4RRFFQ69G5FAX
+├── Connector con_...
+│      └── Session sess_...
+├── Connector con_...
+│      └── Session sess_...
+└── Connector con_...
+       └── Session sess_...
 ```
+
+多个 Connector 默认互为负载副本。新业务连接按“Eligible + 有 Idle WorkConn → Least Active → Round Robin tie-break”选择；已经进入 RAW 或已转发业务字节的连接不因负载均衡自动迁移或重放。
 
 ---
 
-# 13. 同一主机运行多个 Agent
+# 13. 同一主机运行多个 Connector
 
-允许：
-
-```bash
-xtunnel-agent run --token 'xta_...'
-
-xtunnel-agent run --token 'xta_...'
-```
-
-两个实例使用：
-
-```text
-相同 Agent Token
-```
-
-但拥有不同：
-
-```text
-instance_id
-session_id
-```
+允许多个进程或容器使用同一 Tunnel Token。它们拥有不同 `connector_id` 和 `session_id`，并被视为同一 Tunnel 下互为负载副本的等价 Connector。
 
 ---
 
-# 14. Agent 运行身份边界
+# 14. Connector 运行身份边界
 
-`instance_id` 和 `session_id` 都是运行时标识，不是独立 Credential。持有同一个 Agent Token 的进程都被视为该逻辑 Agent 的完整受信 Replica，可以接收该 Agent 的全部远程配置并承接对应流量。
-
-Server 使用 `agent_id + instance_id + session_id + generation` 做 Session fencing、WorkConn 归属和日志关联；这些标识不用于设备注册、硬件绑定或跨重启恢复。需要隔离信任边界时，管理员必须创建不同的逻辑 Agent 和 Token。
+Connector 与 Session 都是运行时标识。持有某个 Tunnel Token 的进程可以接收该 Tunnel 的全部 Service 配置并承接流量；需要隔离信任边界时必须创建不同 Tunnel 和 Token。
 
 ---
 
-# 15. Agent 轻状态边界
+# 15. Connector 轻状态边界
 
-Agent 不维护 Data Directory、安装身份、本地数据库、本地配置或本地 Desired State。运行所需输入只有：
-
-```text
-Binary
-+ one opaque versioned Connection Token (`xta_...`)
-```
-
-Connection Token 在语义上同时携带 Server Endpoint、TLS Trust Descriptor、Agent/Token Identity 与认证 Secret。Agent 不要求用户另外提供 YAML、Endpoint、Pin 或 Token 文件。
+Connector 不维护 Data Directory、安装身份、本地数据库、本地配置或本地 Desired State。运行输入只有 Binary 和一个不透明版本化 Connection Token。Token 同时携带 Server Endpoint、TLS Trust Descriptor、Tunnel/Token Identity 与认证 Secret。
 
 以下对象只存在于当前进程内存：
 
 ```text
-instance_id / session_id
-current revision + full remote config
+connector_id / session_id
+current revision + full Service Snapshot
 Origin Resolver / Health / WorkPool
 Control Session / WorkConn
 ```
 
-多个 Agent 进程可以使用同一个 Connection Token；它们不共享可写目录。进程退出后 Instance 消失，重新启动时生成新 `instance_id`，仅凭 Token 连接并从 Server 获取完整当前配置。
+多个进程可以同时使用同一 Token；它们不共享可写目录。进程退出后 Connector 消失，重新启动后仅凭同一 Token 连接并取得完整当前配置。
 
 ---
 
-# 16. Agent Connection Token
+# 16. Tunnel Connection Token
 
-Agent Token 是一个版本化 Connection Token：
-
-> 用户只需要复制和部署一次的单个不透明 `xta_...` 字符串。
-
-它不是一次性 Enrollment Token，也不是只包含认证 Secret 的裸 Token。其语义字段为：
+Tunnel Token 是长期有效、可重复部署到多个 Connector 的单个不透明 `xta_...` 字符串，不是一次性 Enrollment Token。其语义字段为：
 
 ```text
 format version
 Server Endpoint
 TLS Trust Descriptor
-agent identity
+tunnel identity
 token identity / version
 authentication secret
 ```
 
-`TLS Trust Descriptor` 必须足以让 Agent 在没有其他本地配置的情况下完成 public CA 或 pinned SPKI 验证。Endpoint 或 TLS Trust 改变时，需要签发并重新部署包含新连接信息的 Token。
-
-对用户可见的形式固定为：
-
-```text
-xta_...
-```
-
-V0.1 的精确编码、字段边界、版本分派、解析失败语义和 Golden Vector 在 M05-02 Protocol Freeze 冻结；本阶段不得提前把它写死为 JSON、HMAC 或其他具体封装。认证 Secret 必须由 CSPRNG 生成并提供至少 256 bit 随机熵。
+当前 Token Version 内返回的文本必须逐字节稳定。只有显式 Rotate，或 Endpoint/TLS Trust 变化导致管理员执行 Rotate，才生成新 Token。认证 Secret 由 CSPRNG 生成并提供至少 256 bit 随机熵。
 
 ---
 
-# 17. Connection Token 生命周期
+# 17. Token 创建、获取与存储
 
-默认：
-
-```text
-长期有效
-
-允许多个 Instance 同时使用
-
-可以 Rotate
-
-可以 Revoke
-```
-
-管理员创建 Agent 后：
+创建 Tunnel 时签发第 1 代 ACTIVE Token。之后每次“添加 Connector”或“复制部署命令”都读取同一枚 ACTIVE Token：
 
 ```text
-Agent
- ↓
-Generate Token
- ↓
-Show Once
+Create Tunnel → Issue Token v1
+Add Connector A → Reveal Token v1
+Add Connector B → Reveal Token v1
+Add Connector C → Reveal Token v1
 ```
 
-完整 Connection Token 只在创建或 Rotate 时返回一次。每次签发都使用 Server 当前对外 Agent Gateway Endpoint 与 TLS Trust Descriptor；Rotate 不得继续复制过时的连接描述。
+Reveal 不得创建 Token、不递增 Version，也不得按当前配置重新编码文本。完整 Token 使用 AES-256-GCM 加密后写入 SQLite；认证路径另外保存 `SHA-256(authentication_secret)` 并使用常量时间比较。AEAD AAD 至少绑定 `tunnel_id + token_id + token_version`，防止数据库行间密文替换。
 
-数据库只保存：
+Token Credential Master Key 是 Data Directory 内独立的 32 字节密钥，必须原子创建、权限 `0600`，不得复用 Gateway TLS Private Key。只要 `tunnel_tokens` 已有密文，Master Key 缺失、截断或权限错误就必须快速失败；空 Token 表（包括全新库和从旧 Schema 升级但尚未签发 Token 的库）允许首次创建。Backup/Restore 必须把 SQLite 与该 Key 作为同一一致性单元。
 
-```text
-token identity / version
-authentication secret hash
-status / timestamps
-```
-
-数据库不保存可还原的完整 Connection Token。由于认证 Secret 拥有至少 256 bit 随机熵，不需要使用 Argon2 等慢哈希；具体 Hash 输入和常量时间校验在 M1-01/M1-02 冻结。
+Token 返回响应必须 `Cache-Control: no-store`，不得进入日志、URL、Recent Activity 或前端持久化缓存；Reveal 和 Rotate 都必须写 Security Audit Event。
 
 ---
 
 # 18. Token Rotation
 
-管理员：
-
-```text
-Rotate Token
-```
-
-Server：
-
-```text
-Generate Connection Token with token_version = 2
-        ↓
-v1 = REVOKED_FOR_NEW_SESSION
-        ↓
-v2 = ACTIVE
-```
-
-语义：
-
-```text
-已有 Control Session
-继续工作
-
-旧 Token
-不能建立新的 Control Session
-
-新 Token
-允许建立新 Session
-```
-
-如果需要安全强制下线：
-
-```text
-Revoke Agent
-```
-
-而不是 Rotate。
+Rotate 才生成新 Token Version：旧 Token 进入 `REVOKED_FOR_NEW_SESSION`，新 Token 进入 `ACTIVE`；既有 Session 继续工作，新认证只接受新 Token。
 
 ---
 
-# 19. Agent Revoke
+# 19. Tunnel Revoke
 
-管理员执行：
+强制下线使用 Revoke Tunnel，原子禁用全部 Token，并在事务提交后关闭该 Tunnel 的全部 Session、Idle WorkConn 和 ActiveWork。
 
-```text
-Revoke Agent
-```
-
-Server：
-
-```text
-Agent status = REVOKED
-        ↓
-所有 Token 禁用
-        ↓
-关闭所有 Control Session
-        ↓
-关闭所有 Idle WorkConn
-        ↓
-关闭所有 Active WorkConn
-```
-
-属于强安全操作。
-
-Revoke 的 Desired State、全部 Token 状态和 `agents.version` 必须在同一个 `BEGIN IMMEDIATE` 事务中提交并受 `If-Match` 保护；事务提交后再在 Runtime Lock 内收集需要关闭的 Session/WorkConn，释放锁后执行实际 Close。
+Token 状态、Tunnel Desired State 与 `tunnels.version` 必须在同一个 `BEGIN IMMEDIATE` 事务中提交并受 `If-Match` 保护。锁内不得执行网络 IO 或 Close。
 
 ---
 
-# 20. Connection Token 表
+# 20. Tunnel Token 表
 
 ```sql
-CREATE TABLE agent_tokens (
+CREATE TABLE tunnel_tokens (
     id TEXT PRIMARY KEY,
-
-    agent_id TEXT NOT NULL,
-
+    tunnel_id TEXT NOT NULL,
     secret_hash BLOB NOT NULL UNIQUE,
-
+    token_ciphertext BLOB NOT NULL,
     version INTEGER NOT NULL,
-
     status TEXT NOT NULL,
-
     created_at INTEGER NOT NULL,
-
-    revoked_at INTEGER,
-
-    FOREIGN KEY(agent_id)
-        REFERENCES agents(id)
-        ON DELETE CASCADE,
-
-    UNIQUE(agent_id, version)
+    revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at > 0),
+    FOREIGN KEY(tunnel_id) REFERENCES tunnels(id) ON DELETE CASCADE,
+    UNIQUE(tunnel_id, version)
 );
-```
 
-状态：
-
-```text
-ACTIVE
-REVOKED_FOR_NEW_SESSION
-
-REVOKED
-```
-
-第一阶段一个 Agent 只允许一个 ACTIVE Token。
-
-SQLite 使用条件唯一索引保证该约束：
-
-```sql
-CREATE UNIQUE INDEX one_active_token_per_agent
-ON agent_tokens(agent_id)
+CREATE UNIQUE INDEX one_active_token_per_tunnel
+ON tunnel_tokens(tunnel_id)
 WHERE status = 'ACTIVE';
 ```
 
-Rotate 必须在同一个 `BEGIN IMMEDIATE` 事务中完成旧 Token 状态更新、新 Token 插入和 version 递增。
-
-这里同时包含 Agent Aggregate 的乐观锁：事务先校验 `agents.version == If-Match`，成功后把 `agents.version` 递增一次。Token 自身的 `agent_tokens.version` 继续表示 Credential 代次，两种 Version 不得混用。
+数据库不得出现 `xta_...` 明文或认证 Secret 原文。Token Ciphertext 属于 Secret，错误、日志和 Metric 均不得输出。
 
 ---
 
@@ -905,12 +672,12 @@ TLS >= 1.3
 ```text
 Server Authentication
 +
-Agent Token Authentication
+Tunnel Token Authentication
 ```
 
 不强制使用 Client Certificate。
 
-TLS Session Resumption 只作为性能优化，不能改变 Agent Token、WorkHello HMAC、Budget Lease 或 Replay 检查。V0.1 禁止在 Agent Protocol 上使用 0-RTT Application Data；是否启用受限 Client Session Cache 由 5000 Instance 重连与 WorkConn 建连基准决定，并必须定义 Ticket Key 生命周期。未启用 Resumption 不能影响功能正确性或发布 Gate。
+TLS Session Resumption 只作为性能优化，不能改变 Tunnel Token、WorkHello HMAC、Budget Lease 或 Replay 检查。V0.1 禁止在 Agent Protocol 上使用 0-RTT Application Data；是否启用受限 Client Session Cache 由 5000 Connector 重连与 WorkConn 建连基准决定，并必须定义 Ticket Key 生命周期。未启用 Resumption 不能影响功能正确性或发布 Gate。
 
 ---
 
@@ -1043,11 +810,11 @@ xtunnel-server gateway rotate-key --maintenance
  ↓
 启动 xtunnel-server；旧 pinned Token 因 Pin 不匹配保持离线
  ↓
-通过 Web/API Rotate 每个 Agent Token，使新 Token 携带当前 Endpoint 与 Pin
+通过 Web/API Rotate 每个 Tunnel Token，使新 Token 携带当前 Endpoint 与 Pin
  ↓
 把新的单字符串 Token 重新部署到前台、容器、Linux systemd 或 Windows SCM
  ↓
-重启 Agent 并核对全部 Replica 恢复 ONLINE
+重启 Agent 并核对全部 Connector 恢复 ONLINE
 ```
 
 Agent 只使用 Connection Token 内的 TLS Trust Descriptor，禁止在 Pin 不匹配时自动接受新 Key、TOFU 覆盖或回落 `--insecure`。未部署新 Token 并重启的 Agent 进程会保持离线；这是 V0.1 明确接受的维护中断。在线双 Pin/Token 轮换留到后续协议版本。
@@ -1127,10 +894,10 @@ TLS
 然后发送：
 
 ```protobuf
-message AgentAuthRequest {
+message ConnectorAuthRequest {
     string connection_token = 1;
 
-    string instance_id = 2;
+    string connector_id = 2;
     string hostname = 3;
 
     string version = 4;
@@ -1153,13 +920,13 @@ Server：
 ```text
 Parse + validate Connection Token version/integrity
  ↓
-Lookup token identity + agent identity
+Lookup token identity + tunnel identity
  ↓
 Constant-time verify authentication secret hash
  ↓
 Token ACTIVE?
  ↓
-Agent REVOKED?
+Tunnel REVOKED?
  ↓
 Protocol compatible?
  ↓
@@ -1171,29 +938,29 @@ Connection Token 的连接描述、身份和 Secret 必须作为同一受保护�
 运行身份规则：
 
 ```text
-同一 instance_id 已存在 Current Session
+同一 connector_id 已存在 Current Session
 → 新 Session 完成认证后递增 generation，并 fencing 旧 Session
 
 旧 Session cleanup
 → 只能清理自己的 session_id + generation
 ```
 
-`instance_id` 是 Token 认证后的临时运行标识，不是独立安全凭据。Server 不得在 Token 验证前依据自报字段执行覆盖或删除。
+`connector_id` 是 Token 认证后的临时运行标识，不是独立安全凭据。Server 不得在 Token 验证前依据自报字段执行覆盖或删除。
 
-V0.1 的信任边界是：持有某个 Agent Token 的进程，被视为该逻辑 Agent 的完整受信副本。它可以接收该 Agent 的全部 Binding 并承接对应业务流量。Server 只把 Instance 作为当前在线 Replica 观测对象，不建立跨重启 Installation 身份或设备注册记录。若不同主机之间不能共享这一信任边界，管理员必须为它们创建不同的逻辑 Agent。
+V0.1 的信任边界是：持有某个 Tunnel Token 的进程，被视为该 Tunnel 的完整受信 Connector。它可以接收该 Tunnel 的全部 Service 配置并承接对应业务流量。Server 只把 Connector 作为当前在线运行副本观测对象，不建立跨重启 Installation 身份或设备注册记录。若不同主机之间不能共享这一信任边界，管理员必须为它们创建不同的 Tunnel。
 
 认证统一返回显式 Result，而不是只定义成功响应：
 
 ```protobuf
-message AgentAuthResult {
+message ConnectorAuthResult {
     oneof result {
-        AgentAuthSuccess success = 1;
-        AgentAuthFailure failure = 2;
+        ConnectorAuthSuccess success = 1;
+        ConnectorAuthFailure failure = 2;
     }
 }
 
-message AgentAuthSuccess {
-    string agent_id = 1;
+message ConnectorAuthSuccess {
+    string tunnel_id = 1;
 
     string session_id = 2;
 
@@ -1206,29 +973,29 @@ message AgentAuthSuccess {
     uint32 heartbeat_interval_ms = 6;
 }
 
-message AgentAuthFailure {
+message ConnectorAuthFailure {
     ErrorCode error_code = 1;
     uint32 retry_after_ms = 2;
 }
 ```
 
-认证成功后，Server 必须向新 Control Session 下发当前完整 AgentSnapshot；Agent 不依赖本地 Revision 决定是否跳过首份配置。
+认证成功后，Server 必须向新 Control Session 下发当前完整 TunnelSnapshot；Connector 不依赖本地 Revision 决定是否跳过首份配置。
 
 认证失败流程固定为：
 
 ```text
 TLS Established
  ↓
-AgentAuthRequest
+ConnectorAuthRequest
  ↓
-AgentAuthResult{failure: AgentAuthFailure}
+ConnectorAuthResult{failure: ConnectorAuthFailure}
  ↓
 在 control.write_timeout 内 flush 完整 Frame
  ↓
 Close TLS Connection
 ```
 
-除 TLS 已经不可写或对端提前关闭外，禁止用直接 EOF 代替认证失败结果。`TOKEN_INVALID`、`TOKEN_REVOKED`、`AGENT_REVOKED`、`VERSION_UNSUPPORTED` 和可重试的 Server 容量错误必须能够被 Agent 区分。只有可重试错误允许设置非零 `retry_after_ms`；永久 Credential、Pin 或版本错误不得通过短周期自动重连放大负载。
+除 TLS 已经不可写或对端提前关闭外，禁止用直接 EOF 代替认证失败结果。`TOKEN_INVALID`、`TOKEN_REVOKED`、`TUNNEL_REVOKED`、`VERSION_UNSUPPORTED` 和可重试的 Server 容量错误必须能够被 Connector 区分。只有可重试错误允许设置非零 `retry_after_ms`；永久 Credential、Pin 或版本错误不得通过短周期自动重连放大负载。
 
 ---
 
@@ -1256,7 +1023,7 @@ Agent memory
 认证 WorkConn
 ```
 
-避免每一个 WorkConn 都发送长期 Agent Token。
+避免每一个 WorkConn 都发送长期 Tunnel Token。
 
 ---
 
@@ -1266,9 +1033,9 @@ Agent 新建 WorkConn：
 
 ```protobuf
 message WorkHello {
-    string agent_id = 1;
+    string tunnel_id = 1;
 
-    string instance_id = 2;
+    string connector_id = 2;
 
     string session_id = 3;
 
@@ -1305,8 +1072,9 @@ nonce = 32 byte crypto/rand
 Protocol v1 的 ID 格式必须在 `common.proto` 对应注释和共享校验包中固定为 ASCII、带类型前缀的 ULID：
 
 ```text
-agent_id         = ag_<26-char Crockford ULID>
-instance_id      = ai_<26-char Crockford ULID>
+tunnel_id        = tun_<26-char Crockford ULID>
+connector_id     = con_<26-char Crockford ULID>
+service_id       = svc_<26-char Crockford ULID>
 session_id       = sess_<26-char Crockford ULID>
 work_id          = work_<26-char Crockford ULID>
 connection_id    = conn_<26-char Crockford ULID>
@@ -1325,7 +1093,7 @@ Server 检查：
 ```text
 Session 必须存在
 
-Instance 必须匹配
+Connector 必须匹配
 
 Work ID 不得重复
 
@@ -1365,9 +1133,9 @@ UVarint Frame Length
 Protobuf Message
 ```
 
-Frame 内层类型按连接与状态唯一确定：AUTH 使用裸 `AgentAuthRequest` / `AgentAuthResult`；ESTABLISHED/DRAINING Control 使用 `ControlEnvelope`；WorkConn 在 RAW 前按状态使用唯一合法的裸 Work Message。
+Frame 内层类型按连接与状态唯一确定：AUTH 使用裸 `ConnectorAuthRequest` / `ConnectorAuthResult`；ESTABLISHED/DRAINING Control 使用 `ControlEnvelope`；WorkConn 在 RAW 前按状态使用唯一合法的裸 Work Message。
 
-AUTH 阶段使用同样 UVarint Length 和 MaxAuthFrameSize，但不把 Auth Message 放入 `ControlEnvelope`。Server 只在完整 `AgentAuthResult.success` Frame 已在 `write_timeout` 内 flush 成功后才原子切换到 `ESTABLISHED`；Agent 只在完整解码并验证该 Success 后切换。两个提交点之前双方均禁止发送或接受 `ControlEnvelope`。Auth Failure flush 后直接关闭，不进入 ControlEnvelope 阶段。
+AUTH 阶段使用同样 UVarint Length 和 MaxAuthFrameSize，但不把 Auth Message 放入 `ControlEnvelope`。Server 只在完整 `ConnectorAuthResult.success` Frame 已在 `write_timeout` 内 flush 成功后才原子切换到 `ESTABLISHED`；Agent 只在完整解码并验证该 Success 后切换。两个提交点之前双方均禁止发送或接受 `ControlEnvelope`。Auth Failure flush 后直接关闭，不进入 ControlEnvelope 阶段。
 
 Control Session Envelope：
 
@@ -1380,13 +1148,13 @@ message ControlEnvelope {
     oneof payload {
         Heartbeat heartbeat = 10;
 
-        AgentSnapshot config_snapshot = 11;
+        TunnelSnapshot config_snapshot = 11;
 
         ConfigAck config_ack = 12;
 
         WorkDemand work_demand = 13;
 
-        TunnelHealthBatch tunnel_health_batch = 14;
+        ServiceHealthBatch service_health_batch = 14;
 
         DrainRequest drain_request = 15;
 
@@ -1410,18 +1178,18 @@ CLOSED
 
 | Message | Agent → Server | Server → Agent | AUTH | ESTABLISHED | DRAINING |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| AgentAuthRequest | ✓ | × | ✓ | × | × |
-| AgentAuthResult | × | ✓ | ✓ | × | × |
+| ConnectorAuthRequest | ✓ | × | ✓ | × | × |
+| ConnectorAuthResult | × | ✓ | ✓ | × | × |
 | Heartbeat | ✓ | × | × | ✓ | ✓ |
-| AgentSnapshot | × | ✓ | × | ✓ | × |
+| TunnelSnapshot | × | ✓ | × | ✓ | × |
 | ConfigAck | ✓ | × | × | ✓ | ✓ |
 | WorkDemand | × | ✓ | × | ✓ | × |
-| TunnelHealthBatch | ✓ | × | × | ✓ | ✓ |
+| ServiceHealthBatch | ✓ | × | × | ✓ | ✓ |
 | DrainRequest | ✓ | × | × | ✓ | 幂等 |
 | DrainAck | × | ✓ | × | ✓ | 幂等 |
 | Error | ✓ | ✓ | × | ✓ | ✓ |
 
-AUTH 阶段不使用 `ControlEnvelope.Error`。Server 能安全解码 `AgentAuthRequest` 但发现版本、未知字段或认证语义错误时，发送 `AgentAuthResult.failure{error_code: PROTOCOL_ERROR 或对应 Auth Error}`，flush 后关闭；Frame 已无法安全解码时直接关闭。Agent 在 AUTH 收到无法解码、非法 oneof 或非期望 Result 时直接关闭，不发送 Control Error。
+AUTH 阶段不使用 `ControlEnvelope.Error`。Server 能安全解码 `ConnectorAuthRequest` 但发现版本、未知字段或认证语义错误时，发送 `ConnectorAuthResult.failure{error_code: PROTOCOL_ERROR 或对应 Auth Error}`，flush 后关闭；Frame 已无法安全解码时直接关闭。Agent 在 AUTH 收到无法解码、非法 oneof 或非期望 Result 时直接关闭，不发送 Control Error。
 
 `ESTABLISHED/DRAINING` 收到错误方向、当前状态不允许的 Message 时，接收端应在仍可安全写入时发送 `ControlEnvelope.Error{error_code: PROTOCOL_ERROR}`，随后关闭 Control Session。完全相同的 DrainRequest 和 DrainAck 必须幂等，返回或重发当前状态；同一 ID 但内容不同必须视为 `PROTOCOL_ERROR`。`protocol_version` 必须等于 TLS/Auth 协商出的版本，任何不一致都关闭 Session。
 
@@ -1494,10 +1262,10 @@ MaxAuthFrameSize = 64 KB
 
 MaxWorkFrameSize = 64 KB
 
-MaxAgentSnapshotBytes = 768 KiB
+MaxTunnelSnapshotBytes = 768 KiB
 ```
 
-`MaxAgentSnapshotBytes` 是 AgentSnapshot 本体的业务上限，必须低于 1 MB Control Frame，为 Envelope、未知字段和后续兼容字段预留空间。禁止把 1 MB 当作可用 Payload 大小。
+`MaxTunnelSnapshotBytes` 是 TunnelSnapshot 本体的业务上限，必须低于 1 MB Control Frame，为 Envelope、未知字段和后续兼容字段预留空间。禁止把 1 MB 当作可用 Payload 大小。
 
 任何：
 
@@ -1517,7 +1285,7 @@ malformed protobuf
 PROTOCOL_ERROR
 ```
 
-错误隔离范围固定为：Control Frame 错误关闭对应 Control Session；WorkHello、WorkReady、OpenRequest 或 OpenResponse Frame 错误只关闭对应 WorkConn。只有认证级错误，或同一 Control Session 在滑动窗口内连续超过协议违规阈值，才关闭并短暂封禁整个 Control Session，禁止因单条业务连接的 malformed Frame 清空整个 Instance。
+错误隔离范围固定为：Control Frame 错误关闭对应 Control Session；WorkHello、WorkReady、OpenRequest 或 OpenResponse Frame 错误只关闭对应 WorkConn。只有认证级错误，或同一 Control Session 在滑动窗口内连续超过协议违规阈值，才关闭并短暂封禁整个 Control Session，禁止因单条业务连接的 malformed Frame 清空整个 Connector。
 
 ---
 
@@ -1551,7 +1319,7 @@ VERSION_UNSUPPORTED
 
 ---
 
-# 36. Runtime Ownership and Agent Runtime Registry
+# 36. Runtime Ownership and Tunnel Runtime Registry
 
 每条 Control Session 的并发模型固定为：
 
@@ -1590,32 +1358,32 @@ High Priority
 └── 最新 Heartbeat
 
 Coalescible
-├── AgentSnapshot              key = agent_id，保留最高 revision
-├── WorkDemand                 key = instance_id，保留最高 generation
-└── TunnelHealth pending accumulator，按 tunnel_id 保留最新项
+├── TunnelSnapshot             key = tunnel_id，保留最高 revision
+├── WorkDemand                 key = connector_id，保留最高 generation
+└── ServiceHealth pending accumulator，按 service_id 保留最新项
 ```
 
-旧 Heartbeat 尚未发送时由新 Heartbeat 覆盖，不允许累计。Health 结果在唯一 pending accumulator 中按 `tunnel_id` 合并；只在出队并冻结为不可变 `TunnelHealthBatch` 时才分配严格递增的 `generation`，已冻结 Frame 不再改写。Snapshot 按 Revision 串行 Apply，较高 Revision 可以覆盖尚未开始 Apply 的较低 Revision。Normal Queue 满时，先执行上述合并；仍无法容纳的新消息不得无限等待。High Priority Queue 满、完整 Frame 在 `write_timeout` 内无法写完，或 Owner 无法保证消息次序时，记录 `SESSION_RESOURCE_EXHAUSTED` 并关闭该 Session。关闭动作必须解除 readLoop/writeLoop 的阻塞并等待二者退出，禁止遗留 goroutine。
+旧 Heartbeat 尚未发送时由新 Heartbeat 覆盖，不允许累计。Health 结果在唯一 pending accumulator 中按 `service_id` 合并；只在出队并冻结为不可变 `ServiceHealthBatch` 时才分配严格递增的 `generation`，已冻结 Frame 不再改写。Snapshot 按 Revision 串行 Apply，较高 Revision 可以覆盖尚未开始 Apply 的较低 Revision。Normal Queue 满时，先执行上述合并；仍无法容纳的新消息不得无限等待。High Priority Queue 满、完整 Frame 在 `write_timeout` 内无法写完，或 Owner 无法保证消息次序时，记录 `SESSION_RESOURCE_EXHAUSTED` 并关闭该 Session。关闭动作必须解除 readLoop/writeLoop 的阻塞并等待二者退出，禁止遗留 goroutine。
 
 Server 内存：
 
 ```go
-type AgentRuntime struct {
+type TunnelRuntime struct {
     mu sync.Mutex
 
-    AgentID string
+    TunnelID string
 
-    Instances map[string]*InstanceRuntime
+    Connectors map[string]*ConnectorRuntime
 
     ActiveWork map[string]*ActiveWorkRuntime
 }
 ```
 
-Instance：
+Connector：
 
 ```go
-type InstanceRuntime struct {
-    InstanceID string
+type ConnectorRuntime struct {
+    ConnectorID string
 
     Hostname string
 
@@ -1625,7 +1393,7 @@ type InstanceRuntime struct {
 
     TCP *TCPTransport
 
-    Health map[string]TunnelHealth
+    Health map[string]ServiceHealth
 
     ConnectedAt time.Time
 
@@ -1638,8 +1406,8 @@ Active WorkConn 必须独立于 Current Session 保存：
 ```go
 type ActiveWorkRuntime struct {
     ConnectionID string
-    AgentID      string
-    InstanceID   string
+    TunnelID     string
+    ConnectorID  string
     SessionID    string
     Generation   uint64
     WorkID       string
@@ -1651,7 +1419,7 @@ type ActiveWorkRuntime struct {
 }
 ```
 
-一个逻辑 Agent 内所有 Instance、Session、WorkPool、Health 和 ActiveWork 状态变化，都必须在对应 `AgentRuntime.mu` 下线性化。不同 Agent 使用不同锁；禁止建立跨 Agent 的嵌套 Runtime Lock。
+一个 Tunnel 内所有 Connector、Session、WorkPool、Health 和 ActiveWork 状态变化，都必须在对应 `TunnelRuntime.mu` 下线性化。不同 Tunnel 使用不同锁；禁止建立跨 Tunnel 的嵌套 Runtime Lock。
 
 固定线性化点：
 
@@ -1674,11 +1442,11 @@ Drain
 
 持有 Runtime Lock 时禁止进行网络 IO、SQLite 操作、阻塞 Channel Send、等待 goroutine 或调用 `Conn.Close`。需要关闭的 Conn 和 Cancel Handle 在锁内收集，释放锁后通过 `closeOnce` 执行 `Cancel → SetDeadline(now) → Close`。所有 Counter、Budget Lease 和 Registry 删除必须由同一个终止路径执行且只执行一次。
 
-Session 清理只能在 `instance_id + session_id + generation` 仍匹配时修改 Current Session。旧 Session 的延迟清理不得删除或关闭新 Session。
+Session 清理只能在 `connector_id + session_id + generation` 仍匹配时修改 Current Session。旧 Session 的延迟清理不得删除或关闭新 Session。
 
-Agent Revoke 必须通过 Agent 级 ActiveWork Registry 找到并关闭所有旧、新 Session 的 Active WorkConn。
+Tunnel Revoke 必须通过 Tunnel 级 ActiveWork Registry 找到并关闭所有旧、新 Session 的 Active WorkConn。
 
-旧 Session cleanup 只能关闭属于旧 Session 的 Idle/Opening WorkConn。已经进入 ACTIVE 的旧 WorkConn 必须继续留在 Agent 级 ActiveWork Registry，直到自然结束、Agent Revoke 或 drain timeout；cleanup 不得仅因 Session 已被 fencing 就删除或关闭它们。
+旧 Session cleanup 只能关闭属于旧 Session 的 Idle/Opening WorkConn。已经进入 ACTIVE 的旧 WorkConn 必须继续留在 Tunnel 级 ActiveWork Registry，直到自然结束、Tunnel Revoke 或 drain timeout；cleanup 不得仅因 Session 已被 fencing 就删除或关闭它们。
 
 ---
 
@@ -1693,7 +1461,7 @@ WorkConn
 
 Active Tunnel Connection
 
-Agent Instance
+Connector
 
 Session Secret
 
@@ -1710,25 +1478,25 @@ Server 重启后通过 Agent 重连重新建立。
 
 ---
 
-# 38. Ephemeral Instance 观测
+# 38. Ephemeral Connector 观测
 
-Instance 只存在于 Server Runtime Registry，不写入 SQLite。Web 和 API 可以展示当前在线或仍有 ActiveWork 的 Tombstone Instance：
+Connector 只存在于 Server Runtime Registry，不写入 SQLite。Web 和 API 可以展示当前在线或仍有 ActiveWork 的 Tombstone Connector：
 
 ```text
-instance_id
+connector_id
 hostname / os / arch / version
 connected_at / last_heartbeat_at
 session_id / generation
 WorkPool / ActiveWork / Health
 ```
 
-进程退出且 Tombstone 清理完成后，该 Instance 从运行态消失。V0.1 不提供跨重启 Installation History、设备清单或机器身份审计；长期审计依赖结构化安全事件和 Server 日志，而不是 Agent 本地身份文件。
+进程退出且 Tombstone 清理完成后，该 Connector 从运行态消失。V0.1 不提供跨重启 Installation History、设备清单或机器身份审计；长期审计依赖结构化安全事件和 Server 日志，而不是 Agent 本地身份文件。
 
 ---
 
-# 39. Agent 状态
+# 39. Tunnel 状态
 
-逻辑 Agent 状态：
+Tunnel 状态：
 
 ```text
 PENDING
@@ -1745,28 +1513,28 @@ REVOKED
 计算规则：
 
 ```text
-Agent revoked
+Tunnel revoked
 → REVOKED
 
-Agent 创建后从未成功完成认证
+Tunnel 创建后从未有 Connector 成功完成认证
 → PENDING
 
 曾经成功认证，但当前没有 Current Control Session
 → OFFLINE
 
-至少一个 Instance Status == ONLINE
+至少一个 Connector Status == ONLINE
 → ONLINE
 
 至少一个 Current Control Session，
-但所有 Instance 都是 DEGRADED / DRAINING
+但所有 Connector 都是 DEGRADED / DRAINING
 → DEGRADED
 ```
 
-Agent Status 只聚合 Connector Runtime，不读取任何 Tunnel/Origin Health。某个 Instance 可以访问 SSH Origin、但不能访问 Jenkins Origin，此时 Agent/Instance 仍可能 ONLINE；差异只反映在对应 Service Status。
+Tunnel Status 只聚合 Connector Runtime，不读取任何 Service/Origin Health。某个 Connector 可以访问 SSH Origin、但不能访问 Jenkins Origin，此时 Tunnel/Connector 仍可能 ONLINE；差异只反映在对应 Service Status。
 
 ---
 
-# 40. Instance 状态
+# 40. Connector 状态
 
 ```text
 ONLINE
@@ -1785,17 +1553,17 @@ DRAINING
 ONLINE
 = Current Control Session 存活
 + Heartbeat Fresh
-+ Instance-wide Transport 可以接受新 Work
++ Connector-wide Transport 可以接受新 Work
 
 DEGRADED
 = Current Control Session 存活
 + Heartbeat Fresh
-+ Instance-wide Transport 持续无法接受新 Work
++ Connector-wide Transport 持续无法接受新 Work
 ```
 
-`Instance-wide Transport` 只包含 Control/WorkPool/Budget/FD 等 Instance 级能力。Per-Tunnel Origin Health 不参与 Instance Status。Heartbeat 超时或 Control Session 关闭后，Instance 不保留一个永久 OFFLINE Runtime 状态，而是按下述 Tombstone 规则删除或保留。
+`Connector-wide Transport` 只包含 Control/WorkPool/Budget/FD 等 Connector 级能力。Per-Service Origin Health 不参与 Connector Status。Heartbeat 超时或 Control Session 关闭后，Connector 不保留一个永久 OFFLINE Runtime 状态，而是按下述 Tombstone 规则删除或保留。
 
-Instance 不保存永久 OFFLINE Runtime 对象。
+Connector 不保存永久 OFFLINE Runtime 对象。
 
 如果当前 Session 断开且没有旧 Active WorkConn：
 
@@ -1803,9 +1571,9 @@ Instance 不保存永久 OFFLINE Runtime 对象。
 从 Runtime Registry 删除
 ```
 
-如果仍有旧 Active WorkConn，则保留不可选择的 Instance Tombstone，直到 Active 数归零。它不参与新连接选择，但继续承担计数、Usage、日志和 Revoke 归属。
+如果仍有旧 Active WorkConn，则保留不可选择的 Connector Tombstone，直到 Active 数归零。它不参与新连接选择，但继续承担计数、Usage、日志和 Revoke 归属。
 
-Web 只展示当前在线 Instance 和尚有 ActiveWork 的 Tombstone，不把一次进程生命周期伪装成永久设备记录。
+Web 只展示当前在线 Connector 和尚有 ActiveWork 的 Tombstone，不把一次进程生命周期伪装成永久设备记录。
 
 ---
 
@@ -1839,7 +1607,7 @@ message Heartbeat {
 }
 ```
 
-Heartbeat 的 `ingress_bytes` / `egress_bytes` 按第 110 节全局方向定义，是当前 Control Session 建立以来的累计诊断值，Session 重建后从零开始。它们只用于 Replica 运行态对账和异常检测，不写入 `usage_minutes`，也不与 Server 数据面 `UsageCounter` 再次相加；持久化计费/报表以 Server 数据面计数为唯一来源，避免双重入账。
+Heartbeat 的 `ingress_bytes` / `egress_bytes` 按第 110 节全局方向定义，是当前 Control Session 建立以来的累计诊断值，Session 重建后从零开始。它们只用于 Connector 运行态对账和异常检测，不写入 `usage_minutes`，也不与 Server 数据面 `UsageCounter` 再次相加；持久化计费/报表以 Server 数据面计数为唯一来源，避免双重入账。
 
 超过：
 
@@ -1878,7 +1646,7 @@ type DataTransport interface {
     Type() TransportType
 
     Available(
-        tunnelID string,
+        serviceID string,
     ) bool
 
     Acquire(
@@ -1919,7 +1687,7 @@ HTTP Proxy 和 TCP Proxy 不直接依赖：
 ```text
 WorkConn
 
-Agent Instance
+Connector
 
 TCP Pool
 ```
@@ -1928,7 +1696,7 @@ TCP Pool
 
 # 44. TCP Work Pool
 
-每个 Instance 独立维护：
+每个 Connector 独立维护：
 
 ```text
 Control Session
@@ -1939,13 +1707,13 @@ Work Pool
 例如：
 
 ```text
-Agent
+Tunnel
 │
-├── Instance A
+├── Connector A
 │   ├── Control
 │   └── WorkPool A
 │
-└── Instance B
+└── Connector B
     ├── Control
     └── WorkPool B
 ```
@@ -2092,11 +1860,11 @@ message WorkDemand {
 }
 ```
 
-`desired_non_active` 是该 Instance 的 `Connecting + Idle + Opening` 绝对目标，不是“再增加多少”。Agent 只处理最新 `demand_generation`；目标降低或公网 Pending 消失时，Server 必须发送新 generation 更新或取消 Demand。
+`desired_non_active` 是该 Connector 的 `Connecting + Idle + Opening` 绝对目标，不是“再增加多少”。Agent 只处理最新 `demand_generation`；目标降低或公网 Pending 消失时，Server 必须发送新 generation 更新或取消 Demand。
 
-Server 发送 WorkDemand 前，必须由全局 WorkConn Budget Manager 为 `budget_lease_id` 预留最多 `max_new_connections` 个槽位。Lease 绑定 `agent_id + instance_id + session_id + session_generation`，不能跨 Session 或 Instance 使用。双方在收到消息时分别用本地 monotonic clock 从 `lease_ttl_ms` 建立 Deadline，禁止比较跨主机绝对时间；Server 是 Lease 是否仍有效的最终裁决者。Agent 只能在本地 Deadline 前建连，并在 WorkHello 中携带该 Lease ID；Server 在 WorkHello 验证阶段检查自己的 Deadline 并原子消费一个槽位。未消费槽位在 TTL 到期、Session 关闭或 Demand 取消时归还。Agent 仍受本地 `max_connecting` 限制，不能把 Lease 当作绕过本地上限的许可。
+Server 发送 WorkDemand 前，必须由全局 WorkConn Budget Manager 为 `budget_lease_id` 预留最多 `max_new_connections` 个槽位。Lease 绑定 `tunnel_id + connector_id + session_id + session_generation`，不能跨 Session 或 Connector 使用。双方在收到消息时分别用本地 monotonic clock 从 `lease_ttl_ms` 建立 Deadline，禁止比较跨主机绝对时间；Server 是 Lease 是否仍有效的最终裁决者。Agent 只能在本地 Deadline 前建连，并在 WorkHello 中携带该 Lease ID；Server 在 WorkHello 验证阶段检查自己的 Deadline 并原子消费一个槽位。未消费槽位在 TTL 到期、Session 关闭或 Demand 取消时归还。Agent 仍受本地 `max_connecting` 限制，不能把 Lease 当作绕过本地上限的许可。
 
-Control Session 建立后，Server 根据远端策略、当前 Heartbeat Pool 计数、全局/Agent/Instance/FD 预算生成初始 Demand。Agent 不得在没有有效 Lease 时主动创建 WorkConn，也不得因远端 Demand 超过 Binary 硬上限而无界分配。
+Control Session 建立后，Server 根据远端策略、当前 Heartbeat Pool 计数、全局/Tunnel/Connector/FD 预算生成初始 Demand。Agent 不得在没有有效 Lease 时主动创建 WorkConn，也不得因远端 Demand 超过 Binary 硬上限而无界分配。
 
 公网请求最多等待：
 
@@ -2112,7 +1880,7 @@ work_acquire_timeout = 2s
 
 ---
 
-# 49. Tunnel OPEN
+# 49. Service OPEN
 
 Server 获得 WorkConn 后发送：
 
@@ -2122,7 +1890,7 @@ message OpenRequest {
 
     string connection_id = 2;
 
-    string tunnel_id = 3;
+    string service_id = 3;
 
     string trace_id = 4;
 
@@ -2156,7 +1924,7 @@ Agent 本地：
 ```go
 type OriginResolver interface {
     Resolve(
-        tunnelID string,
+        serviceID string,
     ) (Origin, error)
 }
 ```
@@ -2438,47 +2206,40 @@ cancel
 
 # 57. Tunnel
 
-Tunnel 是逻辑 Service。
+Tunnel 是持久化聚合根：它持有 Token 与 Service，并在运行时关联不入库的
+ephemeral Connector：
 
 ```sql
 CREATE TABLE tunnels (
     id TEXT PRIMARY KEY,
-
     name TEXT NOT NULL,
-
-    enabled INTEGER NOT NULL DEFAULT 1,
-
     version INTEGER NOT NULL DEFAULT 1,
-
+    desired_revision INTEGER NOT NULL DEFAULT 0,
+    revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at > 0),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
 ```
 
+Tunnel 不保存单一 `observed_revision` 或 `last_seen_at`；多个 Connector 的在线、Revision 和最近活动属于运行态，聚合摘要不得反向充当数据面裁决依据。
+
 ---
 
-# 58. Tunnel Binding
+# 58. Service
 
 ```sql
-CREATE TABLE tunnel_bindings (
+CREATE TABLE services (
     id TEXT PRIMARY KEY,
-
     tunnel_id TEXT NOT NULL,
-    agent_id TEXT NOT NULL,
-
+    name TEXT NOT NULL,
     required_revision INTEGER NOT NULL DEFAULT 0,
-
     origin_scheme TEXT NOT NULL,
     origin_host TEXT NOT NULL,
     origin_port INTEGER NOT NULL,
-
     tls_verify INTEGER NOT NULL DEFAULT 1,
     tls_server_name TEXT,
-
     origin_http_host TEXT,
-
     connect_timeout_ms INTEGER NOT NULL DEFAULT 5000,
-
     health_type TEXT,
     health_path TEXT,
     health_interval_ms INTEGER,
@@ -2487,89 +2248,47 @@ CREATE TABLE tunnel_bindings (
     health_expected_status_max INTEGER,
     health_failure_threshold INTEGER,
     health_success_threshold INTEGER,
-
     enabled INTEGER NOT NULL DEFAULT 1,
-
+    version INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-
     FOREIGN KEY(tunnel_id)
         REFERENCES tunnels(id)
-        ON DELETE CASCADE,
-
-    FOREIGN KEY(agent_id)
-        REFERENCES agents(id)
-        ON DELETE RESTRICT,
-
-    UNIQUE(tunnel_id)
+        ON DELETE RESTRICT
 );
 ```
 
-V0.1 的 Web、REST、Application Service、Repository 和 SQLite 必须共同保证：
-
-```text
-一个 Tunnel
-恰好一个 Binding
-只绑定一个逻辑 Agent
-```
-
-不得只在 UI 层限制。读取到零个或多个 Binding 都属于持久化不变量破坏，Runtime Reconcile 必须进入 `APPLY_FAILED`，不能自行猜测 Agent。跨 Agent Binding、健康状态合并和选择策略留到真正设计完成后再通过 Migration 引入，V0.1 不提前预留不可执行状态。
+一个 Tunnel 可以拥有零到多个 Service；一个 Service 只能归属一个 Tunnel。Origin 与 Health 配置直接属于 Service，不再存在 `tunnel_bindings` 中间表。HTTP/TCP Route 外键指向 `service_id`。
+数据库外键必须使用 `RESTRICT`（或 SQLite 等价的 `NO ACTION`）兜底“Tunnel
+仍有 Service 时返回 409”的 REST 契约；任何删除路径都不得隐式级联 Service 或 Route。
 
 ---
 
-# 59. Agent Replica 的配置语义
+# 59. Connector 的 Service 配置语义
 
-同一逻辑 Agent 下：
-
-```text
-所有 Instance
-```
-
-获得相同 Tunnel Binding。
-
-因此必须满足：
-
-> 每个 Instance 都应该能使用相同 Origin 配置正确访问同一个逻辑服务。
-
-例如：
+同一 Tunnel 下所有 Connector 获得相同的完整 Service Snapshot。每个 Connector 都应能按同一 Service Origin 配置访问相同语义的后端。
 
 ```text
 Origin:
 10.10.0.20:8080
 ```
 
-所有 Replica 都应能访问。
+所有 Connector 都应能访问。若 Origin 是 `127.0.0.1:8080`，每个 Connector 本机的该地址必须代表同一 Service。
 
-如果：
+# 60. Connector Selection
 
-```text
-127.0.0.1:8080
-```
-
-则所有 Replica 本机：
+业务连接建立流程：
 
 ```text
-127.0.0.1:8080
-```
-
-应代表相同服务。
-
----
-
-# 60. Instance Selection
-
-Tunnel 建立流程：
-
-```text
+Route
+ ↓
+Service
+ ↓
 Tunnel
  ↓
-Binding
+Eligible Connectors
  ↓
-Logical Agent
- ↓
-Eligible Instances
- ↓
-Instance Selection
+Connector Selection
  ↓
 TCP WorkPool
 ```
@@ -2582,14 +2301,14 @@ Control Session ONLINE
 Not Draining
 
 Health Check Disabled
-或 Tunnel Health == HEALTHY
+或该 Connector 的 Service Health == HEALTHY
 
-Instance ObservedRevision >= Tunnel RequiredRevision
+Connector ObservedRevision >= Service RequiredRevision
 ```
 
 ---
 
-# 61. Instance Selection Algorithm
+# 61. Connector Selection Algorithm
 
 第一阶段采用两级选择：
 
@@ -2598,7 +2317,7 @@ Instance ObservedRevision >= Tunnel RequiredRevision
    ↓
    原子 Acquire Idle WorkConn
 
-2. 多个 Instance 都有 Idle 时
+2. 多个 Connector 都有 Idle 时
    ↓
    Least Active Connections
 ```
@@ -2633,13 +2352,13 @@ C active = 12
 → B
 ```
 
-如果候选 Instance 的 Idle WorkConn 被并发请求抢走：
+如果候选 Connector 的 Idle WorkConn 被并发请求抢走：
 
 ```text
-立即尝试下一个有 Idle 的 Instance
+立即尝试下一个有 Idle 的 Connector
 ```
 
-只有所有 Eligible Instance 都没有 Idle WorkConn 时，才进入 WorkDemand 流程。
+只有所有 Eligible Connector 都没有 Idle WorkConn 时，才进入 WorkDemand 流程。
 
 不引入复杂动态权重算法。
 
@@ -2650,17 +2369,17 @@ C active = 12
 如果：
 
 ```text
-有可用 Instance
+有可用 Connector
 
 但所有 idle = 0
 ```
 
-Server 按 Instance 聚合所有 Pending OPEN 的需求，只保留一个最新绝对目标。需求上升时更新 Demand；Pending 减少或取消时同步降低目标，禁止每个公网请求分别广播一条 Demand。
+Server 按 Connector 聚合所有 Pending OPEN 的需求，只保留一个最新绝对目标。需求上升时更新 Demand；Pending 减少或取消时同步降低目标，禁止每个公网请求分别广播一条 Demand。
 
 Server：
 
 ```text
-向最多 2 个最佳 Instance
+向最多 2 个最佳 Connector
 发送 WorkDemand
 ```
 
@@ -2676,7 +2395,7 @@ work_acquire_timeout
 谁承担连接
 ```
 
-避免一次请求广播所有 Replica。
+避免一次请求广播所有 Connector。
 
 ---
 
@@ -2685,135 +2404,110 @@ work_acquire_timeout
 如果：
 
 ```text
-Agent A
-├── Instance 1
-└── Instance 2
+Tunnel A
+├── Connector 1
+└── Connector 2
 ```
 
-Instance 1 Crash：
+Connector 1 Crash：
 
 ```text
-已有 Instance 1 Connection
+已有 Connector 1 Connection
 允许失败
 ```
 
 新连接：
 
 ```text
-自动选择 Instance 2
+自动选择 Connector 2
 ```
 
 第一阶段因此天然支持：
 
 ```text
-Agent Replica HA
+Connector HA
 ```
 
 ---
 
 # 64. Desired Revision
 
-每个逻辑 Agent 保存：
+每个 Tunnel 保存：
 
 ```text
 desired_revision
 
-observed_revision
 ```
 
-例如：
-
-```text
-desired = 18
-
-observed = 17
-```
-
-代表至少一个配置更新尚未完成。
+每个 Connector 的 `observed_revision` 只保存在 Runtime；Tunnel 是否全部收敛由在线 Connector 运行态聚合，不能用单一数据库字段替代。
 
 ---
 
-# 65. 多 Instance Revision
+# 65. 多 Connector Revision
 
-因为一个 Agent 可以拥有多个 Instance：
+因为一个 Tunnel 可以拥有多个 Connector：
 
 Server Runtime 实际维护：
 
 ```text
-Agent Desired Revision
+Tunnel Desired Revision
         │
-        ├── Instance A Observed 18
-        ├── Instance B Observed 18
-        └── Instance C Observed 17
+        ├── Connector A Observed 18
+        ├── Connector B Observed 18
+        └── Connector C Observed 17
 ```
-
-逻辑 Agent：
-
-```text
-observed_revision
-```
-
-数据库字段只用于摘要：
-
-```text
-MIN(instance observed)
-```
-
-不是数据面判断依据。
 
 运行时以：
 
 ```text
-Instance ObservedRevision
+Connector ObservedRevision
 ```
 
-为准。
-
-Instance Selection 还必须满足：
+为准。Connector Selection 还必须满足：
 
 ```text
-Instance ObservedRevision
+Connector ObservedRevision
 >=
-Tunnel RequiredRevision
+Service RequiredRevision
 ```
 
-每次修改 Tunnel Binding 时记录该 Tunnel 对应的 `required_revision`。旧 Revision Instance 不得承接该 Tunnel 的新连接。
+每次修改 Service 时更新其 `required_revision`。旧 Revision Connector 不得承接该 Service 的新连接。
 
 配置发布顺序：
 
 ```text
 SQLite Commit Desired State
  ↓
-Build Agent Snapshot
+Build Tunnel Snapshot
  ↓
 Push Snapshot
  ↓
 ConfigAck
  ↓
-Instance ObservedRevision 更新
+Connector ObservedRevision 更新
  ↓
-该 Instance 对对应 Tunnel Eligible
+该 Connector 对对应 Service Eligible
 ```
 
-不存在满足 Revision 的 Instance 时返回：
+不存在满足 Revision 的 Connector 时返回：
 
 ```text
-503 CONFIG_NOT_OBSERVED
+503 SERVICE_CONFIG_NOT_OBSERVED
 ```
 
 ---
 
-# 66. Agent Snapshot
+# 66. Tunnel Snapshot
 
 ```protobuf
-message AgentSnapshot {
-    string agent_id = 1;
+message TunnelSnapshot {
+    string tunnel_id = 1;
     uint64 revision = 2;
-    repeated TunnelBindingConfig bindings = 3;
+    repeated ServiceConfig services = 3;
 }
 
-message TunnelBindingConfig {
-    string tunnel_id = 1;
+message ServiceConfig {
+    string service_id = 1;
     string origin_scheme = 2;
     string origin_host = 3;
     uint32 origin_port = 4;
@@ -2841,29 +2535,29 @@ message HealthCheckConfig {
 V0.1 同时限制：
 
 ```text
-max_bindings_per_agent = 1000
+max_services_per_tunnel = 1000
 
-deterministic serialized AgentSnapshot <= 768 KiB
+deterministic serialized TunnelSnapshot <= 768 KiB
 
 encoded ControlEnvelope <= MaxControlFrameSize
 ```
 
-所有可能改变 Agent Snapshot 的 Management 写入，必须在 SQLite Commit 前从事务内 Candidate State 构建受影响 Agent 的完整 Snapshot，并检查 Binding 数、确定性序列化大小和最终 Envelope 大小。超限返回 `422 AGENT_BINDING_LIMIT` 或 `422 SNAPSHOT_TOO_LARGE`，事务不得提交。
+所有可能改变 Tunnel Snapshot 的 Management 写入，必须在 SQLite Commit 前从事务内 Candidate State 构建受影响 Tunnel 的完整 Snapshot，并检查 Service 数、确定性序列化大小和最终 Envelope 大小。超限返回 `422 TUNNEL_SERVICE_LIMIT` 或 `422 SNAPSHOT_TOO_LARGE`，事务不得提交。
 
-Server 启动和 Migration 后也必须对现有数据执行同一检查；不合法时保持 Public Listener 未启动并报告具体 Agent/大小，禁止进入“Agent 重连 → 收到超大 Frame → 再重连”的循环。V0.1 不实现 Snapshot 分片或依赖压缩绕过上限。
+Server 启动和 Migration 后也必须对现有数据执行同一检查；不合法时保持 Public Listener 未启动并报告具体 Tunnel/大小，禁止进入“Connector 重连 → 收到超大 Frame → 再重连”的循环。V0.1 不实现 Snapshot 分片或依赖压缩绕过上限。
 
 ---
 
 # 67. Snapshot 传输安全
 
-AgentSnapshot 只允许在已经完成 TLS Server 身份验证、Agent Token 认证和 Auth→Established 原子切换的 Control Session 中由 Server 下发。V0.1 不再建立独立的 Config Signing Key、Server Epoch 或离线签名验证链。
+TunnelSnapshot 只允许在已经完成 TLS Server 身份验证、Tunnel Token 认证和 Auth→Established 原子切换的 Control Session 中由 Server 下发。V0.1 不再建立独立的 Config Signing Key、Server Epoch 或离线签名验证链。
 
 配置完整性和来源认证由以下边界共同保证：
 
 ```text
 TLS 1.3
 + public CA 或显式 SPKI Pin
-+ Agent Token Authentication
++ Tunnel Token Authentication
 + Control Protocol Direction/State Validation
 + Recursive Unknown-field Rejection
 ```
@@ -2874,7 +2568,7 @@ Agent 不接受本地 Snapshot、旁路文件或其他进程注入的业务配�
 
 # 68. Full Snapshot Sync
 
-Server 是 Agent Desired State 的唯一权威。每个新 Control Session 认证成功后，Server 必须下发当前完整 AgentSnapshot，而不是要求 Agent 从本地 Revision、差量文件或 Last Known Config 恢复。
+Server 是 Tunnel Desired State 的唯一权威。每个新 Control Session 认证成功后，Server 必须下发当前完整 TunnelSnapshot，而不是要求 Agent 从本地 Revision、差量文件或 Last Known Config 恢复。
 
 ```text
 Auth Success
@@ -2887,7 +2581,7 @@ Atomic Swap in memory
  ↓
 ConfigAck
  ↓
-Instance becomes revision-eligible
+Connector becomes revision-eligible
 ```
 
 Server 可以合并尚未开始 Apply 的旧 Revision，只保留最新完整 Snapshot；一旦某个 Revision 开始 Apply，后续 Snapshot 必须串行处理，禁止并发修改 Resolver。
@@ -2922,11 +2616,11 @@ Agent：
 ```text
 Receive full Snapshot
  ↓
-Validate Frame / Unknown Fields / Agent ID
+Validate Frame / Unknown Fields / Tunnel ID
  ↓
-Validate Revision / Binding Count / Serialized Size
+Validate Revision / Service Count / Serialized Size
  ↓
-Validate every Binding and referenced Origin / Health Policy
+Validate every Service and its Origin / Health Policy
  ↓
 Build immutable Resolver + Health Plan
  ↓
@@ -2946,7 +2640,7 @@ message ConfigAck {
 Apply 必须先完整构建不可变 Candidate，再通过单一原子交换发布。任何字段、Origin、Health、资源边界或构建错误都不得发布部分结果。
 
 - 有旧内存配置时：保留旧配置，发送 `CONFIG_REJECTED`，等待更高 Revision。
-- 首份配置失败时：Instance 保持不可选择，发送 `CONFIG_REJECTED`；Server 不得把它标记 ONLINE/Eligible。
+- 首份配置失败时：Connector 保持不可选择，发送 `CONFIG_REJECTED`；Server 不得把它标记 ONLINE/Eligible。
 - Apply 成功时：先完成内存交换，再发送 `CONFIG_APPLIED` Ack；Ack 的 `observed_revision` 必须等于当前内存 Revision。
 
 V0.1 没有 Agent 本地 Persist、fsync、rename 或 Snapshot Crash Recovery 提交点。
@@ -2978,7 +2672,7 @@ Server 不可达时，新 Agent 不能进入 ONLINE，也不能依赖本地旧�
 ---
 # 72. Origin Health
 
-Health Check 在每个 Agent Instance 本地执行。
+Health Check 在每个 Connector 本地执行。
 
 支持：
 
@@ -3000,12 +2694,12 @@ health:
   success_threshold: 2
 ```
 
-这些字段属于 Tunnel Binding，必须同时进入：
+这些字段属于 Service，必须同时进入：
 
 ```text
-SQLite tunnel_bindings
+SQLite services
 
-TunnelBindingConfig Protobuf
+ServiceConfig Protobuf
 
 Service API
 
@@ -3014,7 +2708,7 @@ Web Console
 
 HTTP 默认期望状态范围为 `200-399`。任何自定义范围、成功阈值和失败阈值都必须持久化并随 Snapshot 下发，禁止只保存在 UI 状态中。
 
-每个 Agent Instance 只能运行一个中心化 Health Scheduler，禁止为每个 Binding 启动独立永久 Ticker/Goroutine。调度器固定包含：
+每个 Connector 只能运行一个中心化 Health Scheduler，禁止为每个 Service 启动独立永久 Ticker/Goroutine。调度器固定包含：
 
 ```text
 Timing Heap / Timing Wheel
@@ -3040,25 +2734,25 @@ report_flush_interval = 1s
 report_batch_size = 128
 ```
 
-这些值不是 Agent 本地配置项。每个 Binding 的 Health 行为随远端 Snapshot 下发；Server 的全局预算与 Agent Binary 的固定上限共同限制实际调度。需要调整硬上限时必须通过版本发布和容量基准，而不是在每台 Agent 上维护配置漂移。
+这些值不是 Agent 本地配置项。每个 Service 的 Health 行为随远端 Snapshot 下发；Server 的全局预算与 Agent Binary 的固定上限共同限制实际调度。需要调整硬上限时必须通过版本发布和容量基准，而不是在每台 Agent 上维护配置漂移。
 
-首次检查在 `[0, interval]` 均匀随机分散；后续检查间隔为 `interval × random(0.8, 1.2)`。Rate/Concurrency 已满时，Scheduler 只能在仍可满足该 Binding 的配置 Interval 和 Stale TTL 时短暂排队；无法满足时必须报告 `HEALTH_BUDGET_EXCEEDED`，不能静默把 10 秒检查拖成更长周期后继续显示正常。
+首次检查在 `[0, interval]` 均匀随机分散；后续检查间隔为 `interval × random(0.8, 1.2)`。Rate/Concurrency 已满时，Scheduler 只能在仍可满足该 Service 的配置 Interval 和 Stale TTL 时短暂排队；无法满足时必须报告 `HEALTH_BUDGET_EXCEEDED`，不能静默把 10 秒检查拖成更长周期后继续显示正常。
 
 V0.1 产品容量约束：
 
 ```text
-health-enabled bindings × online replicas
-<= 2000 / logical agent
+health-enabled services × online connectors
+<= 2000 / tunnel
 
 global scheduled health targets
 <= 50000 / Server
 ```
 
-Management 写入必须按事务内 Candidate Binding 与当前在线 Replica 数预检；新 Instance 认证导致预算超限时，Server 返回可重试的 `HEALTH_BUDGET_EXCEEDED` Auth Failure 和 `retry_after_ms`，不建立半可用 Session。相关数值属于第 156 节唯一 Limits 契约，可经 Benchmark 调整，但不得移除这一预算维度。
+Management 写入必须按事务内 Candidate Service 与当前在线 Connector 数预检；新 Connector 认证导致预算超限时，Server 返回可重试的 `HEALTH_BUDGET_EXCEEDED` Auth Failure 和 `retry_after_ms`，不建立半可用 Session。相关数值属于第 156 节唯一 Limits 契约，可经 Benchmark 调整，但不得移除这一预算维度。
 
 Management Candidate 和 Control Auth 必须通过同一个内存 `HealthTargetBudgetManager` 执行原子 `Reserve → Commit/Release`，禁止先分别读取计数再决定。配置写入先按 Candidate Delta 预留，再执行短 SQLite 事务；事务失败释放 Reservation，提交成功后 Commit 并触发 Reconcile。
 
-Runtime Health Budget 的唯一所有权 Key 是 `(agent_id, instance_id)`，`session_generation` 只用于 fencing，不作为额外计费对象。首个 Session 在发布到 Runtime Registry 前，按该 Agent 当前 health-enabled Binding 数预留并 Commit；同一 Instance 重连时，必须按 `AgentRuntime.mu → HealthTargetBudgetManager.mu` 的唯一锁顺序将已有 Reservation 原子转移给新 generation，不得重复计费。`HealthTargetBudgetManager.mu` 持有期间禁止反向获取任何 `AgentRuntime.mu`；需要跨多个 Agent 重算时，必须先在各 Agent Lock 内生成不可变 Delta，释放 Agent Lock 后再单独进入 Budget Lock，不允许同时持有多个 Agent Lock。旧 generation cleanup 因 CAS 失败时不得释放新 generation 持有的 Reservation；只有 Instance Runtime 最终删除或 Tombstone 结束时才按所有权 Key 释放。首次预留失败则发送 Auth Failure，不发布半可用 Session。Budget Lock 内禁止 SQLite、网络 IO 或等待 Channel。Server Restart 从 SQLite Desired State 和重建中的唯一 Instance Runtime 重新计算，任何计数不变量破坏都阻止对应 Session/Config 发布，而不是产生负数或超额 Target。
+Runtime Health Budget 的唯一所有权 Key 是 `(tunnel_id, connector_id)`，`session_generation` 只用于 fencing，不作为额外计费对象。首个 Session 在发布到 Runtime Registry 前，按该 Tunnel 当前 health-enabled Service 数预留并 Commit；同一 Connector 重连时，必须按 `TunnelRuntime.mu → HealthTargetBudgetManager.mu` 的唯一锁顺序将已有 Reservation 原子转移给新 generation，不得重复计费。`HealthTargetBudgetManager.mu` 持有期间禁止反向获取任何 `TunnelRuntime.mu`；需要跨多个 Tunnel 重算时，必须先在各 Tunnel Lock 内生成不可变 Delta，释放 Tunnel Lock 后再单独进入 Budget Lock，不允许同时持有多个 Tunnel Lock。旧 generation cleanup 因 CAS 失败时不得释放新 generation 持有的 Reservation；只有 Connector Runtime 最终删除或 Tombstone 结束时才按所有权 Key 释放。首次预留失败则发送 Auth Failure，不发布半可用 Session。Budget Lock 内禁止 SQLite、网络 IO 或等待 Channel。Server Restart 从 SQLite Desired State 和重建中的唯一 Connector Runtime 重新计算，任何计数不变量破坏都阻止对应 Session/Config 发布，而不是产生负数或超额 Target。
 
 ---
 
@@ -3075,12 +2769,12 @@ UNHEALTHY
 启用 Health Check 时：
 
 ```text
-UNKNOWN 不参与 Instance Selection
+UNKNOWN 不参与 Connector Selection
 
 至少一次成功后才进入 HEALTHY
 
 Server 本地 received_at 超过 2 × interval
-且未收到同 binding_revision 的新 Health Report
+且未收到同 service_revision 的新 Health Report
 → UNKNOWN
 ```
 
@@ -3144,11 +2838,11 @@ Expected Status Range
 
 ---
 
-# 76. Tunnel Health Report
+# 76. Service Health Report
 
 ```protobuf
-message TunnelHealth {
-    string tunnel_id = 1;
+message ServiceHealth {
+    string service_id = 1;
 
     HealthStatus status = 2;
 
@@ -3158,31 +2852,31 @@ message TunnelHealth {
 
     uint64 checked_at_ms = 5;
 
-    uint64 binding_revision = 6;
+    uint64 service_revision = 6;
 }
 
-message TunnelHealthBatch {
+message ServiceHealthBatch {
     uint64 generation = 1;
-    repeated TunnelHealth items = 2;
+    repeated ServiceHealth items = 2;
 }
 ```
 
 Health 是：
 
 ```text
-Per Instance
-Per Tunnel
+Per Connector
+Per Service
 ```
 
-而不是只有 Agent 级状态。
+而不是只有 Tunnel 级状态。
 
-Health Report 必须绑定产生它的 `binding_revision`，值取对应 `TunnelBindingConfig.required_revision`。Server 只接受它与 SQLite/Runtime 中该 Tunnel 当前 `required_revision` 完全相等的报告；旧 Revision 或未知 Revision 全部丢弃，不能覆盖新状态。`checked_at_ms` 只用于 UI/日志展示，不参与新旧裁决；Health 新鲜度使用 Server 本地 monotonic `received_at` 与配置的 Stale TTL 判断，禁止比较 Agent 与 Server 的 wall clock。Agent-level Revision 因其他 Tunnel 变化而递增时，未变化 Tunnel 的 Health Checker 不必重启。
+Health Report 必须绑定产生它的 `service_revision`，值取对应 `ServiceConfig.required_revision`。Server 只接受它与 SQLite/Runtime 中该 Service 当前 `required_revision` 完全相等的报告；旧 Revision 或未知 Revision 全部丢弃，不能覆盖新状态。`checked_at_ms` 只用于 UI/日志展示，不参与新旧裁决；Health 新鲜度使用 Server 本地 monotonic `received_at` 与配置的 Stale TTL 判断，禁止比较 Agent 与 Server 的 wall clock。Tunnel Revision 因其他 Service 变化而递增时，未变化 Service 的 Health Checker 不必重启。
 
-Agent 应用新 Snapshot 时，必须先取消受影响 Tunnel 的旧 Health Checker，并把对应状态原子重置为 `UNKNOWN`，再启动带新 Revision 的检查。启用 Health Check 的 Tunnel 只有在新 Revision 首次检查成功后才可 Eligible；旧 Origin 的 HEALTHY 不能沿用到新 Origin。
+Agent 应用新 Snapshot 时，必须先取消受影响 Service 的旧 Health Checker，并把对应状态原子重置为 `UNKNOWN`，再启动带新 Revision 的检查。启用 Health Check 的 Service 只有在新 Revision 首次检查成功后才可 Eligible；旧 Origin 的 HEALTHY 不能沿用到新 Origin。
 
-Agent 不逐条发送 Health Frame。Report Batcher 在 `report_flush_interval` 到达、累计达到 `report_batch_size`，或进入 Drain 前生成 `TunnelHealthBatch`；同一批次内每个 Tunnel 只保留最新结果。`generation` 在当前 Control Session 内严格递增，Server 丢弃重复或倒退 Batch，但仍以每个 Item 的 `binding_revision` 作为配置新旧的最终裁决。Batch 序列化后仍必须小于 MaxControlFrameSize；超限时按不超过 `report_batch_size` 的子批次拆分，并为每个 Frame 使用新 generation。
+Agent 不逐条发送 Health Frame。Report Batcher 在 `report_flush_interval` 到达、累计达到 `report_batch_size`，或进入 Drain 前生成 `ServiceHealthBatch`；同一批次内每个 Service 只保留最新结果。`generation` 在当前 Control Session 内严格递增，Server 丢弃重复或倒退 Batch，但仍以每个 Item 的 `service_revision` 作为配置新旧的最终裁决。Batch 序列化后仍必须小于 MaxControlFrameSize；超限时按不超过 `report_batch_size` 的子批次拆分，并为每个 Frame 使用新 generation。
 
-Server 在 Binding `required_revision` 变化时也必须立即把所有 Instance 上该 Tunnel 的 Runtime Health 重置为 `UNKNOWN`。Instance Selection 除检查状态为 HEALTHY 外，还必须检查已存 Health 的 `binding_revision == Tunnel required_revision`，因此 ConfigAck 先于新 Health Report 到达也不会短暂放行旧 HEALTHY。
+Server 在 Service `required_revision` 变化时也必须立即把所属 Tunnel 的所有 Connector 对该 Service 的 Runtime Health 重置为 `UNKNOWN`。Connector Selection 除检查状态为 HEALTHY 外，还必须检查已存 Health 的 `service_revision == Service required_revision`，因此 ConfigAck 先于新 Health Report 到达也不会短暂放行旧 HEALTHY。
 
 ---
 
@@ -3203,9 +2897,11 @@ HTTP
   ↓
 XTunnel HTTP Router
   ↓
+Route → Service
+  ↓
 Tunnel
   ↓
-Instance
+Connector
   ↓
 WorkConn
   ↓
@@ -3299,7 +2995,7 @@ Caddy/Nginx Route
 XTunnel 只负责：
 
 ```text
-Host → Tunnel
+Host → HTTP Route → Service → Tunnel
 ```
 
 ---
@@ -3310,7 +3006,7 @@ Host → Tunnel
 CREATE TABLE http_routes (
     id TEXT PRIMARY KEY,
 
-    tunnel_id TEXT NOT NULL,
+    service_id TEXT NOT NULL,
 
     hostname TEXT NOT NULL,
 
@@ -3323,9 +3019,9 @@ CREATE TABLE http_routes (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
 
-    FOREIGN KEY(tunnel_id)
-        REFERENCES tunnels(id)
-        ON DELETE CASCADE,
+    FOREIGN KEY(service_id)
+        REFERENCES services(id)
+        ON DELETE RESTRICT,
 
     UNIQUE(hostname, path_prefix)
 );
@@ -3507,7 +3203,7 @@ API 返回 Desired State 写入结果；Service Status 明确展示 Runtime Appl
 立即使用新 Snapshot
 ```
 
-若该 Route 依赖尚未被任何 Instance 观察到的新 Agent Revision，则 Route 可以进入 Snapshot，但请求必须返回 `CONFIG_NOT_OBSERVED`，禁止回落到旧 Revision Instance。
+若该 Route 指向的 Service 尚未被任何 Connector 观察到所属 Tunnel 的新 Revision，则 Route 可以进入 Snapshot，但请求必须返回 `SERVICE_CONFIG_NOT_OBSERVED`，禁止回落到旧 Revision Connector。
 
 ---
 
@@ -3694,12 +3390,13 @@ Host
 `preserve_host=false`：
 
 ```text
-Host = TunnelBinding.origin_http_host
+Host = Service.origin_http_host
 ```
 
 HTTP/HTTPS Origin 在 `preserve_host=false` 时必须设置 `origin_http_host`；默认建议使用 Origin 的规范化 `host:port`。TCP Origin 禁止设置该字段。
 
-该值由 Server 组装 HTTP 请求 Header 使用，但不出现在 OpenRequest。Agent 仍只按 Tunnel ID 解析和连接 Origin。
+该值由 Server 组装 HTTP 请求 Header 使用，但不出现在 OpenRequest。Agent 只按
+`service_id` 从已原子应用的 Tunnel Snapshot 解析并连接对应 Origin。
 
 ---
 
@@ -3795,7 +3492,7 @@ Agent
 192.168.10.20:22
 ```
 
-`OpenRequest.client_addr` 只用于 Agent 日志、Tracing 和审计。V0.1 不向 TCP Origin 注入 PROXY Protocol，Origin 看到的对端地址是 Agent；需要真实客户端 IP 做访问控制的 Origin 不属于 V0.1 透明转发能力范围。未来如支持，只能在每个 Binding 显式 opt-in，并且 Origin 必须明确声明接受 PROXY v1/v2，禁止默认注入。
+`OpenRequest.client_addr` 只用于 Agent 日志、Tracing 和审计。V0.1 不向 TCP Origin 注入 PROXY Protocol，Origin 看到的对端地址是 Agent；需要真实客户端 IP 做访问控制的 Origin 不属于 V0.1 透明转发能力范围。未来如支持，只能在每个 Service 显式 opt-in，并且 Origin 必须明确声明接受 PROXY v1/v2，禁止默认注入。
 
 ---
 
@@ -3805,7 +3502,7 @@ Agent
 CREATE TABLE tcp_routes (
     id TEXT PRIMARY KEY,
 
-    tunnel_id TEXT NOT NULL,
+    service_id TEXT NOT NULL,
 
     public_port INTEGER NOT NULL UNIQUE,
 
@@ -3814,9 +3511,9 @@ CREATE TABLE tcp_routes (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
 
-    FOREIGN KEY(tunnel_id)
-        REFERENCES tunnels(id)
-        ON DELETE CASCADE
+    FOREIGN KEY(service_id)
+        REFERENCES services(id)
+        ON DELETE RESTRICT
 );
 ```
 
@@ -3888,11 +3585,11 @@ HTTP Ingress Port
 
 # 97. HTTP 错误语义
 
-Agent Offline：
+Tunnel Offline：
 
 ```text
 503
-AGENT_OFFLINE
+TUNNEL_OFFLINE
 ```
 
 Origin Refused：
@@ -3913,21 +3610,21 @@ No Capacity：
 
 ```text
 503
-TUNNEL_CAPACITY
+WORK_POOL_EXHAUSTED
 ```
 
 Config Not Observed：
 
 ```text
 503
-CONFIG_NOT_OBSERVED
+SERVICE_CONFIG_NOT_OBSERVED
 ```
 
-Tunnel Disabled：
+Service Disabled：
 
 ```text
 503
-TUNNEL_DISABLED
+SERVICE_DISABLED
 ```
 
 Route Not Found：
@@ -3943,7 +3640,7 @@ Route Not Found：
 TCP Route 遇到：
 
 ```text
-Agent Offline
+Tunnel Offline
 
 Origin Unavailable
 
@@ -3969,11 +3666,11 @@ error_code
 ```text
 0x0000 OK
 
-0x1001 TUNNEL_NOT_FOUND
-0x1002 TUNNEL_DISABLED
-0x1003 AGENT_OFFLINE
-0x1004 NO_HEALTHY_INSTANCE
-0x1005 CONFIG_NOT_OBSERVED
+0x1001 SERVICE_NOT_FOUND
+0x1002 SERVICE_DISABLED
+0x1003 TUNNEL_OFFLINE
+0x1004 NO_HEALTHY_CONNECTOR
+0x1005 SERVICE_CONFIG_NOT_OBSERVED
 
 0x2001 ORIGIN_REFUSED
 0x2002 ORIGIN_TIMEOUT
@@ -3982,13 +3679,13 @@ error_code
 0x2005 ORIGIN_TLS_ERROR
 
 0x3001 WORK_POOL_EXHAUSTED
-0x3002 AGENT_BUSY
+0x3002 CONNECTOR_BUSY
 0x3003 OPEN_DRAINING
 0x3004 HEALTH_BUDGET_EXCEEDED
 
 0x4001 TOKEN_INVALID
 0x4002 TOKEN_REVOKED
-0x4003 AGENT_REVOKED
+0x4003 TUNNEL_REVOKED
 0x4004 SESSION_INVALID
 0x4005 SESSION_RESOURCE_EXHAUSTED
 
@@ -4023,9 +3720,11 @@ Public
  ↓
 Route
  ↓
+Service
+ ↓
 Tunnel
  ↓
-Instance
+Connector
  ↓
 Origin
 ```
@@ -4042,32 +3741,13 @@ trace_id
 
 # 101. Service 聚合模型
 
-用户 Web Console 不需要理解：
+Service 是 Tunnel 下的独立 Aggregate。它直接保存 Origin、Health、Enabled 和 Required Revision，并由 HTTPRoute 或 TCPRoute 指向；不再创建或维护中间关联资源。
 
 ```text
 Tunnel
-
-Binding
-
-HTTPRoute
-
-TCPRoute
-```
-
-产品层统一叫：
-
-```text
-Service
-```
-
-创建 Service 实际事务：
-
-```text
-Tunnel
-+
-TunnelBinding
-+
-Route
+└── Service
+    ├── Origin / Health
+    └── HTTPRoute 或 TCPRoute
 ```
 
 ---
@@ -4106,7 +3786,7 @@ tcp
 {
   "name": "jenkins",
 
-  "agent_id": "ag_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "tunnel_id": "tun_01ARZ3NDEKTSV4RRFFQ69G5FAV",
 
   "origin": {
     "scheme": "http",
@@ -4133,7 +3813,7 @@ tcp
 }
 ```
 
-POST/PATCH Service DTO 与 `TunnelBindingConfig` 使用同名 Health 字段。边界校验固定为：
+POST/PATCH Service DTO 与 `ServiceConfig` 使用同名 Health 字段。边界校验固定为：
 
 ```text
 1000 <= interval_ms <= 3600000
@@ -4154,15 +3834,13 @@ Server Transaction：
 ```text
 BEGIN IMMEDIATE
 
-next_revision = agent.desired_revision + 1
+next_revision = tunnel.desired_revision + 1
 
-INSERT tunnel
-
-INSERT tunnel_binding(required_revision = next_revision)
+INSERT service(tunnel_id, required_revision = next_revision)
 
 INSERT http_route
 
-SET agent.desired_revision = next_revision
+SET tunnel.desired_revision = next_revision
 
 COMMIT
 ```
@@ -4170,22 +3848,22 @@ COMMIT
 Revision 规则：
 
 ```text
-修改 Origin / Health / Binding Enabled
-→ 在同一事务递增对应 Agent Revision，并更新 required_revision
+修改 Origin / Health / Service Enabled
+→ 在同一事务递增所属 Tunnel Revision，并更新 required_revision
 
-切换 Binding Agent
-→ 同时递增旧 Agent 和新 Agent Revision
+切换 Service 所属 Tunnel
+→ V0.1 禁止；必须在目标 Tunnel 新建 Service，再显式删除旧 Service
 
 只修改 HTTP Host / Path 或 TCP Public Port
-→ 不修改 Agent Revision，只重建 Server Route Snapshot
+→ 不修改 Tunnel Revision，只重建 Server Route Snapshot
 
 删除 Service
-→ 递增原 Agent Revision，使 Agent 删除本地 Binding
+→ 递增所属 Tunnel Revision，使全部 Connector 删除本地 Service
 ```
 
 PATCH、enable、disable、delete 必须复用同一 Application Service 事务规则，禁止各 Handler 自行决定是否递增 Revision。
 
-这些 Service Mutation 还必须在同一事务校验 `tunnels.version == If-Match`，并只把 Aggregate Version 递增一次；Agent `desired_revision` 是否递增仍严格按上述字段变化规则决定。ETag Version 用于管理员并发写保护，Agent Revision 用于配置分发，两者语义独立。
+这些 Service Mutation 必须同时校验 Service ETag 与所属 Tunnel 当前版本，并只按对应 Aggregate 的语义递增。ETag Version 用于管理员并发写保护，Tunnel Revision 用于向 Connector 分发配置，两者语义独立。
 
 ---
 
@@ -4197,7 +3875,7 @@ PATCH、enable、disable、delete 必须复用同一 Application Service 事务�
 <server.data_dir>/xtunnel.db
 ```
 
-V0.1 不提供独立 `database.path`。SQLite、Gateway TLS Identity 和 Server Durable Operation Journal 必须全部位于同一个 Canonical `server.data_dir` 管理边界内，避免两个不同 Data Directory 指向同一外部数据库而绕过互斥锁，也保证 Backup/Restore 不会组合出不同代的数据库与 Gateway 身份文件。
+V0.1 不提供独立 `database.path`。SQLite、Gateway TLS Identity、Token Credential Master Key 和 Server Durable Operation Journal 必须全部位于同一个 Canonical `server.data_dir` 管理边界内，避免两个不同 Data Directory 指向同一外部数据库而绕过互斥锁，也保证 Backup/Restore 不会组合出不同代的数据库、Token 密文与密钥材料。
 
 配置：
 
@@ -4241,7 +3919,7 @@ xtunnel-server backup create --output /secure/backup/xtunnel-backup.tar
 xtunnel-server backup restore --input /secure/backup/xtunnel-backup.tar
 ```
 
-在线 `backup create` 通过本机控制通道暂停新的 Config Write，等待当前短事务结束，再使用 SQLite Backup API 获取一致数据库镜像；在同一 Barrier 内复制 Gateway TLS Key 和尚未完成的 Gateway Identity Rotation Journal。备份 Manifest 必须记录格式版本、数据库 Schema 版本、文件清单和 SHA-256。若 Server 未运行，命令必须先获取与 Server 相同的外部锁。
+在线 `backup create` 通过本机控制通道暂停新的 Config Write，等待当前短事务结束，再使用 SQLite Backup API 获取一致数据库镜像；在同一 Barrier 内复制 Gateway TLS Identity、Token Credential Master Key 和尚未完成的 Durable Operation Journal。备份 Manifest 必须记录格式版本、数据库 Schema 版本、文件清单和 SHA-256。若 Server 未运行，命令必须先获取与 Server 相同的外部锁。
 
 备份包等同于长期私钥材料。输出文件必须使用 `O_CREATE | O_EXCL`、权限 `0600` 且禁止跟随符号链接；临时目录权限 `0700`，失败必须清理，禁止输出到 stdout 或复用已有目标文件。
 
@@ -4265,18 +3943,18 @@ V0.1 的 SQLite Repository 统一使用 GORM。业务持久化不得绕过 Repos
 Repository：
 
 ```go
-type AgentRepository interface {
+type TunnelRepository interface {
     Create(...)
     Get(...)
     List(...)
     Update(...)
 }
 
-type AgentTokenRepository interface {
+type TunnelTokenRepository interface {
     ...
 }
 
-type TunnelRepository interface {
+type ServiceRepository interface {
     ...
 }
 
@@ -4289,22 +3967,28 @@ type UsageRepository interface {
 }
 
 type Store interface {
+    Read(ctx context.Context, fn func(RepositoryView) error) error
     WithTx(ctx context.Context, fn func(TxStore) error) error
 }
 
-type TxStore interface {
-    Agents() AgentRepository
-    AgentTokens() AgentTokenRepository
+type RepositoryView interface {
     Tunnels() TunnelRepository
+    TunnelTokens() TunnelTokenRepository
+    Services() ServiceRepository
     Routes() RouteRepository
     Usage() UsageRepository
 }
+
+type TxStore interface {
+    RepositoryView
+}
 ```
 
-跨表不变量只能由 Application Service 在一次 `Store.WithTx` 中完成。传入的
+认证、Token Reveal 等纯读热路径必须使用 `Store.Read`，不得通过 `BEGIN IMMEDIATE`
+争抢 SQLite 写锁。跨表不变量只能由 Application Service 在一次 `Store.WithTx` 中完成。传入的
 `TxStore` 中所有 Repository 必须共享同一个事务作用域内的 `*gorm.DB`，
-Repository 自身不得再开启或提交事务；Service 创建、切换 Binding、删除
-Service、Token 轮换等多表操作都遵循这一规则。
+Repository 自身不得再开启或提交事务；Service 创建/删除、Tunnel Token
+轮换和 Tunnel Revoke 等多表操作都遵循这一规则。
 
 Migration 继续使用显式、可审查的 forward-only 版本和
 `schema_migrations` 记录；不得用 GORM `AutoMigrate` 取代版本化 Migration。
@@ -4420,38 +4104,11 @@ logout = 删除数据库 Session
 
 ---
 
-# 108. Agent Table
+# 108. Tunnel 与 Service 表
 
-```sql
-CREATE TABLE agents (
-    id TEXT PRIMARY KEY,
+Tunnel、Tunnel Token 与 Service 的持久化结构以第 20、57、58 节为唯一契约。Connector、Session、在线状态、`observed_revision` 与 `last_seen_at` 都是运行态，不写入 SQLite。
 
-    name TEXT NOT NULL,
-
-    version INTEGER NOT NULL DEFAULT 1,
-
-    desired_revision INTEGER NOT NULL DEFAULT 0,
-
-    observed_revision INTEGER,
-
-    last_seen_at INTEGER,
-
-    revoked_at INTEGER,
-
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-```
-
-ONLINE/OFFLINE：
-
-```text
-不写 status 字段
-```
-
-实时计算。
-
-`observed_revision` 只保存最近一次在线 Instance Revision 最小值的 UI 摘要。它在 ConfigAck、Instance 上下线时更新，不作为数据面选择依据；Server 重启后没有在线 Instance 时允许为 `NULL`。
+Tunnel 的 ONLINE/OFFLINE 状态由当前 Connector Registry 实时计算；Service 状态由 Tunnel 可用性、Connector 对该 Service 的 Revision 观测与 Origin Health 统一计算。数据库不得缓存一个可能在 Server 重启后失真的在线状态。
 
 ---
 
@@ -4702,7 +4359,7 @@ Server Global Failed-auth Bucket
 
 IP-only Bucket 防止攻击者不断更换随机 Token 绕过 `IP + fingerprint`；组合 Bucket 限制对单个 Credential 的集中尝试；Global Bucket 限制分布式攻击。Fingerprint 必须从已限制到 8192 bytes 的原始输入以不可逆方式计算，不能把 Token Identity 或 Secret 写入日志/Metric。所有失败同时记入适用层级，成功认证不消耗失败预算，也不能清空 IP 或全局失败计数。
 
-同 NAT 下多个合法 Agent 共享 IP 时，成功认证不消耗失败预算。另设全局 Pending TLS/Auth 上限和单 IP 握手并发上限，具体 Rate/Burst 必须通过 5000 Instance 重连风暴测试确定，不能把示例值作为不可调整的硬编码值。桶表使用有最大容量和过期时间的 LRU，避免随机 IP/Token 造成内存 DoS。
+同 NAT 下多个合法 Agent 共享 IP 时，成功认证不消耗失败预算。另设全局 Pending TLS/Auth 上限和单 IP 握手并发上限，具体 Rate/Burst 必须通过 5000 Connector 重连风暴测试确定，不能把示例值作为不可调整的硬编码值。桶表使用有最大容量和过期时间的 LRU，避免随机 IP/Token 造成内存 DoS。
 
 并限制：
 
@@ -4757,13 +4414,13 @@ web/
 ├── src/
 │   ├── components/
 │   │   ├── ui/
-│   │   ├── agent/
+│   │   ├── tunnel/
 │   │   └── service/
 │   │
 │   ├── pages/
 │   │   ├── login/
 │   │   ├── dashboard/
-│   │   ├── agents/
+│   │   ├── tunnels/
 │   │   ├── services/
 │   │   └── settings/
 │   │
@@ -4855,9 +4512,9 @@ Login
 
 Dashboard
 
-Agents
+Tunnels
 
-Agent Detail
+Tunnel Detail
 
 Services
 
@@ -4877,11 +4534,11 @@ Settings
 ```text
 Server Status
 
-Logical Agents
+Tunnels
 
-Online Instances
+Online Connectors
 
-Offline Agents
+Offline Tunnels
 
 Services Ready
 
@@ -4900,7 +4557,7 @@ Recent Errors
 
 ---
 
-# 122. Agent List
+# 122. Tunnel List
 
 字段：
 
@@ -4909,7 +4566,7 @@ Name
 
 Status
 
-Instances Online
+Connectors Online
 
 Version Summary
 
@@ -4927,6 +4584,8 @@ View
 
 Create Service
 
+Add Connector
+
 Rotate Token
 
 Revoke
@@ -4934,14 +4593,14 @@ Revoke
 
 ---
 
-# 123. Agent Detail
+# 123. Tunnel Detail
 
 展示：
 
 ```text
-Agent Name
+Tunnel Name
 
-Agent ID
+Tunnel ID
 
 Status
 
@@ -4952,12 +4611,12 @@ Desired Revision
 Services
 ```
 
-Instances：
+Connectors：
 
 ```text
 Hostname
 
-Instance ID
+Connector ID
 
 Version
 
@@ -4978,7 +4637,7 @@ Last Heartbeat
 
 ---
 
-# 124. Create Agent
+# 124. Create Tunnel
 
 输入：
 
@@ -4989,7 +4648,7 @@ Name
 创建成功：
 
 ```text
-Agent ID
+Tunnel ID
 
 Connection Token (`xta_...`)
 
@@ -5012,17 +4671,23 @@ Windows 提升权限的 PowerShell：
 .\xtunnel-agent.exe service install --token 'xta_...'
 ```
 
-Token：
-
-```text
-只展示一次
-```
-
-用户只需复制一个完整 Connection Token；不再另外复制 Endpoint、Pin、Agent ID 或准备 Token 文件。Web Console 可以提供不含真实 Secret 的命令模板，但 Token 明文只存在于一次性展示区域，不得进入 Recent Activity、日志、URL、前端持久化缓存或后续 API 响应。
+用户只需复制一个完整 Connection Token；不再另外复制 Endpoint、Pin、Tunnel ID 或准备 Token 文件。Token 创建后仍可从 Tunnel Detail 的“添加 Connector”向导再次安全获取，当前 Token Version 内返回的文本逐字节相同。
 
 ---
 
-# 125. Rotate Token
+# 125. Add Connector 与 Rotate Token
+
+Add Connector：
+
+```text
+读取当前 ACTIVE Tunnel Token
+返回相同部署命令
+不创建 Connector 数据库行
+不生成新 Token
+不递增 Token Version
+```
+
+Connector 使用该 Token 认证成功后自动出现在 Tunnel Runtime 列表中。
 
 管理员确认：
 
@@ -5039,7 +4704,7 @@ New Token
 UI 明确提示：
 
 ```text
-旧实例保持在线
+旧 Connector 保持在线
 
 旧 Token 无法重连
 
@@ -5073,13 +4738,13 @@ Review
 ```text
 Service Name
 
-Logical Agent
+Tunnel
 ```
 
-从 Agent Detail 创建：
+从 Tunnel Detail 创建：
 
 ```text
-Agent 固定
+Tunnel 固定
 ```
 
 ---
@@ -5198,9 +4863,9 @@ Web 表单使用与 Service DTO 相同的范围校验，并始终展示 Server �
 ```text
 Status
 
-Agent
+Tunnel
 
-Healthy Instances
+Healthy Connectors
 
 Origin
 
@@ -5236,7 +4901,7 @@ Delete
 ```text
 DISABLED
 
-AGENT_OFFLINE
+TUNNEL_OFFLINE
 
 ORIGIN_UNHEALTHY
 
@@ -5249,10 +4914,10 @@ APPLY_FAILED
 READY
 ```
 
-如果多个 Replica：
+如果 Tunnel 下有多个 Connector：
 
 ```text
-至少一个可用 Instance
+至少一个可用 Connector
 +
 Origin Healthy
 +
@@ -5272,7 +4937,7 @@ DISABLED
 >
 APPLY_FAILED
 >
-AGENT_OFFLINE
+TUNNEL_OFFLINE
 >
 CONFIG_SYNCING
 >
@@ -5291,11 +4956,11 @@ case !service.Enabled:
     return DISABLED
 case runtimeApplyFailed:
     return APPLY_FAILED
-case noConnectedInstance:
-    return AGENT_OFFLINE
-case noInstanceObservedRequiredRevision:
+case noConnectedConnector:
+    return TUNNEL_OFFLINE
+case noConnectorObservedRequiredRevision:
     return CONFIG_SYNCING
-case healthEnabled && noHealthyRevisionEligibleInstance:
+case healthEnabled && noHealthyRevisionEligibleConnector:
     return ORIGIN_UNHEALTHY
 case noRuntimeCapacity:
     return NO_CAPACITY
@@ -5306,7 +4971,7 @@ default:
 
 `CONFIG_SYNCING` 必须先于 `ORIGIN_UNHEALTHY`，因为旧 Revision Health 明确不可用。该算法只能在 `internal/server/status` 实现一次；Dashboard、Service Detail 和 Web Console 必须展示 API 返回值，禁止在前端或不同 Handler 中重新计算。
 
-`CONFIG_SYNCING` 表示 Desired State 已提交，但尚无满足 Tunnel RequiredRevision 的 Instance。`APPLY_FAILED` 表示 TCP Listener 等 Runtime 副作用无法达到 Desired State；详情必须包含稳定错误码和最近失败时间。
+`CONFIG_SYNCING` 表示 Desired State 已提交，但尚无满足 Service RequiredRevision 的 Connector。`APPLY_FAILED` 表示 TCP Listener 等 Runtime 副作用无法达到 Desired State；详情必须包含稳定错误码和最近失败时间。
 
 ---
 
@@ -5361,7 +5026,7 @@ value   → 修改为该值
 
 未知字段返回 `400 INVALID_REQUEST`。非 Nullable 字段传 `null` 返回 `422 VALIDATION_FAILED`。嵌套对象的 omitted/null/value 语义必须逐字段生成测试，禁止用 Go 零值猜测“未提供”。
 
-Agent 和 Service 都是 Aggregate Root，`agents.version` 与 `tunnels.version` 是各自并发版本。单个 Resource 的 GET、POST Create 和 PATCH 成功响应返回强 ETag；List Response 不返回 Aggregate ETag：
+Tunnel 和 Service 都是 Aggregate Root，`tunnels.version` 与 `services.version` 是各自并发版本。单个 Resource 的 GET、POST Create 和 PATCH 成功响应返回强 ETag；List Response 不返回 Aggregate ETag：
 
 ```http
 ETag: "7"
@@ -5377,7 +5042,7 @@ WHERE id = ? AND version = expected
 
 DELETE 使用 `DELETE ... WHERE id = ? AND version = expected`；Action 使用等价的条件 UPDATE。任何路径受影响行数为零时，必须在同一事务内区分 `404 RESOURCE_NOT_FOUND` 与 `412 RESOURCE_VERSION_CONFLICT`，不能把两者都返回 404。
 
-版本不匹配返回 `412 RESOURCE_VERSION_CONFLICT`，不得覆盖其他管理员已经提交的修改。除成功删除的 Resource 外，Action/Mutation 返回新 ETag；涉及 Tunnel/Binding/Route 的 Service 变更，只递增 `tunnels.version` 一次，同时继续遵循第 103 节 Agent Revision 规则。
+版本不匹配返回 `412 RESOURCE_VERSION_CONFLICT`，不得覆盖其他管理员已经提交的修改。除成功删除的 Resource 外，Action/Mutation 返回新 ETag；涉及 Service/Route 的写入递增 `services.version`，并在同一事务内让所属 Tunnel 的 `desired_revision` 只递增一次。
 
 HTTP Status 固定为：
 
@@ -5397,48 +5062,52 @@ HTTP Status 固定为：
 | 429 | Rate Limited |
 | 500 | Internal Error |
 
-返回 Agent Token、Rotate Token 或其他一次性 Secret 的响应必须包含：
+返回 Tunnel Token、Reveal/Rotate Token 或其他 Secret 的响应必须包含：
 
 ```http
 Cache-Control: no-store
 Pragma: no-cache
 ```
 
-不得被 Dashboard Recent Activity、Access Log Body 或前端持久化缓存记录。Settings 页面在 V0.1 只读展示 `/system/config` 的非敏感 Server 有效配置和“需重启”标记；不提供修改 Server 主配置或 Agent 本地配置的 API。
+不得被 Dashboard Recent Activity、Access Log Body 或前端持久化缓存记录。Settings 页面在 V0.1 只读展示 `/system/config` 的非敏感 Server 有效配置和“需重启”标记；不提供修改 Server 主配置或 Connector 本地配置的 API。
 
 ---
 
-# 135. Agent API
+# 135. Tunnel 与 Connector API
 
 ```text
-POST /agents
+POST /tunnels
 
-GET /agents
+GET /tunnels
 
-GET /agents/{id}
+GET /tunnels/{id}
 
-PATCH /agents/{id}
+PATCH /tunnels/{id}
 
-GET /agents/{id}/instances
+GET /tunnels/{id}/connectors
 
-POST /agents/{id}/token/rotate
+GET /tunnels/{id}/token
 
-POST /agents/{id}/revoke
+POST /tunnels/{id}/token/rotate
 
-DELETE /agents/{id}
+POST /tunnels/{id}/revoke
+
+DELETE /tunnels/{id}
 ```
 
-`DELETE /agents/{id}` 只允许删除没有任何 Tunnel Binding 的 Agent。存在引用时返回：
+管理端“添加 Connector”只生成使用当前 Tunnel Token 的部署指引，不创建 Connector 持久化记录，也不签发新 Token。`GET /tunnels/{id}/token` 每次返回当前 ACTIVE Token 的同一完整值；只有显式 Rotate 才创建新 Token Version。
+
+`DELETE /tunnels/{id}` 只允许删除没有任何 Service 的 Tunnel。存在引用时返回：
 
 ```text
-409 AGENT_IN_USE
+409 TUNNEL_IN_USE
 
-binding_count
+service_count
 
 referencing_service_ids（有界分页）
 ```
 
-删除不得隐式级联 Service、Route 或 Binding。需要停用凭据时使用 `POST /agents/{id}/revoke`；需要删除 Agent 时，管理员必须先显式迁移或删除引用它的 Service。
+删除不得隐式级联 Service 或 Route。需要停用凭据时使用 `POST /tunnels/{id}/revoke`；需要删除 Tunnel 时，管理员必须先显式迁移或删除它下面的 Service。
 
 ---
 
@@ -5460,20 +5129,20 @@ POST /services/{id}/enable
 POST /services/{id}/disable
 ```
 
-创建或修改 Service 在提交前触发 Agent Snapshot 预算检查。超限统一返回：
+创建或修改 Service 在提交前触发 Tunnel Snapshot 预算检查。超限统一返回：
 
 ```text
-422 AGENT_BINDING_LIMIT
+422 TUNNEL_SERVICE_LIMIT
 或
 422 SNAPSHOT_TOO_LARGE
 
-agent_id
-binding_count
+tunnel_id
+service_count
 snapshot_bytes
 configured_limit
 ```
 
-响应不得包含 Origin Credential、Token 或完整 Snapshot。第二个 Binding 指向同一 Tunnel 时返回 `409 TUNNEL_BINDING_CONFLICT`。
+响应不得包含 Origin Credential、Token 或完整 Snapshot。Service 直接且只属于一个 Tunnel，不再存在中间关联资源。
 
 ---
 
@@ -5486,9 +5155,9 @@ GET /dashboard
 返回：
 
 ```text
-Agent Counts
+Tunnel Counts
 
-Instance Counts
+Connector Counts
 
 Service Counts
 
@@ -5528,8 +5197,8 @@ GET /system/config
 ```json
 {
   "error": {
-    "code": "AGENT_OFFLINE",
-    "message": "agent is offline",
+    "code": "TUNNEL_OFFLINE",
+    "message": "tunnel is offline",
     "request_id": "req_01K..."
   }
 }
@@ -5644,7 +5313,7 @@ Server 配置的唯一机器可读契约为 `configs/server.schema.json`。JSON 
 CLI > XTUNNEL_* Environment > YAML > Schema Default
 ```
 
-Server YAML 使用 Strict Decode，未知字段或重复 Key 直接启动失败；未知 CLI Flag 直接失败；`XTUNNEL_*` 命名空间下无法映射到 Schema 的变量直接失败。Duration 统一使用 Go Duration String，大小统一使用整数 Byte。V0.1 不热加载 Server 主配置；变更后必须显式重启，动态 Service/Binding 配置仍通过 Revision/Snapshot 生效。
+Server YAML 使用 Strict Decode，未知字段或重复 Key 直接启动失败；未知 CLI Flag 直接失败；`XTUNNEL_*` 命名空间下无法映射到 Schema 的变量直接失败。Duration 统一使用 Go Duration String，大小统一使用整数 Byte。V0.1 不热加载 Server 主配置；变更后必须显式重启，动态 Service 配置仍通过 Revision/Snapshot 生效。
 
 Server 配置 Schema 固定使用 JSON Schema Draft 2020-12。每个叶子字段必须显式声明 `x-secret` 和 `x-reloadable`；V0.1 Server 主配置的 `x-reloadable` 全部为 `false`。环境变量名由 Schema 点分路径转换：路径段大写后使用双下划线连接，例如 `management.public_url` 对应 `XTUNNEL_MANAGEMENT__PUBLIC_URL`。数组覆盖值使用 JSON Array，标量覆盖值按 Schema 类型解析。CLI 层同样使用 Schema 点分路径。Server 配置入口固定为可选的 `--config <path>` 和可重复的 `--set <schema.path>=<value>`；不接受位置参数，未知 Flag 或 Schema 路径直接失败，同一路径重复覆盖时以后出现的值为准。Agent 不使用此 Schema/Loader，Bootstrap 输入按下一节的单 Token 契约处理。
 
@@ -5696,7 +5365,7 @@ tcp_ingress:
   min_port: 10000
   max_port: 60000
 
-agent_runtime:
+connector_runtime:
   heartbeat_interval: 10s
   heartbeat_timeout: 30s
 
@@ -5723,7 +5392,7 @@ Login Origin == normalized public_url Origin
 
 ---
 
-# 143. Agent Token Bootstrap
+# 143. Tunnel Token Bootstrap
 
 Agent 没有 YAML、`--config`、`--set` 或本地配置 Schema。唯一 Secret 输入是一个完整 Connection Token，来源优先级固定为：
 
@@ -5746,7 +5415,7 @@ UTF-8 byte length <= 8192
 
 这不是 Connection Token Protocol 验证。精确编码、版本分派、完整性、语义字段和 Golden Vector 由 M05-02 冻结；Agent Gateway 实现接入后，未知版本或解析失败必须在发起网络连接前快速失败。
 
-Tunnel、Binding、Origin、Health Policy 和 Revision 全部由 Server 远端托管并通过完整 Snapshot 下发。WorkPool、Reconnect、Control Queue 和 Health Scheduler 的安全边界使用 Server Policy 与 Binary 固定上限。Agent 日志在 V0.1 使用 Binary 固定的安全默认值，Token 不得进入日志。
+Tunnel 下的 Service、Origin、Health Policy 和 Revision 全部由 Server 远端托管并通过完整 Snapshot 下发。WorkPool、Reconnect、Control Queue 和 Health Scheduler 的安全边界使用 Server Policy 与 Binary 固定上限。Agent 日志在 V0.1 使用 Binary 固定的安全默认值，Token 不得进入日志。
 
 ---
 
@@ -5851,9 +5520,9 @@ Linux `service uninstall` 只在 Unit 带匹配 managed marker 时停止、禁�
 
 ---
 
-# 146. 多 Replica 运行
+# 146. 多 Connector 运行
 
-同一个 Agent Token 可以被多个进程或容器使用：
+同一个 Tunnel Token 可以被多个 Agent 进程或容器使用：
 
 ```bash
 xtunnel-agent run --token 'xta_...'
@@ -5861,7 +5530,7 @@ xtunnel-agent run --token 'xta_...'
 XTUNNEL_TOKEN='xta_...' xtunnel-agent run
 ```
 
-它们属于同一个逻辑 Agent，但每次启动各自生成独立 `instance_id`，不需要不同 Data Directory。Agent Self-installer 在 V0.1 每台主机只管理一个固定 systemd Unit 或 `XTunnelAgent` SCM Service；同机多进程由容器编排或管理员自建服务模板管理，不额外引入 Agent 本地状态。
+它们属于同一个 Tunnel，但每次启动各自生成独立 `connector_id`，不需要不同 Data Directory。Agent Self-installer 在 V0.1 每台主机只管理一个固定 systemd Unit 或 `XTunnelAgent` SCM Service；同机多进程由容器编排或管理员自建服务模板管理，不额外引入 Agent 本地状态。
 
 ---
 # 147. Agent Reconnect
@@ -5934,31 +5603,31 @@ ACTIVE
 这些旧 Active WorkConn：
 
 ```text
-继续登记在 AgentRuntime.ActiveWork
+继续登记在 TunnelRuntime.ActiveWork
 
 不计入新 Session 的 Idle Pool
 
-继续计入原 Instance 的 Active、Usage 和日志
+继续计入原 Connector 的 Active、Usage 和日志
 
-可被 Agent Revoke 或 drain timeout 定位并关闭
+可被 Tunnel Revoke 或 drain timeout 定位并关闭
 ```
 
 如果：
 
 ```text
-Agent Revoke
+Tunnel Revoke
 ```
 
 则 Active 也强制关闭。
 
 ---
 
-# 149. Agent 重连
+# 149. Connector 重连
 
 同一个运行进程：
 
 ```text
-instance_id 不变
+connector_id 不变
 
 session_id 改变
 ```
@@ -5977,7 +5646,7 @@ session_id 改变
 
 旧 Active WorkConn 可继续直到完成。
 
-重连时 Server 为该 Instance 递增 `session_generation`。旧 Session cleanup 必须携带旧 generation，并通过 Compare-And-Swap 确认自己仍是 Current Session；若 CAS 失败，只能清理属于旧 Session 且尚未 ACTIVE 的 Idle/Opening Registry 项，禁止修改新 Session 状态。旧 `ActiveWork` 仍在全局 Registry 中，只能自然结束，或由 Revoke / 明确 drain timeout 路径通过其自身 `closeOnce` 关闭。
+重连时 Server 为该 Connector 递增 `session_generation`。旧 Session cleanup 必须携带旧 generation，并通过 Compare-And-Swap 确认自己仍是 Current Session；若 CAS 失败，只能清理属于旧 Session 且尚未 ACTIVE 的 Idle/Opening Registry 项，禁止修改新 Session 状态。旧 `ActiveWork` 仍在全局 Registry 中，只能自然结束，或由 Revoke / 明确 drain timeout 路径通过其自身 `closeOnce` 关闭。
 
 ---
 
@@ -6016,16 +5685,16 @@ SQLite 配置全部保留。
 Agent Restart：
 
 ```text
-Instance ID 改变
+Connector ID 改变
 ```
 
-已有该 Instance 业务连接：
+已有该 Connector 业务连接：
 
 ```text
 中断
 ```
 
-其他 Replica：
+其他 Connector：
 
 ```text
 继续服务
@@ -6034,11 +5703,11 @@ Instance ID 改变
 新 Agent Process：
 
 ```text
-生成新 Instance ID
+生成新 Connector ID
  ↓
 认证并完整拉取当前 Snapshot
  ↓
-Ack 后加入 Logical Agent
+Ack 后加入 Tunnel
 ```
 
 Agent Restart 不读取本地业务配置或历史 Revision。
@@ -6088,7 +5757,7 @@ Send DrainRequest
  ↓
 Stop Refill WorkPool
  ↓
-Server Mark Instance Draining
+Server Mark Connector Draining
  ↓
 Server Stop New Acquire + Finish In-flight OPENING
  ↓
@@ -6113,7 +5782,7 @@ message DrainAck {
 }
 ```
 
-Drain 是两阶段握手。双方收到 Request 后分别以本地 monotonic clock 和相对 `drain_timeout_ms` 建立 Deadline，禁止比较跨主机绝对时间。Server 先把 Instance 从选择集合摘除，并等待已经 Acquire 的 `OPENING` 完成或失败，之后才发送同一 `drain_id` 的 Ack。Agent 在收到 Ack 前仍接受这些已在途 OPEN；收到 Ack 后才拒绝新 OPEN。重复 Request/Ack 必须幂等。若握手超时，Agent 以 `OPEN_DRAINING` 失败仍在途 OPEN，Server 在尚未进入 RAW 时可重新选择其他 Eligible Replica。
+Drain 是两阶段握手。双方收到 Request 后分别以本地 monotonic clock 和相对 `drain_timeout_ms` 建立 Deadline，禁止比较跨主机绝对时间。Server 先把 Connector 从选择集合摘除，并等待已经 Acquire 的 `OPENING` 完成或失败，之后才发送同一 `drain_id` 的 Ack。Agent 在收到 Ack 前仍接受这些已在途 OPEN；收到 Ack 后才拒绝新 OPEN。重复 Request/Ack 必须幂等。若握手超时，Agent 以 `OPEN_DRAINING` 失败仍在途 OPEN，Server 在尚未进入 RAW 时可重新选择其他 Eligible Connector。
 
 默认：
 
@@ -6183,25 +5852,25 @@ streaming
 
 ```yaml
 limits:
-  max_agents: 1000
+  max_tunnels: 1000
 
-  max_instances: 5000
+  max_connectors: 5000
 
-  max_instances_per_agent: 100
+  max_connectors_per_tunnel: 100
 
-  max_bindings_per_agent: 1000
+  max_services_per_tunnel: 1000
 
-  max_health_targets_per_agent: 2000
+  max_health_targets_per_tunnel: 2000
 
   max_health_targets_global: 50000
 
-  max_agent_snapshot_bytes: 786432
+  max_tunnel_snapshot_bytes: 786432
 
   max_active_connections: 20000
 
-  max_connections_per_agent: 5000
-
   max_connections_per_tunnel: 5000
+
+  max_connections_per_service: 5000
 
   max_connections_per_source_ip: 200
 
@@ -6234,9 +5903,9 @@ limits:
   max_http_header_bytes: 65536
 ```
 
-WorkConn 全局预算包含 Connecting、Idle、Opening 和 Active。每个 Instance 的 `target_idle` 是 best effort，只能通过 Server 发放的 WorkDemand Budget Lease 补池；达到全局 Idle/FD 预算后不得继续建连。Budget Manager 必须同时实施 per-agent 和 per-instance 公平份额，并为有真实 Pending OPEN 的 Agent 保留最小可用额度，禁止某个拥有大量 Replica 的 Agent 抢占全部 Idle。
+WorkConn 全局预算包含 Connecting、Idle、Opening 和 Active。每个 Connector 的 `target_idle` 是 best effort，只能通过 Server 发放的 WorkDemand Budget Lease 补池；达到全局 Idle/FD 预算后不得继续建连。Budget Manager 必须同时实施 per-tunnel 和 per-connector 公平份额，并为有真实 Pending OPEN 的 Tunnel 保留最小可用额度，禁止某个拥有大量 Connector 的 Tunnel 抢占全部 Idle。
 
-`configs/server.schema.json` 是所有 Server 硬限制的唯一机器权威和默认值来源。第 156 节只是由 Schema 生成或经 CI 反向校验的人类可读镜像，不得独立修改。`max_instances_per_agent` 在 Control Auth Commit 前执行；Health 两级 Target Budget 在 Management Candidate 校验和新 Instance Auth Commit 前执行。各 Limit 自其所属里程碑起必须进入真实分配/状态转换路径，不能只解析配置或只上报 Metric：Data Plane/Frame/Queue/FD Limit 从 M1 生效，Health Target Budget 从 M3 生效，HTTP 入口限制从 M4 生效。M7 允许根据 Benchmark 调整默认值，但不能第一次实现这些上限。
+`configs/server.schema.json` 是所有 Server 硬限制的唯一机器权威和默认值来源。第 156 节只是由 Schema 生成或经 CI 反向校验的人类可读镜像，不得独立修改。`max_connectors_per_tunnel` 在 Control Auth Commit 前执行；Health 两级 Target Budget 在 Management Candidate 校验和新 Connector Auth Commit 前执行。各 Limit 自其所属里程碑起必须进入真实分配/状态转换路径，不能只解析配置或只上报 Metric：Data Plane/Frame/Queue/FD Limit 从 M1 生效，Health Target Budget 从 M3 生效，HTTP 入口限制从 M4 生效。M7 允许根据 Benchmark 调整默认值，但不能第一次实现这些上限。
 
 公网公平性限制分两层：Active Connection 上限和 Accept/Open Rate Token Bucket。Raw TCP 使用实际 Peer IP；HTTP 使用第 91 节 Trusted Proxy 规则得到的 normalized client IP。HTTP 还执行可配置的请求速率限制，不能只限制底层长连接。所有 per-source 状态使用有容量上限和过期时间的分片 LRU；运维可按 NAT 场景调整数值，但不能绕过 Agent/Tunnel/Global 上限。
 
@@ -6354,13 +6023,13 @@ component
 
 request_id
 
-agent_id
+tunnel_id
 
-instance_id
+connector_id
 
 session_id
 
-tunnel_id
+service_id
 
 connection_id
 
@@ -6383,7 +6052,7 @@ error_code
 绝不能记录：
 
 ```text
-Agent Token
+Tunnel Token
 
 Admin Password
 
@@ -6407,9 +6076,9 @@ HTTP Header、Cookie、请求体或认证对象。
 Server：
 
 ```text
-xtunnel_agents_online
+xtunnel_connectors_online
 
-xtunnel_instances_online
+xtunnel_control_sessions_online
 
 xtunnel_active_connections
 
@@ -6485,11 +6154,11 @@ Span 命名采用 `<package>.<FuncName>`。Server 将 W3C `traceparent`、`trace
 禁止直接使用：
 
 ```text
-agent_id
-
-instance_id
-
 tunnel_id
+
+connector_id
+
+service_id
 
 connection_id
 ```
@@ -6688,6 +6357,10 @@ Open SQLite
  ↓
 Run Migration
  ↓
+检查 tunnel_tokens 是否已有密文
+ ↓
+Load/Create 独立 Tunnel Token Master Key
+ ↓
 Recover / Roll Back Gateway Identity Rotation Journal
  ↓
 Load/Create Gateway TLS Identity
@@ -6713,7 +6386,7 @@ Start Usage Flusher
 READY
 ```
 
-Server External Lock 必须在读取 Restore Journal、Open SQLite、Migration、Gateway PKI Load/Create 和任何 Runtime 初始化之前获取，并一直持有到所有 Listener、Agent Session 和 SQLite 都关闭。Lock Identity 只依赖始终存在的父目录和稳定 leaf 名，不依赖 leaf 当前存在，因此两个 rename 之间崩溃后仍能取得同一把锁。Lock 文件不在 Data Directory 内，Restore 替换目录不会改变已锁 inode。第二个指向同一 Stable Data Target 的 Server 必须在触碰数据库或身份文件之前快速失败，不能等端口绑定冲突才退出。
+Server External Lock 必须在读取 Restore Journal、Open SQLite、Migration、Tunnel Token Master Key Load/Create、Gateway PKI Load/Create 和任何 Runtime 初始化之前获取，并一直持有到所有 Listener、Connector Session 和 SQLite 都关闭。Lock Identity 只依赖始终存在的父目录和稳定 leaf 名，不依赖 leaf 当前存在，因此两个 rename 之间崩溃后仍能取得同一把锁。Lock 文件不在 Data Directory 内，Restore 替换目录不会改变已锁 inode。第二个指向同一 Stable Data Target 的 Server 必须在触碰数据库或身份文件之前快速失败，不能等端口绑定冲突才退出。
 
 Gateway TLS Identity 默认只允许在全新 Data Directory 初始化时创建。唯一例外是管理员显式执行第 26 节离线 `gateway rotate-key --maintenance`；普通 Server Start 绝不自动触发该例外。如果数据库已经存在但 Gateway Identity 文件缺失，且没有可恢复的 Rotation Journal，Server 必须快速失败并要求从一致性备份恢复，禁止静默生成新身份。
 
@@ -6730,15 +6403,15 @@ Validate Bootstrap Shape
  ↓
 Parse Connection Token Version / Integrity / Semantics
  ↓
-Derive Endpoint + TLS Trust + Agent/Token Credential
+Derive Endpoint + TLS Trust + Tunnel/Token Credential
  ↓
-Generate Instance ID
+Generate Connector ID
  ↓
 Connect Agent Gateway
  ↓
 TLS Verify
  ↓
-Agent Token Auth
+Tunnel Token Auth
  ↓
 Create Control Session
  ↓
@@ -6770,9 +6443,9 @@ Token Hash
 
 Token Rotation
 
-Agent State
+Tunnel State
 
-Instance State
+Connector State
 
 Session Authentication
 
@@ -6798,11 +6471,11 @@ Origin Resolver
 
 Work Pool
 
-Instance Selection
+Connector Selection
 
 Config Revision
 
-Snapshot Binding Count + Serialized Size Boundary
+Snapshot Service Count + Serialized Size Boundary
 
 Session Generation Fencing
 
@@ -6810,7 +6483,7 @@ Control Session Single Reader / Single Writer
 
 Control Outbox Priority / Coalescing / Full-close
 
-AgentRuntime Linearization + Lock-free IO Rule
+TunnelRuntime Linearization + Lock-free IO Rule
 
 ActiveWork CloseOnce + Counter Exactly-once
 
@@ -6832,11 +6505,11 @@ WorkDemand Coalescing + Budget Lease Expiry
 
 Health Scheduler Rate / Concurrency / Jitter / Batch
 
-Agent / Instance / Service Status Priority
+Tunnel / Connector / Service Status Priority
 
 Strict Server Config Schema + Override Precedence
 
-Agent Token Bootstrap Source Precedence + Shape Limits
+Tunnel Token Bootstrap Source Precedence + Shape Limits
 
 Lease / Health / Drain Monotonic Time Semantics
 
@@ -6876,7 +6549,7 @@ Offline Gateway Key Rotation: Old Connection Token Rejected / Newly Issued Token
 
 Gateway Identity Rotation Journal Crash Recovery
 
-Multiple Replica
+Multiple Connector
 
 Control Reconnect
 
@@ -6900,7 +6573,7 @@ Snapshot 768 KiB Boundary + Oversize Transaction Rejection
 
 Revision
 
-Old Revision Instance Ineligible
+Old Revision Connector Ineligible
 
 Concurrent Revision 18 / 19 Reconcile
 
@@ -6910,7 +6583,7 @@ Old Revision Health Report Cannot Override New UNKNOWN/UNHEALTHY
 
 Health Batch Generation / Split / Deduplication
 
-Health Target Budget Rejects Config Write And Excess Replica Auth
+Health Target Budget Rejects Config Write And Excess Connector Auth
 
 Health Budget At-capacity Session Replacement Does Not Double Reserve Or Release New Generation
 
@@ -6932,9 +6605,9 @@ Independent `database.path` Config Is Rejected
 
 Concurrent Service Writes Both Present In Runtime Snapshot
 
-Second Binding For Same Tunnel Rejected By DB + Application Service
+Service Cannot Move Across Tunnel Without Explicit Application Transaction
 
-Agent Delete With Binding Returns 409 AGENT_IN_USE
+Tunnel Delete With Service Returns 409 TUNNEL_IN_USE
 
 Stateless Agent Restart Receives Full Current Snapshot Before ONLINE
 
@@ -7010,7 +6683,7 @@ Origin Close
 
 Long Connection
 
-Agent Replica Failure
+Connector Failure
 ```
 
 ---
@@ -7097,18 +6770,18 @@ Goroutine
 
 ---
 
-# 172. Replica Test
+# 172. Connector Load Test
 
-一个逻辑 Agent：
+一个 Tunnel：
 
 ```text
-1 Replica
+1 Connector
 
-2 Replica
+2 Connector
 
-10 Replica
+10 Connector
 
-100 Replica
+100 Connector
 ```
 
 验证：
@@ -7116,19 +6789,19 @@ Goroutine
 ```text
 Load Distribution
 
-Replica Crash
+Connector Crash
 
-Replica Reconnect
+Connector Reconnect
 
 WorkPool Isolation
 
 Global WorkConn Budget
 
-WorkConn Budget Fairness Across Agents/Replicas
+WorkConn Budget Fairness Across Tunnels/Connectors
 
 FD Budget Counts Public + WorkConn Socket Pair
 
-Instance A idle=0、Instance B idle>0 时优先使用 B
+Connector A idle=0、Connector B idle>0 时优先使用 B
 ```
 
 ---
@@ -7145,9 +6818,9 @@ Mock Agent：
 1000
 ```
 
-逻辑 Agent。
+Tunnel。
 
-总 Instance：
+总 Connector：
 
 ```text
 5000
@@ -7223,7 +6896,7 @@ Nightly 和 Release 必须运行在允许 Network Namespace 与 `CAP_NET_ADMIN` 
 必须：
 
 ```text
-kill -9 Agent Instance
+kill -9 Agent Connector
 
 kill -9 XTunnel Server
 ```
@@ -7231,7 +6904,7 @@ kill -9 XTunnel Server
 检查：
 
 ```text
-Replica Failover
+Connector Failover
 
 Agent Reconnect
 
@@ -7251,7 +6924,7 @@ Goroutine Leak
 覆盖：
 
 ```text
-Invalid Agent Token
+Invalid Tunnel Token
 
 Revoked Token
 
@@ -7259,7 +6932,7 @@ Token Brute Force
 
 Token Rotation
 
-Agent Revoke
+Tunnel Revoke
 
 Invalid Server Pin
 
@@ -7283,7 +6956,7 @@ Unauthorized Tunnel ID
 
 Config Snapshot Replay
 
-Config Snapshot Wrong Agent ID
+Config Snapshot Wrong Tunnel ID
 
 Config Revision Rollback Within One Session
 
@@ -7457,16 +7130,16 @@ M0.5 是强制 Gate，不是可与 M1 并行补写的文档任务。M0.5 未通�
 
 # 180. M1：Secure TCP Data Plane Baseline
 
-M1 使用正式身份和安全协议，但产品能力只要求一个 Agent、一个 Instance、一个静态 Tunnel。
+M1 使用正式身份和安全协议，先完成一个 Tunnel、一个 Connector、一个静态 Service 的安全数据面基线；领域模型和协议从一开始就使用最终的 Tunnel→Connector→Service 语义。
 
 完成：
 
 ```text
 Protocol v1 Generated Contract
 
-Agent Entity + Versioned Connection Token Issuance / Verification
+Tunnel Entity + Stable Retrievable Token Issuance / Verification
 
-Ephemeral Instance ID + Session ID
+Ephemeral Connector ID + Session ID
 
 Runtime Registry + Session Generation Fencing
 
@@ -7514,7 +7187,7 @@ Public TCP
  ↓
 Server
  ↓
-Agent
+Service
  ↓
 Echo Origin
 ```
@@ -7523,24 +7196,28 @@ Echo Origin
 
 ---
 
-# 181. M2：Replica & Credential Lifecycle
+# 181. M2：Credential Lifecycle & Failover Hardening
+
+同一 Token 的多 Connector 并存、默认负载选择和优雅排空已经是 M1 数据面基线，
+不能留到 M2 才首次实现。M2 在该基线上增加规模化并发验证、凭据生命周期、
+可观测性与故障切换。
 
 完成：
 
 ```text
-Multi Replica
+Multi-Connector Scale / Isolation / Churn Suite
 
-Instance Selection
+Connector Selection Hardening（Least Active + RR under churn）
 
-Online Instance Lifecycle + Observability
+Online Connector Lifecycle + Observability
 
 Token Rotation + Revoke
 
-Agent Revoke
+Tunnel Revoke
 
 Old Session ActiveWork Preservation
 
-Replica Failover
+Connector Failover
 ```
 
 验收：
@@ -7548,11 +7225,11 @@ Replica Failover
 ```text
 同一个 Token
 
-启动多个 Agent
+并发启动 3 个以上 Agent Connector
 
-Server 能独立识别所有 Instance
+Server 能独立识别所有 Connector
 
-新连接自动分布
+新连接在 Session churn 与容量变化下仍自动、公平分布
 
 旧 Session ActiveWork 自然完成，Revoke 可跨代关闭
 ```
@@ -7564,9 +7241,7 @@ Server 能独立识别所有 Instance
 完成：
 
 ```text
-Tunnel
-
-Binding
+Service（直接属于 Tunnel）
 
 Revision
 
@@ -7664,9 +7339,9 @@ Pagination / PATCH / ETag
 
 Dashboard
 
-Agent CRUD
+Tunnel CRUD
 
-Replica View
+Connector View
 
 Token Rotate
 
@@ -7710,9 +7385,9 @@ Dashboard Health
 能够快速定位：
 
 ```text
-Agent Offline
+Tunnel Offline
 
-Replica Offline
+Connector Offline
 
 Origin Down
 
@@ -7848,7 +7523,7 @@ Web Console Available
 ## Agent
 
 ```text
-Create Agent
+Create Tunnel
  ↓
 Copy one Connection Token
  ↓
@@ -7857,24 +7532,24 @@ sudo xtunnel-agent service install --token 'xta_...'
  ↓
 启动后拉取完整当前 Snapshot
  ↓
-Agent ONLINE
+Tunnel ONLINE
 ```
 
 ---
 
-## Replica
+## Connector
 
 同一 Token：
 
 ```text
-Replica A
-Replica B
+Connector A
+Connector B
 ```
 
 Server：
 
 ```text
-Instances = 2
+Connectors = 2
 ```
 
 停止 A：
@@ -7952,11 +7627,11 @@ SSH 正常。
 仓库初始化建议立即建立：
 
 ```text
-ADR-001-logical-agent-and-replica.md
+ADR-001-tunnel-and-connector.md
 
 ADR-002-versioned-connection-token.md
 
-ADR-003-agent-identity-hierarchy.md
+ADR-003-connector-session-identity-hierarchy.md
 
 ADR-004-agent-gateway-port.md
 
@@ -7966,7 +7641,7 @@ ADR-006-tcp-work-connection.md
 
 ADR-007-no-tcp-multiplex.md
 
-ADR-008-route-tunnel-binding-model.md
+ADR-008-route-service-tunnel-model.md
 
 ADR-009-origin-resolved-only-by-agent.md
 
@@ -7980,7 +7655,7 @@ ADR-013-revision-and-snapshot.md
 
 ADR-014-stateless-agent-config-apply.md
 
-ADR-015-agent-instance-selection.md
+ADR-015-connector-selection.md
 
 ADR-016-no-quic-v0.1.md
 
@@ -8006,21 +7681,21 @@ ADR-023-openapi-etag-concurrency.md
 开发过程中不得破坏：
 
 ```text
-1. Agent 是逻辑 Connector，不是进程。
+1. Tunnel 是管理与认证聚合根；Agent 进程连接后形成临时 Connector。
 
-2. 一个 Agent 可以拥有多个 Replica。
+2. 一个 Tunnel 可以同时拥有多个 Connector，默认共同承载流量并互为备份。
 
-3. Connection Token 属于逻辑 Agent，携带 Endpoint、TLS Trust、Agent/Token Identity 与 Secret，并可重复用于 Replica。
+3. Connection Token 属于 Tunnel，携带 Endpoint、TLS Trust、Tunnel/Token Identity 与 Secret；添加 Connector 重复取回同一 ACTIVE Token，只有显式 Rotate 才产生新版本。
 
-4. Instance / Session 必须是临时运行身份，不得引入 Installation 持久化。
+4. Connector / Session 必须是临时运行身份，不得引入 Installation 持久化。
 
 5. Token 默认长期有效，但必须支持 Rotate 和 Revoke。
 
-6. WorkConn 不重复发送长期 Agent Token。
+6. WorkConn 不重复发送长期 Tunnel Token。
 
-7. Route 必须经过 Tunnel 和 Binding。
+7. Route 必须指向 Service，Service 必须直接属于一个 Tunnel；不再存在中间关联资源。
 
-8. OPEN 只能携带 Tunnel ID，
+8. OPEN 只能携带 Service ID，
    不能携带 Origin 地址。
 
 9. Origin 只能由 Agent 根据 Server 下发的当前内存配置解析。
@@ -8051,11 +7726,11 @@ ADR-023-openapi-etag-concurrency.md
 
 22. 每条 Control Session 只能有一个 Reader、一个 Writer、一个 State Owner。
 
-23. Runtime State 在 AgentRuntime Lock 下线性化，锁内禁止 IO、阻塞和 Conn.Close。
+23. Runtime State 在 TunnelRuntime Lock 下线性化，锁内禁止 IO、阻塞和 Conn.Close。
 
 24. Agent 不保存本地 Desired State；每个新 Control Session 必须获取完整当前 Snapshot。
 
-25. Agent/Instance 不聚合 Origin Health；Service Status 只由 Server 统一计算。
+25. Tunnel/Connector 不聚合 Origin Health；Service Status 只由 Server 统一计算。
 
 26. 只有 Server 主配置使用 JSON Schema 与 Strict Decode；Agent 只接受一个版本化 Connection Token。
 
@@ -8085,15 +7760,18 @@ ADR-023-openapi-etag-concurrency.md
                            │
                  TLS/TCP Tunnel
                            │
-                  Logical Agent
+                      Tunnel
                            │
                 ┌──────────┼──────────┐
                 │          │          │
                 ▼          ▼          ▼
-            Instance A Instance B Instance C
+            Connector A Connector B Connector C
                 │          │          │
                 ▼          ▼          ▼
-              Origin     Origin     Origin
+              Service    Service    Service
+                 │          │          │
+                 ▼          ▼          ▼
+               Origin     Origin     Origin
 ```
 
 公网请求：
@@ -8101,13 +7779,11 @@ ADR-023-openapi-etag-concurrency.md
 ```text
 Route
  ↓
+Service
+ ↓
 Tunnel
  ↓
-Binding
- ↓
-Logical Agent
- ↓
-Healthy Replica
+Eligible Connector
  ↓
 TCP WorkConn
  ↓
@@ -8121,9 +7797,9 @@ Origin
 ```text
 集中管理
 
-多 Agent
+多 Tunnel
 
-Agent Replica
+多 Connector 负载与互备
 
 HTTP Tunnel
 

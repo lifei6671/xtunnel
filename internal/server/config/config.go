@@ -15,17 +15,17 @@ import (
 
 // Config 是完成四层合并和校验后的 Server 配置。
 type Config struct {
-	Server       Server       `json:"server"`
-	Management   Management   `json:"management"`
-	HTTPIngress  HTTPIngress  `json:"http_ingress"`
-	AgentGateway AgentGateway `json:"agent_gateway"`
-	Transport    Transport    `json:"transport"`
-	Control      Control      `json:"control"`
-	TCPIngress   TCPIngress   `json:"tcp_ingress"`
-	AgentRuntime AgentRuntime `json:"agent_runtime"`
-	Metrics      Metrics      `json:"metrics"`
-	Logging      Logging      `json:"logging"`
-	Limits       Limits       `json:"limits"`
+	Server           Server           `json:"server"`
+	Management       Management       `json:"management"`
+	HTTPIngress      HTTPIngress      `json:"http_ingress"`
+	AgentGateway     AgentGateway     `json:"agent_gateway"`
+	Transport        Transport        `json:"transport"`
+	Control          Control          `json:"control"`
+	TCPIngress       TCPIngress       `json:"tcp_ingress"`
+	ConnectorRuntime ConnectorRuntime `json:"connector_runtime"`
+	Metrics          Metrics          `json:"metrics"`
+	Logging          Logging          `json:"logging"`
+	Limits           Limits           `json:"limits"`
 }
 
 // Server 定义 Server 自身的数据目录配置。
@@ -85,8 +85,8 @@ type TCPIngress struct {
 	MaxPort int    `json:"max_port"`
 }
 
-// AgentRuntime 定义 Server 判定 Agent 存活的心跳窗口。
-type AgentRuntime struct {
+// ConnectorRuntime 定义 Server 判定 Connector 存活的心跳窗口。
+type ConnectorRuntime struct {
 	HeartbeatInterval baseconfig.Duration `json:"heartbeat_interval"`
 	HeartbeatTimeout  baseconfig.Duration `json:"heartbeat_timeout"`
 }
@@ -105,16 +105,16 @@ type Logging struct {
 
 // Limits 定义 Server 的硬资源预算；默认值和范围只来自 Server Schema。
 type Limits struct {
-	MaxAgents                           int `json:"max_agents"`
-	MaxInstances                        int `json:"max_instances"`
-	MaxInstancesPerAgent                int `json:"max_instances_per_agent"`
-	MaxBindingsPerAgent                 int `json:"max_bindings_per_agent"`
-	MaxHealthTargetsPerAgent            int `json:"max_health_targets_per_agent"`
+	MaxTunnels                          int `json:"max_tunnels"`
+	MaxConnectors                       int `json:"max_connectors"`
+	MaxConnectorsPerTunnel              int `json:"max_connectors_per_tunnel"`
+	MaxServicesPerTunnel                int `json:"max_services_per_tunnel"`
+	MaxHealthTargetsPerTunnel           int `json:"max_health_targets_per_tunnel"`
 	MaxHealthTargetsGlobal              int `json:"max_health_targets_global"`
-	MaxAgentSnapshotBytes               int `json:"max_agent_snapshot_bytes"`
+	MaxTunnelSnapshotBytes              int `json:"max_tunnel_snapshot_bytes"`
 	MaxActiveConnections                int `json:"max_active_connections"`
-	MaxConnectionsPerAgent              int `json:"max_connections_per_agent"`
 	MaxConnectionsPerTunnel             int `json:"max_connections_per_tunnel"`
+	MaxConnectionsPerService            int `json:"max_connections_per_service"`
 	MaxConnectionsPerSourceIP           int `json:"max_connections_per_source_ip"`
 	MaxOpenRatePerSourceIP              int `json:"max_open_rate_per_source_ip"`
 	MaxOpenBurstPerSourceIP             int `json:"max_open_burst_per_source_ip"`
@@ -179,18 +179,18 @@ func validate(value *Config) error {
 	if value.TCPIngress.MinPort > value.TCPIngress.MaxPort {
 		return fmt.Errorf("tcp_ingress.min_port must not exceed tcp_ingress.max_port")
 	}
-	if value.AgentRuntime.HeartbeatInterval.Duration*3 > value.AgentRuntime.HeartbeatTimeout.Duration {
-		return fmt.Errorf("agent_runtime.heartbeat_interval must not exceed one third of heartbeat_timeout")
+	if value.ConnectorRuntime.HeartbeatInterval.Duration*3 > value.ConnectorRuntime.HeartbeatTimeout.Duration {
+		return fmt.Errorf("connector_runtime.heartbeat_interval must not exceed one third of heartbeat_timeout")
 	}
 	if value.Transport.TCP.WorkAcquireTimeout.Duration <= 0 || value.Control.WriteTimeout.Duration <= 0 ||
-		value.AgentRuntime.HeartbeatInterval.Duration <= 0 || value.AgentRuntime.HeartbeatTimeout.Duration <= 0 {
+		value.ConnectorRuntime.HeartbeatInterval.Duration <= 0 || value.ConnectorRuntime.HeartbeatTimeout.Duration <= 0 {
 		return fmt.Errorf("server duration values must be greater than zero")
 	}
-	if value.Limits.MaxInstancesPerAgent > value.Limits.MaxInstances {
-		return fmt.Errorf("limits.max_instances_per_agent must not exceed max_instances")
+	if value.Limits.MaxConnectorsPerTunnel > value.Limits.MaxConnectors {
+		return fmt.Errorf("limits.max_connectors_per_tunnel must not exceed max_connectors")
 	}
-	if value.Limits.MaxHealthTargetsPerAgent > value.Limits.MaxHealthTargetsGlobal {
-		return fmt.Errorf("limits.max_health_targets_per_agent must not exceed max_health_targets_global")
+	if value.Limits.MaxHealthTargetsPerTunnel > value.Limits.MaxHealthTargetsGlobal {
+		return fmt.Errorf("limits.max_health_targets_per_tunnel must not exceed max_health_targets_global")
 	}
 	if value.Limits.MaxIdleWorkConnections > value.Limits.MaxWorkConnections {
 		return fmt.Errorf("limits.max_idle_work_connections must not exceed max_work_connections")

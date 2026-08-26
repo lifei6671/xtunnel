@@ -35,6 +35,8 @@ func executeWithRun(
 	var err error
 	if isAdminCommand(args) {
 		err = runAdminCommand(ctx, program, args, environ, stderr)
+	} else if isGatewayCommand(args) {
+		err = runGatewayCommand(ctx, program, args[1:], environ, stderr)
 	} else {
 		err = runner(ctx, program, args, environ, stderr)
 	}
@@ -53,19 +55,8 @@ func executeWithRun(
 func run(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
 	return runWithStorageAndBootstrap(ctx, program, args, environ, stderr, func(ctx context.Context, dataDir string) (storage, error) {
 		return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
-	}, func(ctx context.Context, resources storage) (io.Closer, error) {
-		serverResources, ok := resources.(*serverStorage)
-		if !ok {
-			return nil, errors.New("unexpected server storage implementation")
-		}
-		hasAdmin, err := serverResources.database.HasAdmin(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("check admin bootstrap state: %w", err)
-		}
-		if hasAdmin {
-			return nil, nil
-		}
-		return openAdminBootstrapSocket(ctx, externallock.RuntimeDirectory, serverResources.targetHash, serverResources.database)
+	}, func(ctx context.Context, config serverconfig.Config, resources storage) (io.Closer, error) {
+		return openGatewayAndBootstrap(ctx, config, resources)
 	})
 }
 
@@ -79,7 +70,7 @@ func runWithStorageAndBootstrap(
 	args, environ []string,
 	stderr io.Writer,
 	openStorage func(context.Context, string) (storage, error),
-	openBootstrap func(context.Context, storage) (io.Closer, error),
+	openBootstrap func(context.Context, serverconfig.Config, storage) (io.Closer, error),
 ) error {
 	options, err := parseConfigOptions(program, args, environ, stderr)
 	if err != nil {
@@ -106,21 +97,40 @@ func runWithStorageAndBootstrap(
 	}
 	var bootstrapSocket io.Closer
 	if openBootstrap != nil {
-		bootstrapSocket, err = openBootstrap(ctx, resources)
+		bootstrapSocket, err = openBootstrap(ctx, config, resources)
 		if err != nil {
 			return errors.Join(fmt.Errorf("initialize admin bootstrap socket: %w", err), resources.Close())
 		}
 	}
 
 	logger.InfoContext(ctx, "process_started")
-	<-ctx.Done()
+	var runtimeErr error
+	if source, ok := bootstrapSocket.(interface{ RuntimeErrors() <-chan error }); ok {
+		select {
+		case runtimeErr = <-source.RuntimeErrors():
+		case <-ctx.Done():
+			// 信号退出与运行时失败可能同时发生；已排队的具体错误优先返回。
+			select {
+			case runtimeErr = <-source.RuntimeErrors():
+			default:
+			}
+		}
+	} else {
+		<-ctx.Done()
+	}
 	if bootstrapSocket != nil {
 		if err := bootstrapSocket.Close(); err != nil {
-			return errors.Join(fmt.Errorf("close admin bootstrap socket: %w", err), resources.Close())
+			return errors.Join(runtimeErr, fmt.Errorf("close admin bootstrap socket: %w", err), resources.Close())
 		}
 	}
 	closeErr := resources.Close()
 	logger.Info("process_stopped")
+	if runtimeErr != nil {
+		if closeErr != nil {
+			return errors.Join(runtimeErr, fmt.Errorf("close server storage: %w", closeErr))
+		}
+		return runtimeErr
+	}
 	if closeErr != nil {
 		return fmt.Errorf("close server storage: %w", closeErr)
 	}

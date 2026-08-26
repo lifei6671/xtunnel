@@ -1,0 +1,250 @@
+// Package open 实现 Agent 侧 WorkConn 的 OPEN、Origin Dial 与 RAW 交接。
+package open
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"net"
+	"time"
+
+	"github.com/lifei6671/xtunnel/internal/agent/workauth"
+	"github.com/lifei6671/xtunnel/internal/protocol/frame"
+	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
+	"github.com/lifei6671/xtunnel/internal/protocol/state"
+	"github.com/lifei6671/xtunnel/internal/protocol/validate"
+	"github.com/lifei6671/xtunnel/internal/proxy"
+)
+
+var (
+	// ErrInvalidOptions 表示 Handler 缺少 Origin Dialer、超时或 RAW 代理。
+	ErrInvalidOptions = errors.New("agent open handler options are invalid")
+	// ErrProtocol 表示 OpenRequest/状态违反冻结 Protocol v1。
+	ErrProtocol = errors.New("agent open protocol violation")
+	// ErrOrigin 表示 Origin 解析或连接失败，公开错误码由 Dialer 明确提供。
+	ErrOrigin = errors.New("agent origin connection failed")
+)
+
+// OriginDialer 只按已验证 Snapshot 中的 service_id 解析并连接 Origin。
+// 返回错误时 code 必须是非 OK 的公开 Origin/Service 错误码，禁止把地址放回协议。
+type OriginDialer interface {
+	DialOrigin(context.Context, string) (net.Conn, protocolv1.ErrorCode, error)
+}
+
+// OriginDialerFunc 是静态 M1 Fixture 与后续 Snapshot Resolver 的轻量适配器。
+type OriginDialerFunc func(context.Context, string) (net.Conn, protocolv1.ErrorCode, error)
+
+func (dial OriginDialerFunc) DialOrigin(ctx context.Context, serviceID string) (net.Conn, protocolv1.ErrorCode, error) {
+	return dial(ctx, serviceID)
+}
+
+// RawProxy 在 OPEN_OK 完整写出后接管 WorkConn 与 Origin。
+type RawProxy func(context.Context, net.Conn, net.Conn) error
+
+// Options 固定 OPEN Frame、Origin Dial 与 RAW 交接边界。
+type Options struct {
+	ReadTimeout    time.Duration
+	WriteTimeout   time.Duration
+	ConnectTimeout time.Duration
+	Dialer         OriginDialer
+	Proxy          RawProxy
+}
+
+// Handler 处理一个已经通过 WorkHello、处于 IDLE 的 WorkConn。
+type Handler struct {
+	options Options
+}
+
+// NewHandler 创建生产 OPEN Handler；Proxy 为空时使用统一双向 RAW 实现。
+func NewHandler(options Options) (*Handler, error) {
+	if options.ReadTimeout <= 0 || options.WriteTimeout <= 0 || options.ConnectTimeout <= 0 || !validDialer(options.Dialer) {
+		return nil, ErrInvalidOptions
+	}
+	if options.Proxy == nil {
+		options.Proxy = proxy.ProxyBidirectional
+	}
+	return &Handler{options: options}, nil
+}
+
+// Handle 读取唯一 OpenRequest，连接 service_id 对应 Origin，完整写出 OpenResponse，
+// 然后进入 RAW。函数拥有两个连接并保证所有退出路径最终关闭它们。
+// 未提供观察器时保持旧调用方兼容，由调用方保守地把整个 Handle 生命周期计作 IDLE。
+func (handler *Handler) Handle(ctx context.Context, workConnection net.Conn, ready *workauth.Ready) error {
+	return handler.handle(ctx, workConnection, ready, nil)
+}
+
+// HandleObserved 在与 Handle 相同的协议路径上，把 IDLE→OPENING 和
+// OPENING→ACTIVE 的纯状态提交交给 transition 线性化。
+//
+// transition 必须同步执行 commit，且不得在回调返回后保存 commit；commit 只修改当前
+// Work 状态，不做网络 IO。该闭包形状只依赖 protocol/state，因此 WorkPool 可以实现
+// 可选观察而无需 open 包反向依赖 WorkPool。
+func (handler *Handler) HandleObserved(
+	ctx context.Context,
+	workConnection net.Conn,
+	ready *workauth.Ready,
+	transition func(state.WorkPhase, func() error) error,
+) error {
+	if transition == nil {
+		if workConnection != nil {
+			_ = workConnection.Close()
+		}
+		return ErrInvalidOptions
+	}
+	return handler.handle(ctx, workConnection, ready, transition)
+}
+
+func (handler *Handler) handle(
+	ctx context.Context,
+	workConnection net.Conn,
+	ready *workauth.Ready,
+	transition func(state.WorkPhase, func() error) error,
+) (resultErr error) {
+	if handler == nil || ctx == nil || workConnection == nil || ready == nil || ready.State == nil ||
+		ready.State.Phase() != state.WorkIdle {
+		if workConnection != nil {
+			_ = workConnection.Close()
+		}
+		return ErrInvalidOptions
+	}
+	defer func() {
+		ready.State.Close()
+		if err := workConnection.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close Agent WorkConn: %w", err))
+		}
+	}()
+	stopContextIO := context.AfterFunc(ctx, func() { _ = workConnection.SetDeadline(time.Now()) })
+	defer stopContextIO()
+
+	if err := workConnection.SetReadDeadline(operationDeadline(ctx, handler.options.ReadTimeout)); err != nil {
+		return fmt.Errorf("set OpenRequest read deadline: %w", err)
+	}
+	request := &protocolv1.OpenRequest{}
+	if err := frame.ReadWork(workConnection, request); err != nil {
+		return fmt.Errorf("%w: read OpenRequest: %v", ErrProtocol, err)
+	}
+	if err := validate.RejectUnknownFields(request); err != nil {
+		return fmt.Errorf("%w: unknown fields", ErrProtocol)
+	}
+	if request.GetProtocolVersion() != 1 || request.GetIngressType() == protocolv1.IngressType_INGRESS_TYPE_UNSPECIFIED {
+		return fmt.Errorf("%w: invalid OpenRequest fields", ErrProtocol)
+	}
+	commitOpening := func() error { return ready.State.AcceptInbound(request) }
+	if err := commitTransition(transition, state.WorkOpening, commitOpening); err != nil {
+		return fmt.Errorf("%w: accept OpenRequest: %v", ErrProtocol, err)
+	}
+
+	dialContext, cancelDial := context.WithTimeout(ctx, handler.options.ConnectTimeout)
+	startedAt := time.Now()
+	origin, code, dialErr := handler.options.Dialer.DialOrigin(dialContext, request.GetServiceId())
+	latency := time.Since(startedAt)
+	cancelDial()
+	if dialErr != nil {
+		if code == protocolv1.ErrorCode_ERROR_CODE_OK {
+			code = protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE
+		}
+		response := &protocolv1.OpenResponse{
+			ConnectionId: request.GetConnectionId(), Status: protocolv1.OpenStatus_OPEN_STATUS_ERROR,
+			ErrorCode: code, OriginConnectLatencyMs: durationMilliseconds(latency),
+		}
+		if err := handler.writeResponse(ctx, workConnection, ready.State, response, transition); err != nil {
+			return errors.Join(fmt.Errorf("%w: code=%s", ErrOrigin, code.String()), err)
+		}
+		return fmt.Errorf("%w: code=%s", ErrOrigin, code.String())
+	}
+	if origin == nil {
+		return fmt.Errorf("%w: DialOrigin returned nil connection", ErrOrigin)
+	}
+	defer func() {
+		if err := origin.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close Agent Origin connection: %w", err))
+		}
+	}()
+
+	response := &protocolv1.OpenResponse{
+		ConnectionId: request.GetConnectionId(), Status: protocolv1.OpenStatus_OPEN_STATUS_OK,
+		ErrorCode: protocolv1.ErrorCode_ERROR_CODE_OK, OriginConnectLatencyMs: durationMilliseconds(latency),
+	}
+	if err := handler.writeResponse(ctx, workConnection, ready.State, response, transition); err != nil {
+		return err
+	}
+	if err := ready.State.AcceptRaw(); err != nil {
+		return fmt.Errorf("%w: RAW handoff: %v", ErrProtocol, err)
+	}
+	if err := workConnection.SetDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear Agent WorkConn OPEN deadline: %w", err)
+	}
+	// frame.ReadWork 精确停在 OpenRequest Frame 边界；若同一次底层 Read 中已经到达
+	// 后续 RAW 字节，它们仍留在 socket 中，由统一 Proxy 原样读取，不会丢失或重复。
+	return handler.options.Proxy(ctx, workConnection, origin)
+}
+
+func (handler *Handler) writeResponse(
+	ctx context.Context,
+	connection net.Conn,
+	workState *state.Work,
+	response *protocolv1.OpenResponse,
+	transition func(state.WorkPhase, func() error) error,
+) error {
+	if err := connection.SetWriteDeadline(operationDeadline(ctx, handler.options.WriteTimeout)); err != nil {
+		return fmt.Errorf("set OpenResponse write deadline: %w", err)
+	}
+	if err := frame.WriteWork(connection, response); err != nil {
+		return fmt.Errorf("write OpenResponse: %w", err)
+	}
+	// 完整 Frame flush 才提交 OPENING→ACTIVE/CLOSED；半写绝不进入 RAW。
+	commit := func() error { return workState.AcceptOutbound(response) }
+	var err error
+	if response.GetStatus() == protocolv1.OpenStatus_OPEN_STATUS_OK {
+		err = commitTransition(transition, state.WorkActive, commit)
+	} else {
+		// 失败响应进入 CLOSED，不参与 WorkPool 的普通 Demand 目标；Handler 返回后由
+		// Pool 唯一终止路径删除仍登记为 OPENING 的项即可。
+		err = commit()
+	}
+	if err != nil {
+		return fmt.Errorf("%w: commit OpenResponse: %v", ErrProtocol, err)
+	}
+	return nil
+}
+
+func commitTransition(
+	transition func(state.WorkPhase, func() error) error,
+	phase state.WorkPhase,
+	commit func() error,
+) error {
+	if transition == nil {
+		return commit()
+	}
+	return transition(phase, commit)
+}
+
+func operationDeadline(ctx context.Context, timeout time.Duration) time.Time {
+	deadline := time.Now().Add(timeout)
+	if contextDeadline, exists := ctx.Deadline(); exists && contextDeadline.Before(deadline) {
+		return contextDeadline
+	}
+	return deadline
+}
+
+func durationMilliseconds(duration time.Duration) uint32 {
+	if duration <= 0 {
+		return 0
+	}
+	milliseconds := duration / time.Millisecond
+	if milliseconds > math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return uint32(milliseconds)
+}
+
+func validDialer(dialer OriginDialer) bool {
+	if dialer == nil {
+		return false
+	}
+	if function, ok := dialer.(OriginDialerFunc); ok {
+		return function != nil
+	}
+	return true
+}

@@ -1,6 +1,6 @@
 # XTunnel
 
-XTunnel Standalone V0.1 正在按开发计划逐步实现。当前 Server 已具备配置加载，Agent 已收敛为单 Token Bootstrap；两个进程都具备共享 JSON 结构化日志和前台生命周期骨架。Server 已接入 Stable Data Target、Linux External Lock、GORM SQLite 与显式 Migration，尚未启动 Management、Ingress 或 Agent Gateway。
+XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面已进入 Review：Server 已接入 Tunnel/Token Repository、完整 Token 的 AES-256-GCM 密文存储、Connector Auth、Control/Work Session、OPEN/RAW、资源预算、重连与优雅排空；新连接默认从未排空且有 Idle Work 的 Connector 中按 Least Active + Round Robin 选择。Management、生产 Public Listener、远端 Service 配置与完整可观测性仍由后续里程碑实现。
 
 ## 开发运行
 
@@ -21,7 +21,7 @@ export GOTOOLCHAIN=local
 ./tools/proto.sh generate-check
 ```
 
-当前尚未进入 Protocol v1 冻结阶段，因此 `api/proto` 为空，三个检查会明确输出 `SKIP`。这只证明 M0 工具链骨架可执行，不代表 Protocol Lint 或 Breaking Gate 已通过。
+`api/proto` 已使用 Tunnel/Connector/Service 语义生成 Protocol v1 代码与初始 Baseline。当前工作区的 `lint`、`breaking`、Golden Vector 与连续生成 Hash 已通过；正式 `generate-check` 仍需在包含这些变更的干净 checkout 执行，不能把脏工作区的等价检查冒充完整 Gate。
 
 OpenAPI 机器契约固定为 3.1.0，并使用仓库锁定的 vacuum 校验。工具同样只安装到 `.tools/bin`，Windows 开发机通过 WSL 执行：
 
@@ -69,9 +69,9 @@ xtunnel-agent run --token 'xta_...'
 
 Server 的 `--config` 可省略；`--set` 可以重复使用，同一路径以后出现的值为准。Server 配置按 `CLI > XTUNNEL_* Environment > YAML > Schema Default` 合并，字段以 `configs/server.schema.json` 为唯一机器权威。
 
-Connection Token 对用户始终是单个不透明的 `xta_...` 字符串，语义上携带 Server Endpoint、TLS Trust、Agent/Token Identity 与认证 Secret。`run` 按 `--token`、`XTUNNEL_TOKEN`、OS Service Credential 的顺序取值；Linux systemd 使用运行时 Credential `xtunnel-agent.token`，Windows SCM 使用 DPAPI Machine-scope 加密 Credential。缺失时启动失败。当前 Bootstrap 只校验非空、无首尾空白、`xta_` 前缀和不超过 8192 bytes，精确编码和解析留到 M0.5 Protocol Freeze。
+Connection Token 对用户始终是单个不透明的 `xta_...` 字符串，语义上携带 Server Endpoint、TLS Trust、Tunnel/Token Identity 与认证 Secret。创建 Tunnel 时首次签发；之后“添加 Connector”只取回逐字节相同的当前 Token，不创建 Connector 数据库行，也不新增 Token Version。只有显式 Rotate 才产生新版本。`run` 按 `--token`、`XTUNNEL_TOKEN`、OS Service Credential 的顺序取值；Linux systemd 使用运行时 Credential `xtunnel-agent.token`，Windows SCM 使用 DPAPI Machine-scope 加密 Credential。缺失时启动失败。
 
-`--token` 只用于 `run` 的前台交互运行和 `service install` 的一次性安装输入。持久 Linux Unit 或 Windows SCM 配置都不包含 Token；Linux 自安装将它保存为 root-only `LoadCredential` Source，Windows 自安装将它保存为 `%ProgramData%\XTunnel\credentials\agent.token.dpapi` 的 DPAPI Machine-scope 密文。Tunnel、Binding、Origin 和 Health Policy 后续由 Server 远端下发，Agent 只在内存中应用。
+`--token` 只用于 `run` 的前台交互运行和 `service install` 的一次性安装输入。持久 Linux Unit 或 Windows SCM 配置都不包含 Token；Linux 自安装将它保存为 root-only `LoadCredential` Source，Windows 自安装将它保存为 `%ProgramData%\XTunnel\credentials\agent.token.dpapi` 的 DPAPI Machine-scope 密文。Tunnel 下的 Service、Origin 和 Health Policy 由 Server 远端下发，Agent 只在内存中应用。
 
 当前进程在启动输入校验通过后初始化标准库 `log/slog` JSON Handler，并在 `info` 级别输出 `process_started`、`process_stopped` 生命周期事件。基础字段固定为 `timestamp`、`level`、`component`、`event`；真实请求或 Trace 上下文存在时可追加 `request_id`、`trace_id`。
 
@@ -84,11 +84,12 @@ Resolve Stable Data Target
 → Validate Canonical Data Directory
 → Open SQLite with GORM
 → Run Forward-only Migration
+→ Load/Create independent Tunnel Token Master Key
 ```
 
-`server.data_dir` 必须是绝对路径，父目录和正式数据目录都需预先存在；Server 不会自动创建数据目录。Linux 运行环境还需预先创建归 Runtime UID 所有、权限为 `0700` 的 `/run/xtunnel`。数据库固定为 `<server.data_dir>/xtunnel.db`，连接使用 WAL、Foreign Keys、5 秒 Busy Timeout 和 Normal Synchronous。发现待处理 Restore Journal 时，当前版本会在打开数据库前拒绝启动；正式恢复状态机由后续 M3-12 实现。
+`server.data_dir` 必须是绝对路径，父目录和正式数据目录都需预先存在；Server 不会自动创建数据目录。Linux 运行环境还需预先创建归 Runtime UID 所有、权限为 `0700` 的 `/run/xtunnel`。数据库固定为 `<server.data_dir>/xtunnel.db`，连接使用 WAL、Foreign Keys、5 秒 Busy Timeout 和 Normal Synchronous。完整 Tunnel Token 只以 AES-256-GCM 密文写入数据库，独立 32 字节主密钥位于 `<server.data_dir>/credentials/tunnel-token.key`；只要数据库已有 Token 密文，密钥缺失、损坏或权限不安全就会阻止启动。发现待处理 Restore Journal 时，当前版本会在打开数据库前拒绝启动；正式恢复状态机由后续 M3-12 实现。
 
-收到 `SIGINT` 或 `SIGTERM` 后，Server 先关闭 SQLite 再释放 External Lock，Agent 也会正常退出。XTunnel V0.1 Server 的生产运行边界仍为 Linux amd64/arm64，不提供 Windows Server External Lock；Agent 支持 Linux amd64/arm64 与 Windows amd64/arm64。完整 Listener、Session 和 Drain 流程将在后续任务中接入。
+收到 `SIGINT` 或 `SIGTERM` 后，Server 先让 Session 退出选路并执行 Drain，Agent 停止补充 WorkConn、等待 ACTIVE 连接自然结束，超过固定 Deadline 才强制关闭；随后 Server 关闭 SQLite 并释放 External Lock。XTunnel V0.1 Server 的生产运行边界仍为 Linux amd64/arm64，不提供 Windows Server External Lock；Agent 支持 Linux amd64/arm64 与 Windows amd64/arm64。Registry 已按 Tunnel 对 Current Connector Session 先执行未排空、Pool Idle 与容量过滤，再用 Least Active + 稳定 Round Robin 取得原子连接租约，并保留旧 generation ActiveWork tombstone。M2 继续负责 Token Rotate/Revoke、跨 Connector 故障切换策略和在线生命周期可观测性，不重复实现 M1 已有的默认负载选择。
 
 ## OCI 与 Agent Service Self-install
 
@@ -102,7 +103,7 @@ docker buildx build --load --platform linux/amd64 --target agent --tag xtunnel-a
 ./deploy/docker/smoke.sh --target agent --platform linux/amd64
 ```
 
-项目同时提供 `deploy/docker/compose.dualstack.yaml`。该 Profile 为 Server/Agent 创建同时分配 IPv4、IPv6 地址的 Bridge Network；Management 只发布到宿主机 `127.0.0.1`/`::1`，Agent Gateway 显式发布到 `0.0.0.0`/`::`。启动前必须提供 Management 的真实外部 HTTPS Origin、Agent Gateway 公网主机名和 Agent Token；Compose 将宿主输入 `XTUNNEL_AGENT_TOKEN` 映射为 Agent 容器内的 `XTUNNEL_TOKEN`：
+项目同时提供 `deploy/docker/compose.dualstack.yaml`。该 Profile 为 Server/Agent 创建同时分配 IPv4、IPv6 地址的 Bridge Network；Management 只发布到宿主机 `127.0.0.1`/`::1`，Agent Gateway 显式发布到 `0.0.0.0`/`::`。启动前必须提供 Management 的真实外部 HTTPS Origin、Agent Gateway 公网主机名和 Tunnel Token；Compose 继续使用既有宿主变量名 `XTUNNEL_AGENT_TOKEN`，并映射为 Agent 容器内的 `XTUNNEL_TOKEN`：
 
 ```sh
 export XTUNNEL_MANAGEMENT_PUBLIC_URL=https://admin.example.com
@@ -115,7 +116,7 @@ docker compose --file deploy/docker/compose.dualstack.yaml down
 sh deploy/docker/dualstack-smoke.sh --platform linux/amd64
 ```
 
-Compose 内部使用 `:8080`、`:7443` 表示双栈通配监听。Server 的底层监听原语会为这种空 Host 地址分别创建原生 `tcp4`、`tcp6` Socket；显式 IPv4 或 IPv6 地址仍保持单一地址族。当前原语尚未接入 Server 启动路径，Management、Agent Gateway 和 Ingress 仍未实现，因此现阶段的 Compose Smoke 只证明双栈网络、宿主端口绑定、OCI 安全边界与进程生命周期，不代表这些端口已可建立应用连接，也不证明公网 IPv6 路由或防火墙已经就绪。
+Compose 内部使用 `:8080`、`:7443` 表示双栈通配监听。Server 的底层监听原语会为这种空 Host 地址分别创建原生 `tcp4`、`tcp6` Socket；显式 IPv4 或 IPv6 地址仍保持单一地址族。当前该双栈原语尚未接入 Server 启动路径；Management 和 Ingress 仍未实现，Agent Gateway 已由独立 Listener 接入首个 Admin 之后的生产生命周期，但尚未取得 Compose 双栈应用连通证据。因此现阶段的 Compose Smoke 只证明双栈网络、宿主端口绑定、OCI 安全边界与进程生命周期，不代表双栈 Agent Gateway 已可建立应用连接，也不证明公网 IPv6 路由或防火墙已经就绪。
 
 Agent systemd 自安装只支持 root、Linux 和 systemd 249 及以上；任一条件不满足都会在写文件或创建用户前快速失败。Binary 内嵌首行为 `# Managed by xtunnel-agent service install` 的 Unit，`service install` 创建 `xtunnel-agent` 系统用户/组，把当前 Binary 原子安装到 `/usr/local/bin/xtunnel-agent`，并创建 `/etc/xtunnel/credentials/agent.token`（父目录 `root:root 0700`、文件 `root:root 0600`）。Unit 使用 `LoadCredential` 注入 Token，`ExecStart=/usr/local/bin/xtunnel-agent run`，不含 Secret。已有 Unit 不是普通文件或缺少该 marker 时拒绝覆盖或卸载。
 
