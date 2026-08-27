@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M3 Configuration + Health · IN_PROGRESS（M3-13 Gate 本地实现、Checklist 自动化证据与独立复审已进入 `REVIEW`）
 >
-> **当前结论**：M3-01 至 M3-13 均保持 `REVIEW`。M3-13 已补齐 Token-only Server 不可达/重连完整 Snapshot、跨 Session 全量 Health 恢复、Backup ACK 后原子发布、canonical Manifest 身份和 Restore Journal 可达崩溃状态的自动化证据；Windows 整仓 Test/Race/Vet 与 Linux amd64 相关包原生执行通过，独立复审无剩余 P0/P1/P2。当前工作树尚无 Commit/对应 CI；OCI amd64 Smoke 在当前 WSL/Docker 的 Go 编译阶段环境阻塞后被终止，systemd Smoke 因脚本要求隔离 Linux 主机而未在现有 WSL 越权执行，因此 M3 Gate 尚不能标记 `DONE` 或勾选 Checklist。
+> **当前结论**：M3-01 至 M3-13 均保持 `REVIEW`。M3-13 已补齐 Token-only Server 不可达/重连完整 Snapshot、跨 Session 全量 Health 恢复、Backup ACK 后原子发布、canonical Manifest 身份和 Restore Journal 可达崩溃状态的自动化证据；提交 `a3213e4` 对应 CI #33065901938 的 Windows Agent Service 与 Linux amd64/arm64 Verify/OCI Smoke 全部成功，独立复审无剩余 P0/P1/P2。systemd Smoke 因脚本要求隔离 Linux 主机而未在现有 WSL 越权执行，因此 M3 Gate 尚不能标记 `DONE` 或勾选 Checklist。
 
 ---
 
@@ -424,7 +424,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14` 已完成。M2-01 至 M2-08 已完成本地实现、提交、验收与用户阶段 Review，但仍等待对应 CI 证据；M3-01 至 M3-13 已完成本地实现与独立复审，当前待办为：
 
-1. `M3-13` — 本地 Gate 自动化证据与独立复审已完成，保持 `REVIEW`；仍需当前最终提交对应 CI、成功的 OCI amd64/arm64 Runtime Smoke，以及隔离 Linux amd64/arm64 上的 systemd 原生安装/启动 Smoke，才能勾选 Checklist 或转为 `DONE`。本轮失败的 WSL/Docker 构建尝试不计为通过证据。
+1. `M3-13` — 本地 Gate 自动化证据、独立复审、提交 `a3213e4` 对应 CI 与 OCI amd64/arm64 Runtime Smoke 已完成，保持 `REVIEW`；仍需隔离 Linux amd64/arm64 上的 systemd 原生安装/启动 Smoke，才能勾选 Checklist 或转为 `DONE`。本地失败的 WSL/Docker 构建尝试不计为通过证据。
 2. `M3-12` — Linux root Backup/Restore、在线/离线互斥、Manifest、Token Key/密文一致性、Restore Journal Recovery、Stable Parent/data leaf 部署接线已完成并独立复审，保持 `REVIEW`；不提供旧布局迁移兼容层。
 3. `M3-11` — 状态优先级、首次认证耐久事实、Control Auth 提交、已发布 Runtime 联合快照与生产输入组装已完成并独立复审，保持 `REVIEW`。
 4. `M3-10` — 两级 Health Target Budget、配置事务 Reservation、启动重建、Control Auth 容量拒绝与 Runtime generation fencing 已完成并独立复审，保持 `REVIEW`。
@@ -1091,8 +1091,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - Health Gate：新增第二代 Config Session 自动化证据。即使 Health 状态未变化，新 Session 的 observed 基线也必须归零，并严格按 `APPLIED ConfigAck → 当前 Revision 全量 Health Batch → 后续增量 Batch` 排序，禁止沿用上一代 Reporter 的去重基线。
 - Archive 原子发布：Backup 不再直接写最终 OutputPath，而是在固定输出父目录 FD 下创建随机隐藏 `0600` 候选；文件完整 `fsync`/Close 且在线 release ACK 成功后，才以同一 dirfd 的 `renameat2(RENAME_NOREPLACE)` 原子发布并同步父目录。并发目标存在时禁止覆盖；失败只相对固定 dirfd 删除本次候选。Manifest 读取只接受与 `json.Marshal` 逐字节一致的 canonical JSON，Journal Hash 与归档声明绑定同一 canonical bytes。子进程 hard-exit 测试证明 ACK 前最终路径不可见。
 - Restore 崩溃收敛：补齐 `prepared target-only`、`rollback_ready rollback-only/target-only`、`installed rollback-only` 可达组合；prepared 回滚按“删除 staging → 父目录 fsync → 删除 Journal → 父目录 fsync”收敛。启动时只清理固定前缀、普通 `0600` 的 Journal 临时文件，并用已打开父目录 FD 相对删除；符号链接或异常对象 fail closed 保留现场。
-- Checklist 审计：M3 Gate 八项均已有本地自动化证据，覆盖 Snapshot Deterministic/Revision/Size/Count、Atomic Apply 生命周期与 Digest 规则、Health 调度/预算/Replacement fencing，以及在线/离线 Backup/Restore 与 Journal 状态表。但 Checklist 暂不勾选，因为当前最终工作树尚无 Commit/对应 CI，且缺少成功的 OCI 与隔离 systemd Runtime Smoke。
+- Checklist 审计：M3 Gate 八项均已有自动化证据，覆盖 Snapshot Deterministic/Revision/Size/Count、Atomic Apply 生命周期与 Digest 规则、Health 调度/预算/Replacement fencing，以及在线/离线 Backup/Restore 与 Journal 状态表。提交与 OCI CI 证据已经补齐，但 Checklist 暂不勾选，因为仍缺少隔离 systemd Runtime Smoke。
 - 验收环境与结果：Windows `go1.27.0`、`GOTOOLCHAIN=local`。GoFmt、`go test -count=1 -timeout 300s ./...`、`go test -race -count=1 -timeout 360s ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff`、Server Schema JSON 解析与双 Diff Check 全部通过。Linux amd64 DurableOps、Agent Connector、Integration Test Binary 由固定工具链以 `CGO_ENABLED=0` 交叉构建，并在 WSL root 原生运行完整包测试通过；WSL 内未安装 Go，因此未运行 Linux Race。
 - 独立复审与剩余风险：独立只读复审未报告 P0/P1/P2。两个非阻塞 P3 被显式保留：进程在隐藏候选完整写入后 SIGKILL 会留下私有 `.xtunnel-backup-pending-*` 磁盘垃圾但不会暴露最终路径；rename 成功后父目录 `fsync` 失败会返回“不确定持久化”错误并保留完整最终文件。前者进入 M7-04 Filesystem Failpoint 阶段评估显式清理策略，禁止在并发 Create 下按前缀盲删。
-- 部署与证据边界：Linux amd64 OCI Server Smoke 使用固定镜像摘要开始构建，依赖校验通过，但当前 WSL/Docker 在 Go 编译阶段长时间无进展且只读进程快照也受阻，已主动终止；无容器残留，该尝试不计通过。systemd 249 可用且脚本涉及的 XTunnel Unit、Binary、配置/运行/数据目录及两个服务身份经只读预检均不存在，但 `deploy/systemd/smoke.sh` 明确只允许隔离 Linux 主机并会创建/删除这些系统对象；当前 WSL 未被确认可销毁，因此未执行。没有 staged snapshot、Commit SHA、push 或当前工作树对应 CI Run；M3 `DONE` 仍为 `0/13`、全局仍为 `33/95`。
+- Commit/CI 与部署证据：完整 staged snapshot 复验通过后创建并推送 `a3213e4e52733719a1e08eafcdbb7cae4015a7c1`（`fix(m3): harden gate recovery and reconnect evidence`）。[CI #33065901938](https://github.com/lifei6671/xtunnel/actions/runs/33065901938) 精确绑定该 SHA，Windows Agent Service 与 Linux `verify` amd64/arm64 矩阵全部成功；Workflow 中两个 Linux Job 均执行 Server/Agent 原生 OCI Smoke。此前本地 WSL/Docker 阻塞尝试不计证据。systemd 249 可用且脚本涉及的 XTunnel Unit、Binary、配置/运行/数据目录及两个服务身份经只读预检均不存在，但 `deploy/systemd/smoke.sh` 明确只允许隔离 Linux 主机并会创建/删除这些系统对象；当前 WSL 未被确认可销毁，因此未执行。M3 `DONE` 仍为 `0/13`、全局仍为 `33/95`。
 - 文档同步：总技术方案同步 Backup 输出的“隐藏候选 + ACK 后 no-replace 原子发布”契约；README 已准确表述“release ACK 后才发布”，无需重复扩写。开发计划同步任务表、当前队列、复现证据与 Gate 边界，机器契约保持不变。
