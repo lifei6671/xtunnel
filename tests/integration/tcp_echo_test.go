@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/agent/connector"
-	"github.com/lifei6671/xtunnel/internal/agent/open"
 	"github.com/lifei6671/xtunnel/internal/application"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
@@ -36,8 +36,8 @@ const (
 	testServiceID = "svc_01J00000000000000000000000"
 )
 
-// TestTCPEchoEndToEnd 穿过真实 pinned TLS Gateway、Control/Work AUTH、WorkPool、
-// Tunnel Connector 选择、OPEN 和 RAW Half-Close，验证 M1 静态 Harness 的完整链路：
+// TestTCPEchoEndToEnd 穿过真实 pinned TLS Gateway、Control/Work AUTH、Snapshot
+// Origin Resolver、WorkPool、Tunnel Connector 选择、OPEN 和 RAW Half-Close：
 // Public TCP -> Server -> Agent -> Echo Origin。
 func TestTCPEchoEndToEnd(t *testing.T) {
 	baselineGoroutines := runtime.NumGoroutine()
@@ -46,8 +46,9 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	origin, originDone := startEchoOrigin(t, ctx)
-	store := openStoreWithTunnel(t, ctx)
+	firstOrigin, firstOriginDone := startEchoOrigin(t, ctx)
+	secondOrigin, secondOriginDone := startEchoOrigin(t, ctx)
+	store := openStoreWithTunnelAndService(t, ctx, firstOrigin)
 	gatewayIdentity, err := gateway.LoadOrCreatePinnedIdentity(t.TempDir(), "gateway.integration.test", true, time.Now())
 	if err != nil {
 		t.Fatalf("create Gateway identity: %v", err)
@@ -90,6 +91,14 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create Session manager: %v", err)
 	}
+	if err := sessions.Start(context.Background()); err != nil {
+		t.Fatalf("start Session manager: %v", err)
+	}
+	t.Cleanup(func() {
+		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancelShutdown()
+		_ = sessions.Shutdown(shutdownContext)
+	})
 	controlHandler, err := controlauth.New(tokenService, registry, controlauth.Options{
 		ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second,
 		HeartbeatInterval: 100 * time.Millisecond, RetryAfter: 100 * time.Millisecond,
@@ -136,18 +145,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		t.Fatalf("issue Tunnel Token: %v", err)
 	}
 
-	agentConfig, err := connector.HostConfig(issued.Token, "v0.1.0-integration", open.OriginDialerFunc(
-		func(ctx context.Context, serviceID string) (net.Conn, protocolv1.ErrorCode, error) {
-			if serviceID != testServiceID {
-				return nil, protocolv1.ErrorCode_ERROR_CODE_SERVICE_NOT_FOUND, errors.New("unknown static service")
-			}
-			connection, err := (&net.Dialer{}).DialContext(ctx, "tcp", origin.String())
-			if err != nil {
-				return nil, protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE, err
-			}
-			return connection, protocolv1.ErrorCode_ERROR_CODE_OK, nil
-		},
-	))
+	agentConfig, err := connector.HostConfig(issued.Token, "v0.1.0-integration")
 	if err != nil {
 		t.Fatalf("create Agent host config: %v", err)
 	}
@@ -173,53 +171,30 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		t.Fatalf("create Tunnel proxy: %v", err)
 	}
 
-	publicListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen public TCP: %v", err)
+	firstPayload := []byte("xtunnel-m3-origin-one\x00with-binary\xff")
+	if err := tunnelEchoRoundTrip(ctx, tunnelProxy, firstPayload); err != nil {
+		t.Fatalf("first Tunnel Echo: %v", err)
 	}
-	t.Cleanup(func() { _ = publicListener.Close() })
-	serveDone := make(chan error, 1)
-	go func() {
-		peer, acceptErr := publicListener.Accept()
-		if acceptErr != nil {
-			serveDone <- acceptErr
-			return
-		}
-		serveDone <- tunnelProxy.Serve(ctx, testTunnelID, testServiceID, protocolv1.IngressType_INGRESS_TYPE_TCP, peer)
-	}()
+	waitForEchoOrigin(t, firstOriginDone, "first")
 
-	clientConnection, err := net.DialTimeout("tcp", publicListener.Addr().String(), 2*time.Second)
+	updatedOrigin := integrationOriginInput(t, secondOrigin)
+	serviceManagement := application.NewServiceManagementService(store, snapshotBuilder, sessions)
+	updated, err := serviceManagement.Update(ctx, application.UpdateServiceInput{
+		TunnelID: testTunnelID, ServiceID: testServiceID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Origin: &updatedOrigin,
+	})
 	if err != nil {
-		t.Fatalf("dial public TCP listener: %v", err)
+		t.Fatalf("update Origin through Application Service: %v", err)
 	}
-	client := clientConnection.(*net.TCPConn)
-	payload := []byte("xtunnel-m1-echo\x00with-binary\xff")
-	if _, err := client.Write(payload); err != nil {
-		t.Fatalf("write public payload: %v", err)
+	if updated.TunnelRevision != 2 || updated.Service.RequiredRevision != 2 || updated.Service.Version != 2 {
+		t.Fatalf("updated Origin revision/version = %+v", updated)
 	}
-	if err := client.CloseWrite(); err != nil {
-		t.Fatalf("half-close public client: %v", err)
-	}
-	echoed, err := io.ReadAll(client)
-	if err != nil {
-		t.Fatalf("read echoed payload: %v", err)
-	}
-	if err := client.Close(); err != nil {
-		t.Fatalf("close public client: %v", err)
-	}
-	if !bytes.Equal(echoed, payload) {
-		t.Fatalf("echoed payload = %q, want byte-identical %q", echoed, payload)
-	}
-	select {
-	case err := <-serveDone:
-		if err != nil {
-			t.Fatalf("Tunnel proxy error = %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Tunnel proxy did not finish after TCP half-close")
-	}
+
+	secondPayload := []byte("xtunnel-m3-origin-two\x00without-agent-restart\xfe")
+	waitForTunnelEcho(t, ctx, tunnelProxy, secondPayload)
+	waitForEchoOrigin(t, secondOriginDone, "second")
 	if snapshot := limitManager.Snapshot(); snapshot.PendingOpens != 0 || snapshot.ActiveTotal != 0 {
-		t.Fatalf("Limit snapshot after Echo = %#v, want no PendingOpen or Active leak", snapshot)
+		t.Fatalf("Limit snapshot after Origin switch = %#v, want no PendingOpen or Active leak", snapshot)
 	}
 
 	cancel()
@@ -234,17 +209,109 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	if err := gatewayServer.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("close Gateway server: %v", err)
 	}
-	select {
-	case err := <-originDone:
-		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
-			t.Fatalf("Echo origin shutdown error = %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Echo origin did not stop after cancellation")
-	}
-	_ = publicListener.Close()
 	_ = store.Close()
 	waitForResourceBaseline(t, baselineGoroutines, baselineFDs, baselineFDTargets)
+}
+
+func tunnelEchoRoundTrip(ctx context.Context, proxy *tunnel.Proxy, payload []byte) error {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("listen public TCP: %w", err)
+	}
+	defer listener.Close()
+
+	serveDone := make(chan error, 1)
+	go func() {
+		peer, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serveDone <- acceptErr
+			return
+		}
+		serveDone <- proxy.Serve(ctx, testTunnelID, testServiceID, protocolv1.IngressType_INGRESS_TYPE_TCP, peer)
+	}()
+
+	clientConnection, err := net.DialTimeout("tcp", listener.Addr().String(), 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("dial public TCP listener: %w", err)
+	}
+	client := clientConnection.(*net.TCPConn)
+	if _, err := client.Write(payload); err != nil {
+		_ = client.Close()
+		return fmt.Errorf("write public payload: %w", err)
+	}
+	if err := client.CloseWrite(); err != nil {
+		_ = client.Close()
+		return fmt.Errorf("half-close public client: %w", err)
+	}
+	echoed, readErr := io.ReadAll(client)
+	closeErr := client.Close()
+	select {
+	case serveErr := <-serveDone:
+		if serveErr != nil {
+			return fmt.Errorf("Tunnel proxy: %w", serveErr)
+		}
+	case <-time.After(3 * time.Second):
+		return errors.New("Tunnel proxy did not finish after TCP half-close")
+	}
+	if readErr != nil {
+		return fmt.Errorf("read echoed payload: %w", readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close public client: %w", closeErr)
+	}
+	if !bytes.Equal(echoed, payload) {
+		return fmt.Errorf("echoed payload = %q, want byte-identical %q", echoed, payload)
+	}
+	return nil
+}
+
+func waitForTunnelEcho(t *testing.T, ctx context.Context, proxy *tunnel.Proxy, payload []byte) {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if err := tunnelEchoRoundTrip(ctx, proxy, payload); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context ended while waiting for updated Origin: %v", ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatalf("updated Origin did not become active without Agent restart: %v", lastErr)
+}
+
+func waitForEchoOrigin(t *testing.T, done <-chan error, name string) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("%s Echo origin error = %v", name, err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("%s Echo origin did not stop after half-close", name)
+	}
+}
+
+func integrationOriginInput(t *testing.T, address net.Addr) application.ServiceOriginInput {
+	t.Helper()
+	host, portText, err := net.SplitHostPort(address.String())
+	if err != nil {
+		t.Fatalf("split integration Origin address: %v", err)
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		t.Fatalf("parse integration Origin port: %v", err)
+	}
+	verify := true
+	timeout := uint32(2_000)
+	return application.ServiceOriginInput{
+		Scheme: repository.OriginSchemeTCP, Host: host, Port: uint32(port),
+		TLSVerify: &verify, ConnectTimeoutMS: &timeout,
+	}
 }
 
 func waitForResourceBaseline(t *testing.T, baselineGoroutines, baselineFDs int, baselineFDTargets map[string]string) {
@@ -317,16 +384,33 @@ func gatewayHandler(
 	}
 }
 
-func openStoreWithTunnel(t *testing.T, ctx context.Context) *repositorysqlite.Store {
+func openStoreWithTunnelAndService(t *testing.T, ctx context.Context, origin net.Addr) *repositorysqlite.Store {
 	t.Helper()
+	host, portText, err := net.SplitHostPort(origin.String())
+	if err != nil {
+		t.Fatalf("split Echo origin address: %v", err)
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		t.Fatalf("parse Echo origin port: %v", err)
+	}
 	store, err := repositorysqlite.Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatalf("open SQLite store: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
-		return transaction.Tunnels().Create(ctx, repository.Tunnel{
-			ID: testTunnelID, Name: "m1-integration", Version: 1, CreatedAt: 1, UpdatedAt: 1,
+		if err := transaction.Tunnels().Create(ctx, repository.Tunnel{
+			ID: testTunnelID, Name: "m3-integration", Version: 1, DesiredRevision: 1,
+			CreatedAt: 1, UpdatedAt: 1,
+		}); err != nil {
+			return err
+		}
+		return transaction.Services().Create(ctx, repository.Service{
+			ID: testServiceID, TunnelID: testTunnelID, Name: "echo",
+			RequiredRevision: 1, OriginScheme: repository.OriginSchemeTCP,
+			OriginHost: host, OriginPort: uint32(port), TLSVerify: true,
+			ConnectTimeoutMS: 2_000, Enabled: true, Version: 1, CreatedAt: 1, UpdatedAt: 1,
 		})
 	}); err != nil {
 		t.Fatalf("create integration Tunnel: %v", err)

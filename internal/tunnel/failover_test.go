@@ -752,6 +752,7 @@ func newFailoverFixture(t *testing.T, connectorIDs ...string) *failoverFixture {
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)
 	}
+	startSessionManager(t, sessions)
 	fixture := &failoverFixture{
 		registry: registry, sessions: sessions, limits: limits,
 		sessionsByConnector: make(map[string]serverruntime.Session, len(connectorIDs)),

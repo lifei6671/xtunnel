@@ -26,8 +26,14 @@ func TestServiceValidate(t *testing.T) {
 		{name: "CreatedAt 为零", mutate: func(service *Service) { service.CreatedAt = 0 }},
 		{name: "UpdatedAt 为零", mutate: func(service *Service) { service.UpdatedAt = 0 }},
 		{name: "未知 Origin Scheme", mutate: func(service *Service) { service.OriginScheme = "udp" }},
+		{name: "Origin Host 含 URI", mutate: func(service *Service) { service.OriginHost = "http://origin.example" }},
+		{name: "Origin Host 含端口", mutate: func(service *Service) { service.OriginHost = "origin.example:80" }},
+		{name: "Origin Host 非规范大小写", mutate: func(service *Service) { service.OriginHost = "Origin.Example" }},
+		{name: "Origin Host 尾点", mutate: func(service *Service) { service.OriginHost = "origin.example." }},
+		{name: "Origin Host 畸形 IPv4", mutate: func(service *Service) { service.OriginHost = "127.0.0.999" }},
 		{name: "HTTP 设置 TLS Server Name", mutate: func(service *Service) { service.TLSServerName = "origin.example" }},
 		{name: "可选 HTTP Host 仅空白", mutate: func(service *Service) { service.OriginHTTPHost = " " }},
+		{name: "HTTP Host 注入换行", mutate: func(service *Service) { service.OriginHTTPHost = "origin.example\r\nx: bad" }},
 	}
 
 	for _, test := range tests {

@@ -4,6 +4,7 @@ package sessionruntime
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,6 +43,10 @@ var (
 	ErrSessionUnavailable = errors.New("server session runtime is unavailable")
 	// ErrHeartbeatTimeout 表示当前 Session 在 Server 本地超时窗口内没有收到 Heartbeat。
 	ErrHeartbeatTimeout = errors.New("server control session heartbeat timed out")
+	// ErrReconcilerNotRunning 表示 Snapshot Reconcile Loop 尚未启动或已经停止接收 dirty。
+	ErrReconcilerNotRunning = errors.New("server snapshot reconciler is not running")
+	// ErrReconcilerAlreadyStarted 表示同一个 Manager 被重复启动。
+	ErrReconcilerAlreadyStarted = errors.New("server snapshot reconciler is already started")
 )
 
 const (
@@ -70,6 +75,8 @@ type Options struct {
 	HeartbeatTimeout time.Duration
 	// Logger 接收稳定 Connector lifecycle 事件；nil 只用于不需要日志的隔离测试。
 	Logger *slog.Logger
+	// ReportRuntimeError 把 Reconcile goroutine panic 或不可恢复的不变量错误交给进程 owner。
+	ReportRuntimeError func(error)
 }
 
 // MetricsSnapshot 是 M2 Runtime 的无 Label 聚合快照；M6 只负责把这些字段导出到
@@ -102,11 +109,19 @@ type managedSession struct {
 	cleanupDone       chan struct{}
 	cleanupErr        error
 
-	configMu            sync.Mutex
-	configReady         bool
-	observedRevision    uint64
-	outstandingRevision uint64
-	hasOutstanding      bool
+	configMu         sync.Mutex
+	configReady      bool
+	hasObserved      bool
+	observedRevision uint64
+	observedDigest   [sha256.Size]byte
+	outstanding      *snapshotCandidate
+	pending          *snapshotCandidate
+	hasRejected      bool
+	rejectedRevision uint64
+	initialMinimum   uint64
+	initialDone      chan struct{}
+	initialOnce      sync.Once
+	initialErr       error
 
 	reconcileMu          sync.Mutex
 	demandMu             sync.Mutex
@@ -129,6 +144,8 @@ type startupGroup struct {
 // 的异步清理删除新代或让新 WorkConn 继续命中旧 Secret。
 type Manager struct {
 	mu sync.Mutex
+	// 锁顺序固定为 Manager.mu -> snapshotMu -> managedSession.configMu。
+	snapshotMu sync.Mutex
 
 	registry       *serverruntime.Registry
 	options        Options
@@ -151,6 +168,15 @@ type Manager struct {
 	shutdownStarted              bool
 	shutdownDone                 chan struct{}
 	shutdownErr                  error
+	snapshotStarted              bool
+	snapshotAccepting            bool
+	snapshotGeneration           uint64
+	snapshotDirty                map[string]uint64
+	snapshotFailures             map[string]error
+	snapshotWake                 chan struct{}
+	snapshotCancel               context.CancelFunc
+	snapshotDone                 chan struct{}
+	snapshotErr                  error
 }
 
 // New 创建空的 Session 运行时管理器。startedAt 仅用于构造单调时钟，不会参与
@@ -176,7 +202,10 @@ func New(registry *serverruntime.Registry, options Options) (*Manager, error) {
 		liveSessions:     make(map[*managedSession]struct{}),
 		startingByTunnel: make(map[string]*startupGroup),
 		revokedTunnels:   make(map[string]struct{}), logger: options.Logger,
-		shutdownDone: make(chan struct{}),
+		shutdownDone:     make(chan struct{}),
+		snapshotDirty:    make(map[string]uint64),
+		snapshotFailures: make(map[string]error),
+		snapshotWake:     make(chan struct{}, 1),
 	}, nil
 }
 
@@ -190,7 +219,6 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 		!validSession(established.Session) || established.Control == nil || established.ProtocolVersion == 0 {
 		return ErrInvalidSession
 	}
-
 	sessionContext, managed, err := manager.prepareSession(ctx, connection, established)
 	if err != nil {
 		return err
@@ -205,7 +233,7 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 		previous.setTerminationReason("session_replaced")
 		_ = manager.cleanupManaged(previous, cleanupNonActive)
 	}
-	if err := manager.enqueueInitialSnapshot(sessionContext, managed, established.DesiredRevision); err != nil {
+	if err := manager.awaitInitialSnapshot(sessionContext, managed); err != nil {
 		return manager.abortInstalledSession(managed, err)
 	}
 	return manager.waitForSession(ctx, sessionContext, managed)
@@ -268,14 +296,16 @@ func (manager *Manager) prepareSession(
 
 	sessionContext, cancel := context.WithCancel(ctx)
 	managed := &managedSession{
-		session:       established.Session,
-		metadata:      established.ConnectorMetadata,
-		authenticator: authenticator,
-		owner:         owner,
-		pool:          pool,
-		cancel:        cancel,
-		protocol:      established.ProtocolVersion,
-		cleanupDone:   make(chan struct{}),
+		session:        established.Session,
+		metadata:       established.ConnectorMetadata,
+		authenticator:  authenticator,
+		owner:          owner,
+		pool:           pool,
+		cancel:         cancel,
+		protocol:       established.ProtocolVersion,
+		cleanupDone:    make(chan struct{}),
+		initialDone:    make(chan struct{}),
+		initialMinimum: established.DesiredRevision,
 	}
 	return sessionContext, managed, nil
 }
@@ -322,32 +352,6 @@ func (manager *Manager) startSession(
 	return previous, nil
 }
 
-func (manager *Manager) enqueueInitialSnapshot(
-	sessionContext context.Context,
-	managed *managedSession,
-	desiredRevision uint64,
-) error {
-	snapshotResult, err := manager.options.SnapshotProvider.Current(sessionContext, managed.session.TunnelID)
-	if err != nil {
-		return fmt.Errorf("load initial TunnelSnapshot: %w", err)
-	}
-	snapshot := snapshotResult.Snapshot
-	if snapshot == nil || snapshot.GetTunnelId() != managed.session.TunnelID ||
-		snapshot.GetRevision() < desiredRevision {
-		return fmt.Errorf("invalid initial TunnelSnapshot for session: desired_revision=%d", desiredRevision)
-	}
-	if err := managed.installOutstandingSnapshot(snapshot.GetRevision()); err != nil {
-		return err
-	}
-	if err := managed.owner.Enqueue(&protocolv1.ControlEnvelope{
-		ProtocolVersion: managed.protocol,
-		Payload:         &protocolv1.ControlEnvelope_ConfigSnapshot{ConfigSnapshot: snapshot},
-	}); err != nil {
-		return fmt.Errorf("enqueue initial TunnelSnapshot: %w", err)
-	}
-	return nil
-}
-
 func (manager *Manager) abortInstalledSession(managed *managedSession, cause error) error {
 	managed.cancel()
 	ownerErr := managed.owner.Wait()
@@ -389,6 +393,9 @@ func (manager *Manager) waitForSession(
 	default:
 	}
 	manager.removeLookup(managed)
+	if err := manager.MarkDirty(managed.session.TunnelID); err != nil && !errors.Is(err, ErrReconcilerNotRunning) {
+		manager.reportSnapshotRuntimeError(err)
+	}
 	if manager.afterRemoveForTest != nil {
 		manager.afterRemoveForTest(managed.session)
 	}
@@ -461,12 +468,22 @@ func (manager *Manager) handleHeartbeat(managed *managedSession) error {
 }
 
 func (manager *Manager) handleConfigAck(managed *managedSession, inbound controlsession.Inbound) error {
-	if inbound.Duplicate && !managed.hasOutstandingSnapshot() {
+	// Owner 已经通过 message_id 确认这是一个已处理 Ack 的重放。即使此时已经
+	// 下发了更高 Revision，也不能让旧 Ack 与新 outstanding 建立错误关联。
+	if inbound.Duplicate {
 		return nil
 	}
-	applied, err := managed.acceptConfigAck(inbound.Envelope.GetConfigAck())
-	if err != nil || !applied {
+	applied, becameReady, next, err := managed.acceptConfigAck(inbound.Envelope.GetConfigAck())
+	if err != nil {
 		return err
+	}
+	if next != nil {
+		if err := manager.enqueueSnapshot(managed, next); err != nil {
+			return err
+		}
+	}
+	if !applied || !becameReady {
+		return nil
 	}
 	lifecycleEvent, observed := manager.registry.ObserveConnected(managed.session, managed.metadata)
 	if !observed {
@@ -547,6 +564,11 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 		}
 	}
 	manager.shutdownStarted = true
+	manager.snapshotMu.Lock()
+	manager.snapshotAccepting = false
+	reconcileCancel := manager.snapshotCancel
+	reconcileDone := manager.snapshotDone
+	manager.snapshotMu.Unlock()
 	managedSessions := make([]*managedSession, 0, len(manager.liveSessions))
 	for managed := range manager.liveSessions {
 		managed.setConvergenceReason("server_shutdown")
@@ -558,6 +580,21 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 	}
 	clear(manager.bySession)
 	manager.mu.Unlock()
+	if reconcileCancel != nil {
+		reconcileCancel()
+	}
+	var shutdownErr error
+	if reconcileDone != nil {
+		select {
+		case <-reconcileDone:
+		case <-ctx.Done():
+			shutdownErr = errors.Join(shutdownErr, ctx.Err())
+			<-reconcileDone
+		}
+		manager.snapshotMu.Lock()
+		shutdownErr = errors.Join(shutdownErr, manager.snapshotErr)
+		manager.snapshotMu.Unlock()
+	}
 	if manager.afterConvergenceFenceForTest != nil {
 		manager.afterConvergenceFenceForTest("shutdown")
 	}
@@ -565,7 +602,6 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 		<-done
 	}
 
-	var shutdownErr error
 	for _, managed := range managedSessions {
 		managed.authenticator.Close()
 		if err := managed.pool.BeginDrain(); err != nil && !errors.Is(err, serverworkpool.ErrPoolDraining) &&
@@ -931,46 +967,55 @@ func (manager *Manager) reconcileDemand(managed *managedSession, protocolVersion
 	return true, nil
 }
 
-func (managed *managedSession) installOutstandingSnapshot(revision uint64) error {
-	managed.configMu.Lock()
-	defer managed.configMu.Unlock()
-	if managed.hasOutstanding || managed.configReady {
-		return errors.New("initial TunnelSnapshot already installed")
-	}
-	managed.outstandingRevision = revision
-	managed.hasOutstanding = true
-	return nil
-}
-
 // acceptConfigAck 只完成 Ack 与唯一 outstanding Snapshot 的业务关联。APPLIED 的
 // ONLINE 发布由调用方先提交 Registry，再通过 markConfigReady 开放数据面入口。
-func (managed *managedSession) acceptConfigAck(ack *protocolv1.ConfigAck) (bool, error) {
+func (managed *managedSession) acceptConfigAck(
+	ack *protocolv1.ConfigAck,
+) (applied bool, becameReady bool, next *snapshotCandidate, err error) {
 	managed.configMu.Lock()
 	defer managed.configMu.Unlock()
-	if ack == nil || !managed.hasOutstanding {
-		return false, errors.New("ConfigAck has no outstanding TunnelSnapshot")
+	if ack == nil || managed.outstanding == nil {
+		return false, false, nil, errors.New("ConfigAck has no outstanding TunnelSnapshot")
 	}
+	target := managed.outstanding
 	switch ack.GetApplyStatus() {
 	case protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED:
 		if ack.GetErrorCode() != protocolv1.ErrorCode_ERROR_CODE_OK ||
-			ack.GetObservedRevision() != managed.outstandingRevision {
-			return false, errors.New("ConfigAck APPLIED does not match outstanding TunnelSnapshot")
+			ack.GetObservedRevision() != target.revision {
+			return false, false, nil, errors.New("ConfigAck APPLIED does not match outstanding TunnelSnapshot")
 		}
-		managed.observedRevision = managed.outstandingRevision
-		managed.outstandingRevision = 0
-		managed.hasOutstanding = false
-		return true, nil
+		managed.hasObserved = true
+		managed.observedRevision = target.revision
+		managed.observedDigest = target.digest
+		managed.outstanding = nil
+		becameReady = !managed.configReady
+		if managed.hasRejected && managed.rejectedRevision <= managed.observedRevision {
+			managed.hasRejected = false
+		}
+		applied = true
 	case protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED:
 		if ack.GetErrorCode() == protocolv1.ErrorCode_ERROR_CODE_OK ||
 			ack.GetObservedRevision() != managed.observedRevision {
-			return false, errors.New("ConfigAck REJECTED does not preserve observed revision")
+			return false, false, nil, errors.New("ConfigAck REJECTED does not preserve observed revision")
 		}
-		managed.outstandingRevision = 0
-		managed.hasOutstanding = false
-		return false, nil
+		managed.outstanding = nil
+		managed.hasRejected = true
+		managed.rejectedRevision = target.revision
 	default:
-		return false, errors.New("ConfigAck apply status is invalid")
+		return false, false, nil, errors.New("ConfigAck apply status is invalid")
 	}
+	if managed.pending != nil {
+		minimum := managed.observedRevision
+		if managed.hasRejected && managed.rejectedRevision > minimum {
+			minimum = managed.rejectedRevision
+		}
+		if managed.pending.revision > minimum {
+			next = managed.pending
+			managed.outstanding = next
+		}
+		managed.pending = nil
+	}
+	return applied, becameReady, next, nil
 }
 
 func (managed *managedSession) markConfigReady() {
@@ -981,7 +1026,7 @@ func (managed *managedSession) markConfigReady() {
 
 func (managed *managedSession) hasOutstandingSnapshot() bool {
 	managed.configMu.Lock()
-	outstanding := managed.hasOutstanding
+	outstanding := managed.outstanding != nil
 	managed.configMu.Unlock()
 	return outstanding
 }

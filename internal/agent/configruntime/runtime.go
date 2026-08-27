@@ -222,16 +222,44 @@ func (session *Session) Apply(ctx context.Context, snapshot *protocolv1.TunnelSn
 		return session.reject(sink, protocolv1.ErrorCode_ERROR_CODE_PROTOCOL_ERROR, err)
 	}
 
+	current := manager.current.Load()
+	observedRevision, observedDigest, observed := session.Observed()
+	if observed {
+		switch {
+		case owned.GetRevision() < observedRevision:
+			return fmt.Errorf("%w: incoming revision=%d observed revision=%d", ErrProtocolViolation, owned.GetRevision(), observedRevision)
+		case owned.GetRevision() == observedRevision && digest != observedDigest:
+			return fmt.Errorf("%w: revision=%d digest conflicts with observed snapshot", ErrProtocolViolation, owned.GetRevision())
+		case owned.GetRevision() == observedRevision:
+			if current == nil || current.revision != observedRevision || current.digest != digest {
+				return ErrInvalidSession
+			}
+			return session.ackApplied(sink, current)
+		}
+	} else if current != nil && current.revision == owned.GetRevision() && current.digest == digest {
+		// 新 Control Session 不继承旧 Session 的 observed 基线，但可以复用进程内
+		// 完全相同的 Runtime。Ack 成功后才为本代 Session 建立新基线并激活 Gate。
+		return session.ackApplied(sink, current)
+	}
+
 	gate := &publicationGate{manager: manager}
 	// Builder 取得独立副本。即使后续实现为校验或构建缓存而改写、保留输入，
 	// Manager 持有的权威 Snapshot、Revision 与 Digest 也不能被别名破坏。
 	buildInput := proto.Clone(owned).(*protocolv1.TunnelSnapshot)
 	candidate, buildErr := manager.config.Builder.Build(applyContext, buildInput, gate)
 	if buildErr != nil {
-		if abortErr := manager.abortCandidate(ctx, candidate); abortErr != nil {
+		abortErr := manager.abortCandidate(ctx, candidate)
+		if applyErr := applyContext.Err(); applyErr != nil {
+			return errors.Join(applyErr, buildErr, abortErr)
+		}
+		if abortErr != nil {
 			return errors.Join(buildErr, abortErr)
 		}
-		return session.reject(sink, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR, buildErr)
+		code := protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR
+		if errors.Is(buildErr, ErrProtocolViolation) {
+			code = protocolv1.ErrorCode_ERROR_CODE_PROTOCOL_ERROR
+		}
+		return session.reject(sink, code, buildErr)
 	}
 	if isNilInterface(candidate) {
 		return session.reject(sink, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR, ErrInvalidConfig)
@@ -241,9 +269,17 @@ func (session *Session) Apply(ctx context.Context, snapshot *protocolv1.TunnelSn
 	candidateContext, cancelCandidate := context.WithCancel(manager.ownerCtx)
 	stopApplyCancellation := context.AfterFunc(applyContext, cancelCandidate)
 	if startErr := candidate.Start(candidateContext); startErr != nil {
+		candidateErr := candidateContext.Err()
 		stopApplyCancellation()
 		cancelCandidate()
-		if abortErr := manager.abortCandidate(ctx, candidate); abortErr != nil {
+		abortErr := manager.abortCandidate(ctx, candidate)
+		if applyErr := applyContext.Err(); applyErr != nil {
+			return errors.Join(applyErr, candidateErr, startErr, abortErr)
+		}
+		if candidateErr != nil {
+			return errors.Join(candidateErr, startErr, abortErr)
+		}
+		if abortErr != nil {
 			return errors.Join(startErr, abortErr)
 		}
 		return session.reject(sink, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR, startErr)
@@ -301,15 +337,7 @@ func (session *Session) Apply(ctx context.Context, snapshot *protocolv1.TunnelSn
 		manager.statesMu.Unlock()
 	}
 
-	ack := configAck(manager.config.ProtocolVersion, next.revision,
-		protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED, protocolv1.ErrorCode_ERROR_CODE_OK)
-	if err := sink.Enqueue(ack); err != nil {
-		return fmt.Errorf("%w: %w", ErrAckEnqueue, err)
-	}
-	session.observed.Store(&observed{revision: next.revision, digest: next.digest})
-	next.acked.Store(true)
-	manager.retirePending()
-	return nil
+	return session.ackApplied(sink, next)
 }
 
 func (manager *Manager) beginApply(ctx context.Context) (context.Context, func(), error) {
@@ -402,6 +430,18 @@ func (session *Session) reject(sink AckEnqueuer, code protocolv1.ErrorCode, caus
 		return errors.Join(cause, fmt.Errorf("%w: %w", ErrAckEnqueue, err))
 	}
 	return rejected
+}
+
+func (session *Session) ackApplied(sink AckEnqueuer, applied *state) error {
+	ack := configAck(session.manager.config.ProtocolVersion, applied.revision,
+		protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED, protocolv1.ErrorCode_ERROR_CODE_OK)
+	if err := sink.Enqueue(ack); err != nil {
+		return fmt.Errorf("%w: %w", ErrAckEnqueue, err)
+	}
+	session.observed.Store(&observed{revision: applied.revision, digest: applied.digest})
+	applied.acked.Store(true)
+	session.manager.retirePending()
+	return nil
 }
 
 func (manager *Manager) abortCandidate(parent context.Context, candidate Candidate) error {

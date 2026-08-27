@@ -56,6 +56,7 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)
 	}
+	startSessionManager(t, sessions)
 	controlServer, controlAgent := net.Pipe()
 	defer controlAgent.Close()
 	established := establishedControl(t, session)
@@ -144,6 +145,7 @@ func TestProxyAggregatesConcurrentPendingOpensAndRefillsBeyondInitialDemand(t *t
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)
 	}
+	startSessionManager(t, sessions)
 	connectorIDs := []string{testConnectorID, testConnectorTwo}
 	controlPeers := make([]net.Conn, 0, len(connectorIDs))
 	controlResults := make([]<-chan error, 0, len(connectorIDs))
@@ -295,6 +297,7 @@ func TestProxyPendingOpenTimeoutAndCancelReleaseQuota(t *testing.T) {
 			if err != nil {
 				t.Fatalf("sessionruntime.New() error = %v", err)
 			}
+			startSessionManager(t, sessions)
 			controlServer, controlAgent := net.Pipe()
 			established := establishedControl(t, session)
 			controlResult := make(chan error, 1)
@@ -362,6 +365,7 @@ func TestProxyPendingGroupReselectsWhenSelectedSessionDrains(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)
 	}
+	startSessionManager(t, sessions)
 	connectorIDs := []string{testConnectorID, testConnectorTwo}
 	controlPeers := make([]net.Conn, 0, 2)
 	controlResults := make([]<-chan error, 0, 2)
@@ -495,6 +499,7 @@ func TestAcquireWorkRetriesStalePendingSessionAfterGenerationReplacement(t *test
 	if err != nil {
 		t.Fatalf("sessionruntime.New() error = %v", err)
 	}
+	startSessionManager(t, sessions)
 	startSession := func(connectorID string) (serverruntime.Session, net.Conn, <-chan error) {
 		pending, reserveErr := registry.ReserveAuthenticated(testTunnelID, connectorID)
 		if reserveErr != nil {
@@ -610,6 +615,18 @@ func TestAcquireWorkRetriesStalePendingSessionAfterGenerationReplacement(t *test
 			t.Fatalf("%s Control Session did not finish", name)
 		}
 	}
+}
+
+func startSessionManager(t *testing.T, sessions *sessionruntime.Manager) {
+	t.Helper()
+	if err := sessions.Start(context.Background()); err != nil {
+		t.Fatalf("sessionruntime.Manager.Start() error = %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = sessions.Shutdown(ctx)
+	})
 }
 
 func runEchoConnector(connection *net.TCPConn) error {

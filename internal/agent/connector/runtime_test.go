@@ -3,13 +3,14 @@ package connector
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/agent/configruntime"
-	"github.com/lifei6671/xtunnel/internal/agent/open"
+	agentorigin "github.com/lifei6671/xtunnel/internal/agent/origin"
 	"github.com/lifei6671/xtunnel/internal/agent/reconnect"
 	agentsession "github.com/lifei6671/xtunnel/internal/agent/session"
 	agentworkpool "github.com/lifei6671/xtunnel/internal/agent/workpool"
@@ -491,8 +492,138 @@ func TestRuntimeRunKeepsConfigAliveThroughWorkPoolDrainThenClosesManager(t *test
 	}
 }
 
+func TestRuntimeRunStartsHealthBeforeControlAndShutsItDownAfterConfig(t *testing.T) {
+	recorder := &lifecycleRecorder{}
+	health := newFakeHealthRuntime(recorder)
+	resource := &recordingConfigResource{recorder: recorder}
+	var manager *configruntime.Manager
+	runtime := &Runtime{
+		drainTimeout: time.Second,
+		retiredPools: make(map[uint64]retiredPool),
+		health:       health,
+	}
+	runtime.newConfigManager = func(parent context.Context) (*configruntime.Manager, error) {
+		var err error
+		manager, err = configruntime.New(parent, testConfigRuntimeConfig(recordingConfigBuilder{resource: resource}))
+		return manager, err
+	}
+	runtime.runControlSessions = func(ctx context.Context, _ reconnect.SessionHandler[*agentsession.Session]) error {
+		recorder.add("control.run")
+		configSession, err := manager.NewSession(testTunnelID)
+		if err != nil {
+			return err
+		}
+		if err := configSession.Apply(ctx, testSnapshot(1), newFakeEstablishedSession()); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := runtime.Run(context.Background()); err != nil {
+		t.Fatalf("Runtime.Run() error = %v", err)
+	}
+	want := []string{"health.start", "control.run", "config.retire", "health.shutdown"}
+	if got := recorder.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("shutdown order = %v, want %v", got, want)
+	}
+}
+
+func TestRuntimeRunSharesOneDeadlineAcrossConfigAndHealthShutdown(t *testing.T) {
+	const (
+		shutdownBudget = 120 * time.Millisecond
+		configDelay    = 60 * time.Millisecond
+	)
+	configRetireStarted := make(chan time.Time, 1)
+	healthDeadline := make(chan time.Time, 1)
+	recorder := &lifecycleRecorder{}
+	health := newFakeHealthRuntime(recorder)
+	health.shutdown = func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return errors.New("health shutdown context has no deadline")
+		}
+		healthDeadline <- deadline
+		return nil
+	}
+	resource := &recordingConfigResource{
+		recorder: recorder,
+		retire: func(context.Context) error {
+			configRetireStarted <- time.Now()
+			time.Sleep(configDelay)
+			return nil
+		},
+	}
+	var manager *configruntime.Manager
+	runtime := &Runtime{
+		drainTimeout: shutdownBudget,
+		retiredPools: make(map[uint64]retiredPool),
+		health:       health,
+	}
+	runtime.newConfigManager = func(parent context.Context) (*configruntime.Manager, error) {
+		var err error
+		manager, err = configruntime.New(parent, testConfigRuntimeConfig(recordingConfigBuilder{resource: resource}))
+		return manager, err
+	}
+	runtime.runControlSessions = func(ctx context.Context, _ reconnect.SessionHandler[*agentsession.Session]) error {
+		configSession, err := manager.NewSession(testTunnelID)
+		if err != nil {
+			return err
+		}
+		return configSession.Apply(ctx, testSnapshot(1), newFakeEstablishedSession())
+	}
+
+	if err := runtime.Run(context.Background()); err != nil {
+		t.Fatalf("Runtime.Run() error = %v", err)
+	}
+	retireStarted := <-configRetireStarted
+	deadline := <-healthDeadline
+	if latest := retireStarted.Add(shutdownBudget + 20*time.Millisecond); deadline.After(latest) {
+		t.Fatalf("Health deadline = %v, want shared deadline no later than %v", deadline, latest)
+	}
+}
+
+func TestRuntimeRunPropagatesUnexpectedHealthFailure(t *testing.T) {
+	recorder := &lifecycleRecorder{}
+	health := newFakeHealthRuntime(recorder)
+	healthFailure := errors.New("health owner failed")
+	retireNoise := configruntime.ErrClosed
+	var manager *configruntime.Manager
+	runtime := &Runtime{
+		drainTimeout: time.Second,
+		retiredPools: make(map[uint64]retiredPool),
+		health:       health,
+	}
+	runtime.newConfigManager = func(parent context.Context) (*configruntime.Manager, error) {
+		var err error
+		manager, err = configruntime.New(parent, testConfigRuntimeConfig(recordingConfigBuilder{
+			resource: &recordingConfigResource{recorder: recorder, retireErr: retireNoise},
+		}))
+		return manager, err
+	}
+	runtime.runControlSessions = func(ctx context.Context, _ reconnect.SessionHandler[*agentsession.Session]) error {
+		configSession, err := manager.NewSession(testTunnelID)
+		if err != nil {
+			return err
+		}
+		if err := configSession.Apply(ctx, testSnapshot(1), newFakeEstablishedSession()); err != nil {
+			return err
+		}
+		health.fail(healthFailure)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	err := runtime.Run(context.Background())
+	if !errors.Is(err, healthFailure) || !errors.Is(err, context.Canceled) || !errors.Is(err, retireNoise) {
+		t.Fatalf("Runtime.Run() error = %v, want health failure, canceled Control loop, and cleanup noise", err)
+	}
+	if got := recorder.snapshot(); !reflect.DeepEqual(got, []string{"health.start", "config.retire", "health.shutdown"}) {
+		t.Fatalf("health lifecycle = %v", got)
+	}
+}
+
 func TestHostConfigCreatesEphemeralConnectorAndUnobservedOriginFailsClosed(t *testing.T) {
-	config, err := HostConfig("xta_test", "v0.1.0-test", openOriginDialer())
+	config, err := HostConfig("xta_test", "v0.1.0-test")
 	if err != nil {
 		t.Fatalf("HostConfig() error = %v", err)
 	}
@@ -503,10 +634,17 @@ func TestHostConfigCreatesEphemeralConnectorAndUnobservedOriginFailsClosed(t *te
 		config.Hostname == "" || config.OS == "" || config.Arch == "" {
 		t.Fatalf("HostConfig() = %#v", config)
 	}
-	connection, code, err := UnobservedOriginDialer(context.Background(), "svc_ignored")
+	runtime, err := New(config)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if runtime.health == nil {
+		t.Fatal("New() did not install the production Health runtime")
+	}
+	connection, code, err := runtime.origin.DialOrigin(context.Background(), "svc_01J00000000000000000000000")
 	if connection != nil || code != protocolv1.ErrorCode_ERROR_CODE_SERVICE_CONFIG_NOT_OBSERVED ||
-		!errors.Is(err, ErrServiceConfigNotObserved) {
-		t.Fatalf("UnobservedOriginDialer() = (%v, %s, %v)", connection, code, err)
+		!errors.Is(err, agentorigin.ErrConfigNotObserved) {
+		t.Fatalf("DialOrigin() = (%v, %s, %v)", connection, code, err)
 	}
 }
 
@@ -550,7 +688,7 @@ func (resource *orderedConfigResource) Retire(context.Context) error {
 
 func newTestConfigSession(t *testing.T) (*configruntime.Manager, *configruntime.Session) {
 	t.Helper()
-	manager, err := configruntime.New(context.Background(), testConfigRuntimeConfig(snapshotBuilder{}))
+	manager, err := configruntime.New(context.Background(), testConfigRuntimeConfig(agentorigin.New()))
 	if err != nil {
 		t.Fatalf("configruntime.New() error = %v", err)
 	}
@@ -590,6 +728,86 @@ type fakeWorkPool struct {
 	completeDrainCalls atomic.Int32
 	done               chan struct{}
 	donePanic          bool
+}
+
+type fakeHealthRuntime struct {
+	recorder *lifecycleRecorder
+	done     chan struct{}
+	doneOnce sync.Once
+	errMu    sync.Mutex
+	err      error
+	shutdown func(context.Context) error
+}
+
+func newFakeHealthRuntime(recorder *lifecycleRecorder) *fakeHealthRuntime {
+	return &fakeHealthRuntime{recorder: recorder, done: make(chan struct{})}
+}
+
+func (runtime *fakeHealthRuntime) Start(context.Context) error {
+	runtime.recorder.add("health.start")
+	return nil
+}
+
+func (runtime *fakeHealthRuntime) Done() <-chan struct{} { return runtime.done }
+
+func (runtime *fakeHealthRuntime) Err() error {
+	runtime.errMu.Lock()
+	defer runtime.errMu.Unlock()
+	return runtime.err
+}
+
+func (runtime *fakeHealthRuntime) Shutdown(ctx context.Context) error {
+	runtime.recorder.add("health.shutdown")
+	runtime.doneOnce.Do(func() { close(runtime.done) })
+	if runtime.shutdown != nil {
+		return errors.Join(runtime.shutdown(ctx), runtime.Err())
+	}
+	return runtime.Err()
+}
+
+func (runtime *fakeHealthRuntime) fail(err error) {
+	runtime.errMu.Lock()
+	runtime.err = err
+	runtime.errMu.Unlock()
+	runtime.doneOnce.Do(func() { close(runtime.done) })
+}
+
+type recordingConfigBuilder struct {
+	resource configruntime.Resources
+}
+
+func (builder recordingConfigBuilder) Build(context.Context, *protocolv1.TunnelSnapshot, configruntime.Gate) (configruntime.Candidate, error) {
+	return &recordingConfigCandidate{resource: builder.resource}, nil
+}
+
+type recordingConfigCandidate struct {
+	resource configruntime.Resources
+}
+
+func (*recordingConfigCandidate) Start(context.Context) error { return nil }
+func (*recordingConfigCandidate) Abort(context.Context) error { return nil }
+func (candidate *recordingConfigCandidate) Runtime() configruntime.Resources {
+	return candidate.resource
+}
+
+type recordingConfigResource struct {
+	recorder  *lifecycleRecorder
+	retire    func(context.Context) error
+	retireErr error
+}
+
+func (resource *recordingConfigResource) Retire(ctx context.Context) error {
+	resource.recorder.add("config.retire")
+	if resource.retire != nil {
+		return errors.Join(resource.retire(ctx), resource.retireErr)
+	}
+	return resource.retireErr
+}
+
+func closedSignal() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
 }
 
 func (pool *fakeWorkPool) Start(context.Context) error { return nil }
@@ -684,8 +902,4 @@ func inbound(payload any) controlsession.Inbound {
 		panic("unsupported test payload")
 	}
 	return controlsession.Inbound{Envelope: envelope}
-}
-
-func openOriginDialer() open.OriginDialer {
-	return open.OriginDialerFunc(UnobservedOriginDialer)
 }

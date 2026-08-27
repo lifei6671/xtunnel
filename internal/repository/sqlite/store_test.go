@@ -324,6 +324,16 @@ func TestServiceMigrationConstraints(t *testing.T) {
 		{name: "valid HTTP optional host", mutate: func(row *serviceMigrationRow) {
 			row.originScheme, row.originHTTPHost = "http", "origin.example.test:8080"
 		}},
+		{name: "valid UDP origin", mutate: func(row *serviceMigrationRow) {
+			row.originScheme = "udp"
+		}},
+		{name: "valid QUIC origin", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originQUICALPN = "quic", "h3"
+		}},
+		{name: "valid Unix socket origin", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originHost, row.originPort = "unix", nil, nil
+			row.originPath = "/run/xtunnel/origin.sock"
+		}},
 		{name: "control-only TLS server name", mutate: func(row *serviceMigrationRow) {
 			row.originScheme, row.tlsServerName = "https", "\t\r\n"
 		}, wantErr: true},
@@ -334,7 +344,13 @@ func TestServiceMigrationConstraints(t *testing.T) {
 		{name: "tab-only name", mutate: func(row *serviceMigrationRow) { row.name = "\t" }, wantErr: true},
 		{name: "control-only origin host", mutate: func(row *serviceMigrationRow) { row.originHost = "\r\n" }, wantErr: true},
 		{name: "unknown Tunnel", mutate: func(row *serviceMigrationRow) { row.tunnelID = "tun_01J00000000000000000000001" }, wantErr: true},
-		{name: "invalid origin scheme", mutate: func(row *serviceMigrationRow) { row.originScheme = "udp" }, wantErr: true},
+		{name: "invalid origin scheme", mutate: func(row *serviceMigrationRow) { row.originScheme = "sctp" }, wantErr: true},
+		{name: "uppercase origin scheme", mutate: func(row *serviceMigrationRow) { row.originScheme = "UDP" }, wantErr: true},
+		{name: "network origin missing host", mutate: func(row *serviceMigrationRow) { row.originHost = nil }, wantErr: true},
+		{name: "network origin missing port", mutate: func(row *serviceMigrationRow) { row.originPort = nil }, wantErr: true},
+		{name: "network origin retains path", mutate: func(row *serviceMigrationRow) {
+			row.originPath = "/run/xtunnel/origin.sock"
+		}, wantErr: true},
 		{name: "zero origin port", mutate: func(row *serviceMigrationRow) { row.originPort = 0 }, wantErr: true},
 		{name: "oversized origin port", mutate: func(row *serviceMigrationRow) { row.originPort = 65536 }, wantErr: true},
 		{name: "invalid TLS verify", mutate: func(row *serviceMigrationRow) { row.tlsVerify = 2 }, wantErr: true},
@@ -351,6 +367,65 @@ func TestServiceMigrationConstraints(t *testing.T) {
 		}, wantErr: true},
 		{name: "HTTP origin retains TLS server name", mutate: func(row *serviceMigrationRow) {
 			row.originScheme, row.tlsServerName = "http", "origin.example.test"
+		}, wantErr: true},
+		{name: "UDP origin retains TLS server name", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.tlsServerName = "udp", "origin.example.test"
+		}, wantErr: true},
+		{name: "UDP origin retains HTTP host", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originHTTPHost = "udp", "origin.example.test"
+		}, wantErr: true},
+		{name: "QUIC origin missing ALPN", mutate: func(row *serviceMigrationRow) {
+			row.originScheme = "quic"
+		}, wantErr: true},
+		{name: "QUIC origin uses empty ALPN", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originQUICALPN = "quic", ""
+		}, wantErr: true},
+		{name: "QUIC origin uses whitespace ALPN", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originQUICALPN = "quic", "\t\r\n"
+		}, wantErr: true},
+		{name: "QUIC origin ALPN contains NUL", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originQUICALPN = "quic", "h3\x00invalid"
+		}, wantErr: true},
+		{name: "QUIC origin ALPN exceeds 255 bytes", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originQUICALPN = "quic", strings.Repeat("a", 256)
+		}, wantErr: true},
+		{name: "QUIC origin multibyte ALPN exceeds 255 bytes", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originQUICALPN = "quic", strings.Repeat("界", 86)
+		}, wantErr: true},
+		{name: "QUIC origin retains HTTP host", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originQUICALPN = "quic", "h3"
+			row.originHTTPHost = "origin.example.test"
+		}, wantErr: true},
+		{name: "non-QUIC origin retains ALPN", mutate: func(row *serviceMigrationRow) {
+			row.originQUICALPN = "h3"
+		}, wantErr: true},
+		{name: "Unix origin missing path", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originHost, row.originPort = "unix", nil, nil
+		}, wantErr: true},
+		{name: "Unix origin retains host", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originPort = "unix", nil
+			row.originPath = "/run/xtunnel/origin.sock"
+		}, wantErr: true},
+		{name: "Unix origin retains port", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originHost = "unix", nil
+			row.originPath = "/run/xtunnel/origin.sock"
+		}, wantErr: true},
+		{name: "Unix origin uses relative path", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originHost, row.originPort = "unix", nil, nil
+			row.originPath = "run/xtunnel/origin.sock"
+		}, wantErr: true},
+		{name: "Unix origin uses root path", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originHost, row.originPort = "unix", nil, nil
+			row.originPath = "/"
+		}, wantErr: true},
+		{name: "Unix origin path contains NUL", mutate: func(row *serviceMigrationRow) {
+			row.originScheme, row.originHost, row.originPort = "unix", nil, nil
+			row.originPath = "/run/xtunnel\x00/origin.sock"
+		}, wantErr: true},
+		{name: "future origin enables current health", mutate: func(row *serviceMigrationRow) {
+			row.originScheme = "udp"
+			row.healthType, row.healthIntervalMS, row.healthTimeoutMS = "TCP", int64(1000), int64(100)
+			row.healthFailureThreshold, row.healthSuccessThreshold = int64(1), int64(1)
 		}, wantErr: true},
 		{name: "disabled health retains interval", mutate: func(row *serviceMigrationRow) { row.healthIntervalMS = int64(1000) }, wantErr: true},
 		{name: "unknown health type", mutate: func(row *serviceMigrationRow) { row.healthType = "UDP" }, wantErr: true},
@@ -635,30 +710,31 @@ func testNow() time.Time {
 }
 
 type serviceMigrationRow struct {
-	id, tunnelID, name, originScheme, originHost     string
-	requiredRevision, originPort, tlsVerify          int64
-	tlsServerName, originHTTPHost                    any
-	connectTimeoutMS                                 int64
-	healthType, healthPath                           any
-	healthIntervalMS, healthTimeoutMS                any
-	healthExpectedStatusMin, healthExpectedStatusMax any
-	healthFailureThreshold, healthSuccessThreshold   any
-	enabled, version, createdAt, updatedAt           int64
+	id, tunnelID, name, originScheme                   string
+	originHost, originPort, originPath, originQUICALPN any
+	requiredRevision, tlsVerify                        int64
+	tlsServerName, originHTTPHost                      any
+	connectTimeoutMS                                   int64
+	healthType, healthPath                             any
+	healthIntervalMS, healthTimeoutMS                  any
+	healthExpectedStatusMin, healthExpectedStatusMax   any
+	healthFailureThreshold, healthSuccessThreshold     any
+	enabled, version, createdAt, updatedAt             int64
 }
 
 func insertServiceMigrationRow(database *gorm.DB, row serviceMigrationRow) error {
 	return database.Exec(
 		`INSERT INTO services (
 			id, tunnel_id, name, required_revision,
-			origin_scheme, origin_host, origin_port, tls_verify,
+			origin_scheme, origin_host, origin_port, origin_path, origin_quic_alpn, tls_verify,
 			tls_server_name, origin_http_host, connect_timeout_ms,
 			health_type, health_path, health_interval_ms, health_timeout_ms,
 			health_expected_status_min, health_expected_status_max,
 			health_failure_threshold, health_success_threshold,
 			enabled, version, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.id, row.tunnelID, row.name, row.requiredRevision,
-		row.originScheme, row.originHost, row.originPort, row.tlsVerify,
+		row.originScheme, row.originHost, row.originPort, row.originPath, row.originQUICALPN, row.tlsVerify,
 		row.tlsServerName, row.originHTTPHost, row.connectTimeoutMS,
 		row.healthType, row.healthPath, row.healthIntervalMS, row.healthTimeoutMS,
 		row.healthExpectedStatusMin, row.healthExpectedStatusMax,

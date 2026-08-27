@@ -32,6 +32,7 @@ func TestConnectorSnapshotsMetricsHeartbeatDrainAndLifecycleLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	startTestManager(t, manager)
 	controlServer, controlClient := net.Pipe()
 	established := establishedSession(t, session, 0x7a)
 	serveResult := make(chan error, 1)
@@ -281,6 +282,7 @@ func TestConvergenceFreezesLifecycleReasonBeforeUnlock(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
+			startTestManager(t, manager)
 
 			removed := make(chan struct{})
 			releaseRemove := make(chan struct{})
@@ -392,6 +394,7 @@ func TestSessionReplacementLogsNewGenerationWithoutOldCleanupPollution(t *testin
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	startTestManager(t, manager)
 	oldSession := commitSession(t, registry, testTunnelID, testConnectorID)
 	oldServer, oldClient := net.Pipe()
 	oldEstablished := establishedSession(t, oldSession, 0x11)
@@ -511,6 +514,7 @@ func TestRevokeClosesCurrentAndRetiringSessionsDuringInstallTransition(t *testin
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	startTestManager(t, manager)
 	first := commitSession(t, registry, testTunnelID, testConnectorID)
 	firstServer, firstClient := net.Pipe()
 	firstEstablished := establishedSession(t, first, 0x41)
@@ -582,6 +586,7 @@ func TestRevokeOwnsCleanupAfterServeRemovesLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	startTestManager(t, manager)
 	session := commitSession(t, registry, testTunnelID, testConnectorID)
 	server, client := net.Pipe()
 	established := establishedSession(t, session, 0x51)
@@ -888,6 +893,7 @@ func TestInitialDemandFailureLogsPairedDisconnect(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
+			startTestManager(t, manager)
 			manager.beforeInitialDemandForTest = test.fail
 			session := commitSession(t, registry, testTunnelID, testConnectorID)
 			server, client := net.Pipe()
@@ -934,6 +940,7 @@ func TestInboundPanicIsReportedAndSessionIsCleanedUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	startTestManager(t, manager)
 	manager.beforeInitialDemandForTest = func(*managedSession) {
 		panic("sensitive panic value")
 	}
@@ -980,6 +987,7 @@ func TestShutdownUsesExplicitLifecycleReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	startTestManager(t, manager)
 	session := commitSession(t, registry, testTunnelID, testConnectorID)
 	server, client := net.Pipe()
 	established := establishedSession(t, session, 0x61)

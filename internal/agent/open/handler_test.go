@@ -135,43 +135,6 @@ func TestHandleReturnsExplicitOriginFailure(t *testing.T) {
 	}
 }
 
-func TestHandleEnforcesOriginConnectTimeout(t *testing.T) {
-	agentConnection, serverConnection := net.Pipe()
-	defer serverConnection.Close()
-	handler, err := NewHandler(Options{
-		ReadTimeout: time.Second, WriteTimeout: time.Second, ConnectTimeout: 20 * time.Millisecond,
-		Dialer: OriginDialerFunc(func(ctx context.Context, _ string) (net.Conn, protocolv1.ErrorCode, error) {
-			<-ctx.Done()
-			return nil, protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT, ctx.Err()
-		}),
-	})
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
-	ready := idleReady(t)
-	result := make(chan error, 1)
-	go func() { result <- handler.Handle(context.Background(), agentConnection, ready) }()
-	if err := frame.WriteWork(serverConnection, validOpenRequest()); err != nil {
-		t.Fatalf("write OpenRequest: %v", err)
-	}
-	response := &protocolv1.OpenResponse{}
-	if err := frame.ReadWork(serverConnection, response); err != nil {
-		t.Fatalf("read timeout OpenResponse: %v", err)
-	}
-	if response.GetStatus() != protocolv1.OpenStatus_OPEN_STATUS_ERROR ||
-		response.GetErrorCode() != protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT {
-		t.Fatalf("timeout OpenResponse = %#v", response)
-	}
-	select {
-	case err := <-result:
-		if !errors.Is(err, ErrOrigin) {
-			t.Fatalf("Handle() error = %v, want ErrOrigin", err)
-		}
-	case <-time.After(testTimeout):
-		t.Fatal("Handle() did not finish after Origin timeout")
-	}
-}
-
 func TestHandleRejectsUnknownOpenRequestWithoutDial(t *testing.T) {
 	agentConnection, serverConnection := net.Pipe()
 	defer serverConnection.Close()
@@ -204,7 +167,7 @@ func TestHandleRejectsUnknownOpenRequestWithoutDial(t *testing.T) {
 func newTestHandler(t *testing.T, dialer OriginDialer, rawProxy RawProxy) *Handler {
 	t.Helper()
 	handler, err := NewHandler(Options{
-		ReadTimeout: time.Second, WriteTimeout: time.Second, ConnectTimeout: time.Second,
+		ReadTimeout: time.Second, WriteTimeout: time.Second,
 		Dialer: dialer, Proxy: rawProxy,
 	})
 	if err != nil {

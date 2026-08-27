@@ -469,9 +469,8 @@ func TestPoolObservesOpenPhasesRefillsActiveAndTrimsOnlyIdle(t *testing.T) {
 	originPeers := make(chan net.Conn, 1)
 
 	openHandler, err := agentopen.NewHandler(agentopen.Options{
-		ReadTimeout:    time.Second,
-		WriteTimeout:   time.Second,
-		ConnectTimeout: time.Second,
+		ReadTimeout:  time.Second,
+		WriteTimeout: time.Second,
 		Dialer: agentopen.OriginDialerFunc(func(ctx context.Context, serviceID string) (net.Conn, protocolv1.ErrorCode, error) {
 			if serviceID != testServiceID {
 				return nil, protocolv1.ErrorCode_ERROR_CODE_SERVICE_NOT_FOUND, errors.New("unexpected service id")

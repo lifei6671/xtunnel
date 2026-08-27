@@ -404,6 +404,84 @@ func TestCancellationAfterStartAbortsWithoutPublishingOrAck(t *testing.T) {
 	closeManager(t, manager)
 }
 
+func TestCancellationReturnedByBuildOrStartDoesNotRejectSnapshot(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(context.CancelFunc, *fakeBuilder, *fakeCandidate)
+	}{
+		{name: "build", configure: func(cancel context.CancelFunc, builder *fakeBuilder, candidate *fakeCandidate) {
+			builder.buildHook = func(int) { cancel() }
+			builder.buildErrors = []error{context.Canceled}
+			builder.candidates = []*fakeCandidate{candidate}
+		}},
+		{name: "start", configure: func(cancel context.CancelFunc, builder *fakeBuilder, candidate *fakeCandidate) {
+			candidate.startHook = cancel
+			builder.startErrors = []error{context.Canceled}
+			builder.candidates = []*fakeCandidate{candidate}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			applyContext, cancelApply := context.WithCancel(context.Background())
+			candidate := &fakeCandidate{resources: &fakeResources{retired: make(chan struct{})}}
+			builder := &fakeBuilder{}
+			test.configure(cancelApply, builder, candidate)
+			manager := newTestManager(t, testConfig(builder))
+			session := newTestSession(t, manager, testTunnelID)
+			sink := &fakeSink{}
+
+			err := session.Apply(applyContext, testSnapshot(1, testServiceID), sink)
+			if !errors.Is(err, context.Canceled) || errors.Is(err, ErrConfigRejected) {
+				t.Fatalf("Apply() error = %v, want cancellation without ConfigRejected", err)
+			}
+			if candidate.abortCalls.Load() != 1 {
+				t.Fatalf("Abort calls = %d, want 1", candidate.abortCalls.Load())
+			}
+			if sink.count() != 0 {
+				t.Fatal("canceled Apply emitted ConfigAck")
+			}
+			if _, exists := manager.Current(); exists {
+				t.Fatal("canceled Candidate was published")
+			}
+			closeManager(t, manager)
+		})
+	}
+}
+
+func TestManagerParentCancellationDuringStartDoesNotRejectSnapshot(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	candidate := &fakeCandidate{
+		resources: &fakeResources{retired: make(chan struct{})},
+		startErr:  context.Canceled,
+		startContextHook: func(ctx context.Context) {
+			cancelParent()
+			<-ctx.Done()
+		},
+	}
+	builder := &fakeBuilder{candidates: []*fakeCandidate{candidate}}
+	manager, err := New(parent, testConfig(builder))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	session := newTestSession(t, manager, testTunnelID)
+	sink := &fakeSink{}
+
+	err = session.Apply(context.Background(), testSnapshot(1, testServiceID), sink)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrConfigRejected) {
+		t.Fatalf("Apply() error = %v, want owner cancellation without ConfigRejected", err)
+	}
+	if candidate.abortCalls.Load() != 1 {
+		t.Fatalf("Abort calls = %d, want 1", candidate.abortCalls.Load())
+	}
+	if sink.count() != 0 {
+		t.Fatal("owner-canceled Apply emitted ConfigAck")
+	}
+	if _, exists := manager.Current(); exists {
+		t.Fatal("owner-canceled Candidate was published")
+	}
+	closeManager(t, manager)
+}
+
 func TestPublishedCandidateLifetimeBelongsToManager(t *testing.T) {
 	stopped := make(chan struct{})
 	candidate := &fakeCandidate{
@@ -590,6 +668,156 @@ func TestNewSessionResetsObservedAndAcceptsLowerRevision(t *testing.T) {
 		t.Fatalf("first Session baseline changed = (%d, %v)", revision, ok)
 	}
 	closeManager(t, manager)
+}
+
+func TestApplyRevisionAndDigestSemanticsAvoidDuplicateBuild(t *testing.T) {
+	firstResources := &fakeResources{retired: make(chan struct{})}
+	secondResources := &fakeResources{retired: make(chan struct{})}
+	builder := &fakeBuilder{resources: []Resources{firstResources, secondResources}}
+	manager := newTestManager(t, testConfig(builder))
+	session := newTestSession(t, manager, testTunnelID)
+
+	original := testSnapshot(10, testServiceID)
+	if err := session.Apply(context.Background(), original, &fakeSink{}); err != nil {
+		t.Fatal(err)
+	}
+	before, ok := manager.Current()
+	if !ok {
+		t.Fatal("Current() missing after initial Apply")
+	}
+
+	duplicateSink := &fakeSink{}
+	if err := session.Apply(context.Background(), proto.Clone(original).(*protocolv1.TunnelSnapshot), duplicateSink); err != nil {
+		t.Fatalf("idempotent Apply() error = %v", err)
+	}
+	duplicateAck := duplicateSink.onlyAck(t)
+	if duplicateAck.GetObservedRevision() != 10 ||
+		duplicateAck.GetApplyStatus() != protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED ||
+		duplicateAck.GetErrorCode() != protocolv1.ErrorCode_ERROR_CODE_OK {
+		t.Fatalf("idempotent ConfigAck = %#v", duplicateAck)
+	}
+	if builder.calls.Load() != 1 || firstResources.retireCalls.Load() != 0 {
+		t.Fatalf("idempotent Apply work: builds=%d retires=%d, want 1 and 0", builder.calls.Load(), firstResources.retireCalls.Load())
+	}
+
+	for _, test := range []struct {
+		name     string
+		snapshot *protocolv1.TunnelSnapshot
+	}{
+		{name: "same revision different digest", snapshot: testSnapshot(10, testServiceID2)},
+		{name: "older revision", snapshot: testSnapshot(9, testServiceID)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sink := &fakeSink{}
+			if err := session.Apply(context.Background(), test.snapshot, sink); !errors.Is(err, ErrProtocolViolation) {
+				t.Fatalf("Apply() error = %v, want ErrProtocolViolation", err)
+			}
+			if sink.count() != 0 || builder.calls.Load() != 1 {
+				t.Fatalf("protocol violation side effects: acks=%d builds=%d", sink.count(), builder.calls.Load())
+			}
+			after, current := manager.Current()
+			if !current || after.Revision != before.Revision || after.Digest != before.Digest || !after.Acked {
+				t.Fatalf("Current() changed after protocol violation: before=%+v after=%+v current=%v", before, after, current)
+			}
+		})
+	}
+
+	ackFailure := errors.New("outbox unavailable")
+	if err := session.Apply(context.Background(), original, &fakeSink{err: ackFailure}); !errors.Is(err, ErrAckEnqueue) || !errors.Is(err, ackFailure) {
+		t.Fatalf("idempotent Ack failure = %v", err)
+	}
+	if builder.calls.Load() != 1 || firstResources.retireCalls.Load() != 0 {
+		t.Fatalf("failed idempotent Ack work: builds=%d retires=%d", builder.calls.Load(), firstResources.retireCalls.Load())
+	}
+
+	if err := session.Apply(context.Background(), testSnapshot(11, testServiceID2), &fakeSink{}); err != nil {
+		t.Fatalf("higher revision Apply() error = %v", err)
+	}
+	waitClosed(t, firstResources.retired, "revision 10 retirement")
+	if builder.calls.Load() != 2 || firstResources.retireCalls.Load() != 1 {
+		t.Fatalf("higher revision work: builds=%d retires=%d, want 2 and 1", builder.calls.Load(), firstResources.retireCalls.Load())
+	}
+	if revision, _, observed := session.Observed(); !observed || revision != 11 {
+		t.Fatalf("Observed() after higher revision = (%d, %v)", revision, observed)
+	}
+
+	closeManager(t, manager)
+	if secondResources.retireCalls.Load() != 1 {
+		t.Fatalf("current Resources Retire calls = %d, want 1", secondResources.retireCalls.Load())
+	}
+}
+
+func TestNewSessionReusesMatchingCurrentWithoutBuildOrRetire(t *testing.T) {
+	resources := &fakeResources{retired: make(chan struct{})}
+	builder := &fakeBuilder{resources: []Resources{resources}}
+	manager := newTestManager(t, testConfig(builder))
+	first := newTestSession(t, manager, testTunnelID)
+	snapshot := testSnapshot(10, testServiceID)
+	if err := first.Apply(context.Background(), snapshot, &fakeSink{}); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newTestSession(t, manager, testTunnelID)
+	sink := &fakeSink{}
+	if err := second.Apply(context.Background(), proto.Clone(snapshot).(*protocolv1.TunnelSnapshot), sink); err != nil {
+		t.Fatalf("new Session matching Apply() error = %v", err)
+	}
+	ack := sink.onlyAck(t)
+	if ack.GetObservedRevision() != 10 || ack.GetApplyStatus() != protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED {
+		t.Fatalf("new Session ConfigAck = %#v", ack)
+	}
+	if revision, _, observed := second.Observed(); !observed || revision != 10 {
+		t.Fatalf("second Observed() = (%d, %v)", revision, observed)
+	}
+	if builder.calls.Load() != 1 || resources.retireCalls.Load() != 0 {
+		t.Fatalf("matching current reuse work: builds=%d retires=%d", builder.calls.Load(), resources.retireCalls.Load())
+	}
+
+	closeManager(t, manager)
+}
+
+func TestNewSessionReusesAckFailedCurrentAndRetiresPendingOnce(t *testing.T) {
+	oldResources := &fakeResources{retired: make(chan struct{})}
+	currentResources := &fakeResources{retired: make(chan struct{})}
+	builder := &fakeBuilder{resources: []Resources{oldResources, currentResources}}
+	manager := newTestManager(t, testConfig(builder))
+	first := newTestSession(t, manager, testTunnelID)
+	if err := first.Apply(context.Background(), testSnapshot(1, testServiceID), &fakeSink{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ackFailure := errors.New("outbox unavailable")
+	revisionTwo := testSnapshot(2, testServiceID2)
+	if err := first.Apply(context.Background(), revisionTwo, &fakeSink{err: ackFailure}); !errors.Is(err, ErrAckEnqueue) || !errors.Is(err, ackFailure) {
+		t.Fatalf("revision 2 Ack failure = %v", err)
+	}
+	if builder.gate(1).Active() {
+		t.Fatal("Ack-failed current Gate became active")
+	}
+	assertNotClosed(t, oldResources.retired, "old Resources retired before replacement Session Ack")
+
+	second := newTestSession(t, manager, testTunnelID)
+	if err := second.Apply(context.Background(), proto.Clone(revisionTwo).(*protocolv1.TunnelSnapshot), &fakeSink{}); err != nil {
+		t.Fatalf("new Session retry Apply() error = %v", err)
+	}
+	if builder.calls.Load() != 2 {
+		t.Fatalf("Build calls = %d, want 2 without rebuilding Ack-failed current", builder.calls.Load())
+	}
+	if !builder.gate(1).Active() {
+		t.Fatal("reused current Gate inactive after APPLIED Ack")
+	}
+	waitClosed(t, oldResources.retired, "old Resources retirement after replacement Session Ack")
+	if oldResources.retireCalls.Load() != 1 {
+		t.Fatalf("old Resources Retire calls = %d, want 1", oldResources.retireCalls.Load())
+	}
+	if revision, _, observed := second.Observed(); !observed || revision != 2 {
+		t.Fatalf("second Observed() = (%d, %v)", revision, observed)
+	}
+
+	closeManager(t, manager)
+	if currentResources.retireCalls.Load() != 1 {
+		t.Fatalf("current Resources Retire calls = %d, want 1", currentResources.retireCalls.Load())
+	}
 }
 
 func TestConcurrentApplyFailsFastAndCurrentReadersSeeWholeTuples(t *testing.T) {

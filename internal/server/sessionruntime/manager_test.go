@@ -385,11 +385,8 @@ func TestManagedSessionRejectsConfigAckBusinessMismatch(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			managed := &managedSession{}
-			if err := managed.installOutstandingSnapshot(7); err != nil {
-				t.Fatalf("installOutstandingSnapshot() error = %v", err)
-			}
-			if applied, err := managed.acceptConfigAck(test.ack); err == nil || applied {
+			managed := &managedSession{outstanding: &snapshotCandidate{revision: 7}}
+			if applied, _, _, err := managed.acceptConfigAck(test.ack); err == nil || applied {
 				t.Fatalf("acceptConfigAck() = (%t, %v), want business mismatch", applied, err)
 			}
 			if !managed.hasOutstandingSnapshot() {
@@ -397,7 +394,7 @@ func TestManagedSessionRejectsConfigAckBusinessMismatch(t *testing.T) {
 			}
 		})
 	}
-	if applied, err := (&managedSession{}).acceptConfigAck(appliedConfigAck(7)); err == nil || applied {
+	if applied, _, _, err := (&managedSession{}).acceptConfigAck(appliedConfigAck(7)); err == nil || applied {
 		t.Fatalf("acceptConfigAck(without outstanding) = (%t, %v), want error", applied, err)
 	}
 }
@@ -974,6 +971,7 @@ func TestServeHeartbeatTimeoutUsesLocalReceiptTimeAndCleansSession(t *testing.T)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	startTestManager(t, manager)
 	controlServer, controlClient := net.Pipe()
 	defer controlClient.Close()
 	established := establishedSession(t, session, 0x88)
@@ -1017,7 +1015,20 @@ func newTestManager(t *testing.T, registry *serverruntime.Registry) *Manager {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	startTestManager(t, manager)
 	return manager
+}
+
+func startTestManager(t *testing.T, manager *Manager) {
+	t.Helper()
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), testWait)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	})
 }
 
 func activeShutdownFixture(t *testing.T) (

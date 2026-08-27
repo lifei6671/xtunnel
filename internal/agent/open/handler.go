@@ -42,13 +42,13 @@ func (dial OriginDialerFunc) DialOrigin(ctx context.Context, serviceID string) (
 // RawProxy 在 OPEN_OK 完整写出后接管 WorkConn 与 Origin。
 type RawProxy func(context.Context, net.Conn, net.Conn) error
 
-// Options 固定 OPEN Frame、Origin Dial 与 RAW 交接边界。
+// Options 固定 OPEN Frame、Origin Dial 与 RAW 交接边界。每个 Service 的连接超时
+// 由 Snapshot OriginDialer 统一覆盖 DNS、TCP 与 TLS，不在 Handler 叠加固定上限。
 type Options struct {
-	ReadTimeout    time.Duration
-	WriteTimeout   time.Duration
-	ConnectTimeout time.Duration
-	Dialer         OriginDialer
-	Proxy          RawProxy
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	Dialer       OriginDialer
+	Proxy        RawProxy
 }
 
 // Handler 处理一个已经通过 WorkHello、处于 IDLE 的 WorkConn。
@@ -58,7 +58,7 @@ type Handler struct {
 
 // NewHandler 创建生产 OPEN Handler；Proxy 为空时使用统一双向 RAW 实现。
 func NewHandler(options Options) (*Handler, error) {
-	if options.ReadTimeout <= 0 || options.WriteTimeout <= 0 || options.ConnectTimeout <= 0 || !validDialer(options.Dialer) {
+	if options.ReadTimeout <= 0 || options.WriteTimeout <= 0 || !validDialer(options.Dialer) {
 		return nil, ErrInvalidOptions
 	}
 	if options.Proxy == nil {
@@ -135,11 +135,9 @@ func (handler *Handler) handle(
 		return fmt.Errorf("%w: accept OpenRequest: %v", ErrProtocol, err)
 	}
 
-	dialContext, cancelDial := context.WithTimeout(ctx, handler.options.ConnectTimeout)
 	startedAt := time.Now()
-	origin, code, dialErr := handler.options.Dialer.DialOrigin(dialContext, request.GetServiceId())
+	origin, code, dialErr := handler.options.Dialer.DialOrigin(ctx, request.GetServiceId())
 	latency := time.Since(startedAt)
-	cancelDial()
 	if dialErr != nil {
 		if code == protocolv1.ErrorCode_ERROR_CODE_OK {
 			code = protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE

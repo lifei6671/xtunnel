@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/lifei6671/xtunnel/internal/identity"
+	"github.com/lifei6671/xtunnel/internal/originconfig"
 )
 
 const (
@@ -16,7 +17,6 @@ const (
 	maximumHealthThreshold  uint32 = 20
 	minimumHTTPStatus       uint32 = 100
 	maximumHTTPStatus       uint32 = 599
-	maximumOriginPort       uint32 = 65_535
 )
 
 var (
@@ -87,31 +87,22 @@ type Service struct {
 func (service Service) Validate() error {
 	if !identity.ValidServiceID(service.ID) || !identity.ValidTunnelID(service.TunnelID) ||
 		strings.TrimSpace(service.Name) == "" || strings.TrimSpace(service.OriginHost) == "" ||
-		service.RequiredRevision < 0 || service.OriginPort < 1 || service.OriginPort > maximumOriginPort ||
-		service.ConnectTimeoutMS == 0 || service.Version < 1 || service.CreatedAt <= 0 || service.UpdatedAt <= 0 {
+		service.RequiredRevision < 0 || service.Version < 1 || service.CreatedAt <= 0 || service.UpdatedAt <= 0 {
 		return ErrInvalidService
 	}
 
-	if !validOriginFields(service) || !validHealthCheck(service.Health) {
+	if err := originconfig.Validate(originconfig.Fields{
+		Scheme:           string(service.OriginScheme),
+		Host:             service.OriginHost,
+		Port:             service.OriginPort,
+		ConnectTimeoutMS: service.ConnectTimeoutMS,
+		TLSVerify:        service.TLSVerify,
+		TLSServerName:    service.TLSServerName,
+		HTTPHostHeader:   service.OriginHTTPHost,
+	}); err != nil || !validHealthCheck(service.Health) {
 		return ErrInvalidService
 	}
 	return nil
-}
-
-func validOriginFields(service Service) bool {
-	if whitespaceOnly(service.TLSServerName) || whitespaceOnly(service.OriginHTTPHost) {
-		return false
-	}
-	switch service.OriginScheme {
-	case OriginSchemeHTTP:
-		return service.TLSServerName == ""
-	case OriginSchemeHTTPS:
-		return true
-	case OriginSchemeTCP:
-		return service.TLSServerName == "" && service.OriginHTTPHost == ""
-	default:
-		return false
-	}
 }
 
 func validHealthCheck(health *HealthCheck) bool {
@@ -134,10 +125,6 @@ func validHealthCheck(health *HealthCheck) bool {
 	default:
 		return false
 	}
-}
-
-func whitespaceOnly(value string) bool {
-	return value != "" && strings.TrimSpace(value) == ""
 }
 
 // ServiceRepository 定义 Service 的最小持久化边界。

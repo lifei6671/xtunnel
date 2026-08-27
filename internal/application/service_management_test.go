@@ -63,6 +63,53 @@ func TestServiceManagementCreateAppliesDefaultsAndGatesCandidate(t *testing.T) {
 	assertStoredService(t, store, created)
 }
 
+func TestServiceManagementRejectsOriginThatAgentCannotCompileBeforeCommit(t *testing.T) {
+	t.Run("Create", func(t *testing.T) {
+		store := openServiceManagementStore(t)
+		seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+		gate := &recordingSnapshotGate{}
+		service := newServiceManagementTestService(store, gate, serviceManagementIDOne)
+		input := validCreateServiceInput(serviceManagementTunnelID, "invalid-origin")
+		input.Origin.Host = "Origin.Example"
+
+		if _, err := service.Create(context.Background(), input); !errors.Is(err, ErrServiceManagementInput) {
+			t.Fatalf("Create() error = %v, want ErrServiceManagementInput", err)
+		}
+		assertServiceManagementState(t, store, serviceManagementTunnelID, 0, 0)
+		if len(gate.snapshot()) != 0 {
+			t.Fatal("invalid Create reached Snapshot Gate")
+		}
+	})
+
+	t.Run("Update", func(t *testing.T) {
+		store := openServiceManagementStore(t)
+		seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+		gate := &recordingSnapshotGate{}
+		service := newServiceManagementTestService(store, gate, serviceManagementIDOne)
+		created, err := service.Create(context.Background(), validCreateServiceInput(serviceManagementTunnelID, "valid"))
+		if err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		invalid := validServiceOriginInput()
+		invalid.Host = "origin.example:8080"
+
+		if _, err := service.Update(context.Background(), UpdateServiceInput{
+			TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+			ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Origin: &invalid,
+		}); !errors.Is(err, ErrServiceManagementInput) {
+			t.Fatalf("Update() error = %v, want ErrServiceManagementInput", err)
+		}
+		assertServiceManagementState(t, store, serviceManagementTunnelID, 1, 1)
+		stored := readServiceManagementService(t, store, serviceManagementTunnelID, created.Service.ID)
+		if stored.Version != 1 || stored.OriginHost != created.Service.OriginHost {
+			t.Fatalf("invalid Update changed Service = %+v", nonSensitiveServiceState(stored))
+		}
+		if len(gate.snapshot()) != 1 {
+			t.Fatalf("invalid Update Gate calls = %d, want only initial Create", len(gate.snapshot()))
+		}
+	})
+}
+
 func TestServiceManagementHealthDefaultsAndRejectsTCPHTTPFieldMixing(t *testing.T) {
 	interval := uint32(30_000)
 	httpHealth, err := serviceHealth(&ServiceHealthInput{
@@ -127,6 +174,143 @@ func TestServiceManagementGateFailureRollsBackAndPreservesCapacityError(t *testi
 	assertServiceManagementState(t, store, serviceManagementTunnelID, 0, 0)
 	if len(gate.snapshot()) != 1 {
 		t.Fatalf("Snapshot Gate call count = %d, want 1", len(gate.snapshot()))
+	}
+}
+
+func TestServiceManagementNotifiesOnlyCommittedSnapshotChanges(t *testing.T) {
+	store := openServiceManagementStore(t)
+	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+	gate := &recordingSnapshotGate{}
+	wantRevisions := []int64{1, 2, 3}
+	wantServiceCounts := []int64{1, 1, 0}
+	notifier := &recordingSnapshotNotifier{afterMark: func(tunnelID string, call int) {
+		assertServiceManagementState(t, store, tunnelID, wantRevisions[call-1], wantServiceCounts[call-1])
+	}}
+	service := newServiceManagementTestServiceWithNotifier(
+		store, gate, notifier, serviceManagementIDOne,
+	)
+
+	created, err := service.Create(
+		context.Background(), validCreateServiceInput(serviceManagementTunnelID, "before"),
+	)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	name := "after"
+	nameOnly, err := service.Update(context.Background(), UpdateServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Name: &name,
+	})
+	if err != nil {
+		t.Fatalf("Update(name only) error = %v", err)
+	}
+	if _, err := service.Update(context.Background(), UpdateServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: nameOnly.Service.Version, Name: &name,
+	}); err != nil {
+		t.Fatalf("Update(no-op) error = %v", err)
+	}
+	if calls := notifier.snapshot(); !reflect.DeepEqual(calls, []string{serviceManagementTunnelID}) {
+		t.Fatalf("dirty calls after name-only/no-op Updates = %v, want Create only", calls)
+	}
+
+	disabled := false
+	gateErr := errors.New("TUNNEL_SERVICE_LIMIT")
+	gate.setError(gateErr)
+	if _, err := service.Update(context.Background(), UpdateServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: nameOnly.Service.Version, Enabled: &disabled,
+	}); !errors.Is(err, gateErr) {
+		t.Fatalf("Update(gate failure) error = %v, want Gate error", err)
+	}
+	if calls := notifier.snapshot(); len(calls) != 1 {
+		t.Fatalf("dirty calls after rolled-back Update = %v, want Create only", calls)
+	}
+
+	gate.setError(nil)
+	updated, err := service.Update(context.Background(), UpdateServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: nameOnly.Service.Version, Enabled: &disabled,
+	})
+	if err != nil {
+		t.Fatalf("Update(snapshot fields) error = %v", err)
+	}
+	if _, err := service.Delete(context.Background(), DeleteServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: updated.Service.Version,
+	}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if calls := notifier.snapshot(); !reflect.DeepEqual(calls, []string{
+		serviceManagementTunnelID, serviceManagementTunnelID, serviceManagementTunnelID,
+	}) {
+		t.Fatalf("committed Snapshot dirty calls = %v", calls)
+	}
+}
+
+func TestServiceManagementNotifierFailureReturnsCommittedResult(t *testing.T) {
+	signalErr := errors.New("injected reconcile signal failure")
+	for _, operation := range []string{"Create", "Update", "Delete"} {
+		t.Run(operation, func(t *testing.T) {
+			store := openServiceManagementStore(t)
+			seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+			gate := &recordingSnapshotGate{}
+			var created ServiceMutationResult
+			if operation != "Create" {
+				var err error
+				created, err = newServiceManagementTestService(store, gate, serviceManagementIDOne).Create(
+					context.Background(), validCreateServiceInput(serviceManagementTunnelID, "before"),
+				)
+				if err != nil {
+					t.Fatalf("seed Create() error = %v", err)
+				}
+			}
+
+			notifier := &recordingSnapshotNotifier{err: signalErr}
+			service := newServiceManagementTestServiceWithNotifier(
+				store, gate, notifier, serviceManagementIDOne,
+			)
+			var result ServiceMutationResult
+			var err error
+			switch operation {
+			case "Create":
+				result, err = service.Create(
+					context.Background(), validCreateServiceInput(serviceManagementTunnelID, "created"),
+				)
+			case "Update":
+				disabled := false
+				result, err = service.Update(context.Background(), UpdateServiceInput{
+					TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+					ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Enabled: &disabled,
+				})
+			case "Delete":
+				result, err = service.Delete(context.Background(), DeleteServiceInput{
+					TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+					ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1,
+				})
+			}
+
+			if !errors.Is(err, ErrServiceRuntimeConvergence) || !errors.Is(err, signalErr) {
+				t.Fatalf("%s() error = %v, want convergence and signal causes", operation, err)
+			}
+			if !result.Changed || result.Service.ID == "" {
+				t.Fatalf("%s() committed result = %+v", operation, nonSensitiveMutationState(result))
+			}
+			if calls := notifier.snapshot(); !reflect.DeepEqual(calls, []string{serviceManagementTunnelID}) {
+				t.Fatalf("%s() dirty calls = %v", operation, calls)
+			}
+			switch operation {
+			case "Create":
+				assertStoredService(t, store, result.Service)
+				assertServiceManagementState(t, store, serviceManagementTunnelID, 1, 1)
+			case "Update":
+				assertStoredService(t, store, result.Service)
+				assertServiceManagementState(t, store, serviceManagementTunnelID, 2, 1)
+			case "Delete":
+				assertServiceManagementState(t, store, serviceManagementTunnelID, 2, 0)
+			}
+		})
 	}
 }
 
@@ -473,6 +657,13 @@ type recordingSnapshotGate struct {
 	calls []snapshotGateCall
 }
 
+type recordingSnapshotNotifier struct {
+	mu        sync.Mutex
+	err       error
+	calls     []string
+	afterMark func(string, int)
+}
+
 type revisionOverrideStore struct {
 	repository.Store
 	revision int64
@@ -533,12 +724,42 @@ func (gate *recordingSnapshotGate) snapshot() []snapshotGateCall {
 	return calls
 }
 
+func (notifier *recordingSnapshotNotifier) MarkDirty(tunnelID string) error {
+	notifier.mu.Lock()
+	notifier.calls = append(notifier.calls, tunnelID)
+	call := len(notifier.calls)
+	err := notifier.err
+	afterMark := notifier.afterMark
+	notifier.mu.Unlock()
+	if afterMark != nil {
+		afterMark(tunnelID, call)
+	}
+	return err
+}
+
+func (notifier *recordingSnapshotNotifier) snapshot() []string {
+	notifier.mu.Lock()
+	defer notifier.mu.Unlock()
+	return append([]string(nil), notifier.calls...)
+}
+
 func newServiceManagementTestService(
 	store repository.Store,
 	gate TunnelSnapshotGate,
 	identifiers ...string,
 ) *ServiceManagementService {
-	service := NewServiceManagementService(store, gate)
+	return newServiceManagementTestServiceWithNotifier(
+		store, gate, &recordingSnapshotNotifier{}, identifiers...,
+	)
+}
+
+func newServiceManagementTestServiceWithNotifier(
+	store repository.Store,
+	gate TunnelSnapshotGate,
+	notifier SnapshotReconcileNotifier,
+	identifiers ...string,
+) *ServiceManagementService {
+	service := NewServiceManagementService(store, gate, notifier)
 	var mutex sync.Mutex
 	next := 0
 	service.newServiceID = func() (string, error) {

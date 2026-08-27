@@ -5,14 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"runtime"
 	"sync"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/agent/configruntime"
+	agenthealth "github.com/lifei6671/xtunnel/internal/agent/health"
 	"github.com/lifei6671/xtunnel/internal/agent/open"
+	agentorigin "github.com/lifei6671/xtunnel/internal/agent/origin"
 	"github.com/lifei6671/xtunnel/internal/agent/reconnect"
 	agentsession "github.com/lifei6671/xtunnel/internal/agent/session"
 	agentworkpool "github.com/lifei6671/xtunnel/internal/agent/workpool"
@@ -24,12 +25,10 @@ import (
 )
 
 const (
-	controlAuthTimeout = 10 * time.Second
-	workAuthTimeout    = 10 * time.Second
-	openReadTimeout    = 10 * time.Second
-	openWriteTimeout   = 10 * time.Second
-	originDialTimeout  = 10 * time.Second
-
+	controlAuthTimeout  = 10 * time.Second
+	workAuthTimeout     = 10 * time.Second
+	openReadTimeout     = 10 * time.Second
+	openWriteTimeout    = 10 * time.Second
 	controlHighQueue    = 32
 	controlNormalQueue  = 128
 	controlInboundQueue = 128
@@ -43,12 +42,14 @@ const (
 )
 
 var (
-	// ErrInvalidConfig 表示 Connector 缺少 Token、身份或 Origin 解析器。
+	// ErrInvalidConfig 表示 Connector 缺少 Token 或进程身份。
 	ErrInvalidConfig = errors.New("agent connector runtime config is invalid")
 	// ErrUnsupportedControlMessage 表示 M1 Agent 收到当前方向不应处理的消息。
 	ErrUnsupportedControlMessage = errors.New("agent connector received unsupported control message")
 	// ErrServiceConfigNotObserved 表示本代 Session 尚未成功 Ack 任何完整 Snapshot。
-	ErrServiceConfigNotObserved = errors.New("service configuration has not been observed by connector")
+	ErrServiceConfigNotObserved = agentorigin.ErrConfigNotObserved
+	// ErrHealthStopped 表示中心 Health Scheduler 在 Connector Runtime 结束前意外退出。
+	ErrHealthStopped = errors.New("agent health scheduler stopped unexpectedly")
 )
 
 // Config 是进程启动时冻结、并在全部重连代次复用的 Connector 输入。
@@ -59,7 +60,6 @@ type Config struct {
 	Version         string
 	OS              string
 	Arch            string
-	OriginDialer    open.OriginDialer
 }
 
 // Runtime 持有一个进程内固定 Connector 身份及其可重连 Control Runner。
@@ -71,6 +71,7 @@ type Runtime struct {
 	newWorkPool        func(agentworkpool.Config) (workPool, error)
 	newDrainID         func() (string, error)
 	drainTimeout       time.Duration
+	health             healthRuntime
 
 	retiredMu    sync.Mutex
 	retiredNext  uint64
@@ -98,16 +99,17 @@ type establishedSession interface {
 	Done() <-chan struct{}
 }
 
-type snapshotBuilder struct{}
-
-type snapshotCandidate struct{}
-
-type snapshotResources struct{}
+type healthRuntime interface {
+	Start(context.Context) error
+	Done() <-chan struct{}
+	Err() error
+	Shutdown(context.Context) error
+}
 
 // New 创建生产 Connector Runtime，但不会立即建立网络连接。
 func New(config Config) (*Runtime, error) {
 	if config.ConnectionToken == "" || config.Connector.ID() == "" || config.Hostname == "" ||
-		config.Version == "" || config.OS == "" || config.Arch == "" || config.OriginDialer == nil {
+		config.Version == "" || config.OS == "" || config.Arch == "" {
 		return nil, ErrInvalidConfig
 	}
 	runner, err := agentsession.NewRunner(agentsession.Config{
@@ -131,9 +133,12 @@ func New(config Config) (*Runtime, error) {
 		return nil, fmt.Errorf("create connector control runner: %w", err)
 	}
 	sharedBudget := agentworkpool.NewBudget()
+	originResolver := agentorigin.New()
+	healthManager := agenthealth.New()
 	return &Runtime{
 		token:  config.ConnectionToken,
-		origin: config.OriginDialer,
+		origin: originResolver,
+		health: healthManager,
 		runControlSessions: func(ctx context.Context, handler reconnect.SessionHandler[*agentsession.Session]) error {
 			return reconnect.Run(ctx, runner, handler, reconnect.Options{
 				InitialBackoff: reconnectInitial,
@@ -149,7 +154,7 @@ func New(config Config) (*Runtime, error) {
 				MaxSnapshotBytes:     configruntime.MaxSnapshotSize,
 				MaxControlFrameBytes: int(frame.MaxControlFrameSize),
 				RetireTimeout:        agentDrainTimeout,
-				Builder:              snapshotBuilder{},
+				Builder:              snapshotBuilder{origin: originResolver, health: healthManager},
 			})
 		},
 		newWorkPool: func(config agentworkpool.Config) (workPool, error) {
@@ -175,17 +180,68 @@ func (runtime *Runtime) Run(ctx context.Context) error {
 		return fmt.Errorf("create Agent config runtime: %w", err)
 	}
 	defer cancelManagerParent()
+	if runtime.health != nil {
+		if startErr := runtime.health.Start(managerParent); startErr != nil {
+			configErr, healthErr := closeConfigAndHealth(
+				ctx, manager, runtime.health, time.Now().Add(runtime.drainTimeout),
+			)
+			return errors.Join(
+				fmt.Errorf("start Agent health scheduler: %w", startErr),
+				configErr,
+				healthErr,
+			)
+		}
+	}
+
+	runContext, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	var healthWatch sync.WaitGroup
+	var healthWatchErr error
+	if runtime.health != nil {
+		healthWatch.Add(1)
+		safego.Go(func(panicErr error) {
+			healthWatchErr = fmt.Errorf("observe Agent health scheduler: %w", panicErr)
+			cancelRun()
+		}, healthWatch.Done, func() {
+			select {
+			case <-runtime.health.Done():
+				healthErr := runtime.health.Err()
+				if healthErr == nil {
+					healthErr = ErrHealthStopped
+				}
+				healthWatchErr = fmt.Errorf("run Agent health scheduler: %w", healthErr)
+				cancelRun()
+			case <-runContext.Done():
+			}
+		})
+	}
 
 	shutdownStarted := make(chan time.Time, 1)
 	stopShutdownClock := context.AfterFunc(ctx, func() { shutdownStarted <- time.Now() })
-	runErr := runtime.runControlSessions(ctx, func(sessionContext context.Context, session *agentsession.Session) error {
+	runErr := runtime.runControlSessions(runContext, func(sessionContext context.Context, session *agentsession.Session) error {
 		return runtime.handleSession(sessionContext, manager, session)
 	})
-	closeTimeout := runtime.drainTimeout
+	cancelRun()
+	healthWatch.Wait()
+	if runtime.health != nil && healthWatchErr == nil {
+		select {
+		case <-runtime.health.Done():
+			healthErr := runtime.health.Err()
+			if healthErr == nil {
+				healthErr = ErrHealthStopped
+			}
+			healthWatchErr = fmt.Errorf("run Agent health scheduler: %w", healthErr)
+		default:
+		}
+	}
 	if stopShutdownClock() {
 		if ctx.Err() == nil {
 			runtime.shutdownRetiredPools()
-			return errors.Join(runErr, runtime.retiredError(), closeConfigManager(ctx, manager, closeTimeout))
+			configErr, healthErr := closeConfigAndHealth(
+				ctx, manager, runtime.health, time.Now().Add(runtime.drainTimeout),
+			)
+			return errors.Join(runErr, healthWatchErr, runtime.retiredError(),
+				configErr, healthErr)
 		}
 		shutdownStarted <- time.Now()
 	}
@@ -195,11 +251,9 @@ func (runtime *Runtime) Run(ctx context.Context) error {
 		remaining = 0
 	}
 	runtime.drainRetiredPools(remaining)
-	closeTimeout = time.Until(shutdownDeadline)
-	if closeTimeout < 0 {
-		closeTimeout = 0
-	}
-	return errors.Join(runErr, runtime.retiredError(), closeConfigManager(ctx, manager, closeTimeout))
+	configErr, healthErr := closeConfigAndHealth(ctx, manager, runtime.health, shutdownDeadline)
+	return errors.Join(runErr, healthWatchErr, runtime.retiredError(),
+		configErr, healthErr)
 }
 
 func (runtime *Runtime) handleSession(
@@ -220,7 +274,7 @@ func (runtime *Runtime) handleSession(
 
 	openHandler, err := open.NewHandler(open.Options{
 		ReadTimeout: openReadTimeout, WriteTimeout: openWriteTimeout,
-		ConnectTimeout: originDialTimeout, Dialer: runtime.origin,
+		Dialer: runtime.origin,
 	})
 	if err != nil {
 		clear(authentication.SessionSecret[:])
@@ -511,29 +565,6 @@ func observedRevision(session *configruntime.Session) uint64 {
 	return revision
 }
 
-func (snapshotBuilder) Build(ctx context.Context, _ *protocolv1.TunnelSnapshot, _ configruntime.Gate) (configruntime.Candidate, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return snapshotCandidate{}, nil
-}
-
-func (snapshotCandidate) Start(ctx context.Context) error {
-	return ctx.Err()
-}
-
-func (snapshotCandidate) Abort(context.Context) error {
-	return nil
-}
-
-func (snapshotCandidate) Runtime() configruntime.Resources {
-	return snapshotResources{}
-}
-
-func (snapshotResources) Retire(context.Context) error {
-	return nil
-}
-
 func closeConfigManager(parent context.Context, manager *configruntime.Manager, timeout time.Duration) error {
 	closeContext, cancelClose := context.WithTimeout(context.WithoutCancel(parent), timeout)
 	defer cancelClose()
@@ -543,9 +574,43 @@ func closeConfigManager(parent context.Context, manager *configruntime.Manager, 
 	return nil
 }
 
+func shutdownHealth(parent context.Context, health healthRuntime, timeout time.Duration) error {
+	if health == nil {
+		return nil
+	}
+	shutdownContext, cancelShutdown := context.WithTimeout(context.WithoutCancel(parent), timeout)
+	defer cancelShutdown()
+	if err := health.Shutdown(shutdownContext); err != nil {
+		return fmt.Errorf("shutdown Agent health scheduler: %w", err)
+	}
+	return nil
+}
+
+// closeConfigAndHealth 让两个 Owner 按固定顺序共享同一个绝对截止时间。
+// Config Close 消耗的时间会从 Health Shutdown 的预算中扣除，避免串行清理
+// 把进程的固定排空窗口隐式翻倍。
+func closeConfigAndHealth(
+	parent context.Context,
+	manager *configruntime.Manager,
+	health healthRuntime,
+	deadline time.Time,
+) (error, error) {
+	configErr := closeConfigManager(parent, manager, remainingUntil(deadline))
+	healthErr := shutdownHealth(parent, health, remainingUntil(deadline))
+	return configErr, healthErr
+}
+
+func remainingUntil(deadline time.Time) time.Duration {
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
 // HostConfig 使用进程当前主机与 Go 运行时信息构造无本地状态的生产配置。
 // Connector 在此函数每次调用时新建，因此调用方必须只在单个进程生命周期调用一次。
-func HostConfig(connectionToken, version string, origin open.OriginDialer) (Config, error) {
+func HostConfig(connectionToken, version string) (Config, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		return Config{}, fmt.Errorf("read Agent hostname: %w", err)
@@ -561,18 +626,8 @@ func HostConfig(connectionToken, version string, origin open.OriginDialer) (Conf
 		Version:         version,
 		OS:              runtime.GOOS,
 		Arch:            runtime.GOARCH,
-		OriginDialer:    origin,
 	}, nil
 }
-
-// UnobservedOriginDialer 是 M3 Snapshot 尚未 Apply 时的安全边界。
-// 它不会猜测 localhost、环境变量或其他地址，避免把未知 service_id 错接到本机服务。
-func UnobservedOriginDialer(context.Context, string) (net.Conn, protocolv1.ErrorCode, error) {
-	return nil, protocolv1.ErrorCode_ERROR_CODE_SERVICE_CONFIG_NOT_OBSERVED, ErrServiceConfigNotObserved
-}
-
-// 保证静态函数可直接作为生产 OPEN Handler 的 OriginDialer 使用。
-var _ open.OriginDialer = open.OriginDialerFunc(UnobservedOriginDialer)
 
 // 编译期确保生产 WorkPool Handler 仍与 OPEN Handler 契约一致。
 var _ agentworkpool.Handler = (*open.Handler)(nil)

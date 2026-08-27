@@ -128,6 +128,7 @@ func openGatewayLifecycle(config serverconfig.Config, resources storage, logger 
 		SnapshotProvider:     snapshotSource,
 		HeartbeatTimeout:     config.ConnectorRuntime.HeartbeatTimeout.Duration,
 		Logger:               logger,
+		ReportRuntimeError:   reportRuntimeError,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("construct gateway Session runtime: %w", err)
@@ -319,7 +320,24 @@ func openGatewayAndBootstrapWith(
 		// 进程 Context 取消只触发外层冻结的排空顺序；已认证 Gateway 连接必须继续
 		// 存活到 ACTIVE 自然结束或 Server Drain Deadline。
 		if err := gatewayServer.Start(context.WithoutCancel(ctx)); err != nil {
-			startErr := fmt.Errorf("start agent gateway after admin bootstrap: %w", err)
+			startErr := errors.Join(fmt.Errorf("start agent gateway after admin bootstrap: %w", err), gatewayServer.Close())
+			reportRuntimeError(startErr)
+			return startErr
+		}
+		// 冻结的 Server 启动顺序是 Gateway 后紧接唯一 Runtime Reconciler。
+		// 极短窗口内到达的 Control Session 因 Reconciler 未启动而 fail-closed，
+		// Agent 使用现有 backoff 重连，不会回落到本地配置。
+		if err := sessions.Start(context.WithoutCancel(ctx)); err != nil {
+			drainContext, cancelDrain := context.WithTimeout(context.Background(), serverDrainTimeout)
+			stopErr := gatewayServer.StopAccepting()
+			shutdownErr := sessions.Shutdown(drainContext)
+			cancelDrain()
+			startErr := errors.Join(
+				fmt.Errorf("start server Snapshot reconciler: %w", err),
+				stopErr,
+				shutdownErr,
+				gatewayServer.Close(),
+			)
 			reportRuntimeError(startErr)
 			return startErr
 		}

@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-08-26
+> **进度基线日期**：2026-08-27
 >
-> **当前阶段**：M3 Configuration + Health · IN_PROGRESS（M3-05 已进入 `REVIEW`，等待阶段复审后推进 M3-06）
+> **当前阶段**：M3 Configuration + Health · IN_PROGRESS（M3-08 已进入 `REVIEW`，等待阶段复审后推进 M3-09）
 >
-> **当前结论**：M3-01 至 M3-05 保持 `REVIEW`。M3-05 已完成 Token-only 启动/重连的完整 Snapshot、ConfigAck、Connector config-ready 门禁和生产 Bootstrap 接线；Server Schema 已将 `max_services_per_tunnel` 绝对上限收紧为 1000。持续 Snapshot Reconcile、真实 Origin Resolver 和服务级 Health/Eligible 仍分别属于 M3-06 至 M3-09。Proto、OpenAPI、依赖和锁文件保持不变。
+> **当前结论**：M3-01 至 M3-08 保持 `REVIEW`。M3-08 已完成每 Connector 唯一的中心 Health Scheduler、Heap 时序、固定全局/per-origin 并发与 Rate Budget、Jitter、TCP/HTTP Check、三态阈值、Stale/Budget fail-closed、Snapshot generation fencing 和受控 goroutine 生命周期；Health Batch、Revision Fencing Report 与服务级 Eligible 仍属于 M3-09。M3-01 初始数据库 Schema 已按用户确认前置预留 UDP、原生 QUIC 与文件系统 Unix Socket 形态，但 V0.1 Protocol/Application/Agent 仍只执行 HTTP/HTTPS/TCP。OpenAPI、Server Schema、依赖和锁文件保持不变。
 
 ---
 
@@ -274,14 +274,14 @@ M1 的静态 Service 只能由 Integration Test Harness 注入，不得为过渡
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M3-01 | Service 领域与存储 | M1-14、M0-05 | Domain + SQLite Repository | Service 直接归属 Tunnel；Origin/Health/Enabled/RequiredRevision 不变量、引用关系和容量边界；无中间关联表 | `REVIEW` |
+| M3-01 | Service 领域与存储 | M1-14、M0-05 | Domain + SQLite Repository | Service 直接归属 Tunnel；Origin/Health/Enabled/RequiredRevision 不变量、引用关系和容量边界；初始 Schema 预留 UDP/原生 QUIC/文件系统 Unix Socket，当前 Runtime 对预留 Scheme fail closed；无中间关联表 | `REVIEW` |
 | M3-02 | Application Service + Version Transaction | M3-01 | Server Application Service | Service Aggregate 修改在单事务递增 version/revision；并发写不丢失 | `REVIEW` |
 | M3-03 | Snapshot Builder/Size Gate | M3-02 | TunnelSnapshot Builder | 稳定排序、Service 数/字节上限在事务提交前校验 | `REVIEW` |
 | M3-04 | Agent In-Memory Atomic Apply | M3-03、M05-08、M1-07 | Agent Config Runtime + ConfigAck | `Validate → Prepare/Build Candidate → Start Candidate Resources（保持 unpublished/gated，不发 Health、不参与选择）→ Atomic Publish Runtime + Revision + Digest → ConfigAck → 有界 Retire 旧配置/Health 资源`；Retire 不关闭旧 Revision 已进入 ACTIVE 的 WorkConn；Candidate 失败释放自身资源并保留当前 Revision；Digest 在递归 Unknown Field 拒绝后按 Deterministic Snapshot Bytes 计算，且只驻留内存 | `REVIEW` |
 | M3-05 | Token-only Startup/Reconnect + Remote Config | M3-04、M1-05 | Agent Bootstrap/Reconnect Integration | Agent 仅凭 Connection Token 建连；每次启动或重连从 Server 获取完整 Desired Snapshot；Apply 成功并 Ack 前不进入 Eligible；Server 不可达时不上线且无本地配置回退 | `REVIEW` |
-| M3-06 | Snapshot Reconcile/Observed Revision | M3-03至 M3-05、M1-07 | Reconciler + ConfigAck | Single Reconcile Loop；过期 Revision 拒绝，高 Revision debounce/coalesce；构建期间 generation 变化则丢弃旧 Candidate 并直接构建最新 generation；同 Revision 同 Digest 幂等、不同 Digest 协议错误；完整 Apply 的 Ack 后才 Eligible；新 Control Session 重置 observed revision/digest 基线并重新获取完整 Snapshot | `NOT_STARTED` |
-| M3-07 | Origin Resolver | M3-03、M3-04 | Agent Origin Resolver | 仅从当前已原子 Apply 的内存 Snapshot 解析 HTTP/HTTPS/TCP、DNS/IPv4/IPv6、TLS Server Name 与 SSRF 边界 | `NOT_STARTED` |
-| M3-08 | 中心 Health Scheduler | M3-07 | Heap/Wheel Scheduler + Semaphores | 全局/per-origin 并发、Rate、initial/interval jitter；无 per-service ticker；状态机固定为 UNKNOWN 首次成功进入 HEALTHY，UNKNOWN/HEALTHY 连续 `failure_threshold` 次失败进入 UNHEALTHY，UNHEALTHY 连续 `success_threshold` 次成功恢复 HEALTHY，反向结果重置连续计数 | `NOT_STARTED` |
+| M3-06 | Snapshot Reconcile/Observed Revision | M3-03至 M3-05、M1-07 | Reconciler + ConfigAck | Single Reconcile Loop；过期 Revision 拒绝，高 Revision debounce/coalesce；构建期间 generation 变化则丢弃旧 Candidate 并直接构建最新 generation；同 Revision 同 Digest 幂等、不同 Digest 协议错误；完整 Apply 的 Ack 后才 Eligible；新 Control Session 重置 observed revision/digest 基线并重新获取完整 Snapshot | `REVIEW` |
+| M3-07 | Origin Resolver | M3-03、M3-04 | Agent Origin Resolver | 仅从当前已原子 Apply 的内存 Snapshot 解析 HTTP/HTTPS/TCP、DNS/IPv4/IPv6、TLS Server Name 与 SSRF 边界 | `REVIEW` |
+| M3-08 | 中心 Health Scheduler | M3-07 | Heap/Wheel Scheduler + Semaphores | 全局/per-origin 并发、Rate、initial/interval jitter；无 per-service ticker；状态机固定为 UNKNOWN 首次成功进入 HEALTHY，UNKNOWN/HEALTHY 连续 `failure_threshold` 次失败进入 UNHEALTHY，UNHEALTHY 连续 `success_threshold` 次成功恢复 HEALTHY，反向结果重置连续计数 | `REVIEW` |
 | M3-09 | Health Batch/Revision Fencing + Eligible Selection | M3-06、M3-08、M2-02 | Pending Accumulator、Batch Reporter、完整 Connector Eligible Filter | `service_id` 合并；出队分配 generation；Control 重连且完整 Snapshot Apply/Ack 后，Owner/Outbox 按新 Session generation 在 ConfigAck 后立即发送当前 Revision 全量 Health，之后再发增量 Batch；将 required/observed Revision 和 Per-Service Health 接入 M2 Selection；UNKNOWN/旧 Revision Health 不放行 | `NOT_STARTED` |
 | M3-10 | Health Target Budget Manager | M3-01、M3-08、M2-06 | Reserve/Commit/Release Manager | `(tunnel_id,connector_id)` 所有权；固定锁顺序；重连不双计费/误释放 | `NOT_STARTED` |
 | M3-11 | Tunnel/Connector/Service Status | M3-06、M3-09、M3-10 | `internal/server/status` | 状态优先级唯一；Origin Health 不污染 Tunnel/Connector；Web 不重算 | `NOT_STARTED` |
@@ -422,17 +422,20 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14` 已完成。M2-01 至 M2-08 已完成本地实现、提交、验收与用户阶段 Review，但仍等待对应 CI 证据；M3-01 至 M3-05 已完成本地实现与独立复审，当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14` 已完成。M2-01 至 M2-08 已完成本地实现、提交、验收与用户阶段 Review，但仍等待对应 CI 证据；M3-01 至 M3-08 已完成本地实现与独立复审，当前待办为：
 
-1. `M3-06` — 等待 M3-05 阶段 Review 通过后实现 Single Reconcile Loop、debounce/coalesce、generation fencing，以及同 Revision Digest 的幂等/冲突语义。
-2. `M3-05` — Token-only 启动/重连、完整 Snapshot、ConfigAck 与 Connector config-ready 门禁已完成并独立复审，保持 `REVIEW`；M3-07 前生产 Origin 仍按安全边界拒绝解析。
-3. `M3-04` — 独立 Config Runtime 内核、并发资源生命周期、ConfigAck 入队门闩与失败清理已完成并独立复审，保持 `REVIEW`。
-4. `M3-03` — Transaction Gate 与 Startup Gate 均已完成并独立复审，保持 `REVIEW`；未来 M4 的 Management/HTTP/TCP Listener 必须继续位于 Startup Gate 下游。
-5. `M3-02` — 单事务 Application Service 与真实 Builder 容量回滚链已完成并独立复审，保持 `REVIEW`。
-6. `M3-01` — 本地实现与独立复审完成，保持 `REVIEW`；当前 Index 只含部分新增文件，提交前必须重新整体暂存最终工作树并从 staged snapshot 验证。
-7. `M2-01` 至 `M2-08` — 用户阶段 Review 已通过，本地提交 `4447602` 尚未推送；待对应 CI 证据后才能从 `REVIEW` 转为 `DONE`。
-8. `M0-09` — 正式 Dockerfile 双架构与 Windows SCM 已在 CI #11/#12 通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
-9. `M0-02` — Token-only Bootstrap 等待用户复审。
+1. `M3-09` — 等待 M3-08 阶段 Review 通过后实现 Health Batch、Session generation/revision fencing 与服务级 Eligible Selection；UNKNOWN 或旧 Revision Health 不得放行。
+2. `M3-08` — 中心 Heap Scheduler、固定并发/Rate Budget、Jitter、TCP/HTTP Check、三态阈值、Stale/Budget fail-closed 与 Snapshot fencing 已完成并独立复审，保持 `REVIEW`。
+3. `M3-07` — 当前已 Ack Snapshot 的 HTTP/HTTPS/TCP Origin Resolver、原子 Gate、DNS/IP、TLS 与受信管理面 SSRF 边界已完成并独立复审，保持 `REVIEW`。
+4. `M3-06` — Single Reconcile Loop、post-COMMIT dirty 合并、generation fencing、outstanding/pending Ack 串行和 Agent revision/digest 语义已完成并独立复审，保持 `REVIEW`。
+5. `M3-05` — Token-only 启动/重连、完整 Snapshot、ConfigAck 与 Connector config-ready 门禁已完成并独立复审，保持 `REVIEW`。
+6. `M3-04` — 独立 Config Runtime 内核、并发资源生命周期、ConfigAck 入队门闩与失败清理已完成并独立复审，保持 `REVIEW`。
+7. `M3-03` — Transaction Gate 与 Startup Gate 均已完成并独立复审，保持 `REVIEW`；未来 M4 的 Management/HTTP/TCP Listener 必须继续位于 Startup Gate 下游。
+8. `M3-02` — 单事务 Application Service 与真实 Builder 容量回滚链已完成并独立复审，保持 `REVIEW`。
+9. `M3-01` — 本地实现与独立复审完成，未来 Origin 持久化预留约束也已复核，保持 `REVIEW`。
+10. `M2-01` 至 `M2-08` — 用户阶段 Review 已通过，本地提交 `4447602` 尚未推送；待对应 CI 证据后才能从 `REVIEW` 转为 `DONE`。
+11. `M0-09` — 正式 Dockerfile 双架构与 Windows SCM 已在 CI #11/#12 通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
+12. `M0-02` — Token-only Bootstrap 等待用户复审。
 
 `M0-12` 仍是 Alpha 前 Gate。M3 严格按 M3-01→M3-02→M3-03→M3-04 的强依赖推进；M3-05/M3-07 只有在 M3-04 后才可并行，完整 M3-01 至 M3-13 完成后停止并等待用户阶段 Review。
 
@@ -950,3 +953,50 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 关键断言：覆盖 Control read/write/owner、双向 Proxy、Server Session 入站、Agent Retire/Close/Session Completion/WorkConn Worker/WorkPool Lifetime、Windows Service Callback、Gateway Handler/Renewal 和 Linux Admin Request 的 Panic；断言错误可用 `errors.Is(..., safego.ErrPanic)` 识别，Secret Panic 原值不进入错误文本，连接、预算、Registry、Pool、WaitGroup 和 Done Channel 均按 owner 规则收敛。
 - 验收环境与结果：Windows `go1.27.0`、`GOTOOLCHAIN=local`；定向 Package Test/Race/Vet、`go test -race -timeout 120s ./...`、`go vet ./...` 与 `go mod verify` 全部通过。Linux Admin Bootstrap 完成 Linux amd64 Test Binary 交叉编译与 Linux Vet，但当前宿主未原生运行 Linux-only 测试，不把交叉编译冒充 Runtime Smoke。
 - 证据边界：本次仍是未提交的混合 staged/unstaged 工作树，没有 Commit SHA、push、对应 CI Run 或 staged snapshot 复验；M3-05 保持 `REVIEW`，M3 与全局 `DONE` 计数不变。本次未勾选任何产品任务，M3-06 继续保持 `NOT_STARTED`，等待用户 Review。Proto、OpenAPI、Server Schema、数据库、第三方依赖、锁文件、README、用户命令和部署方式均未改变。
+
+## 2026-08-26 · M3-06 Snapshot Reconcile/Observed Revision · REVIEW
+
+- 授权与边界：用户通过 M3-05 阶段 Review 后明确要求继续 M3-06。本轮只实现 Snapshot Reconcile、Observed Revision/Digest、ConfigAck 串行和 Service 提交后 dirty 通知；未提前实现 M3-07 Origin Resolver、M3-08 Health Scheduler 或 M3-09 服务级 Eligible Selection。
+- Server Reconciler：`sessionruntime.Manager` 唯一拥有一个 `safego` 包装的 Reconcile goroutine。容量 1 的 wake 只表达“存在 dirty”，per-Tunnel map 保留最新 generation；构建期间同 Tunnel generation 前进时旧 Candidate 不进入 Session，立即重建最新状态。首份 Snapshot 也经同一 Build owner；生产启动保持冻结的 `Gateway → Reconciler` 顺序，关闭则先停止并等待 Reconciler，再排空 Session。
+- Session 收敛：每代 Control Session 只允许一个 outstanding Snapshot，期间只保留最高 pending Revision。APPLIED 才推进 observed revision/digest，首份 Ack 后才开放 config-ready；REJECTED 保留旧 observed/config-ready，不重发同或更低的已拒绝 Revision，更高 pending 在 Ack 后串行下发。重放 ConfigAck 不会误消费已建立的新 outstanding。锁序固定为 `Manager.mu → snapshotMu → managed.configMu`，SQLite Build、Outbox Enqueue、Cancel/Close/Wait 和错误上报均在锁外。
+- Agent 语义：在递归 Unknown Field 拒绝和 Deterministic Digest 计算后、Candidate Build 前应用 Revision 规则。同 Session 低 Revision 或同 Revision/不同 Digest 返回 `ErrProtocolViolation` 并不 Build/ConfigAck；同 Revision/同 Digest 幂等补 APPLIED Ack。新 Control Session 的 observed 基线仍为空，允许 Restore 后更低 Revision；若与进程 current Revision+Digest 完全相同，可复用 Runtime 并在 Ack 成功后激活 Gate。
+- Config Write 接线：`ServiceManagementService` 在 Create/Delete 以及真正改变 Snapshot 的 Update 事务 COMMIT 成功后调用最小 `SnapshotReconcileNotifier.MarkDirty`；Name-only、no-op、Gate/事务失败不通知。通知失败返回真实已提交 Result 并包装 `ErrServiceRuntimeConvergence`，不伪装成回滚。Reconcile Source 失败保留旧 Runtime，记录可查询 `SnapshotError`，在 5 秒周期/新 dirty 后重试并于成功通过 generation fence 后清除。
+- 复审：三个无写冲突子任务分别完成 Agent、Application 和 Server 实现；主代理复审额外修正 duplicate Ack 与新 outstanding 错误关联。独立只读复审提出 Source 失败不可查询和 Bootstrap 启动顺序两个 P2；补齐失败状态/恢复测试并修正启动顺序后复核均为 Closed，当前无剩余 P0/P1/P2。
+- 验收环境与结果：Windows `go1.27.0`、`GOTOOLCHAIN=local`；`go test -race -count=1 -timeout 180s ./...`、`go vet ./...`、`go mod verify`、GoFmt、`git diff --check` 与 `git diff --cached --check` 全部通过。Source 失败状态与冻结启动顺序修正后，相关四包 `go test -race -count=1 -timeout 120s ./internal/server/sessionruntime ./internal/server/bootstrap ./internal/tunnel ./tests/integration` 再次通过。
+- 证据边界：本轮未提交、未推送，没有 Commit SHA 或对应 CI Run；因此 M3-06 只进入 `REVIEW`，M3 `DONE` 仍为 `0/13`、全局仍为 `33/95`，本次未勾选任何产品任务或 Gate。当前 `reconcile.go` 与 `reconcile_test.go` 同时存在 staged/unstaged 差异，提交前必须重新暂存最终版本并从 staged snapshot 复验。
+- 文档同步：行为符合已冻结的 Revision、ConfigAck、Reconcile 和 Server Startup 契约，本次只同步开发计划任务表、当前队列和执行证据。Proto、OpenAPI、Server Schema、数据库 Migration、第三方依赖、锁文件、README、用户命令和部署方式均无需更新。M3-07 保持 `NOT_STARTED`，本轮到此停止并等待用户阶段 Review。
+
+## 2026-08-26 · M3-07 Origin Resolver · REVIEW
+
+- 授权与边界：用户通过 M3-06 阶段 Review 后明确要求继续 M3-07。本轮只实现 Agent Origin Resolver 及完成它所必需的 Server 提交前语义校验；未启动 M3-08 Health Scheduler、Health goroutine、服务级 Eligible 或额外 Egress Policy。
+- 统一 Origin 契约：新增 `internal/originconfig`，由 Repository/Application 的事务提交边界与 Agent Snapshot Candidate 共同复用。HTTP/HTTPS/TCP、规范 ASCII DNS/IPv4/IPv6、Port、Connect Timeout、TLS Server Name 和 HTTP Host Header 组合在 Server 提交前即校验，Agent 保留同义防御校验；不在 Apply 时解析 DNS或固化单一 IP。V0.1 按冻结边界允许受信管理面配置 Loopback、RFC1918 和其他内网 Origin，不提前实现 CIDR、Link-local、Metadata IP 或 DNS Suffix denylist。
+- 发布与连接生命周期：进程级 Resolver 同时作为 `configruntime.Builder` 与 OPEN Dialer。Candidate Start 仅按 identity 注册不可变索引，`Gate.Active()` 是唯一可见性条件；Swap 至 APPLIED Ack 返回期间、Ack 失败或持续多 active 内部异常均 fail-closed，不回退旧配置。Abort/Retire 通过 `sync.Once` 只注销条目；Resolver 锁内只复制连接计划，DNS、TCP、TLS、Close 均在锁外，Candidate Context 不拥有业务 Dial 或已建立 Connection。
+- Dial/TLS/Error：每条连接使用系统 `net.Dialer.DialContext` 重新解析 DNS，多 A/AAAA、IPv4/IPv6 回退交给标准库；Service `connect_timeout` 同时约束 DNS、TCP 与 `HandshakeContext`。HTTPS 校验名按显式 `tls_server_name`、DNS `origin_host`、IP SAN 顺序确定；`tls_verify=false` 只接受 Snapshot 显式值且仍发送有效显式 SNI。Refused、Timeout、Unreachable、TLS、Service Missing/Disabled/Not Observed 与内部不变量使用冻结 ErrorCode，错误文本不携带 Origin 地址或 TLS 细节。
+- 生产接线与真实变更：移除生产 `Config.OriginDialer`、`UnobservedOriginDialer` 和 OPEN 固定 10 秒 Dial 上限；Bootstrap 仍只接收 Connection Token。真实 TLS Gateway/Control/Work/SQLite/Snapshot/Reconciler/Agent/WorkPool/Tunnel Proxy/TCP Echo 集成先连接 Origin A，再经 `ServiceManagementService.Update` 提交 Origin B、推进 Revision 并 MarkDirty；同一 Agent Runtime 未重启即在第二条连接切换到 B，旧 A 已先退出，不能产生误通过。
+- 取消语义修正：Builder 语义错误以 `PROTOCOL_ERROR` REJECTED；Apply 或 Manager Owner 在 Build/Start 阶段取消时，Abort 后直接返回 Context 错误且不发送 ConfigAck。测试覆盖 Apply cancel、parent cancel 异步桥接窗口、Abort exactly-once、Ack=0 和 current 不发布。
+- 独立复审：三项首轮只读复审发现 Server/Agent 校验漂移、动态 Origin 集成缺口、内部错误码归因和 Owner Cancel 窄竞态；逐项修复后分别复核为 Closed，当前无剩余 P0/P1/P2。动态 Origin 真实集成 `go test -race -count=50` 通过。
+- 验收环境与结果：Windows `go1.27.0`、`GOTOOLCHAIN=local`。相关六包与真实集成 `go test -race -count=10 -timeout 180s` 通过；Apply 取消用例 `go test -race -count=50`、Config Runtime/Origin/Connector `go test -race -count=5` 通过；`go test -race -count=1 -timeout 180s ./...`、`go vet ./...` 与 `go mod verify` 全部通过，完成 GoFmt。
+- 证据边界：本轮未提交、未推送，没有 Commit SHA 或对应 CI Run；因此 M3-07 只进入 `REVIEW`，M3 `DONE` 仍为 `0/13`、全局仍为 `33/95`，本次未勾选任何产品任务或 Gate。当前工作树继续混合 M3 多阶段 staged/unstaged 差异，提交前必须重新整体暂存最终版本并从 staged snapshot 复验。
+- 文档同步：实现符合已冻结 Origin Resolver、Connection、TLS 与 SSRF 契约，无需修改总技术方案、Proto、OpenAPI、Server Schema、Migration、第三方依赖或锁文件。README 已同步动态 Reconcile、真实 Origin Resolver、DNS/Timeout 和私网访问边界；开发计划已同步任务表、当前队列和证据。M3-08 保持 `NOT_STARTED`，本轮到此停止并等待用户阶段 Review。
+
+## 2026-08-27 · M3-08 中心 Health Scheduler · REVIEW
+
+- 授权与边界：用户通过 M3-07 阶段 Review 后明确要求继续开发。本轮只实现 M3-08 中心 Health Scheduler 及其必要的 Snapshot Candidate/Origin 生命周期接线；未实现 M3-09 Health Batch、Control Outbox Report、Revision Eligible Selection 或后续状态聚合。
+- 中心调度与预算：每个 Connector 只创建一个 Health Manager，由单 Owner、Heap 时序和固定 64 个 `safego` Worker 管理全部 Service；固定全局并发 64、每 Origin `host:port` 并发 4、每秒最多 50 次检查，initial jitter 为 `[0, interval]`、后续 jitter 为 `[0.8, 1.2] × interval`，没有 per-service ticker 或 fire-and-forget goroutine。
+- 检查与状态：Health Timeout 是外层预算，Origin `connect_timeout` 继续作为内层 DNS/TCP/TLS 预算，并复用 M3-07 Candidate-scoped Resolver/Dial/TLS Policy。TCP 成功连接后立即关闭；HTTP 使用 GET、显式 Host、Connection Close、只读取响应头并按包含边界的状态码范围判断。UNKNOWN 首次成功立即 HEALTHY；连续失败/成功严格按阈值切换，反向结果重置 streak；预算超时进入 `UNKNOWN/HEALTH_BUDGET_EXCEEDED` 且不计 Origin 失败，绝对 Stale Deadline 不晚于上次完成后的 `2 × interval`。
+- 原子发布与生命周期：Connector Composite Candidate 按 Origin→Health 构建/启动、Health→Origin Abort/Retire；Health 只使用当前 generation 的不可变 scoped dialer。Gate 空窗立即隐藏状态并暂停检查，未变化 Service 保留状态与 next due，变化 Service 重置 UNKNOWN，epoch/revision fencing 丢弃旧结果；Health 后台 fatal 会取消 Runtime，Shutdown 即使 Deadline 到期也等待全部受控 goroutine 退出。
+- 独立复审：首轮只读复审发现最坏 jitter 下 Stale Deadline 可延迟到 `2.2 × interval`，以及首次注销超时会耗尽 once 并留下旧 Plan；修复为绝对 `2 × interval` 上限和失败可重试的显式注销状态后，确定性回归测试与二次复核均确认 Closed，当前没有剩余 P0/P1/P2。
+- 验收环境与结果：Windows `go1.27.0`、`GOTOOLCHAIN=local`。相关 Health/Origin/Connector 包 `go test -race -count=20 -timeout 180s` 与定向 `go vet` 通过；全仓 `go test -race -count=1 -timeout 240s ./...`、`go vet ./...`、`go mod verify` 和 GoFmt 均通过。修复复核后 Health 包再次执行 `go test -race -count=20 -timeout 180s` 与 `go vet`，结果通过。
+- 证据边界：本轮未提交、未推送，没有 Commit SHA 或对应 CI Run；因此 M3-08 只进入 `REVIEW`，M3 `DONE` 仍为 `0/13`、全局仍为 `33/95`，本次未勾选任何产品任务或 Gate。当前工作树继续混合多阶段 staged/unstaged 差异，且 M3-08 新文件尚未暂存；提交前必须重新整体暂存最终版本并从 staged snapshot 复验。
+- 文档同步：实现符合已冻结 Health Scheduler、Origin 和 Config Runtime 契约；总技术方案、Proto、OpenAPI、Server Schema、数据库 Migration、第三方依赖、锁文件、用户命令与部署方式均保持不变。README 已同步中心 Health 能力，开发计划已同步任务表、当前队列和验收边界。M3-09 保持 `NOT_STARTED`，本轮到此停止并等待用户阶段 Review。
+
+## 2026-08-27 · M3-01 Future Origin Persistence Reservation · REVIEW
+
+- 授权与边界：用户明确要求在 `000005_services.sql` 初始建表时前置支持下一小版本的 UDP、QUIC 与 Unix Socket。本轮只调整持久化形态与约束测试，不实现新协议的 Proto、Application、Snapshot、Resolver、Health 或数据面，也不启动 M3-09。
+- 持久化契约：`origin_scheme` 固定接受 `http/https/tcp/udp/quic/unix`。网络 Scheme 必须使用 Host+Port 且 Path 为空；`unix` 独占绝对文件系统 `origin_path`，Host/Port 必须为空；原生 `quic` 必须提供单个 `origin_quic_alpn`，透明 QUIC 流量归入 `udp`。TCP/UDP/Unix 禁止 TLS Server Name 与 HTTP Host，QUIC 禁止 HTTP Host。
+- Health 与运行时边界：UDP、QUIC、Unix 预留行当前只能 Disabled Health。`internal/originconfig`、Repository/Application、Protocol Snapshot 与 Agent Resolver 继续只执行 HTTP/HTTPS/TCP；新增字面回归测试确认三个预留 Scheme 在 V0.1 Runtime 仍 fail closed，数据库可表达不等于功能已经发布。
+- 迁移兼容边界：本次按用户要求直接修改发布前 Version 5 初始建表，只对新数据库生效。已执行旧 Version 5 的开发数据库必须删除重建；若存在需保留的已部署数据，必须新增向前 Migration，当前 Migrator 不会因 SQL 内容变化自动重放 Version 5。
+- 独立复审：首轮发现 QUIC ALPN 的 255 上限按 Unicode 字符而非 UTF-8 字节计算，以及新增 Path/ALPN 列缺少直接边界用例；修复为 `BLOB` 字节长度约束并补齐空值、空白、NUL、ASCII/多字节超限、Unix Root/NUL 用例后，二次复核确认 Closed，当前无剩余 P0/P1/P2。
+- 验收：Windows `go1.27.0`、`GOTOOLCHAIN=local`。初轮 `go test -race -count=10 -timeout 180s ./internal/repository/sqlite ./internal/originconfig` 通过；修复后 `go test -race -run '^TestServiceMigrationConstraints$' -count=20 -timeout 180s ./internal/repository/sqlite`、相关包 Race 与 `go vet` 通过；最终 `go test -race -count=1 -timeout 240s ./...`、`go vet ./...`、`go mod verify` 与双 Diff Check 全部通过。DDL 用例覆盖三种合法预留形态、Host/Port/Path 互斥、QUIC ALPN、字段污染、大小写/未知 Scheme、端口与字节边界和预留 Scheme 禁止启用现有 Health。
+- 证据边界：本轮未提交、未推送，没有 Commit SHA 或 CI Run；M3-01 继续保持 `REVIEW`，M3 `DONE` 仍为 `0/13`、全局仍为 `33/95`，本次未勾选任何产品任务或 Gate。`internal/originconfig/validate_test.go` 处于 staged/unstaged 混合状态，提交前必须重新整体暂存并复验 staged snapshot。
+- 文档同步：总技术方案的 Service Schema 与持久化/Runtime 边界、开发计划 M3-01 验收范围和执行证据已同步。Proto、OpenAPI、Server Config Schema、README、依赖、锁文件、用户命令与部署方式不更新，因为本轮没有新增当前版本可用能力。

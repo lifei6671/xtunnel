@@ -2263,8 +2263,10 @@ CREATE TABLE services (
     name TEXT NOT NULL,
     required_revision INTEGER NOT NULL DEFAULT 0,
     origin_scheme TEXT NOT NULL,
-    origin_host TEXT NOT NULL,
-    origin_port INTEGER NOT NULL,
+    origin_host TEXT,
+    origin_port INTEGER,
+    origin_path TEXT,
+    origin_quic_alpn TEXT,
     tls_verify INTEGER NOT NULL DEFAULT 1,
     tls_server_name TEXT,
     origin_http_host TEXT,
@@ -2290,6 +2292,25 @@ CREATE TABLE services (
 一个 Tunnel 可以拥有零到多个 Service；一个 Service 只能归属一个 Tunnel。Origin 与 Health 配置直接属于 Service，不再存在 `tunnel_bindings` 中间表。HTTP/TCP Route 外键指向 `service_id`。
 数据库外键必须使用 `RESTRICT`（或 SQLite 等价的 `NO ACTION`）兜底“Tunnel
 仍有 Service 时返回 409”的 REST 契约；任何删除路径都不得隐式级联 Service 或 Route。
+
+初始 `services` Schema 为后续小版本预留 `udp`、`quic` 与 `unix` Origin，但预留不代表
+V0.1 Runtime 已支持这些 Scheme。字段组合必须满足：
+
+- `http`、`https`、`tcp`、`udp`、`quic` 使用非空 `origin_host + origin_port`，且
+  `origin_path` 必须为空。
+- `unix` 只表示绝对文件系统路径的 `SOCK_STREAM`，必须使用 `origin_path`，Host/Port
+  必须为空；不接受抽象 Namespace 或假端口。
+- `quic` 表示 Agent 原生 QUIC Dial，必须提供单个 1—255 UTF-8 字节的
+  `origin_quic_alpn`；透明转发既有
+  QUIC 流量使用 `udp`，不得把两种语义混为一谈。
+- UDP、QUIC 与 Unix Health 语义尚未冻结，预留行只能使用 Disabled Health。
+- V0.1 Application、Snapshot 与 Agent 继续只接受 `http`、`https`、`tcp`，遇到预留
+  Scheme 必须 fail closed；后续版本须先扩展 Protocol 与 Runtime 契约，不能仅凭数据库
+  可写就宣称功能可用。
+
+`000005_services.sql` 属于发布前初始建表基线。修改后的内容只作用于新数据库；开发期
+已记录 Migration Version 5 的数据库不会自动重放，必须删除并重建。若存在必须保留的
+已部署数据，则只能新增向前 Migration，禁止依赖修改后的 Version 5 原地升级。
 
 ---
 

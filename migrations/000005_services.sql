@@ -15,10 +15,31 @@ CREATE TABLE services (
         CHECK (length(trim(name, char(9) || char(10) || char(11) || char(12) || char(13) || ' ')) > 0),
     required_revision INTEGER NOT NULL DEFAULT 0 CHECK (required_revision >= 0),
 
-    origin_scheme TEXT NOT NULL CHECK (origin_scheme IN ('http', 'https', 'tcp')),
-    origin_host TEXT NOT NULL
-        CHECK (length(trim(origin_host, char(9) || char(10) || char(11) || char(12) || char(13) || ' ')) > 0),
-    origin_port INTEGER NOT NULL CHECK (origin_port BETWEEN 1 AND 65535),
+    origin_scheme TEXT NOT NULL
+        CHECK (origin_scheme IN ('http', 'https', 'tcp', 'udp', 'quic', 'unix')),
+    origin_host TEXT CHECK (
+        origin_host IS NULL
+        OR length(trim(origin_host, char(9) || char(10) || char(11) || char(12) || char(13) || ' ')) > 0
+    ),
+    origin_port INTEGER CHECK (origin_port IS NULL OR origin_port BETWEEN 1 AND 65535),
+    -- unix 只表示文件系统 SOCK_STREAM；不使用假 Host/Port，也不接受抽象 Namespace。
+    origin_path TEXT CHECK (
+        origin_path IS NULL
+        OR (
+            length(origin_path) > 1
+            AND substr(origin_path, 1, 1) = '/'
+            AND instr(origin_path, char(0)) = 0
+        )
+    ),
+    -- quic 表示 Agent 原生 QUIC Dial；透明 QUIC 流量应使用 udp。
+    origin_quic_alpn TEXT CHECK (
+        origin_quic_alpn IS NULL
+        OR (
+            length(CAST(origin_quic_alpn AS BLOB)) BETWEEN 1 AND 255
+            AND length(trim(origin_quic_alpn, char(9) || char(10) || char(11) || char(12) || char(13) || ' ')) > 0
+            AND instr(origin_quic_alpn, char(0)) = 0
+        )
+    ),
     tls_verify INTEGER NOT NULL DEFAULT 1 CHECK (tls_verify IN (0, 1)),
     tls_server_name TEXT CHECK (
         tls_server_name IS NULL
@@ -49,9 +70,41 @@ CREATE TABLE services (
     FOREIGN KEY(tunnel_id) REFERENCES tunnels(id) ON DELETE RESTRICT,
 
     CHECK (
-        (origin_scheme = 'tcp' AND tls_server_name IS NULL AND origin_http_host IS NULL)
-        OR (origin_scheme = 'http' AND tls_server_name IS NULL)
-        OR origin_scheme = 'https'
+        (
+            origin_scheme IN ('http', 'https', 'tcp', 'udp', 'quic')
+            AND origin_host IS NOT NULL
+            AND origin_port IS NOT NULL
+            AND origin_path IS NULL
+        )
+        OR (
+            origin_scheme = 'unix'
+            AND origin_host IS NULL
+            AND origin_port IS NULL
+            AND origin_path IS NOT NULL
+        )
+    ),
+
+    CHECK (
+        (
+            origin_scheme = 'http'
+            AND tls_server_name IS NULL
+            AND origin_quic_alpn IS NULL
+        )
+        OR (
+            origin_scheme = 'https'
+            AND origin_quic_alpn IS NULL
+        )
+        OR (
+            origin_scheme IN ('tcp', 'udp', 'unix')
+            AND tls_server_name IS NULL
+            AND origin_http_host IS NULL
+            AND origin_quic_alpn IS NULL
+        )
+        OR (
+            origin_scheme = 'quic'
+            AND origin_http_host IS NULL
+            AND origin_quic_alpn IS NOT NULL
+        )
     ),
 
     CHECK (
@@ -99,7 +152,10 @@ CREATE TABLE services (
             AND health_success_threshold IS NOT NULL
             AND health_success_threshold BETWEEN 1 AND 20
         )
-    )
+    ),
+
+    -- UDP、QUIC 与 Unix Health 语义留给后续协议版本冻结；预留行只能 Disabled。
+    CHECK (origin_scheme IN ('http', 'https', 'tcp') OR health_type IS NULL)
 );
 
 -- Tunnel Snapshot 与容量校验都按 Tunnel 枚举 Service；ID 作为稳定次序的第二键。

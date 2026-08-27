@@ -31,11 +31,18 @@ var (
 	ErrServiceManagementTunnelRevoked = errors.New("service management tunnel is revoked")
 	// ErrServiceManagementRevisionExhausted 表示 Tunnel Desired Revision 已无法继续递增。
 	ErrServiceManagementRevisionExhausted = errors.New("service management revision is exhausted")
+	// ErrServiceRuntimeConvergence 表示 Service Desired State 已提交，但运行态收敛通知失败。
+	ErrServiceRuntimeConvergence = errors.New("service mutation committed but runtime convergence failed")
 )
 
 // TunnelSnapshotGate 在事务提交前校验受影响 Tunnel 的完整 Candidate Service 集合。
 type TunnelSnapshotGate interface {
 	Validate(tunnelID string, revision int64, services []repository.Service) error
+}
+
+// SnapshotReconcileNotifier 在 Service Desired State 提交后标记受影响 Tunnel 待收敛。
+type SnapshotReconcileNotifier interface {
+	MarkDirty(tunnelID string) error
 }
 
 // ServiceOriginInput 是 Create 或 Update 提交的完整 Origin 配置。
@@ -107,14 +114,19 @@ type ServiceMutationResult struct {
 type ServiceManagementService struct {
 	store        repository.Store
 	gate         TunnelSnapshotGate
+	notifier     SnapshotReconcileNotifier
 	newServiceID func() (string, error)
 	now          func() time.Time
 }
 
 // NewServiceManagementService 返回使用 CSPRNG Service ID 与系统时钟的生产服务。
-func NewServiceManagementService(store repository.Store, gate TunnelSnapshotGate) *ServiceManagementService {
+func NewServiceManagementService(
+	store repository.Store,
+	gate TunnelSnapshotGate,
+	notifier SnapshotReconcileNotifier,
+) *ServiceManagementService {
 	return &ServiceManagementService{
-		store: store, gate: gate, newServiceID: identity.NewServiceID, now: time.Now,
+		store: store, gate: gate, notifier: notifier, newServiceID: identity.NewServiceID, now: time.Now,
 	}
 }
 
@@ -168,7 +180,7 @@ func (service *ServiceManagementService) Create(ctx context.Context, input Creat
 	}); err != nil {
 		return ServiceMutationResult{}, err
 	}
-	return result, nil
+	return service.notifySnapshotReconcile(input.TunnelID, result)
 }
 
 // Update 应用 Service PATCH。只有影响 Agent Snapshot 的字段才推进 Tunnel Revision；
@@ -181,6 +193,7 @@ func (service *ServiceManagementService) Update(ctx context.Context, input Updat
 	}
 
 	var result ServiceMutationResult
+	var notifyReconcile bool
 	if err := service.store.WithTx(ctx, func(transaction repository.TxStore) error {
 		tunnel, err := loadServiceMutationTunnel(ctx, transaction, input.TunnelID, input.ExpectedTunnelVersion)
 		if err != nil {
@@ -236,9 +249,13 @@ func (service *ServiceManagementService) Update(ctx context.Context, input Updat
 			return err
 		}
 		result = serviceMutationResult(updated, updatedTunnel, true)
+		notifyReconcile = true
 		return nil
 	}); err != nil {
 		return ServiceMutationResult{}, err
+	}
+	if notifyReconcile {
+		return service.notifySnapshotReconcile(input.TunnelID, result)
 	}
 	return result, nil
 }
@@ -293,12 +310,22 @@ func (service *ServiceManagementService) Delete(ctx context.Context, input Delet
 	}); err != nil {
 		return ServiceMutationResult{}, err
 	}
-	return result, nil
+	return service.notifySnapshotReconcile(input.TunnelID, result)
 }
 
 func (service *ServiceManagementService) valid(ctx context.Context) bool {
-	return service != nil && ctx != nil && service.store != nil && service.gate != nil &&
+	return service != nil && ctx != nil && service.store != nil && service.gate != nil && service.notifier != nil &&
 		service.newServiceID != nil && service.now != nil
+}
+
+func (service *ServiceManagementService) notifySnapshotReconcile(
+	tunnelID string,
+	result ServiceMutationResult,
+) (ServiceMutationResult, error) {
+	if err := service.notifier.MarkDirty(tunnelID); err != nil {
+		return result, fmt.Errorf("%w: mark Tunnel Snapshot dirty: %w", ErrServiceRuntimeConvergence, err)
+	}
+	return result, nil
 }
 
 func (service *ServiceManagementService) timestamp() (int64, error) {

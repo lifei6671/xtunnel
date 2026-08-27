@@ -14,7 +14,6 @@ import (
 	"syscall"
 
 	"github.com/lifei6671/xtunnel/internal/agent/connector"
-	"github.com/lifei6671/xtunnel/internal/agent/open"
 	"github.com/lifei6671/xtunnel/internal/agent/service"
 	"github.com/lifei6671/xtunnel/internal/logging"
 )
@@ -220,7 +219,7 @@ func runLifecycle(ctx context.Context, token string, stderr io.Writer) error {
 	logger.InfoContext(ctx, "process_started")
 	defer logger.Info("process_stopped")
 
-	config, err := connector.HostConfig(token, agentVersion, open.OriginDialerFunc(connector.UnobservedOriginDialer))
+	config, err := connector.HostConfig(token, agentVersion)
 	if err != nil {
 		return fmt.Errorf("create ephemeral Connector identity: %w", err)
 	}

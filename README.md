@@ -1,6 +1,6 @@
 # XTunnel
 
-XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面已通过阶段 Review 与全绿 CI；M2 Credential Lifecycle & Failover Hardening 已通过用户阶段 Review，仍等待覆盖本地提交的 CI 证据；M3-01 至 M3-05 已完成本地实现与独立复审，当前保持 `REVIEW`。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke 与 RAW 前受限故障切换；远端 Service 配置的首次启动/重连完整 Snapshot 与 ConfigAck 门禁已接入生产链路。持续动态 Reconcile、真实 Origin Resolver、服务级 Health/Eligible、Management REST、生产 Public Listener 和 `/metrics` 导出仍由后续里程碑实现。
+XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面已通过阶段 Review 与全绿 CI；M2 Credential Lifecycle & Failover Hardening 已通过用户阶段 Review，仍等待覆盖本地提交的 CI 证据；M3-01 至 M3-08 已完成本地实现与独立复审，当前保持 `REVIEW`。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换与持续 Snapshot Reconcile；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，并由进程级中心调度器执行服务健康检查。Health Batch/Eligible、Management REST、生产 Public Listener 和 `/metrics` 导出仍由后续里程碑实现。
 
 ## 开发运行
 
@@ -71,7 +71,7 @@ Server 的 `--config` 可省略；`--set` 可以重复使用，同一路径以�
 
 Connection Token 对用户始终是单个不透明的 `xta_...` 字符串，语义上携带 Server Endpoint、TLS Trust、Tunnel/Token Identity 与认证 Secret。创建 Tunnel 时首次签发；之后“添加 Connector”只取回逐字节相同的当前 Token，不创建 Connector 数据库行，也不新增 Token Version。只有显式 Rotate 才产生新版本；Token Revoke 只阻止新认证，Tunnel Revoke 则在持久提交后关闭全部 generation。上述 Application Workflow 已完成，REST Handler 仍归 M5。`run` 按 `--token`、`XTUNNEL_TOKEN`、OS Service Credential 的顺序取值；Linux systemd 使用运行时 Credential `xtunnel-agent.token`，Windows SCM 使用 DPAPI Machine-scope 加密 Credential。缺失时启动失败。
 
-`--token` 只用于 `run` 的前台交互运行和 `service install` 的一次性安装输入。持久 Linux Unit 或 Windows SCM 配置都不包含 Token；Linux 自安装将它保存为 root-only `LoadCredential` Source，Windows 自安装将它保存为 `%ProgramData%\XTunnel\credentials\agent.token.dpapi` 的 DPAPI Machine-scope 密文。Tunnel 下的 Service、Origin 和 Health Policy 由 Server 远端下发，Agent 只在内存中应用。每次启动或重连都由 Server 先发送当前完整 Snapshot；APPLIED ConfigAck 前，Connector 不会进入 ONLINE、Work Auth、Pool 或 WorkDemand。持续动态 Reconcile、真实 Origin Resolver 和服务级 Health/Eligible 仍分别由 M3-06 至 M3-09 实现，当前生产 Origin 在未接入 M3-07 前保持 fail-closed。
+`--token` 只用于 `run` 的前台交互运行和 `service install` 的一次性安装输入。持久 Linux Unit 或 Windows SCM 配置都不包含 Token；Linux 自安装将它保存为 root-only `LoadCredential` Source，Windows 自安装将它保存为 `%ProgramData%\XTunnel\credentials\agent.token.dpapi` 的 DPAPI Machine-scope 密文。Tunnel 下的 Service、Origin 和 Health Policy 由 Server 远端下发，Agent 只在内存中应用。每次启动或重连都由 Server 先发送当前完整 Snapshot；APPLIED ConfigAck 前，Connector 不会进入 ONLINE、Work Auth、Pool 或 WorkDemand。后续 Service Origin 变更经持续 Reconcile 原子生效，无需重启 Agent；每条新连接使用系统 Resolver 解析 DNS，并让 DNS、IPv4/IPv6、TCP 与 HTTPS TLS 握手共同受该 Service 的 `connect_timeout` 约束。Agent 使用单个中心 Scheduler、固定并发与 Rate Budget、Heap 时序和 Jitter 执行 TCP/HTTP Health Check，结果只保存在当前 Snapshot generation 的内存状态中。V0.1 允许受信管理面配置 Loopback、RFC1918 和其他内网 Origin；可选 Egress Policy 以及 Health Batch/Eligible 仍属于后续阶段。
 
 当前进程在启动输入校验通过后初始化标准库 `log/slog` JSON Handler，并在 `info` 级别输出 `process_started`、`process_stopped` 以及 Connector connected/replaced/draining/disconnected 生命周期事件。基础字段固定为 `timestamp`、`level`、`component`、`event`；真实请求或 Trace 上下文存在时可追加 `request_id`、`trace_id`。Session Manager 同时提供五项无 Label Runtime Metric Source，HTTP `/metrics` 导出归 M6。
 
