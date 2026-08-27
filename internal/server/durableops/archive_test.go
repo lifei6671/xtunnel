@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -25,6 +26,8 @@ import (
 )
 
 var testMasterKey = bytes.Repeat([]byte{0x42}, 32)
+
+const archiveHardExitHelperEnv = "XTUNNEL_ARCHIVE_HARD_EXIT_HELPER"
 
 func TestCreateOwnsExclusiveOutputAndRemovesFailedArchive(t *testing.T) {
 	if runtime.GOOS != "linux" {
@@ -45,6 +48,10 @@ func TestCreateOwnsExclusiveOutputAndRemovesFailedArchive(t *testing.T) {
 	if manifest.SchemaVersion != sqlite.CurrentSchemaVersion() || manifest.TLSMode != TLSModePublic || len(manifest.Files) != 2 {
 		t.Fatalf("Create() manifest = %#v", manifest)
 	}
+	originalArchive, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(first archive) error = %v", err)
+	}
 	if _, err := Create(context.Background(), CreateOptions{
 		DataDir: dataDir, TLSMode: TLSModePublic, OutputPath: outputPath,
 		BackupDatabase: func(ctx context.Context, destination string) (int, error) {
@@ -52,6 +59,20 @@ func TestCreateOwnsExclusiveOutputAndRemovesFailedArchive(t *testing.T) {
 		},
 	}); err == nil || !strings.Contains(err.Error(), "file exists") {
 		t.Fatalf("second Create() error = %v, want exclusive-output rejection", err)
+	}
+	archiveAfterConflict, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(archive after conflict) error = %v", err)
+	}
+	if !bytes.Equal(archiveAfterConflict, originalArchive) {
+		t.Fatal("conflicting Create() overwrote the existing archive")
+	}
+	conflictEntries, err := os.ReadDir(filepath.Dir(outputPath))
+	if err != nil {
+		t.Fatalf("os.ReadDir(conflicting output parent) error = %v", err)
+	}
+	if len(conflictEntries) != 1 || conflictEntries[0].Name() != filepath.Base(outputPath) {
+		t.Fatalf("conflicting Create() left pending output entries: %#v", conflictEntries)
 	}
 
 	failedOutput := filepath.Join(t.TempDir(), "failed.tar")
@@ -84,6 +105,75 @@ func TestCreateOwnsExclusiveOutputAndRemovesFailedArchive(t *testing.T) {
 	}
 	if _, statErr := os.Lstat(publicationFailedOutput); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("publication-failed output remained: %v", statErr)
+	}
+	publicationEntries, err := os.ReadDir(filepath.Dir(publicationFailedOutput))
+	if err != nil {
+		t.Fatalf("os.ReadDir(publication-failed parent) error = %v", err)
+	}
+	if len(publicationEntries) != 0 {
+		t.Fatalf("publication failure left pending outputs: %#v", publicationEntries)
+	}
+}
+
+func TestCreateHardExitBeforePublishDoesNotExposeFinalPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("atomic backup publication is supported only on Linux")
+	}
+	if os.Getenv(archiveHardExitHelperEnv) == "1" {
+		dataDir := os.Getenv("XTUNNEL_ARCHIVE_HARD_EXIT_DATA_DIR")
+		outputPath := os.Getenv("XTUNNEL_ARCHIVE_HARD_EXIT_OUTPUT")
+		_, err := Create(context.Background(), CreateOptions{
+			DataDir: dataDir, TLSMode: TLSModePublic, OutputPath: outputPath,
+			BackupDatabase: func(ctx context.Context, destination string) (int, error) {
+				return sqlite.CurrentSchemaVersion(), createValidSQLiteDatabase(ctx, destination)
+			},
+			BeforePublish: func() error {
+				// 回调代表归档内容和文件 fsync 已完成。若最终路径此时已经出现，说明
+				// 崩溃窗口仍会向调用方暴露未获得 ACK 的归档。
+				if _, statErr := os.Lstat(outputPath); !errors.Is(statErr, os.ErrNotExist) {
+					os.Exit(76)
+				}
+				os.Exit(73)
+				return nil
+			},
+		})
+		if err != nil {
+			os.Exit(74)
+		}
+		os.Exit(75)
+	}
+
+	dataDir := t.TempDir()
+	initializeValidBackupState(t, dataDir, false)
+	outputDir := t.TempDir()
+	outputPath := filepath.Join(outputDir, "backup.tar")
+	command := exec.Command(os.Args[0], "-test.run=^TestCreateHardExitBeforePublishDoesNotExposeFinalPath$")
+	command.Env = append(os.Environ(),
+		archiveHardExitHelperEnv+"=1",
+		"XTUNNEL_ARCHIVE_HARD_EXIT_DATA_DIR="+dataDir,
+		"XTUNNEL_ARCHIVE_HARD_EXIT_OUTPUT="+outputPath,
+	)
+	err := command.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 73 {
+		t.Fatalf("hard-exit helper error = %v, want exit code 73", err)
+	}
+	if _, err := os.Lstat(outputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final output became visible before publication ACK: %v", err)
+	}
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		t.Fatalf("os.ReadDir(output parent) error = %v", err)
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), pendingOutputPrefix) {
+		t.Fatalf("hard-exit output entries = %#v, want one hidden pending file", entries)
+	}
+	info, err := entries[0].Info()
+	if err != nil {
+		t.Fatalf("pending output Info() error = %v", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("pending output mode = %v, want regular 0600", info.Mode())
 	}
 }
 
@@ -207,7 +297,7 @@ func TestCreateRejectsPendingGatewayRotationArtifacts(t *testing.T) {
 	}
 }
 
-func TestCreateExclusiveOutputRejectsSymbolicLinkParent(t *testing.T) {
+func TestCreatePendingOutputRejectsSymbolicLinkParent(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("secure output creation is supported only on Linux")
 	}
@@ -216,15 +306,71 @@ func TestCreateExclusiveOutputRejectsSymbolicLinkParent(t *testing.T) {
 	if err := os.Symlink(realParent, linkParent); err != nil {
 		t.Fatalf("os.Symlink(output parent) error = %v", err)
 	}
-	output, parent, err := createExclusiveOutput(filepath.Join(linkParent, "backup.tar"))
-	if output != nil {
-		_ = output.Close()
-	}
-	if parent != nil {
-		_ = parent.Close()
+	pending, err := createPendingOutput(filepath.Join(linkParent, "backup.tar"))
+	if pending != nil {
+		if pending.file != nil {
+			_ = pending.file.Close()
+		}
+		if pending.parent != nil {
+			_ = pending.parent.Close()
+		}
 	}
 	if err == nil {
-		t.Fatal("createExclusiveOutput() followed a symbolic-link parent")
+		t.Fatal("createPendingOutput() followed a symbolic-link parent")
+	}
+}
+
+func TestPublishPendingOutputDoesNotReplaceExistingTarget(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("atomic backup publication is supported only on Linux")
+	}
+	outputPath := filepath.Join(t.TempDir(), "backup.tar")
+	first, err := createPendingOutput(outputPath)
+	if err != nil {
+		t.Fatalf("createPendingOutput(first) error = %v", err)
+	}
+	defer first.parent.Close()
+	second, err := createPendingOutput(outputPath)
+	if err != nil {
+		_ = first.file.Close()
+		t.Fatalf("createPendingOutput(second) error = %v", err)
+	}
+	defer second.parent.Close()
+
+	for _, item := range []struct {
+		name    string
+		pending *pendingOutput
+		data    []byte
+	}{
+		{name: "first", pending: first, data: []byte("first-complete-archive")},
+		{name: "second", pending: second, data: []byte("second-complete-archive")},
+	} {
+		if _, err := item.pending.file.Write(item.data); err != nil {
+			t.Fatalf("%s pending Write() error = %v", item.name, err)
+		}
+		if err := item.pending.file.Sync(); err != nil {
+			t.Fatalf("%s pending Sync() error = %v", item.name, err)
+		}
+		if err := item.pending.file.Close(); err != nil {
+			t.Fatalf("%s pending Close() error = %v", item.name, err)
+		}
+		item.pending.file = nil
+	}
+	if err := publishPendingOutput(first); err != nil {
+		t.Fatalf("publishPendingOutput(first) error = %v", err)
+	}
+	if err := publishPendingOutput(second); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("publishPendingOutput(second) error = %v, want file exists", err)
+	}
+	if err := removePendingOutput(second.parent, second.name); err != nil {
+		t.Fatalf("removePendingOutput(second) error = %v", err)
+	}
+	content, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(published output) error = %v", err)
+	}
+	if string(content) != "first-complete-archive" {
+		t.Fatalf("published output = %q, want first candidate", content)
 	}
 }
 
@@ -237,36 +383,36 @@ func TestFailedOutputCleanupStaysBoundToOpenedParent(t *testing.T) {
 	if err := os.Mkdir(originalParent, 0o700); err != nil {
 		t.Fatalf("os.Mkdir(original parent) error = %v", err)
 	}
-	output, parent, err := createExclusiveOutput(filepath.Join(originalParent, "backup.tar"))
+	pending, err := createPendingOutput(filepath.Join(originalParent, "backup.tar"))
 	if err != nil {
-		t.Fatalf("createExclusiveOutput() error = %v", err)
+		t.Fatalf("createPendingOutput() error = %v", err)
 	}
-	if err := output.Close(); err != nil {
-		_ = parent.Close()
+	if err := pending.file.Close(); err != nil {
+		_ = pending.parent.Close()
 		t.Fatalf("output.Close() error = %v", err)
 	}
 	movedParent := filepath.Join(container, "moved-output")
 	if err := os.Rename(originalParent, movedParent); err != nil {
-		_ = parent.Close()
+		_ = pending.parent.Close()
 		t.Fatalf("os.Rename(original parent) error = %v", err)
 	}
 	if err := os.Mkdir(originalParent, 0o700); err != nil {
-		_ = parent.Close()
+		_ = pending.parent.Close()
 		t.Fatalf("os.Mkdir(replacement parent) error = %v", err)
 	}
-	victim := filepath.Join(originalParent, "backup.tar")
+	victim := filepath.Join(originalParent, pending.name)
 	if err := os.WriteFile(victim, []byte("must-survive"), 0o600); err != nil {
-		_ = parent.Close()
+		_ = pending.parent.Close()
 		t.Fatalf("os.WriteFile(victim) error = %v", err)
 	}
-	if err := removeExclusiveOutput(parent, "backup.tar"); err != nil {
-		_ = parent.Close()
-		t.Fatalf("removeExclusiveOutput() error = %v", err)
+	if err := removePendingOutput(pending.parent, pending.name); err != nil {
+		_ = pending.parent.Close()
+		t.Fatalf("removePendingOutput() error = %v", err)
 	}
-	if err := parent.Close(); err != nil {
+	if err := pending.parent.Close(); err != nil {
 		t.Fatalf("parent.Close() error = %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(movedParent, "backup.tar")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(movedParent, pending.name)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("original failed output remains or stat failed: %v", err)
 	}
 	content, err := os.ReadFile(victim)
@@ -314,6 +460,46 @@ func TestValidateManifestRejectsUnsafeOrIncompleteFileSets(t *testing.T) {
 			test.mutate(&manifest)
 			if err := validateManifest(manifest, 1); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("validateManifest() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestReadManifestRequiresCanonicalJSON(t *testing.T) {
+	manifest := testPublicManifest([]byte("database"), testMasterKey)
+	canonical, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("json.Marshal(manifest) error = %v", err)
+	}
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, canonical, "", "  "); err != nil {
+		t.Fatalf("json.Indent(manifest) error = %v", err)
+	}
+	tests := []struct {
+		name      string
+		data      []byte
+		wantError bool
+	}{
+		{name: "canonical", data: canonical},
+		{name: "leading whitespace", data: append([]byte(" "), canonical...), wantError: true},
+		{name: "trailing newline", data: append(append([]byte(nil), canonical...), '\n'), wantError: true},
+		{name: "indented", data: indented.Bytes(), wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			archiveData := buildTestArchiveWithManifestData(t, test.data, nil)
+			parsed, manifestData, err := readManifest(tar.NewReader(bytes.NewReader(archiveData)), 1)
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "not canonical") {
+					t.Fatalf("readManifest() error = %v, want canonical rejection", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readManifest() error = %v", err)
+			}
+			if !bytes.Equal(manifestData, canonical) || parsed.SchemaVersion != manifest.SchemaVersion {
+				t.Fatalf("readManifest() = %#v, %q", parsed, manifestData)
 			}
 		})
 	}
@@ -382,6 +568,11 @@ func buildTestArchive(t *testing.T, manifest Manifest, entries []testTarEntry) [
 	if err != nil {
 		t.Fatalf("json.Marshal(manifest) error = %v", err)
 	}
+	return buildTestArchiveWithManifestData(t, manifestData, entries)
+}
+
+func buildTestArchiveWithManifestData(t *testing.T, manifestData []byte, entries []testTarEntry) []byte {
+	t.Helper()
 	var output bytes.Buffer
 	archive := tar.NewWriter(&output)
 	if err := archive.WriteHeader(&tar.Header{Name: manifestName, Mode: 0o600, Size: int64(len(manifestData)), Typeflag: tar.TypeReg}); err != nil {

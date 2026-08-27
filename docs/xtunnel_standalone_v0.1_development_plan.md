@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-27
 >
-> **当前阶段**：M3 Configuration + Health · IN_PROGRESS（M3-12 Durable Operations 本地实现与独立复审已进入 `REVIEW`）
+> **当前阶段**：M3 Configuration + Health · IN_PROGRESS（M3-13 Gate 本地实现、Checklist 自动化证据与独立复审已进入 `REVIEW`）
 >
-> **当前结论**：M3-01 至 M3-12 均保持 `REVIEW`。M3-12 已完成 Linux root `backup create/restore`、在线可取消 Barrier Lease、离线 External Lock、固定 inode SQLite Backup、canonical USTAR Manifest、Token Key/密文语义校验、同盘 staging/rollback/journal 崩溃恢复，以及 systemd/OCI Stable Parent + 可 rename data leaf 接线；项目按用户确认不提供旧根布局迁移兼容层。总技术方案、README、Server Schema、部署产物和依赖归类已同步；Proto、OpenAPI、数据库 Migration 与锁文件保持不变。下一项为 M3-13 M3 Gate，尚未启动。
+> **当前结论**：M3-01 至 M3-13 均保持 `REVIEW`。M3-13 已补齐 Token-only Server 不可达/重连完整 Snapshot、跨 Session 全量 Health 恢复、Backup ACK 后原子发布、canonical Manifest 身份和 Restore Journal 可达崩溃状态的自动化证据；Windows 整仓 Test/Race/Vet 与 Linux amd64 相关包原生执行通过，独立复审无剩余 P0/P1/P2。当前工作树尚无 Commit/对应 CI；OCI amd64 Smoke 在当前 WSL/Docker 的 Go 编译阶段环境阻塞后被终止，systemd Smoke 因脚本要求隔离 Linux 主机而未在现有 WSL 越权执行，因此 M3 Gate 尚不能标记 `DONE` 或勾选 Checklist。
 
 ---
 
@@ -286,7 +286,7 @@ M1 的静态 Service 只能由 Integration Test Harness 注入，不得为过渡
 | M3-10 | Health Target Budget Manager | M3-01、M3-08、M2-06 | Reserve/Commit/Release Manager | `(tunnel_id,connector_id)` 所有权；固定锁顺序；重连不双计费/误释放 | `REVIEW` |
 | M3-11 | Tunnel/Connector/Service Status | M3-06、M3-09、M3-10 | `internal/server/status` | 状态优先级唯一；Origin Health 不污染 Tunnel/Connector；Web 不重算 | `REVIEW` |
 | M3-12 | Durable Operations：Backup/Restore | M0-05、M1-01、M1-04、M3-02 | `backup create/restore`、Backup Manifest、Restore Journal | 在线 Create 通过本机控制通道建立 Config Write Barrier；离线 Create/Restore 使用同一 Stable Target External Lock；把 SQLite + data-dir-owned Pinned Gateway TLS Identity + Tunnel Token Master Key 作为同一一致性单元；Manifest/Hash/Schema 校验；同盘 staging/rollback/journal 可恢复 | `REVIEW` |
-| M3-13 | M3 Gate | M3-01至 M3-12 | Application Service Integration + Server Durable Operation Crash Tests | 下方 Checklist 全部通过 | `NOT_STARTED` |
+| M3-13 | M3 Gate | M3-01至 M3-12 | Application Service Integration + Server Durable Operation Crash Tests | 下方 Checklist 全部通过 | `REVIEW` |
 
 ## 9.2 M3 Gate Checklist
 
@@ -398,7 +398,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 对 16/32/64 KiB Proxy Buffer、HTTP/1.1 WorkConn Capacity、Connector Selection CPU/Allocation 做 Benchmark；只依据本项目结果调整 Server Schema 默认值，不删除预算维度；记录 CPU/RAM/FD 环境 | `NOT_STARTED` |
 | M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 100/500/1000 Connector 使用 Stagger + Jitter 重连，无同步 TLS/Auth Storm；永久错误不快速重试；记录 Pending TLS/Auth、`retry_after`、FD/CPU/RAM；Server Restart 后测量 `T_control_reconnect`、`T_config_ready`、`T_workpool_ready`、`T_first_success` 分布，旧 generation 无污染 | `NOT_STARTED` |
 | M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `NOT_STARTED` |
-| M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `NOT_STARTED` |
+| M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `NOT_STARTED` |
 | M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `NOT_STARTED` |
 | M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `NOT_STARTED` |
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `NOT_STARTED` |
@@ -422,9 +422,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14` 已完成。M2-01 至 M2-08 已完成本地实现、提交、验收与用户阶段 Review，但仍等待对应 CI 证据；M3-01 至 M3-12 已完成本地实现与独立复审，当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14` 已完成。M2-01 至 M2-08 已完成本地实现、提交、验收与用户阶段 Review，但仍等待对应 CI 证据；M3-01 至 M3-13 已完成本地实现与独立复审，当前待办为：
 
-1. `M3-13` — M3 Gate；必须汇总 M3-01 至 M3-12 的完整 Gate Checklist、CI 与缺失的 systemd/OCI 原生 Runtime Smoke，不得用本地或交叉编译证据冒充 Gate PASS。
+1. `M3-13` — 本地 Gate 自动化证据与独立复审已完成，保持 `REVIEW`；仍需当前最终提交对应 CI、成功的 OCI amd64/arm64 Runtime Smoke，以及隔离 Linux amd64/arm64 上的 systemd 原生安装/启动 Smoke，才能勾选 Checklist 或转为 `DONE`。本轮失败的 WSL/Docker 构建尝试不计为通过证据。
 2. `M3-12` — Linux root Backup/Restore、在线/离线互斥、Manifest、Token Key/密文一致性、Restore Journal Recovery、Stable Parent/data leaf 部署接线已完成并独立复审，保持 `REVIEW`；不提供旧布局迁移兼容层。
 3. `M3-11` — 状态优先级、首次认证耐久事实、Control Auth 提交、已发布 Runtime 联合快照与生产输入组装已完成并独立复审，保持 `REVIEW`。
 4. `M3-10` — 两级 Health Target Budget、配置事务 Reservation、启动重建、Control Auth 容量拒绝与 Runtime generation fencing 已完成并独立复审，保持 `REVIEW`。
@@ -441,7 +441,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 15. `M0-09` — 正式 Dockerfile 双架构与 Windows SCM 已在 CI #11/#12 通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 16. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。下一项是 M3-13 Gate；完整 M3-01 至 M3-13 完成后停止并等待用户阶段 Review。
+`M0-12` 仍是 Alpha 前 Gate。M3-01 至 M3-13 当前均为 `REVIEW`；取得最终提交 CI 与隔离部署 Runtime Smoke 后，才能完成 M3 Gate 并进入用户阶段 Review。
 
 推进规则：
 
@@ -1083,3 +1083,16 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 验收环境与结果：Windows `go1.27.0`、`GOTOOLCHAIN=local`。GoFmt、`go test -count=1 -timeout 300s ./...`、`go test -race -count=1 -timeout 360s ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff` 均通过。Linux amd64 DurableOps Test Binary 由固定 Go 1.27 工具链以 `CGO_ENABLED=0` 交叉编译，并在 WSL 原生运行完整包测试通过；WSL 本身未安装 Go，因此未在发行版内重新构建，也未运行 Linux Race。
 - 证据边界：本轮仍是 staged/unstaged/untracked 混合的脏工作区，没有 staged snapshot 复验、Commit SHA、push、对应 CI Run、Docker OCI Smoke 或 systemd 原生安装/启动 Smoke。M3-12 继续保持 `REVIEW`，M3-13 仍为 `NOT_STARTED`，本次未勾选任何产品任务或 Gate；提交前必须重新整体暂存最终工作树并从 staged snapshot 复验。
 - 文档同步：两项修复恢复总技术方案既有的 Journal phase/fail-closed 与“每次目录项变化后同步父目录”契约，README 的用户可见行为没有变化，因此只追加本执行记录并限定上一轮复审结论的时间边界；总技术方案、README 和机器契约无需更新。
+
+## 2026-08-27 · M3-13 M3 Gate · REVIEW
+
+- 授权与边界：用户确认继续下一步开发。本轮只补 M3 Gate 所需的 DurableOps 崩溃收敛修复和跨 Session 集成证据；未修改 Proto、OpenAPI、Server Schema、数据库 Migration、第三方依赖、锁文件、CI/CD、生产配置、暂存区或提交历史，也未提供旧布局迁移兼容层。
+- Application/Session Gate：既有真实 TCP Echo E2E 已证明 Application Service 修改 Origin 后 Agent 无需重启即可生效；本轮进一步关闭 Gateway 后断言旧 Session 不再 Current/Eligible、Runtime Status 为空且数据面不能使用 Agent 进程内旧 Candidate 回退。重连代在真实 Token-only TLS/Auth 后被门闩阻塞于完整 Snapshot 读取，ConfigAck 前无 Pool/Eligible；放行后只接受 Revision 3 完整 Snapshot，并通过第三个 Origin Echo。
+- Health Gate：新增第二代 Config Session 自动化证据。即使 Health 状态未变化，新 Session 的 observed 基线也必须归零，并严格按 `APPLIED ConfigAck → 当前 Revision 全量 Health Batch → 后续增量 Batch` 排序，禁止沿用上一代 Reporter 的去重基线。
+- Archive 原子发布：Backup 不再直接写最终 OutputPath，而是在固定输出父目录 FD 下创建随机隐藏 `0600` 候选；文件完整 `fsync`/Close 且在线 release ACK 成功后，才以同一 dirfd 的 `renameat2(RENAME_NOREPLACE)` 原子发布并同步父目录。并发目标存在时禁止覆盖；失败只相对固定 dirfd 删除本次候选。Manifest 读取只接受与 `json.Marshal` 逐字节一致的 canonical JSON，Journal Hash 与归档声明绑定同一 canonical bytes。子进程 hard-exit 测试证明 ACK 前最终路径不可见。
+- Restore 崩溃收敛：补齐 `prepared target-only`、`rollback_ready rollback-only/target-only`、`installed rollback-only` 可达组合；prepared 回滚按“删除 staging → 父目录 fsync → 删除 Journal → 父目录 fsync”收敛。启动时只清理固定前缀、普通 `0600` 的 Journal 临时文件，并用已打开父目录 FD 相对删除；符号链接或异常对象 fail closed 保留现场。
+- Checklist 审计：M3 Gate 八项均已有本地自动化证据，覆盖 Snapshot Deterministic/Revision/Size/Count、Atomic Apply 生命周期与 Digest 规则、Health 调度/预算/Replacement fencing，以及在线/离线 Backup/Restore 与 Journal 状态表。但 Checklist 暂不勾选，因为当前最终工作树尚无 Commit/对应 CI，且缺少成功的 OCI 与隔离 systemd Runtime Smoke。
+- 验收环境与结果：Windows `go1.27.0`、`GOTOOLCHAIN=local`。GoFmt、`go test -count=1 -timeout 300s ./...`、`go test -race -count=1 -timeout 360s ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff`、Server Schema JSON 解析与双 Diff Check 全部通过。Linux amd64 DurableOps、Agent Connector、Integration Test Binary 由固定工具链以 `CGO_ENABLED=0` 交叉构建，并在 WSL root 原生运行完整包测试通过；WSL 内未安装 Go，因此未运行 Linux Race。
+- 独立复审与剩余风险：独立只读复审未报告 P0/P1/P2。两个非阻塞 P3 被显式保留：进程在隐藏候选完整写入后 SIGKILL 会留下私有 `.xtunnel-backup-pending-*` 磁盘垃圾但不会暴露最终路径；rename 成功后父目录 `fsync` 失败会返回“不确定持久化”错误并保留完整最终文件。前者进入 M7-04 Filesystem Failpoint 阶段评估显式清理策略，禁止在并发 Create 下按前缀盲删。
+- 部署与证据边界：Linux amd64 OCI Server Smoke 使用固定镜像摘要开始构建，依赖校验通过，但当前 WSL/Docker 在 Go 编译阶段长时间无进展且只读进程快照也受阻，已主动终止；无容器残留，该尝试不计通过。systemd 249 可用且脚本涉及的 XTunnel Unit、Binary、配置/运行/数据目录及两个服务身份经只读预检均不存在，但 `deploy/systemd/smoke.sh` 明确只允许隔离 Linux 主机并会创建/删除这些系统对象；当前 WSL 未被确认可销毁，因此未执行。没有 staged snapshot、Commit SHA、push 或当前工作树对应 CI Run；M3 `DONE` 仍为 `0/13`、全局仍为 `33/95`。
+- 文档同步：总技术方案同步 Backup 输出的“隐藏候选 + ACK 后 no-replace 原子发布”契约；README 已准确表述“release ACK 后才发布”，无需重复扩写。开发计划同步任务表、当前队列、复现证据与 Gate 边界，机器契约保持不变。

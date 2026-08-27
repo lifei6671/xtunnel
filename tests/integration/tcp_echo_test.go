@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,11 +84,12 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create Snapshot source: %v", err)
 	}
+	snapshotProvider := &blockingSnapshotProvider{delegate: snapshotSource}
 	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
 		HighPriorityCapacity: 32, NormalCapacity: 128, InboundCapacity: 128,
 		WriteTimeout: 2 * time.Second, MaxReplayEntries: 256,
 		MaxWorkTotal: 32, MaxWorkConnecting: 16,
-		LimitManager: limitManager, SnapshotProvider: snapshotSource,
+		LimitManager: limitManager, SnapshotProvider: snapshotProvider,
 	})
 	if err != nil {
 		t.Fatalf("create Session manager: %v", err)
@@ -206,6 +208,101 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		t.Fatalf("Limit snapshot after Origin switch = %#v, want no PendingOpen or Active leak", snapshot)
 	}
 
+	t.Run("token-only reconnect requires a fresh complete snapshot", func(t *testing.T) {
+		firstSession, exists := registry.Current(testTunnelID, agentConfig.Connector.ID())
+		if !exists || !registry.Eligible(firstSession, testServiceID) {
+			t.Fatalf("initial current Session = %#v, exists=%t, want eligible", firstSession, exists)
+		}
+		listenAddress := gatewayServer.Addr().String()
+		if err := gatewayServer.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("close first Gateway server: %v", err)
+		}
+		waitForConnectorAbsent(t, registry, agentConfig.Connector.ID())
+		if registry.Eligible(firstSession, testServiceID) {
+			t.Fatal("closed Server left the old Session eligible")
+		}
+		assertConnectorRemainsUnavailable(t, registry, sessions, agentConfig.Connector.ID(), 150*time.Millisecond)
+		if err := tunnelEchoRoundTrip(ctx, tunnelProxy, []byte("must-not-use-local-config")); err == nil {
+			t.Fatal("Tunnel data plane stayed available while the Server was unreachable")
+		}
+
+		thirdOrigin, thirdOriginDone := startEchoOrigin(t, ctx)
+		thirdInput := integrationOriginInput(t, thirdOrigin)
+		updated, err := serviceManagement.Update(ctx, application.UpdateServiceInput{
+			TunnelID: testTunnelID, ServiceID: testServiceID,
+			ExpectedTunnelVersion: 1, ExpectedServiceVersion: 2, Origin: &thirdInput,
+		})
+		if err != nil {
+			t.Fatalf("update Origin while Agent Gateway is unavailable: %v", err)
+		}
+		if updated.TunnelRevision != 3 || updated.Service.RequiredRevision != 3 || updated.Service.Version != 3 {
+			t.Fatalf("offline desired Origin revision/version = %+v", updated)
+		}
+
+		// 阻塞重连代的完整 Snapshot 读取，稳定暴露“认证已提交但尚未
+		// ConfigAck”的窗口。此时进程虽仍保留旧 Candidate，数据面也不能回退使用。
+		readBlock := snapshotProvider.blockNext(t, func() bool {
+			current, currentExists := registry.Current(testTunnelID, agentConfig.Connector.ID())
+			return currentExists && current.Generation > firstSession.Generation
+		})
+		restarted, err := gateway.NewServer(gateway.ServerOptions{
+			Listen: listenAddress, Identity: gatewayIdentity, MaxPendingTLSHandshakes: 32,
+			Handle: gatewayHandler(controlHandler, workHandler, sessions),
+		})
+		if err != nil {
+			t.Fatalf("create restarted Gateway server: %v", err)
+		}
+		if err := restarted.Start(ctx); err != nil {
+			t.Fatalf("restart Gateway server on token endpoint: %v", err)
+		}
+		gatewayServer = restarted
+
+		select {
+		case <-readBlock.started:
+		case <-ctx.Done():
+			t.Fatalf("context ended before reconnected Snapshot read: %v", ctx.Err())
+		case <-time.After(5 * time.Second):
+			t.Fatal("Agent did not reconnect and request a complete Snapshot")
+		}
+		reconnected, exists := registry.Current(testTunnelID, agentConfig.Connector.ID())
+		if !exists || reconnected.Generation != firstSession.Generation+1 {
+			t.Fatalf("reconnected Session = %#v, exists=%t, want generation %d",
+				reconnected, exists, firstSession.Generation+1)
+		}
+		if _, ready := sessions.Pool(reconnected); ready || registry.Eligible(reconnected, testServiceID) {
+			t.Fatal("reconnected Session became ready before complete Snapshot Apply/Ack")
+		}
+		blockedProxy, err := tunnel.NewProxy(tunnel.Options{
+			Registry: registry, Sessions: sessions, OpenHandler: serverOpen,
+			AcquireTimeout: 100 * time.Millisecond, LimitManager: limitManager,
+		})
+		if err != nil {
+			t.Fatalf("create blocked-state Tunnel proxy: %v", err)
+		}
+		if err := tunnelEchoRoundTrip(ctx, blockedProxy, []byte("must-wait-for-fresh-snapshot")); err == nil {
+			t.Fatal("reconnected data plane used the process-local old Snapshot before ConfigAck")
+		}
+
+		readBlock.release()
+		waitForIdleWork(t, ctx, registry, sessions, agentConfig.Connector.ID())
+		current, exists := registry.Current(testTunnelID, agentConfig.Connector.ID())
+		if !exists || current != reconnected || !registry.Eligible(current, testServiceID) {
+			t.Fatalf("current Session after fresh Snapshot = %#v, exists=%t, want reconnected eligible Session",
+				current, exists)
+		}
+		status := currentRuntimeStatus(t, sessions, current)
+		service, complete := status.Config.Services[testServiceID]
+		if !status.Config.ConfigReady || !status.Config.HasObserved || status.Config.ObservedRevision != 3 ||
+			!complete || service.RequiredRevision != 3 {
+			t.Fatalf("reconnected complete Snapshot status = %#v, service=%#v, complete=%t",
+				status.Config, service, complete)
+		}
+
+		payload := []byte("xtunnel-m3-origin-three-after-reconnect\x00\xfd")
+		waitForTunnelEcho(t, ctx, tunnelProxy, payload)
+		waitForEchoOrigin(t, thirdOriginDone, "third")
+	})
+
 	cancel()
 	select {
 	case err := <-agentDone:
@@ -220,6 +317,130 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	}
 	_ = store.Close()
 	waitForResourceBaseline(t, baselineGoroutines, baselineFDs, baselineFDTargets)
+}
+
+// blockingSnapshotProvider 只在测试显式 arm 时阻塞下一次完整 Snapshot 读取。
+// 它不伪造 Snapshot 或 Ack，只把真实生产 Source 的一个并发窗口变为确定性窗口。
+type blockingSnapshotProvider struct {
+	delegate sessionruntime.SnapshotProvider
+
+	mu   sync.Mutex
+	next *snapshotReadBlock
+}
+
+// snapshotReadBlock 只被一次匹配的 Current 调用消费；release 使用 Once，保证
+// 失败清理与测试主流程并发时不会重复关闭 proceed。
+type snapshotReadBlock struct {
+	started chan struct{}
+	proceed chan struct{}
+	once    sync.Once
+	match   func() bool
+}
+
+func (provider *blockingSnapshotProvider) Current(
+	ctx context.Context,
+	tunnelID string,
+) (serversnapshot.Result, error) {
+	provider.mu.Lock()
+	candidate := provider.next
+	provider.mu.Unlock()
+
+	var block *snapshotReadBlock
+	if candidate != nil && (candidate.match == nil || candidate.match()) {
+		provider.mu.Lock()
+		if provider.next == candidate {
+			provider.next = nil
+			block = candidate
+		}
+		provider.mu.Unlock()
+	}
+	if block != nil {
+		close(block.started)
+		select {
+		case <-block.proceed:
+		case <-ctx.Done():
+			return serversnapshot.Result{}, ctx.Err()
+		}
+	}
+	return provider.delegate.Current(ctx, tunnelID)
+}
+
+func (provider *blockingSnapshotProvider) blockNext(t *testing.T, match func() bool) *snapshotReadBlock {
+	t.Helper()
+	block := &snapshotReadBlock{started: make(chan struct{}), proceed: make(chan struct{}), match: match}
+	provider.mu.Lock()
+	if provider.next != nil {
+		provider.mu.Unlock()
+		t.Fatal("Snapshot provider already has an armed read block")
+	}
+	provider.next = block
+	provider.mu.Unlock()
+	t.Cleanup(block.release)
+	return block
+}
+
+func (block *snapshotReadBlock) release() {
+	block.once.Do(func() { close(block.proceed) })
+}
+
+func waitForConnectorAbsent(t *testing.T, registry *serverruntime.Registry, connectorID string) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, exists := registry.Current(testTunnelID, connectorID); !exists {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("closed Gateway did not remove the current Connector")
+		case <-ticker.C:
+		}
+	}
+}
+
+func assertConnectorRemainsUnavailable(
+	t *testing.T,
+	registry *serverruntime.Registry,
+	sessions *sessionruntime.Manager,
+	connectorID string,
+	duration time.Duration,
+) {
+	t.Helper()
+	deadline := time.NewTimer(duration)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, exists := registry.Current(testTunnelID, connectorID); exists {
+			t.Fatal("Connector became current while its token endpoint was unavailable")
+		}
+		if snapshots := sessions.RuntimeStatusSnapshots(); len(snapshots) != 0 {
+			t.Fatalf("Server exposed Runtime status while Agent Gateway was unavailable: %#v", snapshots)
+		}
+		select {
+		case <-deadline.C:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func currentRuntimeStatus(
+	t *testing.T,
+	sessions *sessionruntime.Manager,
+	want serverruntime.Session,
+) serverruntime.SessionStatusSnapshot {
+	t.Helper()
+	for _, snapshot := range sessions.RuntimeStatusSnapshots() {
+		if snapshot.Session == want {
+			return snapshot
+		}
+	}
+	t.Fatalf("RuntimeStatusSnapshots() does not contain current Session %#v", want)
+	return serverruntime.SessionStatusSnapshot{}
 }
 
 func tunnelEchoRoundTrip(ctx context.Context, proxy *tunnel.Proxy, payload []byte) error {

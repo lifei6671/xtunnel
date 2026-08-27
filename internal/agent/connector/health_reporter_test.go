@@ -350,6 +350,77 @@ func TestApplyInboundQueuesFullHealthOnlyAfterAppliedAck(t *testing.T) {
 	}
 }
 
+func TestReconnectQueuesCurrentFullHealthAfterConfigAckBeforeIncremental(t *testing.T) {
+	manager, firstConfigSession := newTestConfigSession(t)
+	source := newFakeHealthSource()
+	source.states[firstHealthServiceID] = agenthealth.State{
+		Status:          protocolv1.HealthStatus_HEALTH_STATUS_HEALTHY,
+		ServiceRevision: 9,
+		CheckedAt:       time.UnixMilli(1_000),
+	}
+	snapshot := healthReporterSnapshot(9,
+		healthReporterService(firstHealthServiceID, 9, protocolv1.HealthType_HEALTH_TYPE_TCP),
+	)
+	firstSession := newHealthReporterSession(4)
+	firstReporter := newHealthReporter(source, firstSession)
+	if err := applyInboundAndReport(context.Background(), firstSession, firstConfigSession, &fakeWorkPool{},
+		inbound(&protocolv1.ControlEnvelope_ConfigSnapshot{ConfigSnapshot: snapshot}), firstReporter); err != nil {
+		t.Fatalf("first Control Session Apply() error = %v", err)
+	}
+	if ack := receiveEnqueued(t, firstSession.enqueued).GetConfigAck(); ack.GetObservedRevision() != 9 {
+		t.Fatalf("first ConfigAck = %#v, want observed revision 9", ack)
+	}
+	if batch := receiveEnqueued(t, firstSession.enqueued).GetServiceHealthBatch(); len(batch.GetItems()) != 1 || batch.GetItems()[0].GetStatus() != protocolv1.HealthStatus_HEALTH_STATUS_HEALTHY {
+		t.Fatalf("first full Health Batch = %#v", batch)
+	}
+
+	// Health 状态没有发生变化，但新 Control Session 的 observed 基线必须归零，
+	// 并在本代 ConfigAck 后重新发送完整集合，不能沿用上一代 Reporter 的 last。
+	secondConfigSession, err := manager.NewSession(testTunnelID)
+	if err != nil {
+		t.Fatalf("Manager.NewSession(reconnect) error = %v", err)
+	}
+	if _, _, observed := secondConfigSession.Observed(); observed {
+		t.Fatal("reconnected Config Session inherited the previous observed baseline")
+	}
+	secondSession := newHealthReporterSession(4)
+	secondReporter := newHealthReporter(source, secondSession)
+	if err := applyInboundAndReport(context.Background(), secondSession, secondConfigSession, &fakeWorkPool{},
+		inbound(&protocolv1.ControlEnvelope_ConfigSnapshot{ConfigSnapshot: snapshot}), secondReporter); err != nil {
+		t.Fatalf("reconnected Control Session Apply() error = %v", err)
+	}
+
+	ack := receiveEnqueued(t, secondSession.enqueued).GetConfigAck()
+	if ack.GetObservedRevision() != 9 ||
+		ack.GetApplyStatus() != protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED {
+		t.Fatalf("reconnected first message = %#v, want APPLIED ConfigAck for revision 9", ack)
+	}
+	full := receiveEnqueued(t, secondSession.enqueued).GetServiceHealthBatch()
+	if len(full.GetItems()) != 1 || full.GetItems()[0].GetServiceId() != firstHealthServiceID ||
+		full.GetItems()[0].GetStatus() != protocolv1.HealthStatus_HEALTH_STATUS_HEALTHY ||
+		full.GetItems()[0].GetCheckedAtMs() != 1_000 {
+		t.Fatalf("reconnected second message = %#v, want unchanged current full Health", full)
+	}
+
+	source.states[firstHealthServiceID] = agenthealth.State{
+		Status:          protocolv1.HealthStatus_HEALTH_STATUS_UNHEALTHY,
+		ServiceRevision: 9,
+		CheckedAt:       time.UnixMilli(2_000),
+	}
+	if err := secondReporter.collectChanges(); err != nil {
+		t.Fatalf("collect reconnected Health change: %v", err)
+	}
+	if err := secondReporter.flush(); err != nil {
+		t.Fatalf("flush reconnected Health change: %v", err)
+	}
+	incremental := receiveEnqueued(t, secondSession.enqueued).GetServiceHealthBatch()
+	if len(incremental.GetItems()) != 1 ||
+		incremental.GetItems()[0].GetStatus() != protocolv1.HealthStatus_HEALTH_STATUS_UNHEALTHY ||
+		incremental.GetItems()[0].GetCheckedAtMs() != 2_000 {
+		t.Fatalf("message after reconnect full Batch = %#v, want later incremental Health", incremental)
+	}
+}
+
 func TestApplyInboundAtomicAckFailurePreservesReporterBaselineAndRetries(t *testing.T) {
 	_, configSession := newTestConfigSession(t)
 	source := newFakeHealthSource()

@@ -14,8 +14,12 @@ import (
 	"path/filepath"
 )
 
-// maxManifestSize 限制不可信归档在 JSON 解码前的内存占用。
-const maxManifestSize = 1 << 20
+const (
+	// maxManifestSize 限制不可信归档在 JSON 解码前的内存占用。
+	maxManifestSize = 1 << 20
+	// pendingOutputPrefix 让未发布候选保持隐藏且可与最终归档名明确区分。
+	pendingOutputPrefix = ".xtunnel-backup-pending-"
+)
 
 // CreateOptions 描述一次备份捕获。BackupDatabase 必须把 SQLite
 // Backup API 产生的自包含数据库写到 destination，并返回当时的 Schema 版本。
@@ -32,8 +36,19 @@ type CreateOptions struct {
 	BeforePublish func() error
 }
 
-// Create 使用 0700 临时目录捕获数据边界，并以 O_CREATE|O_EXCL、0600
-// 写出备份。失败时删除不完整输出，不会覆盖已有文件。
+// pendingOutput 持有输出父目录的固定 FD 和尚未公开的候选文件。
+// name/finalName 都是该父目录下的单个路径分量，所有清理和发布都不得重新解析
+// 调用方提供的绝对路径。
+type pendingOutput struct {
+	file      *os.File
+	parent    *os.File
+	name      string
+	finalName string
+}
+
+// Create 使用 0700 临时目录捕获数据边界，并先把 0600 归档写入输出父目录中的
+// 隐藏候选文件。候选完整 fsync 且在线 Barrier Release ACK 成功后，才以 Linux
+// no-replace rename 原子发布最终路径；失败时只按固定父目录 FD 删除本次候选。
 func Create(ctx context.Context, options CreateOptions) (result Manifest, resultErr error) {
 	if !platformSupported() {
 		return Manifest{}, ErrUnsupported
@@ -105,61 +120,65 @@ func Create(ctx context.Context, options CreateOptions) (result Manifest, result
 		}
 	}
 
-	output, outputParent, err := createExclusiveOutput(options.OutputPath)
+	pending, err := createPendingOutput(options.OutputPath)
 	if err != nil {
-		return Manifest{}, fmt.Errorf("create backup output: %w", err)
+		return Manifest{}, fmt.Errorf("create pending backup output: %w", err)
 	}
-	completed := false
+	published := false
 	defer func() {
-		// outputParent 是创建时固定的目录 FD。失败清理必须相对它 unlink，不能重新
+		// parent 是创建候选时固定的目录 FD。失败清理必须相对它 unlink，不能重新
 		// 解析 OutputPath，否则父路径被并发替换后可能误删另一目录的同名文件。
-		if output != nil {
-			if err := output.Close(); err != nil {
+		if pending.file != nil {
+			if err := pending.file.Close(); err != nil {
 				resultErr = errors.Join(resultErr, fmt.Errorf("close backup output: %w", err))
-				completed = false
 			}
 		}
-		if !completed {
-			if err := removeExclusiveOutput(outputParent, filepath.Base(options.OutputPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				resultErr = errors.Join(resultErr, fmt.Errorf("remove failed backup output: %w", err))
+		if !published {
+			if err := removePendingOutput(pending.parent, pending.name); err != nil && !errors.Is(err, os.ErrNotExist) {
+				resultErr = errors.Join(resultErr, fmt.Errorf("remove failed pending backup output: %w", err))
 			}
-			if err := outputParent.Sync(); err != nil {
+			if err := pending.parent.Sync(); err != nil {
 				resultErr = errors.Join(resultErr, fmt.Errorf("sync backup output parent after cleanup: %w", err))
 			}
 		}
-		if err := outputParent.Close(); err != nil {
+		if err := pending.parent.Close(); err != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("close backup output parent: %w", err))
 		}
 	}()
-	if err := output.Chmod(0o600); err != nil {
+	if err := pending.file.Chmod(0o600); err != nil {
 		return Manifest{}, fmt.Errorf("set backup output permissions: %w", err)
 	}
-	manifest, _, err := createArchive(ctx, output, snapshot, schemaVersion, options.TLSMode)
+	manifest, _, err := createArchive(ctx, pending.file, snapshot, schemaVersion, options.TLSMode)
 	if err != nil {
 		return Manifest{}, err
 	}
-	if err := output.Sync(); err != nil {
+	if err := pending.file.Sync(); err != nil {
 		return Manifest{}, fmt.Errorf("sync backup output: %w", err)
 	}
-	if err := output.Close(); err != nil {
+	if err := pending.file.Close(); err != nil {
 		return Manifest{}, fmt.Errorf("close backup output before publishing completion: %w", err)
 	}
-	output = nil
+	pending.file = nil
 	if err := os.RemoveAll(snapshot); err != nil {
 		return Manifest{}, fmt.Errorf("remove backup snapshot directory: %w", err)
 	}
 	snapshot = ""
-	if err := outputParent.Sync(); err != nil {
-		return Manifest{}, fmt.Errorf("sync backup output parent: %w", err)
-	}
 	if options.BeforePublish != nil {
-		// 在线模式的 Barrier Release ACK 是发布承诺的一部分；ACK 失败表示调用方
-		// 无法确认捕获边界仍成立，此时 defer 会删除已写完但未承诺的归档。
+		// 在线模式的 Barrier Release ACK 必须发生在最终路径出现之前。ACK 失败或
+		// 进程在回调中退出时，调用方永远看不到一个名字正确但未承诺的归档。
 		if err := options.BeforePublish(); err != nil {
 			return Manifest{}, fmt.Errorf("confirm backup publication barrier: %w", err)
 		}
 	}
-	completed = true
+	if err := publishPendingOutput(pending); err != nil {
+		return Manifest{}, fmt.Errorf("publish backup output: %w", err)
+	}
+	// rename 后候选名已不存在；先标记已发布，避免后续目录 fsync 失败时清理逻辑
+	// 误把一个完整且已对外可见的归档当成半成品处理。
+	published = true
+	if err := pending.parent.Sync(); err != nil {
+		return Manifest{}, fmt.Errorf("sync published backup output parent: %w", err)
+	}
 	return manifest, nil
 }
 
@@ -377,7 +396,8 @@ func copySourceFile(output io.Writer, path string, manifest ManifestFile) error 
 }
 
 // readManifest 严格读取归档首条目并拒绝未知 JSON 字段、尾随 JSON 值和超限内容。
-// 返回原始 JSON 字节，使 Journal 绑定的是归档实际声明而非重新编码前的输入流。
+// 通过逐字节比较 json.Marshal 结果只接受 canonical JSON，并返回同一 canonical
+// 字节，使归档摘要与 Restore Journal 不会因字段顺序或空白差异产生两套身份。
 func readManifest(archive *tar.Reader, currentSchemaVersion int) (Manifest, []byte, error) {
 	header, err := archive.Next()
 	if err != nil {
@@ -405,7 +425,14 @@ func readManifest(archive *tar.Reader, currentSchemaVersion int) (Manifest, []by
 	if err := validateManifest(manifest, currentSchemaVersion); err != nil {
 		return Manifest{}, nil, err
 	}
-	return manifest, data, nil
+	canonical, err := json.Marshal(manifest)
+	if err != nil {
+		return Manifest{}, nil, fmt.Errorf("marshal canonical backup manifest: %w", err)
+	}
+	if !bytes.Equal(data, canonical) {
+		return Manifest{}, nil, errors.New("backup manifest JSON is not canonical")
+	}
+	return manifest, canonical, nil
 }
 
 // ensureJSONEOF 要求一个 JSON 文档后只剩空白，避免第二个值绕过严格字段校验。

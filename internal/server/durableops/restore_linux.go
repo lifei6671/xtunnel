@@ -14,7 +14,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // maxRestoreJournalSize 限制崩溃恢复读取未可信 Journal 时的内存占用。
@@ -152,9 +155,14 @@ func recoverPlatform(ctx context.Context, paths restorePaths) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
+	removedTemporaryJournals, err := cleanupRestoreJournalTemps(paths)
+	if err != nil {
+		return false, err
+	}
 	journalInfo, err := os.Lstat(paths.journal)
 	if errors.Is(err, os.ErrNotExist) {
-		return recoverWithoutJournal(paths)
+		recovered, recoverErr := recoverWithoutJournal(paths)
+		return removedTemporaryJournals || recovered, recoverErr
 	}
 	if err != nil {
 		return false, fmt.Errorf("inspect restore journal: %w", err)
@@ -203,6 +211,12 @@ func recoverPlatform(ctx context.Context, paths restorePaths) (bool, error) {
 	case phasePrepared:
 		if targetExists && stagingExists && !rollbackExists {
 			return true, rollbackPrepared(paths)
+		}
+		if targetExists && !stagingExists && !rollbackExists {
+			// prepared 尚未承诺移动旧 target。这个组合来自 rollbackPrepared 已经
+			// 持久化删除 staging、但尚未删除 Journal 时再次崩溃；旧 target
+			// 始终未被替换，因此只需收掉 Journal，不能拿新 Manifest 重验旧数据。
+			return true, removePreparedJournal(paths)
 		}
 		if !targetExists && stagingExists && rollbackExists {
 			// target -> rollback 可能已落盘，但 phase 更新未落盘。
@@ -444,11 +458,30 @@ func directoryExists(path string) (bool, error) {
 // rollbackPrepared 收敛尚未移走旧 target 的 prepared 事务：删除未提交 staging，
 // 再删除 Journal 并 fsync 父目录。旧 target 始终保持在线。
 func rollbackPrepared(paths restorePaths) error {
+	return rollbackPreparedWithSync(paths, syncDirectory)
+}
+
+// rollbackPreparedWithSync 先持久化 staging 删除，再删除 Journal 并再次同步父目录。
+// 测试通过注入同步点验证：只要 Journal 消失，未提交 staging 的删除就一定已经落盘。
+func rollbackPreparedWithSync(paths restorePaths, syncParent func(string) error) error {
+	parent := filepath.Dir(paths.target)
 	if err := removeDirectoryTree(paths.staging); err != nil {
 		return fmt.Errorf("remove uncommitted restore staging: %w", err)
 	}
+	if err := syncParent(parent); err != nil {
+		return fmt.Errorf("sync restore parent after removing uncommitted staging: %w", err)
+	}
 	if err := os.Remove(paths.journal); err != nil {
 		return fmt.Errorf("remove rolled-back restore journal: %w", err)
+	}
+	return syncParent(parent)
+}
+
+// removePreparedJournal 收敛 staging 已持久化删除、旧 target 从未移动的 prepared
+// 尾声。此时 Journal 是唯一残留目录项，删除并同步后即可回到正常启动状态。
+func removePreparedJournal(paths restorePaths) error {
+	if err := os.Remove(paths.journal); err != nil {
+		return fmt.Errorf("remove completed prepared restore journal: %w", err)
 	}
 	return syncDirectory(filepath.Dir(paths.target))
 }
@@ -549,6 +582,51 @@ func writeJournal(paths restorePaths, journal restoreJournal, uid, gid int) erro
 		return fmt.Errorf("sync restore journal parent: %w", err)
 	}
 	return nil
+}
+
+// cleanupRestoreJournalTemps 清理由 writeJournal 在原子 rename 前留下的同目录临时
+// 文件。调用方持有 Stable Target External Lock；这里只接受固定前缀的 0600 普通
+// 文件，并通过已打开父目录 FD 相对 unlink，既不跟随链接，也不重新解析父路径。
+func cleanupRestoreJournalTemps(paths restorePaths) (removed bool, resultErr error) {
+	parentPath := filepath.Dir(paths.journal)
+	parent, err := os.Open(parentPath)
+	if err != nil {
+		return false, fmt.Errorf("open restore journal parent for temporary cleanup: %w", err)
+	}
+	defer func() {
+		if err := parent.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close restore journal temporary cleanup parent: %w", err))
+		}
+	}()
+
+	entries, err := parent.ReadDir(-1)
+	if err != nil {
+		return false, fmt.Errorf("list restore journal temporary files: %w", err)
+	}
+	prefix := filepath.Base(paths.journal) + ".tmp-"
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || len(name) == len(prefix) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return false, fmt.Errorf("inspect restore journal temporary file %q: %w", name, err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			return false, fmt.Errorf("restore journal temporary entry %q must be a regular 0600 file", name)
+		}
+		if err := unix.Unlinkat(int(parent.Fd()), name, 0); err != nil {
+			return false, fmt.Errorf("remove restore journal temporary file %q: %w", name, err)
+		}
+		removed = true
+	}
+	if removed {
+		if err := parent.Sync(); err != nil {
+			return true, fmt.Errorf("sync restore journal parent after temporary cleanup: %w", err)
+		}
+	}
+	return removed, nil
 }
 
 // syncDirectory 持久化目录条目变化，并把 Sync 与 Close 错误一起返回。

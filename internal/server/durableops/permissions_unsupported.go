@@ -30,12 +30,17 @@ func openAbsoluteRegularNoSymlinks(string) (*os.File, error) {
 	return nil, ErrUnsupported
 }
 
-// createExclusiveOutput 在非 Linux 平台明确返回不支持。
-func createExclusiveOutput(string) (*os.File, *os.File, error) {
-	return nil, nil, ErrUnsupported
+// createPendingOutput 在非 Linux 平台明确返回不支持。
+func createPendingOutput(string) (*pendingOutput, error) {
+	return nil, ErrUnsupported
 }
 
-// removeExclusiveOutput 在非 Linux 平台明确返回不支持。
-func removeExclusiveOutput(*os.File, string) error {
+// publishPendingOutput 在非 Linux 平台明确返回不支持，不提供非原子的 rename 回退。
+func publishPendingOutput(*pendingOutput) error {
+	return ErrUnsupported
+}
+
+// removePendingOutput 在非 Linux 平台明确返回不支持。
+func removePendingOutput(*os.File, string) error {
 	return ErrUnsupported
 }

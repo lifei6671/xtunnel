@@ -162,9 +162,13 @@ func TestRecoverPendingRestoreConvergesInterruptedRenameStates(t *testing.T) {
 	}{
 		{name: "prepared before first rename rolls back staging", phase: phasePrepared, targetExists: true, stagingExists: true, wantAdmin: true},
 		{name: "prepared after first rename restores rollback", phase: phasePrepared, stagingExists: true, rollbackExists: true, wantAdmin: true},
+		{name: "prepared after staging cleanup removes journal", phase: phasePrepared, targetExists: true, wantAdmin: true},
 		{name: "rollback ready before second rename restores rollback", phase: phaseRollbackReady, stagingExists: true, rollbackExists: true, wantAdmin: true},
 		{name: "rollback ready after second rename finishes install", phase: phaseRollbackReady, targetExists: true, rollbackExists: true},
+		{name: "rollback ready after invalid target removal restores rollback", phase: phaseRollbackReady, rollbackExists: true, wantAdmin: true},
+		{name: "rollback ready after rollback cleanup removes journal", phase: phaseRollbackReady, targetExists: true},
 		{name: "installed cleans rollback", phase: phaseInstalled, targetExists: true, rollbackExists: true},
+		{name: "installed after invalid target removal restores rollback", phase: phaseInstalled, rollbackExists: true, wantAdmin: true},
 		{name: "installed after rollback cleanup removes journal", phase: phaseInstalled, targetExists: true},
 	}
 	for _, test := range tests {
@@ -186,7 +190,12 @@ func TestRecoverPendingRestoreConvergesInterruptedRenameStates(t *testing.T) {
 				manifest = writeValidStateDirectory(t, paths.staging, false)
 			}
 			if test.rollbackExists {
-				writeValidStateDirectory(t, paths.rollback, true)
+				rollbackManifest := writeValidStateDirectory(t, paths.rollback, true)
+				if manifest.FormatVersion == 0 {
+					// rollback-only 表示恢复新 target 的清理阶段再次崩溃；真实
+					// Journal 仍携带原新状态 Manifest，这里只需提供合法绑定。
+					manifest = rollbackManifest
+				}
 			}
 			manifestData, err := json.Marshal(manifest)
 			if err != nil {
@@ -338,6 +347,84 @@ func TestFinishInstalledSyncsRollbackRemovalBeforeDeletingJournal(t *testing.T) 
 	}
 }
 
+func TestRollbackPreparedSyncsStagingRemovalBeforeDeletingJournal(t *testing.T) {
+	target := newRestoreTarget(t)
+	paths, err := pathsForTarget(target)
+	if err != nil {
+		t.Fatalf("pathsForTarget() error = %v", err)
+	}
+	writeValidStateDirectory(t, paths.staging, false)
+	if err := os.WriteFile(paths.journal, []byte("journal"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(journal) error = %v", err)
+	}
+
+	syncCalls := 0
+	err = rollbackPreparedWithSync(paths, func(parent string) error {
+		syncCalls++
+		if parent != filepath.Dir(paths.target) {
+			t.Fatalf("sync parent = %q, want %q", parent, filepath.Dir(paths.target))
+		}
+		if _, err := os.Lstat(paths.staging); !os.IsNotExist(err) {
+			t.Fatalf("sync call %d observed staging: %v", syncCalls, err)
+		}
+		_, journalErr := os.Lstat(paths.journal)
+		if syncCalls == 1 && journalErr != nil {
+			t.Fatalf("first sync did not preserve journal: %v", journalErr)
+		}
+		if syncCalls == 2 && !os.IsNotExist(journalErr) {
+			t.Fatalf("second sync observed journal: %v", journalErr)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("rollbackPreparedWithSync() error = %v", err)
+	}
+	if syncCalls != 2 {
+		t.Fatalf("rollbackPreparedWithSync() sync calls = %d, want 2", syncCalls)
+	}
+}
+
+func TestRollbackPreparedSyncFailureRemainsRecoverable(t *testing.T) {
+	target := newRestoreTarget(t)
+	paths, err := pathsForTarget(target)
+	if err != nil {
+		t.Fatalf("pathsForTarget() error = %v", err)
+	}
+	if err := os.Remove(paths.target); err != nil {
+		t.Fatalf("os.Remove(empty target) error = %v", err)
+	}
+	writeValidStateDirectory(t, paths.target, true)
+	manifest := writeValidStateDirectory(t, paths.staging, false)
+	writeRestoreJournalForTest(t, paths, manifest, phasePrepared)
+
+	syncCalls := 0
+	err = rollbackPreparedWithSync(paths, func(string) error {
+		syncCalls++
+		if syncCalls == 1 {
+			return errors.New("simulated sync failure after staging removal")
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "simulated sync failure") {
+		t.Fatalf("rollbackPreparedWithSync(sync failure) error = %v", err)
+	}
+	if _, err := os.Lstat(paths.staging); !os.IsNotExist(err) {
+		t.Fatalf("failed rollback left staging: %v", err)
+	}
+	if _, err := os.Lstat(paths.journal); err != nil {
+		t.Fatalf("failed rollback did not preserve journal: %v", err)
+	}
+
+	recovered, err := RecoverPendingRestore(context.Background(), target)
+	if err != nil || !recovered {
+		t.Fatalf("RecoverPendingRestore(after sync failure) = %t, %v", recovered, err)
+	}
+	assertStateHasAdmin(t, paths.target, true)
+	if _, err := os.Lstat(paths.journal); !os.IsNotExist(err) {
+		t.Fatalf("recovered prepared journal remains: %v", err)
+	}
+}
+
 func TestRecoverWithoutJournalCleansOnlySafeOrphanStaging(t *testing.T) {
 	target := newRestoreTarget(t)
 	paths, err := pathsForTarget(target)
@@ -357,6 +444,52 @@ func TestRecoverWithoutJournalCleansOnlySafeOrphanStaging(t *testing.T) {
 		t.Fatalf("RecoverPendingRestore(orphan rollback) error = %v", err)
 	}
 	assertStateHasAdmin(t, paths.rollback, true)
+}
+
+func TestRecoverWithoutJournalCleansOnlyRegularPrivateJournalTemps(t *testing.T) {
+	t.Run("regular private temporary journal", func(t *testing.T) {
+		target := newRestoreTarget(t)
+		paths, err := pathsForTarget(target)
+		if err != nil {
+			t.Fatalf("pathsForTarget() error = %v", err)
+		}
+		temporary := paths.journal + ".tmp-crash"
+		if err := os.WriteFile(temporary, []byte("partial"), 0o600); err != nil {
+			t.Fatalf("os.WriteFile(temporary journal) error = %v", err)
+		}
+
+		recovered, err := RecoverPendingRestore(context.Background(), target)
+		if err != nil || !recovered {
+			t.Fatalf("RecoverPendingRestore(temporary journal) = %t, %v", recovered, err)
+		}
+		if _, err := os.Lstat(temporary); !os.IsNotExist(err) {
+			t.Fatalf("temporary journal remains: %v", err)
+		}
+	})
+
+	t.Run("symbolic link temporary journal fails closed", func(t *testing.T) {
+		target := newRestoreTarget(t)
+		paths, err := pathsForTarget(target)
+		if err != nil {
+			t.Fatalf("pathsForTarget() error = %v", err)
+		}
+		outside := filepath.Join(filepath.Dir(paths.target), "outside-journal")
+		if err := os.WriteFile(outside, []byte("must-survive"), 0o600); err != nil {
+			t.Fatalf("os.WriteFile(outside journal) error = %v", err)
+		}
+		temporary := paths.journal + ".tmp-link"
+		if err := os.Symlink(outside, temporary); err != nil {
+			t.Fatalf("os.Symlink(temporary journal) error = %v", err)
+		}
+
+		if _, err := RecoverPendingRestore(context.Background(), target); err == nil || !strings.Contains(err.Error(), "regular 0600") {
+			t.Fatalf("RecoverPendingRestore(symbolic temporary journal) error = %v", err)
+		}
+		assertFileContents(t, outside, "must-survive")
+		if _, err := os.Lstat(temporary); err != nil {
+			t.Fatalf("suspicious temporary journal was not preserved: %v", err)
+		}
+	})
 }
 
 func TestRemoveDirectoryTreeRefusesNestedBindMount(t *testing.T) {
