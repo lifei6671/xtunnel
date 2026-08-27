@@ -6,13 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
-	"strings"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	"github.com/lifei6671/xtunnel/internal/logging"
@@ -38,28 +35,6 @@ type backupLease interface {
 	BindContext(context.Context) (context.Context, context.CancelFunc)
 }
 
-// isBackupCommand 只识别顶层 backup 分派词，具体 create/restore 校验留给
-// runBackupCommand，以便主启动流程不会误接管普通 Server 参数。
-func isBackupCommand(args []string) bool {
-	return len(args) != 0 && args[0] == "backup"
-}
-
-// runBackupCommand 分派维护子命令。它不启动 Server，也不复用 Server 生命周期；
-// 每个子命令自行建立所需的在线 Barrier 或离线 External Lock 边界。
-func runBackupCommand(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("expected backup create or backup restore")
-	}
-	switch args[0] {
-	case "create":
-		return runBackupCreate(ctx, program, args[1:], environ, stderr, externallock.RuntimeDirectory)
-	case "restore":
-		return runBackupRestore(ctx, program, args[1:], environ, stderr, externallock.RuntimeDirectory)
-	default:
-		return fmt.Errorf("unknown backup command %q", args[0])
-	}
-}
-
 // runBackupCreate 创建与固定 data target 绑定的备份归档。
 //
 // 运行中的 Server 通过 Backup Socket 授予写屏障，CLI 必须持有租约直到归档、
@@ -77,6 +52,15 @@ func runBackupCreate(
 	if err != nil {
 		return err
 	}
+	return runBackupCreateWithOptions(ctx, options, stderr, runtimeDir)
+}
+
+func runBackupCreateWithOptions(
+	ctx context.Context,
+	options backupCommandOptions,
+	stderr io.Writer,
+	runtimeDir string,
+) (resultErr error) {
 	if err := requireBackupMaintenanceRoot(); err != nil {
 		return err
 	}
@@ -182,6 +166,15 @@ func runBackupRestore(
 	if err != nil {
 		return err
 	}
+	return runBackupRestoreWithOptions(ctx, options, stderr, runtimeDir)
+}
+
+func runBackupRestoreWithOptions(
+	ctx context.Context,
+	options backupCommandOptions,
+	stderr io.Writer,
+	runtimeDir string,
+) (resultErr error) {
 	if err := requireBackupMaintenanceRoot(); err != nil {
 		return err
 	}
@@ -251,40 +244,23 @@ func parseBackupCommandOptions(
 	args, environ []string,
 	stderr io.Writer,
 ) (backupCommandOptions, error) {
-	flags := flag.NewFlagSet(program+" backup "+operation, flag.ContinueOnError)
-	flags.SetOutput(stderr)
 	var options backupCommandOptions
-	var configPath string
-	overrides := make(configOverrides)
-	pathFlag := "output"
-	if operation == "restore" {
-		pathFlag = "input"
-	}
-	flags.StringVar(&options.path, pathFlag, "", "absolute backup archive path")
-	flags.StringVar(&configPath, "config", "", "YAML configuration file")
-	flags.Var(overrides, "set", "override one Schema path with path=value; may be repeated")
-	flags.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: %s backup %s --%s path [--config path] [--set path=value]...\n", program, operation, pathFlag)
-		flags.PrintDefaults()
-	}
-	if err := flags.Parse(args); err != nil {
+	parsed := false
+	command := newBackupOperationCommand(program, operation, environ, stderr, func(_ context.Context, parsedOptions backupCommandOptions) error {
+		parsed = true
+		options = parsedOptions
+		return nil
+	})
+	command.Writer = stderr
+	command.ErrWriter = stderr
+	command.HideVersion = true
+	command.ExitErrHandler = ignoreCLIExitError
+	if err := command.Run(context.Background(), append([]string{program}, args...)); err != nil {
 		return backupCommandOptions{}, fmt.Errorf("parse backup %s command: %w", operation, err)
 	}
-	if flags.NArg() != 0 {
-		return backupCommandOptions{}, fmt.Errorf("backup %s does not accept positional arguments: %s", operation, strings.Join(flags.Args(), " "))
+	if !parsed {
+		return backupCommandOptions{}, errServerCLIHelp
 	}
-	if options.path == "" || options.path == "-" || !filepath.IsAbs(options.path) {
-		return backupCommandOptions{}, fmt.Errorf("backup %s --%s must be an absolute non-stdout path", operation, pathFlag)
-	}
-	var yamlData []byte
-	if configPath != "" {
-		var err error
-		yamlData, err = os.ReadFile(configPath)
-		if err != nil {
-			return backupCommandOptions{}, fmt.Errorf("read config file %q: %w", configPath, err)
-		}
-	}
-	options.config = baseconfig.Options{YAML: yamlData, Environment: environ, CLI: overrides}
 	return options, nil
 }
 

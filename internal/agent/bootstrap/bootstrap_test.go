@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -158,11 +157,11 @@ func TestResolveTokenRejectsUnsupportedCommandLine(t *testing.T) {
 func TestResolveTokenHelp(t *testing.T) {
 	var stderr bytes.Buffer
 	_, err := resolveToken("xtunnel-agent", []string{"--help"}, nil, &stderr)
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("resolveToken() error = %v, want flag.ErrHelp", err)
+	if !errors.Is(err, errCLIHelp) {
+		t.Fatalf("resolveToken() error = %v, want errCLIHelp", err)
 	}
 	output := stderr.String()
-	if !strings.Contains(output, "--token STRING") || !strings.Contains(output, "-token string") {
+	if !strings.Contains(output, "--token string") {
 		t.Fatalf("help output = %q, want Token usage", output)
 	}
 	for _, removed := range []string{"--config", "--set", "--token-file"} {
@@ -380,8 +379,82 @@ func TestExecuteHelpRoutes(t *testing.T) {
 			if exitCode := Execute("xtunnel-agent", args, nil, &stdout, &stderr); exitCode != 0 {
 				t.Fatalf("Execute() = %d, want 0", exitCode)
 			}
-			if !strings.Contains(stdout.String()+stderr.String(), "Usage") {
+			if !strings.Contains(stdout.String()+stderr.String(), "USAGE") {
 				t.Fatalf("help output missing Usage: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestExecuteExplicitFalseHelpDoesNotRunActions(t *testing.T) {
+	tests := [][]string{
+		{"run", "--help=false", "--token", "xta_runtime_secret"},
+		{"service", "install", "--help=false", "--token", "xta_install_secret"},
+		{"service", "uninstall", "--help=false"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args[:2], "_"), func(t *testing.T) {
+			services := &fakeServiceOperations{}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if err := execute(context.Background(), "xtunnel-agent", args, nil, &stdout, &stderr, services); err != nil {
+				t.Fatalf("execute() error = %v", err)
+			}
+			if services.installCalls != 0 || services.uninstallCalls != 0 {
+				t.Fatal("explicit false help invoked service operation")
+			}
+			if !strings.Contains(stdout.String()+stderr.String(), "USAGE") {
+				t.Fatalf("help output missing Usage: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestExecuteLeafHelpSubcommandRemainsPositionalError(t *testing.T) {
+	tests := [][]string{
+		{"run", "help"},
+		{"service", "install", "help"},
+		{"service", "uninstall", "help"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			services := &fakeServiceOperations{}
+			err := execute(context.Background(), "xtunnel-agent", args, nil, &bytes.Buffer{}, &bytes.Buffer{}, services)
+			if err == nil {
+				t.Fatal("execute() error = nil, want positional argument error")
+			}
+			if services.installCalls != 0 || services.uninstallCalls != 0 {
+				t.Fatal("leaf help subcommand invoked service operation")
+			}
+		})
+	}
+}
+
+func TestExecuteHelpAndMissingCommandStreams(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStdout bool
+		wantStderr bool
+	}{
+		{name: "root help", args: []string{"--help"}, wantCode: 0, wantStdout: true},
+		{name: "run help", args: []string{"run", "--help"}, wantCode: 0, wantStdout: true},
+		{name: "missing command", wantCode: 1, wantStderr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			gotCode := Execute("xtunnel-agent", test.args, nil, &stdout, &stderr)
+			if gotCode != test.wantCode {
+				t.Fatalf("Execute() = %d, want %d", gotCode, test.wantCode)
+			}
+			if (stdout.Len() != 0) != test.wantStdout {
+				t.Fatalf("stdout presence = %t, want %t; output = %q", stdout.Len() != 0, test.wantStdout, stdout.String())
+			}
+			if (stderr.Len() != 0) != test.wantStderr {
+				t.Fatalf("stderr presence = %t, want %t; output = %q", stderr.Len() != 0, test.wantStderr, stderr.String())
 			}
 		})
 	}

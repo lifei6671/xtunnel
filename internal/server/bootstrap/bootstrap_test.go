@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"io"
 	"log/slog"
 	"os"
@@ -14,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urfave/cli/v3"
+
+	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 )
 
@@ -21,7 +23,12 @@ func TestParseConfigOptions(t *testing.T) {
 	configPath := writeConfig(t, "logging:\n  level: warn\n")
 	options, err := parseConfigOptions(
 		"xtunnel-server",
-		[]string{"--config", configPath, "--set", "logging.level=error", "--set", "logging.level=debug"},
+		[]string{
+			"--config", configPath,
+			"--set", "logging.level=error",
+			"--set", "logging.level=debug",
+			"--set", "management.public_url=https://admin.example.com/path?a=b,c=d",
+		},
 		[]string{"OTHER=value"},
 		&bytes.Buffer{},
 	)
@@ -34,9 +41,74 @@ func TestParseConfigOptions(t *testing.T) {
 	if options.CLI["logging.level"] != "debug" {
 		t.Fatalf("CLI logging.level = %q, want last override", options.CLI["logging.level"])
 	}
+	if options.CLI["management.public_url"] != "https://admin.example.com/path?a=b,c=d" {
+		t.Fatalf("CLI management.public_url = %q, want comma and equals preserved", options.CLI["management.public_url"])
+	}
 	if len(options.Environment) != 1 || options.Environment[0] != "OTHER=value" {
 		t.Fatalf("Environment = %#v", options.Environment)
 	}
+}
+
+func TestServerCLIParsesRootOptionsAndRejectsCommandsAfterFlags(t *testing.T) {
+	t.Run("root options", func(t *testing.T) {
+		called := false
+		var stderr bytes.Buffer
+		exitCode := executeWithRun(
+			"xtunnel-server",
+			[]string{"--set", "logging.level=debug", "--set", "logging.level=warn"},
+			[]string{"OTHER=value"},
+			&stderr,
+			func(_ context.Context, options baseconfig.Options, _ io.Writer) error {
+				called = true
+				if options.CLI["logging.level"] != "warn" {
+					t.Fatalf("CLI logging.level = %q, want last override", options.CLI["logging.level"])
+				}
+				return nil
+			},
+		)
+		if exitCode != 0 || !called {
+			t.Fatalf("executeWithRun() = %d, called = %t, stderr = %q", exitCode, called, stderr.String())
+		}
+	})
+
+	t.Run("subcommand must be first", func(t *testing.T) {
+		var stderr bytes.Buffer
+		exitCode := executeWithRun(
+			"xtunnel-server",
+			[]string{"--set", "logging.level=debug", "backup", "create", "--help"},
+			nil,
+			&stderr,
+			func(context.Context, baseconfig.Options, io.Writer) error {
+				t.Fatal("misplaced backup command invoked Server runner")
+				return nil
+			},
+		)
+		if exitCode != 1 || !strings.Contains(stderr.String(), "unexpected positional arguments") {
+			t.Fatalf("executeWithRun() = %d, stderr = %q", exitCode, stderr.String())
+		}
+	})
+
+	t.Run("help", func(t *testing.T) {
+		var stderr bytes.Buffer
+		exitCode := executeWithRun("xtunnel-server", []string{"--help"}, nil, &stderr, func(context.Context, baseconfig.Options, io.Writer) error {
+			t.Fatal("help invoked Server runner")
+			return nil
+		})
+		if exitCode != 0 || !strings.Contains(stderr.String(), "COMMANDS:") || !strings.Contains(stderr.String(), "backup") {
+			t.Fatalf("executeWithRun(--help) = %d, stderr = %q", exitCode, stderr.String())
+		}
+	})
+
+	t.Run("explicit false help", func(t *testing.T) {
+		var stderr bytes.Buffer
+		exitCode := executeWithRun("xtunnel-server", []string{"--help=false", "--config", filepath.Join(t.TempDir(), "missing.yaml")}, nil, &stderr, func(context.Context, baseconfig.Options, io.Writer) error {
+			t.Fatal("explicit false help invoked Server runner")
+			return nil
+		})
+		if exitCode != 0 || !strings.Contains(stderr.String(), "USAGE") {
+			t.Fatalf("executeWithRun(--help=false) = %d, stderr = %q", exitCode, stderr.String())
+		}
+	})
 }
 
 func TestParseConfigOptionsRejectsInvalidCommandLine(t *testing.T) {
@@ -64,11 +136,82 @@ func TestParseConfigOptionsRejectsInvalidCommandLine(t *testing.T) {
 func TestParseConfigOptionsHelp(t *testing.T) {
 	var stderr bytes.Buffer
 	_, err := parseConfigOptions("xtunnel-server", []string{"--help"}, nil, &stderr)
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("parseConfigOptions() error = %v, want flag.ErrHelp", err)
+	if !errors.Is(err, errServerCLIHelp) {
+		t.Fatalf("parseConfigOptions() error = %v, want errServerCLIHelp", err)
 	}
 	if !strings.Contains(stderr.String(), "--config") || !strings.Contains(stderr.String(), "--set") {
 		t.Fatalf("help output = %q", stderr.String())
+	}
+}
+
+func TestServerExplicitFalseHelpDoesNotRunMaintenanceActions(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		newCommand func(*bool, io.Writer) *cli.Command
+	}{
+		{
+			name: "admin create",
+			args: []string{"--help=false", "--username", "admin"},
+			newCommand: func(called *bool, output io.Writer) *cli.Command {
+				return newAdminCreateCommand("xtunnel-server", nil, output, func(context.Context, adminCreateOptions) error {
+					*called = true
+					return nil
+				})
+			},
+		},
+		{
+			name: "gateway rotate-key",
+			args: []string{"--help=false", "--maintenance"},
+			newCommand: func(called *bool, output io.Writer) *cli.Command {
+				return newGatewayRotateKeyCommand("xtunnel-server", nil, output, func(context.Context, baseconfig.Options) error {
+					*called = true
+					return nil
+				})
+			},
+		},
+		{
+			name: "backup create",
+			args: []string{"--help=false", "--output", filepath.Join(t.TempDir(), "backup.tar")},
+			newCommand: func(called *bool, output io.Writer) *cli.Command {
+				return newBackupOperationCommand("xtunnel-server", "create", nil, output, func(context.Context, backupCommandOptions) error {
+					*called = true
+					return nil
+				})
+			},
+		},
+		{
+			name: "backup restore",
+			args: []string{"--help=false", "--input", filepath.Join(t.TempDir(), "backup.tar")},
+			newCommand: func(called *bool, output io.Writer) *cli.Command {
+				return newBackupOperationCommand("xtunnel-server", "restore", nil, output, func(context.Context, backupCommandOptions) error {
+					*called = true
+					return nil
+				})
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			var output bytes.Buffer
+			command := test.newCommand(&called, &output)
+			command.Writer = &output
+			command.ErrWriter = &output
+			command.HideVersion = true
+			command.ExitErrHandler = ignoreCLIExitError
+			err := command.Run(context.Background(), append([]string{command.Name}, test.args...))
+			if !errors.Is(err, errServerCLIHelp) {
+				t.Fatalf("command.Run() error = %v, want errServerCLIHelp", err)
+			}
+			if called {
+				t.Fatal("explicit false help invoked maintenance action")
+			}
+			if !strings.Contains(output.String(), "USAGE") {
+				t.Fatalf("help output = %q, want Usage", output.String())
+			}
+		})
 	}
 }
 

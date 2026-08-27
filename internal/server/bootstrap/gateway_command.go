@@ -3,11 +3,9 @@ package bootstrap
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
@@ -24,14 +22,6 @@ import (
 
 var errGatewayRotationAuditAfterCommit = errors.New("gateway identity was rotated but its security audit event was not persisted")
 
-// runGatewayCommand 只提供离线身份轮换；在线轮换会破坏旧 Pin，因此不属于 V0.1。
-func runGatewayCommand(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
-	if len(args) < 1 || args[0] != "rotate-key" {
-		return errors.New("expected gateway rotate-key --maintenance")
-	}
-	return runGatewayRotateKey(ctx, program, args[1:], environ, stderr, externallock.RuntimeDirectory, time.Now())
-}
-
 // runGatewayRotateKey 在 External Lock 保护的离线维护窗口中轮换 pinned 身份。
 // 文件替换先由 durable Journal 提交，再把对应安全审计写入 SQLite；若审计落库失败，
 // Journal 保留供下次启动或重试收敛，绝不能假装整次操作未发生。
@@ -43,39 +33,24 @@ func runGatewayRotateKey(
 	runtimeDir string,
 	now time.Time,
 ) (resultErr error) {
+	options, err := parseGatewayRotateKeyOptions(program, args, environ, stderr)
+	if err != nil {
+		return err
+	}
+	return runGatewayRotateKeyWithOptions(ctx, options, stderr, runtimeDir, now)
+}
+
+func runGatewayRotateKeyWithOptions(
+	ctx context.Context,
+	options baseconfig.Options,
+	stderr io.Writer,
+	runtimeDir string,
+	now time.Time,
+) (resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	flags := flag.NewFlagSet(program+" gateway rotate-key", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	var maintenance bool
-	var configPath string
-	overrides := make(configOverrides)
-	flags.BoolVar(&maintenance, "maintenance", false, "require offline maintenance mode")
-	flags.StringVar(&configPath, "config", "", "YAML configuration file")
-	flags.Var(overrides, "set", "override one Schema path with path=value; may be repeated")
-	flags.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: %s gateway rotate-key --maintenance [--config path] [--set path=value]...\n", program)
-		flags.PrintDefaults()
-	}
-	if err := flags.Parse(args); err != nil {
-		return fmt.Errorf("parse gateway rotate-key command: %w", err)
-	}
-	if !maintenance {
-		return errors.New("gateway rotate-key requires --maintenance")
-	}
-	if flags.NArg() != 0 {
-		return fmt.Errorf("gateway rotate-key does not accept positional arguments: %s", strings.Join(flags.Args(), " "))
-	}
-	var yamlData []byte
-	if configPath != "" {
-		var err error
-		yamlData, err = os.ReadFile(configPath)
-		if err != nil {
-			return fmt.Errorf("read config file %q: %w", configPath, err)
-		}
-	}
-	config, err := serverconfig.Load(baseconfig.Options{YAML: yamlData, Environment: environ, CLI: overrides})
+	config, err := serverconfig.Load(options)
 	if err != nil {
 		return fmt.Errorf("load server config: %w", err)
 	}
@@ -164,7 +139,23 @@ func runGatewayRotateKey(
 	return nil
 }
 
-// isGatewayCommand 识别独立 gateway 子命令，避免进入常驻 Server 参数解析。
-func isGatewayCommand(args []string) bool {
-	return len(args) != 0 && args[0] == "gateway"
+func parseGatewayRotateKeyOptions(program string, args, environ []string, stderr io.Writer) (baseconfig.Options, error) {
+	var options baseconfig.Options
+	parsed := false
+	command := newGatewayRotateKeyCommand(program, environ, stderr, func(_ context.Context, parsedOptions baseconfig.Options) error {
+		parsed = true
+		options = parsedOptions
+		return nil
+	})
+	command.Writer = stderr
+	command.ErrWriter = stderr
+	command.HideVersion = true
+	command.ExitErrHandler = ignoreCLIExitError
+	if err := command.Run(context.Background(), append([]string{program}, args...)); err != nil {
+		return baseconfig.Options{}, fmt.Errorf("parse gateway rotate-key command: %w", err)
+	}
+	if !parsed {
+		return baseconfig.Options{}, errServerCLIHelp
+	}
+	return options, nil
 }

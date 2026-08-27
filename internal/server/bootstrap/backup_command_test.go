@@ -2,8 +2,13 @@ package bootstrap
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 )
 
 func TestParseBackupCommandOptionsRequiresAbsoluteArchivePath(t *testing.T) {
@@ -42,10 +47,12 @@ func TestParseBackupCommandOptionsRequiresAbsoluteArchivePath(t *testing.T) {
 }
 
 func TestBackupCommandDispatchRejectsUnknownOperation(t *testing.T) {
-	if !isBackupCommand([]string{"backup", "create"}) {
-		t.Fatal("isBackupCommand() = false")
-	}
-	if err := runBackupCommand(t.Context(), "xtunnel-server", []string{"unknown"}, nil, &bytes.Buffer{}); err == nil {
-		t.Fatal("runBackupCommand(unknown) error = nil")
+	var stderr bytes.Buffer
+	exitCode := executeWithRun("xtunnel-server", []string{"backup", "unknown"}, nil, &stderr, func(context.Context, baseconfig.Options, io.Writer) error {
+		t.Fatal("invalid backup command invoked Server runner")
+		return nil
+	})
+	if exitCode != 1 || !strings.Contains(stderr.String(), "unknown backup command") {
+		t.Fatalf("executeWithRun(backup unknown) = %d, stderr = %q", exitCode, stderr.String())
 	}
 }

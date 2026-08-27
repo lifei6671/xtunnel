@@ -4,17 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	"github.com/lifei6671/xtunnel/internal/server/datadir"
-	"github.com/lifei6671/xtunnel/internal/server/externallock"
 )
 
 const (
@@ -32,15 +29,15 @@ type adminCreateOptions struct {
 	config       baseconfig.Options
 }
 
-func runAdminCreate(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
-	return runAdminCreateWithRuntimeDir(ctx, program, args, environ, stderr, externallock.RuntimeDirectory)
-}
-
 func runAdminCreateWithRuntimeDir(ctx context.Context, program string, args, environ []string, stderr io.Writer, runtimeDir string) (resultErr error) {
 	options, err := parseAdminCreateOptions(program, args, environ, stderr)
 	if err != nil {
 		return err
 	}
+	return runAdminCreateWithOptions(ctx, options, stderr, runtimeDir)
+}
+
+func runAdminCreateWithOptions(ctx context.Context, options adminCreateOptions, stderr io.Writer, runtimeDir string) (resultErr error) {
 	config, err := serverconfig.Load(options.config)
 	if err != nil {
 		return fmt.Errorf("load server config: %w", err)
@@ -80,39 +77,23 @@ func runAdminCreateWithRuntimeDir(ctx context.Context, program string, args, env
 }
 
 func parseAdminCreateOptions(program string, args, environ []string, stderr io.Writer) (adminCreateOptions, error) {
-	flags := flag.NewFlagSet(program+" admin create", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-
 	var options adminCreateOptions
-	overrides := make(configOverrides)
-	var configPath string
-	flags.StringVar(&options.username, "username", "", "first administrator username")
-	flags.StringVar(&options.passwordFile, "password-file", "", "file containing the first administrator password")
-	flags.StringVar(&configPath, "config", "", "YAML configuration file")
-	flags.Var(overrides, "set", "override one Schema path with path=value; may be repeated")
-	flags.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: %s admin create --username name [--password-file path] [--config path] [--set path=value]...\n", program)
-		flags.PrintDefaults()
-	}
-	if err := flags.Parse(args); err != nil {
+	parsed := false
+	command := newAdminCreateCommand(program, environ, stderr, func(_ context.Context, parsedOptions adminCreateOptions) error {
+		parsed = true
+		options = parsedOptions
+		return nil
+	})
+	command.Writer = stderr
+	command.ErrWriter = stderr
+	command.HideVersion = true
+	command.ExitErrHandler = ignoreCLIExitError
+	if err := command.Run(context.Background(), append([]string{program}, args...)); err != nil {
 		return adminCreateOptions{}, fmt.Errorf("parse admin create command line: %w", err)
 	}
-	if flags.NArg() != 0 {
-		return adminCreateOptions{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
+	if !parsed {
+		return adminCreateOptions{}, errServerCLIHelp
 	}
-	if strings.TrimSpace(options.username) == "" {
-		return adminCreateOptions{}, errors.New("admin username must not be empty")
-	}
-
-	var yamlData []byte
-	if configPath != "" {
-		var err error
-		yamlData, err = os.ReadFile(configPath)
-		if err != nil {
-			return adminCreateOptions{}, fmt.Errorf("read config file %q: %w", configPath, err)
-		}
-	}
-	options.config = baseconfig.Options{YAML: yamlData, Environment: environ, CLI: overrides}
 	return options, nil
 }
 
@@ -130,15 +111,4 @@ func readAdminPassword(passwordFile string, stderr io.Writer) (string, error) {
 		return "", errors.New("admin password must not be empty")
 	}
 	return string(data), nil
-}
-
-func isAdminCommand(args []string) bool {
-	return len(args) != 0 && args[0] == "admin"
-}
-
-func runAdminCommand(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
-	if len(args) < 2 || args[1] != "create" {
-		return errors.New("expected admin create")
-	}
-	return runAdminCreate(ctx, program, args[2:], environ, stderr)
 }

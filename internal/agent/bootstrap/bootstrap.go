@@ -4,7 +4,6 @@ package bootstrap
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/urfave/cli/v3"
 
 	"github.com/lifei6671/xtunnel/internal/agent/connector"
 	"github.com/lifei6671/xtunnel/internal/agent/service"
@@ -35,6 +36,8 @@ type serviceOperations interface {
 
 type platformServiceOperations struct{}
 
+var errCLIHelp = errors.New("CLI help requested")
+
 func (platformServiceOperations) Install(ctx context.Context, token string) error {
 	return service.Install(ctx, token)
 }
@@ -49,9 +52,6 @@ func Execute(program string, args, environ []string, stdout, stderr io.Writer) i
 	defer stop()
 
 	if err := execute(ctx, program, args, environ, stdout, stderr, platformServiceOperations{}); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
 		fmt.Fprintf(stderr, "%s: %v\n", program, err)
 		return 1
 	}
@@ -65,110 +65,161 @@ func execute(
 	stdout, stderr io.Writer,
 	services serviceOperations,
 ) error {
-	if len(args) == 0 {
-		printRootUsage(stderr, program)
-		return errors.New("command is required")
-	}
-	switch args[0] {
-	case "-h", "--help", "help":
-		printRootUsage(stdout, program)
+	command := newAgentCommand(program, environ, stdout, stderr, services)
+	err := command.Run(ctx, append([]string{program}, args...))
+	if errors.Is(err, errCLIHelp) {
 		return nil
-	case "run":
-		return run(ctx, program+" run", args[1:], environ, stderr)
-	case "service":
-		return executeService(ctx, program, args[1:], stdout, stderr, services)
-	default:
-		return errors.New("unknown command")
 	}
+	return err
 }
 
-func printRootUsage(writer io.Writer, program string) {
-	fmt.Fprintf(writer, "Usage:\n  %s run [--token STRING]\n  %s service install --token STRING\n  %s service uninstall\n", program, program, program)
-}
-
-func executeService(
-	ctx context.Context,
-	program string,
-	args []string,
-	stdout, stderr io.Writer,
-	services serviceOperations,
-) error {
-	if len(args) == 0 {
-		printServiceUsage(stderr, program)
-		return errors.New("service command is required")
+func agentHelpBefore(ctx context.Context, command *cli.Command) (context.Context, error) {
+	if !command.IsSet("help") || command.Bool("help") {
+		return ctx, nil
 	}
-	switch args[0] {
-	case "-h", "--help", "help":
-		printServiceUsage(stdout, program)
-		return nil
-	case "install":
-		return executeServiceInstall(ctx, program, args[1:], stdout, stderr, services)
-	case "uninstall":
-		if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-			fmt.Fprintf(stdout, "Usage: %s service uninstall\n", program)
-			return nil
-		}
-		if len(args) != 1 {
-			return errors.New("service uninstall does not accept arguments")
-		}
-		result, err := services.Uninstall(ctx)
-		if err != nil {
-			return fmt.Errorf("uninstall Agent service: %w", err)
-		}
-		if result.BinaryRemovalPendingReboot {
-			fmt.Fprintf(stdout, "uninstalled %s; service registration was removed, the running binary will be deleted after the next reboot, and the credential was preserved\n", service.Name())
-			return nil
-		}
-		fmt.Fprintf(stdout, "uninstalled %s; credential and service identity were preserved\n", service.Name())
-		return nil
-	default:
-		return errors.New("unknown service command")
+	var err error
+	if command.Root() == command {
+		err = cli.ShowRootCommandHelp(command)
+	} else {
+		err = cli.ShowSubcommandHelp(command)
 	}
-}
-
-func printServiceUsage(writer io.Writer, program string) {
-	fmt.Fprintf(writer, "Usage:\n  %s service install --token STRING\n  %s service uninstall\n", program, program)
-}
-
-func executeServiceInstall(
-	ctx context.Context,
-	program string,
-	args []string,
-	stdout, stderr io.Writer,
-	services serviceOperations,
-) error {
-	flags := flag.NewFlagSet(program+" service install", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	var token string
-	flags.StringVar(&token, "token", "", "Agent Token")
-	flags.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: %s service install --token STRING\n", program)
-		flags.PrintDefaults()
-	}
-	if err := flags.Parse(args); err != nil {
-		return fmt.Errorf("parse service install command: %w", err)
-	}
-	if flags.NArg() != 0 {
-		return errors.New("service install does not accept positional arguments")
-	}
-	tokenSet := false
-	flags.Visit(func(current *flag.Flag) {
-		if current.Name == "token" {
-			tokenSet = true
-		}
-	})
-	if !tokenSet {
-		return errors.New("service install requires --token")
-	}
-	validatedToken, err := validateToken(token)
 	if err != nil {
-		return fmt.Errorf("validate service install Token: %w", err)
+		return ctx, fmt.Errorf("show Agent command help: %w", err)
 	}
-	if err := services.Install(ctx, validatedToken); err != nil {
-		return fmt.Errorf("install Agent service: %w", err)
+	return ctx, errCLIHelp
+}
+
+// newAgentCommand 由一棵 urfave/cli 命令树统一声明 Agent 的公开命令面。
+// Token 的来源选择和校验仍由 bootstrap 持有，避免 CLI 框架读取环境变量后改变安全优先级。
+func newAgentCommand(program string, environ []string, stdout, stderr io.Writer, services serviceOperations) *cli.Command {
+	var runToken string
+	var installToken string
+	stopOnFirstArgument := 1
+
+	command := &cli.Command{
+		Name:         program,
+		Usage:        "run and manage XTunnel Agent",
+		UsageText:    program + " <command> [options]",
+		Writer:       stdout,
+		ErrWriter:    stderr,
+		HideVersion:  true,
+		StopOnNthArg: &stopOnFirstArgument,
+		Before:       agentHelpBefore,
+		OnUsageError: func(_ context.Context, _ *cli.Command, err error, _ bool) error {
+			return err
+		},
+		ExitErrHandler: func(context.Context, *cli.Command, error) {},
+		Action: func(_ context.Context, current *cli.Command) error {
+			if current.NArg() != 0 {
+				return errors.New("unknown command")
+			}
+			writer := current.Writer
+			current.Writer = stderr
+			defer func() { current.Writer = writer }()
+			if err := cli.ShowRootCommandHelp(current); err != nil {
+				return fmt.Errorf("show Agent command help: %w", err)
+			}
+			return errors.New("command is required")
+		},
 	}
-	fmt.Fprintf(stdout, "installed and started %s\n", service.Name())
-	return nil
+	command.Commands = []*cli.Command{
+		{
+			Name:            "run",
+			Usage:           "run the Agent in the foreground",
+			UsageText:       program + " run [--token string]",
+			HideHelpCommand: true,
+			StopOnNthArg:    &stopOnFirstArgument,
+			Before:          agentHelpBefore,
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "token", Usage: "Agent Token", Destination: &runToken, HideDefault: true},
+			},
+			OnUsageError: command.OnUsageError,
+			Action: func(ctx context.Context, current *cli.Command) error {
+				if current.NArg() != 0 {
+					return errors.New("unexpected positional arguments")
+				}
+				return runWithTokenSource(ctx, stderr, runLifecycle, func() (string, error) {
+					return resolveTokenSource(runToken, current.IsSet("token"), environ)
+				})
+			},
+		},
+		{
+			Name:         "service",
+			Usage:        "install or uninstall the native Agent service",
+			UsageText:    program + " service <command> [options]",
+			StopOnNthArg: &stopOnFirstArgument,
+			Before:       agentHelpBefore,
+			OnUsageError: command.OnUsageError,
+			Action: func(_ context.Context, current *cli.Command) error {
+				if current.NArg() == 0 {
+					writer := current.Writer
+					current.Writer = stderr
+					defer func() { current.Writer = writer }()
+					if err := cli.ShowSubcommandHelp(current); err != nil {
+						return fmt.Errorf("show Agent service help: %w", err)
+					}
+					return errors.New("service command is required")
+				}
+				return errors.New("unknown service command")
+			},
+			Commands: []*cli.Command{
+				{
+					Name:            "install",
+					Usage:           "install and start the native Agent service",
+					UsageText:       program + " service install --token string",
+					HideHelpCommand: true,
+					StopOnNthArg:    &stopOnFirstArgument,
+					Before:          agentHelpBefore,
+					OnUsageError:    command.OnUsageError,
+					Flags: []cli.Flag{
+						&cli.StringFlag{Name: "token", Usage: "Agent Token", Destination: &installToken, HideDefault: true},
+					},
+					Action: func(ctx context.Context, current *cli.Command) error {
+						if current.NArg() != 0 {
+							return errors.New("service install does not accept positional arguments")
+						}
+						if !current.IsSet("token") {
+							return errors.New("service install requires --token")
+						}
+						validatedToken, err := validateToken(installToken)
+						if err != nil {
+							return fmt.Errorf("validate service install Token: %w", err)
+						}
+						if err := services.Install(ctx, validatedToken); err != nil {
+							return fmt.Errorf("install Agent service: %w", err)
+						}
+						fmt.Fprintf(stdout, "installed and started %s\n", service.Name())
+						return nil
+					},
+				},
+				{
+					Name:            "uninstall",
+					Usage:           "uninstall the native Agent service",
+					UsageText:       program + " service uninstall",
+					HideHelpCommand: true,
+					StopOnNthArg:    &stopOnFirstArgument,
+					Before:          agentHelpBefore,
+					OnUsageError:    command.OnUsageError,
+					Action: func(ctx context.Context, current *cli.Command) error {
+						if current.NArg() != 0 {
+							return errors.New("service uninstall does not accept arguments")
+						}
+						result, err := services.Uninstall(ctx)
+						if err != nil {
+							return fmt.Errorf("uninstall Agent service: %w", err)
+						}
+						if result.BinaryRemovalPendingReboot {
+							fmt.Fprintf(stdout, "uninstalled %s; service registration was removed, the running binary will be deleted after the next reboot, and the credential was preserved\n", service.Name())
+							return nil
+						}
+						fmt.Fprintf(stdout, "uninstalled %s; credential and service identity were preserved\n", service.Name())
+						return nil
+					},
+				},
+			},
+		},
+	}
+	return command
 }
 
 // run 解析唯一的 Tunnel Token 来源，并把同一个 Token 交给进程内唯一 Connector。
@@ -182,6 +233,17 @@ func runWithLifecycle(
 	args, environ []string,
 	stderr io.Writer,
 	lifecycle lifecycleRunner,
+) error {
+	return runWithTokenSource(ctx, stderr, lifecycle, func() (string, error) {
+		return resolveToken(program, args, environ, stderr)
+	})
+}
+
+func runWithTokenSource(
+	ctx context.Context,
+	stderr io.Writer,
+	lifecycle lifecycleRunner,
+	resolve func() (string, error),
 ) error {
 	if lifecycle == nil {
 		return errors.New("Agent lifecycle runner must not be nil")
@@ -199,7 +261,7 @@ func runWithLifecycle(
 	if handled {
 		return nil
 	}
-	token, err := resolveToken(program, args, environ, stderr)
+	token, err := resolve()
 	if err != nil {
 		return fmt.Errorf("load agent token: %w", err)
 	}
@@ -234,29 +296,43 @@ func runLifecycle(ctx context.Context, token string, stderr io.Writer) error {
 }
 
 func resolveToken(program string, args, environ []string, stderr io.Writer) (string, error) {
-	flags := flag.NewFlagSet(program, flag.ContinueOnError)
-	flags.SetOutput(stderr)
-
 	var cliToken string
-	flags.StringVar(&cliToken, "token", "", "Agent Token")
-	flags.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: %s [--token STRING]\n", program)
-		flags.PrintDefaults()
+	var token string
+	parsed := false
+	stopOnFirstArgument := 1
+	command := &cli.Command{
+		Name:         program,
+		UsageText:    program + " [--token string]",
+		Writer:       stderr,
+		ErrWriter:    stderr,
+		HideVersion:  true,
+		StopOnNthArg: &stopOnFirstArgument,
+		Before:       agentHelpBefore,
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "token", Usage: "Agent Token", Destination: &cliToken, HideDefault: true},
+		},
+		OnUsageError:   func(_ context.Context, _ *cli.Command, err error, _ bool) error { return err },
+		ExitErrHandler: func(context.Context, *cli.Command, error) {},
+		Action: func(_ context.Context, current *cli.Command) error {
+			if current.NArg() != 0 {
+				return errors.New("unexpected positional arguments")
+			}
+			parsed = true
+			var err error
+			token, err = resolveTokenSource(cliToken, current.IsSet("token"), environ)
+			return err
+		},
 	}
-
-	if err := flags.Parse(args); err != nil {
+	if err := command.Run(context.Background(), append([]string{program}, args...)); err != nil {
 		return "", fmt.Errorf("parse command line: %w", err)
 	}
-	if flags.NArg() != 0 {
-		return "", errors.New("unexpected positional arguments")
+	if !parsed {
+		return "", errCLIHelp
 	}
+	return token, nil
+}
 
-	cliTokenSet := false
-	flags.Visit(func(current *flag.Flag) {
-		if current.Name == "token" {
-			cliTokenSet = true
-		}
-	})
+func resolveTokenSource(cliToken string, cliTokenSet bool, environ []string) (string, error) {
 	if cliTokenSet {
 		return validateToken(cliToken)
 	}

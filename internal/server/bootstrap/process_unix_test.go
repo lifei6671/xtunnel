@@ -11,16 +11,18 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 )
 
 func TestProcessExitsOnSIGTERM(t *testing.T) {
 	if os.Getenv("GO_WANT_XTUNNEL_SERVER_HELPER_PROCESS") == "1" {
 		for index, arg := range os.Args {
 			if arg == "--" {
-				runner := func(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
-					return runWithStorage(ctx, program, args, environ, stderr, func(context.Context, string) (storage, error) {
+				runner := func(ctx context.Context, options baseconfig.Options, stderr io.Writer) error {
+					return runWithStorageAndBootstrapOptions(ctx, options, stderr, func(context.Context, string) (storage, error) {
 						return &fakeStorage{}, nil
-					})
+					}, nil)
 				}
 				os.Exit(executeWithRun("xtunnel-server", os.Args[index+1:], os.Environ(), os.Stderr, runner))
 			}

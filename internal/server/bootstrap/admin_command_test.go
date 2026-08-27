@@ -3,10 +3,13 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 )
 
 func TestParseAdminCreateOptions(t *testing.T) {
@@ -49,8 +52,13 @@ func TestParseAdminCreateOptionsRejectsPasswordArgumentAndInvalidCommands(t *tes
 			}
 		})
 	}
-	if err := runAdminCommand(context.Background(), "xtunnel-server", []string{"admin", "delete"}, nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "expected admin create") {
-		t.Fatalf("runAdminCommand() error = %v", err)
+	var stderr bytes.Buffer
+	exitCode := executeWithRun("xtunnel-server", []string{"admin", "delete"}, nil, &stderr, func(context.Context, baseconfig.Options, io.Writer) error {
+		t.Fatal("invalid admin command invoked Server runner")
+		return nil
+	})
+	if exitCode != 1 || !strings.Contains(stderr.String(), "expected admin create") {
+		t.Fatalf("executeWithRun(admin delete) = %d, stderr = %q", exitCode, stderr.String())
 	}
 }
 

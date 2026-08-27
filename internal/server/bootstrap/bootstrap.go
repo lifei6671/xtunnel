@@ -4,7 +4,6 @@ package bootstrap
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,7 +20,13 @@ import (
 
 // Execute 把操作系统输入和信号接入 Server 生命周期，并返回进程退出码。
 func Execute(program string, args, environ []string, stderr io.Writer) int {
-	return executeWithRun(program, args, environ, stderr, run)
+	return executeWithRun(program, args, environ, stderr, func(ctx context.Context, options baseconfig.Options, stderr io.Writer) error {
+		return runWithStorageAndBootstrapOptions(ctx, options, stderr, func(ctx context.Context, dataDir string) (storage, error) {
+			return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
+		}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
+			return openGatewayAndBootstrap(ctx, config, resources, logger)
+		})
+	})
 }
 
 // executeWithRun 是进程命令分发与信号 Context 的唯一入口。管理命令、维护命令和
@@ -31,25 +36,17 @@ func executeWithRun(
 	program string,
 	args, environ []string,
 	stderr io.Writer,
-	runner func(context.Context, string, []string, []string, io.Writer) error,
+	runner func(context.Context, baseconfig.Options, io.Writer) error,
 ) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var err error
-	if isAdminCommand(args) {
-		err = runAdminCommand(ctx, program, args, environ, stderr)
-	} else if isGatewayCommand(args) {
-		err = runGatewayCommand(ctx, program, args[1:], environ, stderr)
-	} else if isBackupCommand(args) {
-		err = runBackupCommand(ctx, program, args[1:], environ, stderr)
-	} else {
-		err = runner(ctx, program, args, environ, stderr)
+	command := newServerCommand(program, args, environ, stderr, runner)
+	err := command.Run(ctx, append([]string{program}, args...))
+	if errors.Is(err, errServerCLIHelp) {
+		return 0
 	}
 	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
 		fmt.Fprintf(stderr, "%s: %v\n", program, err)
 		return 1
 	}
@@ -86,6 +83,16 @@ func runWithStorageAndBootstrap(
 	if err != nil {
 		return err
 	}
+	return runWithStorageAndBootstrapOptions(ctx, options, stderr, openStorage, openBootstrap)
+}
+
+func runWithStorageAndBootstrapOptions(
+	ctx context.Context,
+	options baseconfig.Options,
+	stderr io.Writer,
+	openStorage func(context.Context, string) (storage, error),
+	openBootstrap func(context.Context, serverconfig.Config, storage, *slog.Logger) (io.Closer, error),
+) error {
 	config, err := serverconfig.Load(options)
 	if err != nil {
 		return fmt.Errorf("load server config: %w", err)
@@ -155,43 +162,11 @@ func runWithStorageAndBootstrap(
 // parseConfigOptions 只收集 YAML、环境变量和显式 CLI override；字段解释、默认值与
 // 类型校验仍由配置 Schema 驱动的 Load 统一完成。
 func parseConfigOptions(program string, args, environ []string, stderr io.Writer) (baseconfig.Options, error) {
-	flags := flag.NewFlagSet(program, flag.ContinueOnError)
-	flags.SetOutput(stderr)
-
-	var configPath string
-	overrides := make(configOverrides)
-	flags.StringVar(&configPath, "config", "", "YAML configuration file")
-	flags.Var(overrides, "set", "override one Schema path with path=value; may be repeated")
-	flags.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: %s [--config path] [--set path=value]...\n", program)
-		flags.PrintDefaults()
-	}
-
-	if err := flags.Parse(args); err != nil {
-		return baseconfig.Options{}, fmt.Errorf("parse command line: %w", err)
-	}
-	if flags.NArg() != 0 {
-		return baseconfig.Options{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
-	}
-
-	var yamlData []byte
-	if configPath != "" {
-		var err error
-		yamlData, err = os.ReadFile(configPath)
-		if err != nil {
-			return baseconfig.Options{}, fmt.Errorf("read config file %q: %w", configPath, err)
-		}
-	}
-	return baseconfig.Options{YAML: yamlData, Environment: environ, CLI: overrides}, nil
+	return parseServerConfigOptions(program, args, environ, stderr)
 }
 
 // configOverrides 实现可重复的 --set path=value flag，并保留最后一次显式赋值。
 type configOverrides map[string]string
-
-// String 避免 flag 包把可能包含敏感配置值的 override 集合打印到默认 Usage。
-func (configOverrides) String() string {
-	return ""
-}
 
 // Set 严格拆分第一个等号，允许值本身继续包含等号。
 func (values configOverrides) Set(raw string) error {
