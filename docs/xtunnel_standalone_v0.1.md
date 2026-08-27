@@ -784,7 +784,7 @@ SPKI Fingerprint
 Server：
 
 ```text
-/data/pki/
+<server.data_dir>/pki/
 ├── agent-gateway.key
 └── agent-gateway.crt
 ```
@@ -1556,6 +1556,11 @@ Tunnel 创建后从未有 Connector 成功完成认证
 
 Tunnel Status 只聚合 Connector Runtime，不读取任何 Service/Origin Health。某个 Connector 可以访问 SSH Origin、但不能访问 Jenkins Origin，此时 Tunnel/Connector 仍可能 ONLINE；差异只反映在对应 Service Status。
 
+“从未成功认证”由 Tunnel 持久化的 `first_authenticated_at` 判定，而不是从当前
+Runtime 是否为空反推。该字段只在完整 Connector Auth Success Frame 已写出后首次
+记录；因此 Server 重启后，曾经成功认证但当前没有 Current Control Session 的
+Tunnel 仍然是 `OFFLINE`，不会退回 `PENDING`。
+
 ---
 
 # 40. Connector 状态
@@ -1577,15 +1582,21 @@ DRAINING
 ONLINE
 = Current Control Session 存活
 + Heartbeat Fresh
++ 已完成当前 Session 的首份完整 Config Apply/Ack
 + Connector-wide Transport 可以接受新 Work
 
 DEGRADED
 = Current Control Session 存活
 + Heartbeat Fresh
-+ Connector-wide Transport 持续无法接受新 Work
++ 首份完整 Config Apply/Ack 尚未完成，
+  或 Connector-wide Transport 持续无法接受新 Work
 ```
 
 `Connector-wide Transport` 只包含 Control/WorkPool/Budget/FD 等 Connector 级能力。Per-Service Origin Health 不参与 Connector Status。Heartbeat 超时或 Control Session 关闭后，Connector 不保留一个永久 OFFLINE Runtime 状态，而是按下述 Tombstone 规则删除或保留。
+
+Status 只读取 Tunnel Runtime 已发布的 Lifecycle 与 Eligibility 快照；Session Manager
+中尚未成功发布的数据不能提前改变展示状态。Lifecycle 已进入 `DRAINING` 时，即使
+WorkPool 尚处在同一次 Drain 操作的切换窗口，也必须立即展示 `DRAINING`。
 
 Connector 不保存永久 OFFLINE Runtime 对象。
 
@@ -2245,12 +2256,21 @@ CREATE TABLE tunnels (
     version INTEGER NOT NULL DEFAULT 1,
     desired_revision INTEGER NOT NULL DEFAULT 0,
     revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at > 0),
+    first_authenticated_at INTEGER CHECK (
+        first_authenticated_at IS NULL OR first_authenticated_at > 0
+    ),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
 ```
 
 Tunnel 不保存单一 `observed_revision` 或 `last_seen_at`；多个 Connector 的在线、Revision 和最近活动属于运行态，聚合摘要不得反向充当数据面裁决依据。
+
+`first_authenticated_at` 是唯一新增的跨重启认证历史事实：它只允许从 `NULL`
+变为第一次成功认证的 UTC Unix 秒，重复认证不得改写，也不推进 Tunnel Aggregate
+的 `version` 或 `updated_at`。完整 Success Frame 尚未写出时不得记录；一旦对端已经
+观察到成功，即使后续本地交接失败，也保留该事实。它不是在线状态、Session、
+Connector 或 `last_seen_at`，不得扩展为第二套 Runtime 持久化来源。
 
 ---
 
@@ -3992,7 +4012,7 @@ PATCH、enable、disable、delete 必须复用同一 Application Service 事务�
 <server.data_dir>/xtunnel.db
 ```
 
-V0.1 不提供独立 `database.path`。SQLite、Gateway TLS Identity、Token Credential Master Key 和 Server Durable Operation Journal 必须全部位于同一个 Canonical `server.data_dir` 管理边界内，避免两个不同 Data Directory 指向同一外部数据库而绕过互斥锁，也保证 Backup/Restore 不会组合出不同代的数据库、Token 密文与密钥材料。
+V0.1 不提供独立 `database.path`。SQLite、data-dir-owned Pinned Gateway TLS Identity、Token Credential Master Key 和 Server Durable Operation Journal 必须全部位于同一个 Canonical `server.data_dir` 管理边界内，避免两个不同 Data Directory 指向同一外部数据库而绕过互斥锁，也保证 Backup/Restore 不会组合出不同代的数据库、Token 密文与密钥材料。Public TLS 的证书和私钥由外部证书管理系统负责，不进入 XTunnel Backup Archive；Manifest 只记录 `tls_mode=public`。位于 Stable Target 父目录中的 Restore Journal 是替换边界外唯一允许的 Durable Operation Journal 例外。
 
 配置：
 
@@ -4036,11 +4056,17 @@ xtunnel-server backup create --output /secure/backup/xtunnel-backup.tar
 xtunnel-server backup restore --input /secure/backup/xtunnel-backup.tar
 ```
 
-在线 `backup create` 通过本机控制通道暂停新的 Config Write，等待当前短事务结束，再使用 SQLite Backup API 获取一致数据库镜像；在同一 Barrier 内复制 Gateway TLS Identity、Token Credential Master Key 和尚未完成的 Durable Operation Journal。备份 Manifest 必须记录格式版本、数据库 Schema 版本、文件清单和 SHA-256。若 Server 未运行，命令必须先获取与 Server 相同的外部锁。
+在线 `backup create` 通过 `/run/xtunnel/backup-<stable-target-hash>.sock` 暂停新的 Config Write 和 Pinned Identity 自动续签，等待当前短事务或续签结束，再使用 SQLite Backup API 获取一致数据库镜像；在同一 Barrier 内复制 data-dir-owned Pinned Gateway TLS Identity 与 Token Credential Master Key。Socket 位于权限 `0700` 的 Runtime Directory，文件权限为 `0600`，只接受 Linux root peer；root CLI 还必须用 `SO_PEERCRED` 校验服务端 UID 与 Runtime Directory owner 一致。协议使用带 `version`、Stable Target Hash 和 acquire/release 动作的单行 JSON，grant/release 响应必须回显同一 Target Hash。Socket 只授予可取消、连接所有的 Barrier Lease，不传输 Archive 或 Secret；CLI 在租约存续期间从本地一致性边界构建归档，单一 Socket Reader 把连接 EOF、Server Shutdown 或提前响应转换为 Create Context 取消，且完整 Archive 必须在 release ACK 成功后才允许发布；取消、协议失败或租约丢失都必须删除未发布输出并 exactly-once 释放 Lease。若 Socket 不存在，命令必须先获取与 Server 相同的外部锁；Socket 存在但连接、授权或响应绑定失败时不得静默回退到离线路径。
 
-备份包等同于长期私钥材料。输出文件必须使用 `O_CREATE | O_EXCL`、权限 `0600` 且禁止跟随符号链接；临时目录权限 `0700`，失败必须清理，禁止输出到 stdout 或复用已有目标文件。
+Backup Archive 固定为 canonical POSIX USTAR，`manifest.json` 使用格式版本 `1` 并作为唯一 Manifest。Manifest 使用稳定路径排序，记录数据库实际 Schema 版本、`tls_mode`，以及每个归档普通文件的相对 POSIX 路径、大小、权限和 SHA-256。归档只允许固定白名单：SQLite Backup API 生成的自包含 `xtunnel.db`、精确 32 字节的 Tunnel Token Master Key，以及 Pinned Gateway 最终 Identity；Public TLS 外部证书和私钥、SQLite WAL/SHM、未知文件都不得归档。Gateway Rotation Journal 或 `.rotate` 临时文件存在时 Backup 必须 fail closed，要求先由正常启动或维护流程完成身份与审计 Reconciliation，禁止把包含源 Data Directory 绝对路径的未决轮换状态移植进 Archive。root CLI 必须以 Linux `openat2 + O_NOFOLLOW + fstat` 固定源数据库 inode，Schema 检查与 SQLite Backup API 只能通过同一打开 FD 的 `/proc/self/fd` 引用访问；每次 SQLite 打开前后及操作完成后都要安全重开原路径并用 `SameFile` 核对，rename、symlink 或路径替换一律 fail closed 并删除候选，避免 main DB 改名后遗漏仍留在原名的未 checkpoint WAL。SQLite Backup API 的目标 `xtunnel.db` 已包含调用时刻 WAL 可见状态；“禁止只复制 `xtunnel.db` 而遗漏 WAL”专指禁止裸拷贝在线主库文件，不要求把 WAL/SHM 写入 Archive。V0.1 固定限制 `xtunnel.db <= 64 GiB`、Pinned Private Key `<= 64 KiB`、Pinned Certificate `<= 1 MiB`；Parser 必须拒绝 PAX/GNU sparse、绝对路径、`..`、重复项、未知项、symlink、hardlink、设备文件、FIFO、Hash/大小/权限不一致、非 canonical 结束块和归档结尾后的任何未声明字节。Data Directory 内文件使用 `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV)` 捕获，禁止经中间目录 symlink 或子挂载越界读取。
 
-`backup restore` 只允许 Server 停止后执行，必须先由 `realpath(parent) + basename` 计算 Stable Data Target、获取同一外部锁，再校验 Manifest/Hash/Schema 兼容性。恢复内容写到同盘 sibling staging 目录，然后按“旧目录 rename 为 rollback → staging rename 为正式目录 → fsync 父目录”的顺序切换。切换前在父目录写入权限 `0600` 的 `.xtunnel-restore-<hash>.journal`，文件名中的 `<hash>` 固定为 Stable Data Target 的 SHA-256，Journal 内容另行记录 Manifest Hash；其中还记录 Stable Target、staging、rollback 和当前 phase。三条路径都必须校验为同一 `realpath(parent)` 的直接子项。Journal 位于替换边界外且跨重启保留，崩溃后下次 Server/Restore 命令先按 Stable Target 取得同一把锁，再完成或回滚，不能要求 leaf 预先存在。外部锁在整个流程中不变，因此替换 Data Directory 不会替换当前持有的 Lock inode。禁止与现有数据库合并，也禁止只复制 `xtunnel.db` 而遗漏 WAL 或 PKI。集成测试必须覆盖“备份 → Migration → 恢复 → Agent 通过原 Pin 重连”以及两个 rename 之间崩溃后的回滚。
+备份包等同于长期私钥材料。输出文件必须使用 `O_CREATE | O_EXCL`、权限 `0600`，并以 `openat2` 拒绝输出路径任意中间 symlink；临时目录权限 `0700`。创建时必须保留输出父目录 FD，失败清理只能使用该 FD 做 relative unlink 并同步同一目录，不得重新解析可被 rename/替换的绝对路径；成功必须完成文件 `fsync`、Close、父目录 `fsync` 和在线 release ACK 后才记录完成，禁止输出到 stdout 或复用已有目标文件。
+
+`backup restore` 只允许 Server 停止后执行，必须先由 `realpath(parent) + basename` 计算 Stable Data Target、获取同一外部锁，再校验 Manifest/Hash/Schema 兼容性。只接受大于零且不高于当前 Binary 支持上限的 Schema 版本；较旧版本原样 Restore，由下一次正常启动执行 forward-only Migration，离线 Backup/Restore 校验路径不得先运行 Migration。staging 必须在第一次 rename 前通过完整白名单/Hash/权限、immutable SQLite `quick_check`、精确 `schema_migrations`、Token Master Key 与 Pinned key/certificate 配对校验；其中全部 `tunnel_tokens` 都必须用归档 Master Key 和行身份 AAD 解密，严格解析规范 Token，并核对 Tunnel ID、Token ID、Version 与 `secret_hash`，合法长度但属于另一数据库的 Key 必须拒绝。任何失败都只删除 staging，旧 target 保持不动。恢复内容写到同盘 sibling staging 目录，然后按“旧目录 rename 为 rollback → staging rename 为正式目录 → fsync 父目录”的顺序切换。切换前在父目录写入权限 `0600` 的 `.xtunnel-restore-<hash>.journal`，文件名中的 `<hash>` 固定为 Stable Data Target 的 SHA-256；Journal 同时保存 canonical Manifest 与 Manifest Hash，二者必须相互匹配。staging 与 rollback 也必须由同一 Hash 固定派生。三条路径都必须校验为同一 `realpath(parent)` 的直接子项，且不得是 symlink 或独立挂载点。
+
+Restore Journal 版本 `1` 的 phase 固定为 `prepared`、`rollback_ready`、`installed`。每次 phase 更新都必须以同父目录 `O_CREATE | O_EXCL | O_NOFOLLOW` 临时文件写入，完成文件 `fsync`、原子 rename 和父目录 `fsync`，禁止原地 truncate。恢复决策必须同时验证 phase 与正式 target/staging/rollback 的实际存在组合：两次目录 rename 之间优先把 rollback 恢复为正式目录；第二次 rename 已完成但 phase 尚未更新时，只有新 target 按 Journal Manifest 完整重验通过才允许前向完成，否则恢复旧 rollback；路径越界、对象类型异常或不可判定组合一律 fail closed。无 Journal 时只允许清理由 `target + staging + no rollback` 唯一判定的 pre-Journal 孤儿 staging；任何孤儿 rollback 都阻止启动。成功安装并验证后才能删除 rollback；删除前必须用 FD-relative 两阶段遍历证明整棵树无 symlink、特殊文件或不同 `statx mount ID`，禁止 `RemoveAll` 穿过 nested bind mount，之后才逐层 unlink。最后删除 Journal，并在每次目录项变化后 `fsync` 父目录。root 离线 Restore 必须沿用原 target 或 rollback 的 Runtime UID/GID，不能信任 Archive UID/GID；staging 根在完成内容校验前保持 root `0700`，只在交付前最后变更 owner。Journal 位于替换边界外且跨重启保留，崩溃后下次 Server/Restore 命令先按 Stable Target 取得同一把锁，再完成或回滚，不能要求 leaf 预先存在。禁止与现有数据库合并。集成测试必须覆盖“备份 → Migration → 恢复 → Agent 通过原 Pin 重连”以及两个 rename 之间崩溃后的回滚。
+
+维护命令仅记录稳定事件 `backup_create_completed` 与 `backup_restore_completed`，字段固定为 `target_hash`、`manifest_sha256`、`schema_version`、`mode=online|offline`；不得记录 Archive 路径、Data Directory 路径、Token、Key、证书内容或其他 Secret。
 
 ---
 
@@ -4055,7 +4081,10 @@ gormDB.Where(...)
 
 V0.1 的 SQLite Repository 统一使用 GORM。业务持久化不得绕过 Repository
 直接操作 `*gorm.DB`；仅连接初始化、逐连接 PRAGMA 自检和 SQLite Backup API
-等 GORM 不提供等价能力的基础设施路径可以访问底层 `database/sql`。
+等 GORM 不提供等价能力的基础设施路径可以访问底层 `database/sql`。全部写入只能
+从 `WithTx`/`WithDurableTx` 取得统一 `writeGate` 后执行；`Read` 与
+`ReadConsistent` 生成的 Repository 视图必须标记为只读，任何 mutator 即使通过现有
+组合接口被调用也要快速失败，不能绕过在线 Backup Barrier。
 
 Repository：
 
@@ -4176,7 +4205,7 @@ Server External Lock 位于 Data Directory 替换边界之外：
 /run/xtunnel/server-lock-<sha256(stable-data-target)>.lock
 ```
 
-`/run/xtunnel` 权限为 `0700` 并归 XTunnel Runtime UID 所有。systemd 通过 `RuntimeDirectory=xtunnel` 创建；OCI Image 预创建同一目录并固定以 `UID:GID 65532:65532` 运行。OCI 使用只读根文件系统时，运行器必须把 `/run/xtunnel` 挂载为该 UID/GID 可写、权限 `0700` 的 tmpfs。离线维护命令由 root 创建或访问该目录。禁止要求非 root Server 直接写 `/run/lock`。
+`/run/xtunnel` 权限为 `0700` 并归 XTunnel Runtime UID 所有。systemd 通过 `RuntimeDirectory=xtunnel` 创建；OCI Image 预创建同一目录并固定以 `UID:GID 65532:65532` 运行。OCI 使用只读根文件系统时，运行器必须把 `/run/xtunnel` 挂载为该 UID/GID 可写、权限 `0700` 的 tmpfs。离线维护命令由 root 创建或访问该目录。禁止要求非 root Server 直接写 `/run/lock`。生产默认 Stable Parent 固定为 `/var/lib/xtunnel`，systemd `StateDirectory` 与 OCI Volume 都挂载该父目录；正式 `server.data_dir` 默认为其直接子目录 `/var/lib/xtunnel/data`。安装流程和 OCI Image 必须预创建权限 `0700`、归 Runtime UID/GID 所有的 `data` leaf，不能把正式 leaf 本身用作不可 rename 的 Volume mountpoint。
 
 `server.data_dir` 必须是绝对路径。Stable Data Target 的计算只依赖 `realpath(parent_dir) + basename(data_dir)`：父目录必须已存在且不是符号链接，leaf 名称必须合法；leaf 可以在 Restore 的中间崩溃状态下暂时不存在。Lock 使用非阻塞 OS 独占锁、禁止跟随符号链接、权限 `0600`，由进程全生命周期持有，残留文件本身不代表已加锁。离线 Admin、Backup、Restore 和 Recovery 命令必须用完全相同的 Stable Target/Hash 算法复用同一把锁。
 
@@ -5452,7 +5481,7 @@ Server 配置 Schema 固定使用 JSON Schema Draft 2020-12。每个叶子字段
 
 ```yaml
 server:
-  data_dir: /var/lib/xtunnel
+  data_dir: /var/lib/xtunnel/data
 
 management:
   listen: "127.0.0.1:8080"

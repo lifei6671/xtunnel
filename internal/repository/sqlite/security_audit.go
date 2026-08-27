@@ -50,6 +50,8 @@ var SecurityAuditEventColumns = struct {
 	OccurredAt:        "occurred_at",
 }
 
+// securityAuditEventRecord 是不可变安全审计事件的 SQLite 形状；可选字段用 NULL
+// 区分“未提供”和空文本，Payload 则以独立字节副本保存。
 type securityAuditEventRecord struct {
 	EventID           string  `gorm:"column:event_id;primaryKey"`
 	OperationID       string  `gorm:"column:operation_id"`
@@ -69,18 +71,26 @@ type securityAuditEventRecord struct {
 	OccurredAt        int64   `gorm:"column:occurred_at"`
 }
 
+// TableName 把 GORM 模型固定到安全审计表。
 func (securityAuditEventRecord) TableName() string { return SecurityAuditEventTable }
 
 // SecurityAuditEvents 返回当前写事务内的 append-only 安全审计 Repository。
 func (store *transactionStore) SecurityAuditEvents() repository.SecurityAuditEventRepository {
-	return securityAuditEventRepository{database: store.database}
+	return securityAuditEventRepository{database: store.database, readOnly: store.readOnly}
 }
 
-type securityAuditEventRepository struct{ database *gorm.DB }
+// securityAuditEventRepository 只允许在 Store 管理的事务边界内追加审计记录。
+type securityAuditEventRepository struct {
+	database *gorm.DB
+	readOnly bool
+}
 
 // Append 幂等追加事件。相同 Event ID 与 Operation ID 的完全相同重放视为成功；
 // 任一 ID 已绑定到不同内容时快速失败，绝不覆盖已有证据。
 func (store securityAuditEventRepository) Append(ctx context.Context, event repository.SecurityAuditEvent) error {
+	if store.readOnly {
+		return errRepositoryWriteOutsideTransaction
+	}
 	if err := event.Validate(); err != nil {
 		return err
 	}
@@ -104,6 +114,7 @@ func (store securityAuditEventRepository) Append(ctx context.Context, event repo
 	return nil
 }
 
+// securityAuditEventRecordFromDomain 复制审计事件，避免调用方在提交后修改 Payload。
 func securityAuditEventRecordFromDomain(event repository.SecurityAuditEvent) securityAuditEventRecord {
 	return securityAuditEventRecord{
 		EventID:           event.EventID,
@@ -125,6 +136,8 @@ func securityAuditEventRecordFromDomain(event repository.SecurityAuditEvent) sec
 	}
 }
 
+// equal 用于幂等追加：同一 Event ID 只有逐字段完全一致才算安全重放，任何差异
+// 都必须报告冲突，不能覆盖或吞掉已经落库的审计事实。
 func (record securityAuditEventRecord) equal(other securityAuditEventRecord) bool {
 	return record.EventID == other.EventID && record.OperationID == other.OperationID &&
 		record.Event == other.Event && record.Action == other.Action && record.ActorType == other.ActorType &&
@@ -136,6 +149,7 @@ func (record securityAuditEventRecord) equal(other securityAuditEventRecord) boo
 		bytes.Equal(record.AfterStateDigest, other.AfterStateDigest) && record.OccurredAt == other.OccurredAt
 }
 
+// nullableString 把缺失的可选审计文本编码为 SQL NULL。
 func nullableString(value string) *string {
 	if value == "" {
 		return nil
@@ -144,6 +158,7 @@ func nullableString(value string) *string {
 	return &copy
 }
 
+// nullableBytes 返回独立副本，空 Payload 保持 SQL NULL。
 func nullableBytes(value []byte) []byte {
 	if len(value) == 0 {
 		return nil
@@ -151,6 +166,7 @@ func nullableBytes(value []byte) []byte {
 	return append([]byte(nil), value...)
 }
 
+// equalNullableString 保留 NULL 与空字符串的语义差异。
 func equalNullableString(left, right *string) bool {
 	if left == nil || right == nil {
 		return left == right

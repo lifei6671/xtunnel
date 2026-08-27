@@ -144,7 +144,8 @@ func openGatewayLifecycle(
 		return nil, nil, fmt.Errorf("construct gateway Session runtime: %w", err)
 	}
 	controlAuthenticator, err := servercontrolauth.New(tokenService, registry, servercontrolauth.Options{
-		ReadTimeout: controlAuthReadTimeout, WriteTimeout: controlAuthWriteTimeout,
+		AuthenticationRecorder: serverResources.database,
+		ReadTimeout:            controlAuthReadTimeout, WriteTimeout: controlAuthWriteTimeout,
 		HeartbeatInterval: config.ConnectorRuntime.HeartbeatInterval.Duration,
 		RetryAfter:        controlAuthRetryAfter,
 		MaxFrameBytes:     uint64(config.Limits.MaxAuthFrameBytes),
@@ -171,6 +172,13 @@ func openGatewayLifecycle(
 		MaxPendingTLSHandshakes: config.Limits.MaxPendingTLSHandshakes,
 		Handle:                  protocolHandler.handle,
 		ReportRuntimeError:      reportRuntimeError,
+		AcquireMaintenanceBarrier: func(ctx context.Context) (func(), error) {
+			barrier, err := serverResources.database.AcquireBackupBarrier(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return barrier.Release, nil
+		},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("construct agent gateway: %w", err)
@@ -190,6 +198,8 @@ type gatewayProtocolHandler struct {
 	authGate             *authGate
 }
 
+// handle 在 TLS/ALPN 成功后执行有界 AUTH 并把连接所有权交给对应 Control Owner
+// 或 WorkPool。返回即表示 Gateway 可以关闭底层连接，因此 Work 路径必须等待 Done。
 func (handler *gatewayProtocolHandler) handle(ctx context.Context, connection *tls.Conn, protocol gateway.Protocol) {
 	if handler == nil || connection == nil {
 		return
@@ -237,10 +247,12 @@ type authGate struct {
 	slots chan struct{}
 }
 
+// newAuthGate 创建固定容量、无等待队列的认证预算。
 func newAuthGate(capacity int) *authGate {
 	return &authGate{slots: make(chan struct{}, capacity)}
 }
 
+// tryAcquire 非阻塞取得一次 AUTH 槽位；成功返回的 release 必须且只能调用一次。
 func (gate *authGate) tryAcquire() (release func(), acquired bool) {
 	if gate == nil || cap(gate.slots) == 0 {
 		return func() {}, false
@@ -255,17 +267,26 @@ func (gate *authGate) tryAcquire() (release func(), acquired bool) {
 
 // gatewayBootstrapCloser 将运行中的 Gateway 与只在 SETUP_REQUIRED 存在的 Bootstrap Socket 一起收束。
 type gatewayBootstrapCloser struct {
+	backupBarrier io.Closer
 	bootstrap     io.Closer
 	gateway       *gateway.Server
 	sessions      *sessionruntime.Manager
-	runtimeErrors <-chan error
+	runtimeErrors chan error
 	drainTimeout  time.Duration
 	once          sync.Once
 	result        error
 }
 
+// Close 以幂等方式执行冻结的关闭顺序：先停止维护入口和新连接，再限时排空
+// Session，最后关闭 Gateway 中残留的连接 goroutine。
 func (closer *gatewayBootstrapCloser) Close() error {
 	closer.once.Do(func() {
+		var backupErr error
+		if closer.backupBarrier != nil {
+			// Backup Barrier 必须先停止并解除现有 Lease，随后才能排空
+			// Gateway/Session 并最终关闭 SQLite。
+			backupErr = closer.backupBarrier.Close()
+		}
 		var bootstrapErr error
 		if closer.bootstrap != nil {
 			bootstrapErr = closer.bootstrap.Close()
@@ -278,7 +299,7 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		drainContext, cancelDrain := context.WithTimeout(context.Background(), timeout)
 		drainErr := closer.sessions.Shutdown(drainContext)
 		cancelDrain()
-		closer.result = errors.Join(bootstrapErr, stopErr, drainErr, closer.gateway.Close())
+		closer.result = errors.Join(backupErr, bootstrapErr, stopErr, drainErr, closer.gateway.Close())
 	})
 	return closer.result
 }
@@ -289,10 +310,41 @@ func (closer *gatewayBootstrapCloser) RuntimeErrors() <-chan error {
 	return closer.runtimeErrors
 }
 
+// openGatewayAndBootstrap 在通用 Gateway 生命周期之外接入生产 Backup Barrier Socket。
+// Barrier 必须与 Server 共用同一个 SQLite Store 和 target hash，不能另开配置来源。
 func openGatewayAndBootstrap(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
-	return openGatewayAndBootstrapWith(ctx, config, resources, logger, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
+	lifecycle, err := openGatewayAndBootstrapWith(ctx, config, resources, logger, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
 		return openAdminBootstrapSocketAfter(ctx, runtimeDir, targetHash, store, afterCreate, reportRuntimeError)
 	})
+	if err != nil {
+		return nil, err
+	}
+	closer, ok := lifecycle.(*gatewayBootstrapCloser)
+	if !ok {
+		return nil, errors.Join(errors.New("unexpected gateway lifecycle implementation"), lifecycle.Close())
+	}
+	serverResources, ok := resources.(*serverStorage)
+	if !ok {
+		return nil, errors.Join(errors.New("unexpected server storage implementation"), lifecycle.Close())
+	}
+	reportRuntimeError := func(runtimeErr error) {
+		select {
+		case closer.runtimeErrors <- runtimeErr:
+		default:
+		}
+	}
+	barrier, err := openBackupBarrierSocket(
+		ctx,
+		externallock.RuntimeDirectory,
+		serverResources.targetHash,
+		serverResources.database,
+		reportRuntimeError,
+	)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("initialize backup barrier socket: %w", err), lifecycle.Close())
+	}
+	closer.backupBarrier = barrier
+	return closer, nil
 }
 
 // openGatewayAndBootstrapWith 保持生产生命周期的唯一装配路径，并允许测试替换

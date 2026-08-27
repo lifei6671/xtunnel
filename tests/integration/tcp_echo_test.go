@@ -101,7 +101,8 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		_ = sessions.Shutdown(shutdownContext)
 	})
 	controlHandler, err := controlauth.New(tokenService, registry, controlauth.Options{
-		ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second,
+		AuthenticationRecorder: store,
+		ReadTimeout:            2 * time.Second, WriteTimeout: 2 * time.Second,
 		HeartbeatInterval: 100 * time.Millisecond, RetryAfter: 100 * time.Millisecond,
 	})
 	if err != nil {

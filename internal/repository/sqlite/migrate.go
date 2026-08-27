@@ -9,11 +9,14 @@ import (
 	"gorm.io/gorm"
 )
 
+// migration 描述一个不可拆分、只向前执行的数据库版本。statements 必须按声明顺序
+// 在同一事务内完成，最后才记录版本，避免部分 DDL 被误认为已应用。
 type migration struct {
 	version    int
 	statements []string
 }
 
+// productionMigrations 是当前二进制唯一认可的连续迁移链；数组顺序即版本顺序。
 var productionMigrations = []migration{
 	{
 		version: 1,
@@ -45,12 +48,21 @@ var productionMigrations = []migration{
 			migrations.ServiceDomain,
 		},
 	},
+	{
+		version: 6,
+		statements: []string{
+			migrations.TunnelFirstAuthentication,
+		},
+	},
 }
 
+// migrate 使用生产迁移集合把数据库推进到当前二进制支持的最新版本。
 func migrate(ctx context.Context, database *gorm.DB) error {
 	return runMigrations(ctx, database, productionMigrations, time.Now)
 }
 
+// runMigrations 先验证代码侧与数据库侧版本都从 1 连续递增，再逐版本事务提交。
+// 数据库比二进制更新或存在版本空洞时立即失败，禁止猜测、跳过或自动降级。
 func runMigrations(ctx context.Context, database *gorm.DB, available []migration, now func() time.Time) error {
 	for index, candidate := range available {
 		want := index + 1
@@ -98,6 +110,8 @@ func runMigrations(ctx context.Context, database *gorm.DB, available []migration
 	return nil
 }
 
+// appliedVersions 区分“迁移表尚不存在”和“迁移表存在但没有版本”两种状态；后者
+// 表示数据库初始化被破坏，调用方必须阻止启动而不是把它当成新库重新执行。
 func appliedVersions(ctx context.Context, database *gorm.DB) ([]int, bool, error) {
 	var tableCount int64
 	if err := database.WithContext(ctx).Raw(

@@ -53,6 +53,10 @@ type ServerOptions struct {
 	// ReportRuntimeError 接收后台 goroutine 的致命错误。回调必须保持非阻塞；
 	// Gateway 会先停止接收新连接并取消仍在运行的连接处理器，再调用该回调。
 	ReportRuntimeError func(error)
+	// AcquireMaintenanceBarrier 把 pinned 身份的运行期续签纳入 Server 的
+	// durable-state 写屏障。返回的 release 必须可在续签结束后无阻塞调用；
+	// 等待过程必须尊重 ctx，确保 Shutdown 能解除仍在排队的续签。
+	AcquireMaintenanceBarrier func(context.Context) (release func(), err error)
 
 	// 下列未导出字段仅用于包内测试：生产路径固定使用默认检查周期和系统时钟，
 	// 不新增用户配置项，也避免测试因真实时间等待而不稳定。
@@ -186,6 +190,8 @@ func (server *Server) Close() error {
 	return server.closeErr
 }
 
+// accept 是 Listener 的唯一 Accept owner。每个已接收连接都由 wait group 跟踪，
+// TLS 预算满时立即关闭；Listener 关闭只结束新入口，不取消已经认证的连接。
 func (server *Server) accept(ctx context.Context) {
 	limit := make(chan struct{}, server.options.MaxPendingTLSHandshakes)
 	for {
@@ -220,6 +226,8 @@ func (server *Server) accept(ctx context.Context) {
 	}
 }
 
+// handshake 在有界超时内完成 TLS 和 ALPN 协商；失败时返回 false，连接仍由
+// accept 为该连接创建的外层 goroutine 统一关闭。
 func (server *Server) handshake(ctx context.Context, connection net.Conn) (*tls.Conn, Protocol, bool) {
 	tlsConnection := tls.Server(connection, server.tlsConfig())
 	handshakeContext, cancel := context.WithTimeout(ctx, handshakeTimeout)
@@ -234,6 +242,7 @@ func (server *Server) handshake(ctx context.Context, connection net.Conn) (*tls.
 	return tlsConnection, protocol, true
 }
 
+// handle 把已认证前的 TLS 连接交给协议处理器，并保证处理器返回后关闭底层 FD。
 func (server *Server) handle(ctx context.Context, connection *tls.Conn, protocol Protocol) {
 	if server.options.Handle == nil {
 		return
@@ -241,6 +250,8 @@ func (server *Server) handle(ctx context.Context, connection *tls.Conn, protocol
 	server.options.Handle(ctx, connection, protocol)
 }
 
+// tlsConfig 为每次握手返回独立配置；共享证书只经 getCertificate 原子读取，
+// 已发布的 *tls.Config 不在并发连接之间原地修改。
 func (server *Server) tlsConfig() *tls.Config {
 	return &tls.Config{
 		MinVersion:     tls.VersionTLS13,
@@ -257,6 +268,7 @@ func (server *Server) LastRenewalError() error {
 	return server.lastRenewalError
 }
 
+// getCertificate 在读锁下复制当前证书值，使后台续签发布与握手读取互不竞态。
 func (server *Server) getCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	server.identityMu.RLock()
 	identity := server.identity
@@ -271,12 +283,15 @@ func (server *Server) getCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, 
 	}, nil
 }
 
+// hasPinnedRenewalSource 判断当前身份是否支持进程内 pinned 证书续签。
 func (server *Server) hasPinnedRenewalSource() bool {
 	server.identityMu.RLock()
 	defer server.identityMu.RUnlock()
 	return server.identity.pinnedRenewal != nil
 }
 
+// renewalLoop 由 Server.Start 唯一拥有，按固定周期检查续签条件，随 Server Context
+// 取消退出，并由 wait group 保证 Close 返回前 goroutine 已停止。
 func (server *Server) renewalLoop(ctx context.Context) {
 	ticker := time.NewTicker(server.renewalInterval)
 	defer ticker.Stop()
@@ -285,11 +300,13 @@ func (server *Server) renewalLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			server.renewPinnedIdentity()
+			server.renewPinnedIdentity(ctx)
 		}
 	}
 }
 
+// handlePanic 把受保护 goroutine 的 panic 转成进程级运行错误。互斥状态只保留首错，
+// 首错会停止新连接、取消 Server Context 并调用运行时错误上报入口。
 func (server *Server) handlePanic(operation string) func(error) {
 	return func(err error) {
 		runtimeErr := fmt.Errorf("%s: %w", operation, err)
@@ -316,9 +333,19 @@ func (server *Server) handlePanic(operation string) func(error) {
 
 // renewPinnedIdentity 在不持有 identityMu 的情况下完成签发与文件替换。
 // 这样新握手可以继续读取旧有效证书；只有替换成功后才用写锁发布新身份。
-func (server *Server) renewPinnedIdentity() {
+func (server *Server) renewPinnedIdentity(ctx context.Context) {
 	server.renewalMu.Lock()
 	defer server.renewalMu.Unlock()
+	if acquire := server.options.AcquireMaintenanceBarrier; acquire != nil {
+		release, err := acquire(ctx)
+		if err != nil {
+			server.identityMu.Lock()
+			server.lastRenewalError = fmt.Errorf("acquire gateway identity maintenance barrier: %w", err)
+			server.identityMu.Unlock()
+			return
+		}
+		defer release()
+	}
 
 	server.identityMu.RLock()
 	identity := server.identity
@@ -335,6 +362,7 @@ func (server *Server) renewPinnedIdentity() {
 	server.lastRenewalError = nil
 }
 
+// protocolFromALPN 只接受冻结的 Control/Work 协议，未知或空 ALPN 快速失败。
 func protocolFromALPN(alpn string) (Protocol, error) {
 	switch alpn {
 	case ControlALPN:

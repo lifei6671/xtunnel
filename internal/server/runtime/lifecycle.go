@@ -68,6 +68,8 @@ type ConnectorLifecycleEvent struct {
 	Reason   string
 }
 
+// connectorObservation 是 TunnelRuntime.mu 保护的可变生命周期事实；对外只发布
+// ConnectorSnapshot 副本，不能把本对象引用泄露给 Session Manager 或状态接口。
 type connectorObservation struct {
 	session         Session
 	metadata        ConnectorMetadata
@@ -163,9 +165,10 @@ func (registry *Registry) ObserveDraining(session Session) (ConnectorLifecycleEv
 	}
 	observation.status = ConnectorStatusDraining
 	runtime.connectors[session.ConnectorID] = observation
-	delete(runtime.eligibility, session)
-	// Pending OPEN 可能仍阻塞在该 Session 的 Pool；广播只关闭内存 channel，
-	// 真正的 membership 释放与 Demand 调整由 waiter 在 Runtime 锁外完成。
+	// 保留当前代已发布 Eligibility 供只读 Status 区分 CONFIG_SYNCING 与
+	// NO_CAPACITY；数据面继续由 observation.status != ONLINE fail closed。
+	// Pending OPEN 可能仍阻塞在该 Session 的 Pool，广播只关闭内存 channel，真正的
+	// membership 释放与 Demand 调整由 waiter 在 Runtime 锁外完成。
 	runtime.signalEligibilityLocked()
 	snapshot := runtime.connectorSnapshotLocked(observation)
 	runtime.mu.Unlock()
@@ -195,6 +198,35 @@ func (registry *Registry) ConnectorSnapshots() []ConnectorSnapshot {
 	return snapshots
 }
 
+// CurrentConnectorSnapshot 在 TunnelRuntime.mu 下同时复制 Lifecycle 与已发布的
+// Eligibility，并分别返回完整 Session identity 是否仍为 Current、Config Ack 后的
+// Lifecycle observation 是否存在。Eligibility 只来自数据面已发布状态，不能读取
+// Session Manager 尚未发布的协议侧镜像；Tombstone 永远不是 Current。
+func (registry *Registry) CurrentConnectorSnapshot(
+	session Session,
+) (ConnectorSnapshot, SessionEligibility, bool, bool) {
+	if registry == nil || !validLifecycleSession(session) {
+		return ConnectorSnapshot{}, SessionEligibility{}, false, false
+	}
+	runtime := registry.tunnel(session.TunnelID, false)
+	if runtime == nil {
+		return ConnectorSnapshot{}, SessionEligibility{}, false, false
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.revoked || runtime.current[session.ConnectorID] != session {
+		return ConnectorSnapshot{}, SessionEligibility{}, false, false
+	}
+	eligibility, _ := cloneEligibility(runtime.eligibility[session])
+	observation, exists := runtime.connectors[session.ConnectorID]
+	if !exists || observation.session != session || observation.tombstone {
+		return ConnectorSnapshot{}, eligibility, true, false
+	}
+	return runtime.connectorSnapshotLocked(observation), eligibility, true, true
+}
+
+// connectorSnapshotLocked 在 TunnelRuntime.mu 下把生命周期事实与当前 ACTIVE Work
+// 计数合并为同一线性化点的值型快照。
 func (runtime *TunnelRuntime) connectorSnapshotLocked(observation connectorObservation) ConnectorSnapshot {
 	active := uint64(0)
 	for _, work := range runtime.activeWorks {
@@ -209,6 +241,8 @@ func (runtime *TunnelRuntime) connectorSnapshotLocked(observation connectorObser
 	}
 }
 
+// disconnectObservationLocked 只处理完整身份匹配的当前观测。仍有 ACTIVE Work 时
+// 保留无状态 Tombstone 供归属追踪，最后一个 Work 结束后才删除 Connector。
 func (runtime *TunnelRuntime) disconnectObservationLocked(session Session, reason string) ConnectorLifecycleEvent {
 	observation, exists := runtime.connectors[session.ConnectorID]
 	if !exists || observation.session != session {
@@ -227,6 +261,7 @@ func (runtime *TunnelRuntime) disconnectObservationLocked(session Session, reaso
 	return ConnectorLifecycleEvent{Name: ConnectorEventDisconnected, Snapshot: snapshot, Reason: reason}
 }
 
+// removeFinishedTombstoneLocked 在确认该 Connector 已无任何 ACTIVE Work 后删除墓碑。
 func (runtime *TunnelRuntime) removeFinishedTombstoneLocked(connectorID string) {
 	observation, exists := runtime.connectors[connectorID]
 	if !exists || !observation.tombstone {
@@ -240,6 +275,7 @@ func (runtime *TunnelRuntime) removeFinishedTombstoneLocked(connectorID string) 
 	delete(runtime.connectors, connectorID)
 }
 
+// validLifecycleSession 校验参与生命周期 fencing 的完整 Session identity。
 func validLifecycleSession(session Session) bool {
 	return identity.ValidTunnelID(session.TunnelID) && identity.ValidConnectorID(session.ConnectorID) &&
 		identity.ValidSessionID(session.SessionID) && session.Generation > 0

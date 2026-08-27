@@ -1,29 +1,10 @@
 package datadir
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 )
-
-// ErrPendingRestore 表示当前稳定数据目标仍有待恢复的 Restore Journal。
-var ErrPendingRestore = errors.New("pending restore journal")
-
-// CheckPendingRestore 在打开 SQLite 前拒绝仍有 Restore Journal 的目标。
-// M3-12 将在相同位置接入正式的完成或回滚状态机。
-func CheckPendingRestore(target Target) error {
-	journalPath := filepath.Join(target.Parent, ".xtunnel-restore-"+target.Hash+".journal")
-	_, err := os.Lstat(journalPath)
-	switch {
-	case err == nil:
-		return fmt.Errorf("%w: %s", ErrPendingRestore, journalPath)
-	case errors.Is(err, os.ErrNotExist):
-		return nil
-	default:
-		return fmt.Errorf("inspect restore journal %q: %w", journalPath, err)
-	}
-}
 
 // ValidateCanonical 在取得 External Lock 后校验正式数据目录。
 func ValidateCanonical(target Target) error {

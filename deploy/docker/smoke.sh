@@ -122,6 +122,7 @@ fi
 volume=
 container=
 boundary_container=
+layout_dir=$(mktemp -d)
 # Server 默认容量的 FD 预算为 87188。OCI Runtime 必须显式提供更高的
 # soft/hard limit；镜像内的非 root 进程无法自行提升宿主施加的硬上限。
 server_nofile_limit=1048576
@@ -136,6 +137,7 @@ cleanup() {
 	if [ -n "$volume" ]; then
 		docker volume rm --force "$volume" >/dev/null 2>&1 || true
 	fi
+	rm -rf -- "$layout_dir"
 }
 trap cleanup 0
 trap 'exit 129' HUP
@@ -220,6 +222,17 @@ verify_runtime_mounts() {
 	fi
 }
 
+verify_server_data_layout() {
+	[ "$target" = server ] || return 0
+	rm -f -- "$layout_dir/xtunnel.db" "$layout_dir/legacy-xtunnel.db"
+	docker cp "$container:/var/lib/xtunnel/data/xtunnel.db" "$layout_dir/xtunnel.db"
+	test -s "$layout_dir/xtunnel.db"
+	if docker cp "$container:/var/lib/xtunnel/xtunnel.db" "$layout_dir/legacy-xtunnel.db" >/dev/null 2>&1; then
+		printf '%s\n' "Server wrote SQLite at the legacy Volume root" >&2
+		return 1
+	fi
+}
+
 stop_target() {
 	# 容器在收到本次 SIGTERM 前退出属于生命周期失败，不能用 `|| true`
 	# 掩盖；捕获 Docker 错误并附带最终状态，便于 CI 直接定位根因。
@@ -285,12 +298,14 @@ verify_server_runtime_boundary
 container=$(run_target)
 wait_for_start
 verify_runtime_mounts
+verify_server_data_layout
 stop_target
 
 # Server 的第二次启动会重新打开同一卷中的 SQLite；Agent 则重复验证无状态前台生命周期。
 container=$(run_target)
 wait_for_start
 verify_runtime_mounts
+verify_server_data_layout
 stop_target
 
 printf 'OCI smoke passed: target=%s platform=%s image=%s\n' "$target" "$platform" "$image"

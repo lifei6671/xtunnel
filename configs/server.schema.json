@@ -26,7 +26,7 @@
         "data_dir": {
           "type": "string",
           "minLength": 1,
-          "default": "/var/lib/xtunnel",
+          "default": "/var/lib/xtunnel/data",
           "description": "Server 持久化数据目录，必须为绝对路径。",
           "x-secret": false,
           "x-reloadable": false

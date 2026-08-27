@@ -24,11 +24,17 @@ const integrationTunnelID = "tun_01J00000000000000000000000"
 // Token 可以被三个独立 Connector 复用，而不会为新增 Connector 签发新 Credential。
 func TestConnectorAuthenticationWithPersistentTunnelToken(t *testing.T) {
 	ctx := context.Background()
-	store, err := repositorysqlite.Open(ctx, t.TempDir())
+	dataDir := t.TempDir()
+	store, err := repositorysqlite.Open(ctx, dataDir)
 	if err != nil {
 		t.Fatalf("sqlite.Open() error = %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	storeClosed := false
+	t.Cleanup(func() {
+		if !storeClosed {
+			_ = store.Close()
+		}
+	})
 	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
 		return transaction.Tunnels().Create(ctx, repository.Tunnel{
 			ID: integrationTunnelID, Name: "integration", Version: 1, CreatedAt: 1, UpdatedAt: 1,
@@ -62,7 +68,8 @@ func TestConnectorAuthenticationWithPersistentTunnelToken(t *testing.T) {
 
 	registry := serverruntime.NewRegistry()
 	serverHandler, err := servercontrolauth.New(tokenService, registry, servercontrolauth.Options{
-		ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second,
+		AuthenticationRecorder: store,
+		ReadTimeout:            2 * time.Second, WriteTimeout: 2 * time.Second,
 		HeartbeatInterval: 10 * time.Second, RetryAfter: time.Second,
 	})
 	if err != nil {
@@ -107,6 +114,45 @@ func TestConnectorAuthenticationWithPersistentTunnelToken(t *testing.T) {
 		afterConnectors.TokenVersion != issued.TokenVersion {
 		t.Fatalf("Current(after Connectors) changed Credential identity: got=%s/v%d want=%s/v%d",
 			afterConnectors.TokenID, afterConnectors.TokenVersion, issued.TokenID, issued.TokenVersion)
+	}
+	var persistedFirstAuthenticatedAt *int64
+	if err := store.Read(ctx, func(view repository.RepositoryView) error {
+		tunnel, readErr := view.Tunnels().Get(ctx, integrationTunnelID)
+		if readErr != nil {
+			return readErr
+		}
+		persistedFirstAuthenticatedAt = tunnel.FirstAuthenticatedAt
+		return nil
+	}); err != nil {
+		t.Fatalf("read authenticated Tunnel error = %v", err)
+	}
+	if persistedFirstAuthenticatedAt == nil {
+		t.Fatal("successful authentication did not persist first_authenticated_at")
+	}
+	firstAuthenticatedAt := *persistedFirstAuthenticatedAt
+	if err := store.Close(); err != nil {
+		t.Fatalf("close SQLite before restart error = %v", err)
+	}
+	storeClosed = true
+
+	reopened, err := repositorysqlite.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatalf("sqlite.Open(after restart) error = %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	var reopenedFirstAuthenticatedAt *int64
+	if err := reopened.Read(ctx, func(view repository.RepositoryView) error {
+		tunnel, readErr := view.Tunnels().Get(ctx, integrationTunnelID)
+		if readErr != nil {
+			return readErr
+		}
+		reopenedFirstAuthenticatedAt = tunnel.FirstAuthenticatedAt
+		return nil
+	}); err != nil {
+		t.Fatalf("read authenticated Tunnel after restart error = %v", err)
+	}
+	if reopenedFirstAuthenticatedAt == nil || *reopenedFirstAuthenticatedAt != firstAuthenticatedAt {
+		t.Fatalf("FirstAuthenticatedAt after restart = %v, want %d", reopenedFirstAuthenticatedAt, firstAuthenticatedAt)
 	}
 }
 

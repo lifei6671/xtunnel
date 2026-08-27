@@ -133,6 +133,24 @@ if [ -z "$smoke_agent_token" ] || [ -z "$reinstall_agent_token" ] || [ "$smoke_a
 	exit 1
 fi
 
+# 无迁移策略必须表现为安全拒绝，不能留下新 Binary、Config、Unit 或服务身份。
+mkdir -p /var/lib/xtunnel
+printf '%s\n' legacy > /var/lib/xtunnel/xtunnel.db
+if sh "$script_dir/install.sh" server --binary "$server_binary" --config "$temp_dir/server.yaml" >/dev/null 2>&1; then
+	printf '%s\n' "server install unexpectedly accepted the legacy data layout" >&2
+	exit 1
+fi
+test "$(cat /var/lib/xtunnel/xtunnel.db)" = legacy
+test ! -e /var/lib/xtunnel/data
+test ! -e /usr/local/bin/xtunnel-server
+test ! -e /etc/xtunnel/server.yaml
+test ! -e /etc/systemd/system/xtunnel-server.service
+if id xtunnel-server >/dev/null 2>&1 || getent group xtunnel-server >/dev/null 2>&1; then
+	printf '%s\n' "rejected legacy install created the Server service identity" >&2
+	exit 1
+fi
+rm -rf -- /var/lib/xtunnel
+
 sh "$script_dir/install.sh" server --binary "$server_binary" --config "$temp_dir/server.yaml"
 if "$agent_binary" service install >/dev/null 2>&1; then
 	printf '%s\n' "agent install unexpectedly accepted a missing --token" >&2
@@ -174,6 +192,7 @@ test "$(cat /etc/xtunnel/credentials/agent.token)" = "$smoke_agent_token"
 test "$(stat -c '%a:%U:%G' /run/xtunnel)" = '700:xtunnel-server:xtunnel-server'
 test "$(stat -c '%a:%U:%G' /run/xtunnel-agent)" = '700:xtunnel-agent:xtunnel-agent'
 test "$(stat -c '%a:%U:%G' /var/lib/xtunnel)" = '700:xtunnel-server:xtunnel-server'
+test "$(stat -c '%a:%U:%G' /var/lib/xtunnel/data)" = '700:xtunnel-server:xtunnel-server'
 test ! -e /var/lib/xtunnel-agent
 test "$(stat -c '%a:%U:%G' /usr/local/bin/xtunnel-server)" = '755:root:root'
 test "$(stat -c '%a:%U:%G' /usr/local/bin/xtunnel-agent)" = '755:root:root'
@@ -181,7 +200,7 @@ cmp -s "$agent_binary" /usr/local/bin/xtunnel-agent
 test "$(stat -c '%a:%U:%G' /etc/systemd/system/xtunnel-server.service)" = '644:root:root'
 test "$(stat -c '%a:%U:%G' /etc/systemd/system/xtunnel-agent.service)" = '644:root:root'
 test "$(systemctl show --property=LimitNOFILE --value xtunnel-server.service)" = 1048576
-test -f /var/lib/xtunnel/xtunnel.db
+test -f /var/lib/xtunnel/data/xtunnel.db
 test "$(sed -n '1p' /etc/systemd/system/xtunnel-agent.service)" = '# Managed by xtunnel-agent service install'
 grep -Fx 'LoadCredential=xtunnel-agent.token:/etc/xtunnel/credentials/agent.token' /etc/systemd/system/xtunnel-agent.service >/dev/null
 grep -Fx 'ExecStart=/usr/local/bin/xtunnel-agent run' /etc/systemd/system/xtunnel-agent.service >/dev/null
@@ -233,7 +252,7 @@ test -f /etc/xtunnel/server.yaml
 test ! -e /etc/xtunnel/agent.yaml
 test ! -e /etc/xtunnel/agent.token
 test -f /etc/xtunnel/credentials/agent.token
-test -f /var/lib/xtunnel/xtunnel.db
+test -f /var/lib/xtunnel/data/xtunnel.db
 test ! -e /var/lib/xtunnel-agent
 id xtunnel-server >/dev/null 2>&1
 id xtunnel-agent >/dev/null 2>&1

@@ -9,14 +9,19 @@ import (
 
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
 	"github.com/lifei6671/xtunnel/internal/server/datadir"
+	"github.com/lifei6671/xtunnel/internal/server/durableops"
 	"github.com/lifei6671/xtunnel/internal/server/externallock"
 	"github.com/lifei6671/xtunnel/internal/server/tokenkey"
 )
 
+// storage 是 bootstrap 关闭路径需要的最小资源集合；生产实现仍由 serverStorage
+// 统一拥有数据库、External Lock 和 Token 主密钥生命周期。
 type storage interface {
 	Close() error
 }
 
+// serverStorage 持有从启动成功到全部 Listener/Session 关闭后的进程级存储资源。
+// tokenMasterKey 只驻留内存，不经日志或配置传播。
 type serverStorage struct {
 	database        *sqlite.Store
 	lock            *externallock.Lock
@@ -41,8 +46,8 @@ func openServerStorage(ctx context.Context, dataDir, runtimeDir string) (*server
 		return nil, errors.Join(cause, lock.Close())
 	}
 
-	if err := datadir.CheckPendingRestore(target); err != nil {
-		return failAfterLock(fmt.Errorf("check pending restore journal: %w", err))
+	if _, err := durableops.RecoverPendingRestore(ctx, target); err != nil {
+		return failAfterLock(fmt.Errorf("recover pending Restore Journal: %w", err))
 	}
 	if err := datadir.ValidateCanonical(target); err != nil {
 		return failAfterLock(fmt.Errorf("validate canonical server data directory: %w", err))

@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"context"
 	"errors"
+	"net"
 	"testing"
 	"time"
 )
@@ -88,6 +90,64 @@ func TestConnectorLifecycleDisconnectUsesActiveWorkTombstoneUntilFinish(t *testi
 	}
 	if snapshots := fixture.registry.ConnectorSnapshots(); len(snapshots) != 0 {
 		t.Fatalf("ConnectorSnapshots() after final Active = %#v", snapshots)
+	}
+}
+
+func TestCurrentConnectorSnapshotRejectsReplacementAndTombstone(t *testing.T) {
+	registry := newRegistry(sessionGenerator(1))
+	oldSession, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, observed := registry.ObserveConnected(oldSession, ConnectorMetadata{Hostname: "old"}); !observed {
+		t.Fatal("ObserveConnected(old) = false")
+	}
+	replacement, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, current, _ := registry.CurrentConnectorSnapshot(oldSession); current {
+		t.Fatal("CurrentConnectorSnapshot() exposed replaced generation")
+	}
+	if _, _, current, observed := registry.CurrentConnectorSnapshot(replacement); !current || observed {
+		t.Fatalf("CurrentConnectorSnapshot() before observation = current %t observed %t", current, observed)
+	}
+	if _, observed := registry.ObserveConnected(replacement, ConnectorMetadata{Hostname: "new"}); !observed {
+		t.Fatal("ObserveConnected(replacement) = false")
+	}
+	snapshot, _, current, observed := registry.CurrentConnectorSnapshot(replacement)
+	if !current || !observed || snapshot.Session != replacement || snapshot.Hostname != "new" || snapshot.Tombstone {
+		t.Fatalf("CurrentConnectorSnapshot(replacement) = %#v, %t, %t", snapshot, current, observed)
+	}
+
+	tunnel, err := registry.Tunnel(runtimeTunnelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := registry.AcquireConnector(runtimeTunnelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cancel := context.WithCancel(context.Background())
+	workConn, workPeer := net.Pipe()
+	defer workPeer.Close()
+	peerConn, peerClient := net.Pipe()
+	defer peerClient.Close()
+	work, err := tunnel.RegisterActiveWork(ActiveWorkSpec{
+		Session: replacement, WorkID: runtimeWorkID, ConnectionID: runtimeConnectionID,
+		Cancel: cancel, WorkConn: workConn, PeerConn: peerConn, Lease: lease,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, disconnected := registry.DisconnectIfCurrent(replacement, "test"); !disconnected {
+		t.Fatal("DisconnectIfCurrent() = false")
+	}
+	if _, _, current, _ := registry.CurrentConnectorSnapshot(replacement); current {
+		t.Fatal("CurrentConnectorSnapshot() exposed ActiveWork Tombstone")
+	}
+	if err := work.Finish(); err != nil {
+		t.Fatal(err)
 	}
 }
 

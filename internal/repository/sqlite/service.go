@@ -66,6 +66,8 @@ var ServiceColumns = struct {
 	UpdatedAt:               "updated_at",
 }
 
+// serviceRecord 是 Service 聚合的 SQLite 存储形状；可选字符串和端口用指针保持
+// SQL NULL 与领域零值之间的明确映射。
 type serviceRecord struct {
 	ID                      string  `gorm:"column:id;primaryKey"`
 	TunnelID                string  `gorm:"column:tunnel_id"`
@@ -92,13 +94,23 @@ type serviceRecord struct {
 	UpdatedAt               int64   `gorm:"column:updated_at"`
 }
 
+// TableName 把 GORM 模型固定到机器契约定义的 services 表。
 func (serviceRecord) TableName() string { return ServiceTable }
 
-type serviceRepository struct{ database *gorm.DB }
+// serviceRepository 把 Service CRUD 绑定到一个只读视图或写事务。
+// readOnly 会在写入口快速失败，防止绕过 Store 的写锁与事务边界。
+type serviceRepository struct {
+	database *gorm.DB
+	readOnly bool
+}
 
 var _ repository.ServiceRepository = serviceRepository{}
 
+// Create 在当前写事务中插入经过领域校验的 Service。
 func (store serviceRepository) Create(ctx context.Context, service repository.Service) error {
+	if store.readOnly {
+		return errRepositoryWriteOutsideTransaction
+	}
 	if err := service.Validate(); err != nil {
 		return err
 	}
@@ -108,6 +120,7 @@ func (store serviceRepository) Create(ctx context.Context, service repository.Se
 	return nil
 }
 
+// Get 按 Tunnel 与 Service 复合身份读取单个 Service，并验证持久化行仍满足领域约束。
 func (store serviceRepository) Get(ctx context.Context, tunnelID, serviceID string) (repository.Service, error) {
 	if !validate.ValidID(tunnelID, "tun_") || !validate.ValidID(serviceID, "svc_") {
 		return repository.Service{}, repository.ErrInvalidService
@@ -125,6 +138,7 @@ func (store serviceRepository) Get(ctx context.Context, tunnelID, serviceID stri
 	return serviceDomainFromRecord(record)
 }
 
+// ListByTunnel 按 Service ID 稳定排序返回一个 Tunnel 的全部 Service。
 func (store serviceRepository) ListByTunnel(ctx context.Context, tunnelID string) ([]repository.Service, error) {
 	if !validate.ValidID(tunnelID, "tun_") {
 		return nil, repository.ErrInvalidService
@@ -147,6 +161,7 @@ func (store serviceRepository) ListByTunnel(ctx context.Context, tunnelID string
 	return services, nil
 }
 
+// CountByTunnel 在创建新 Service 前提供同一事务内的配额计数。
 func (store serviceRepository) CountByTunnel(ctx context.Context, tunnelID string) (int64, error) {
 	if !validate.ValidID(tunnelID, "tun_") {
 		return 0, repository.ErrInvalidService
@@ -160,7 +175,12 @@ func (store serviceRepository) CountByTunnel(ctx context.Context, tunnelID strin
 	return count, nil
 }
 
+// Update 用 expectedVersion 执行乐观锁更新并只推进一次 Service version。
+// 零受影响行会进一步区分不存在与版本冲突，不能把并发覆盖伪装成成功。
 func (store serviceRepository) Update(ctx context.Context, service repository.Service, expectedVersion int64) (repository.Service, error) {
+	if store.readOnly {
+		return repository.Service{}, errRepositoryWriteOutsideTransaction
+	}
 	if err := service.Validate(); err != nil || expectedVersion < 1 || expectedVersion == math.MaxInt64 || service.Version != expectedVersion {
 		return repository.Service{}, repository.ErrInvalidService
 	}
@@ -183,7 +203,11 @@ func (store serviceRepository) Update(ctx context.Context, service repository.Se
 	return store.Get(ctx, service.TunnelID, service.ID)
 }
 
+// Delete 按复合身份与 expectedVersion 删除；零受影响行同样区分不存在和并发冲突。
 func (store serviceRepository) Delete(ctx context.Context, tunnelID, serviceID string, expectedVersion int64) error {
+	if store.readOnly {
+		return errRepositoryWriteOutsideTransaction
+	}
 	if !validate.ValidID(tunnelID, "tun_") || !validate.ValidID(serviceID, "svc_") || expectedVersion < 1 {
 		return repository.ErrInvalidService
 	}
@@ -204,6 +228,7 @@ func (store serviceRepository) Delete(ctx context.Context, tunnelID, serviceID s
 	return nil
 }
 
+// serviceRecordFromDomain 复制领域值到持久化形状，不保留调用方可变对象的别名。
 func serviceRecordFromDomain(service repository.Service) serviceRecord {
 	record := serviceRecord{
 		ID: service.ID, TunnelID: service.TunnelID, Name: service.Name,
@@ -230,6 +255,7 @@ func serviceRecordFromDomain(service repository.Service) serviceRecord {
 	return record
 }
 
+// serviceDomainFromRecord 还原并验证领域对象；数据库中的非法行必须显式阻止读取。
 func serviceDomainFromRecord(record serviceRecord) (repository.Service, error) {
 	service := repository.Service{
 		ID: record.ID, TunnelID: record.TunnelID, Name: record.Name,
@@ -257,6 +283,7 @@ func serviceDomainFromRecord(record serviceRecord) (repository.Service, error) {
 	return service, nil
 }
 
+// serviceUpdates 显式列出允许变更的业务列，并由调用方单独提供下一版本号。
 func serviceUpdates(record serviceRecord, nextVersion int64) map[string]any {
 	return map[string]any{
 		ServiceColumns.Name:                    record.Name,
@@ -282,6 +309,7 @@ func serviceUpdates(record serviceRecord, nextVersion int64) map[string]any {
 	}
 }
 
+// optionalString 把领域空字符串编码为 SQL NULL。
 func optionalString(value string) *string {
 	if value == "" {
 		return nil
@@ -289,6 +317,7 @@ func optionalString(value string) *string {
 	return &value
 }
 
+// stringValue 把可空数据库字符串还原为领域零值。
 func stringValue(value *string) string {
 	if value == nil {
 		return ""
@@ -296,6 +325,7 @@ func stringValue(value *string) string {
 	return *value
 }
 
+// uint32Value 把可空数据库整数还原为领域零值。
 func uint32Value(value *uint32) uint32 {
 	if value == nil {
 		return 0

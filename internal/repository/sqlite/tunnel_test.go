@@ -247,6 +247,84 @@ func TestTunnelRepositoriesRollBackWholeTransaction(t *testing.T) {
 	}
 }
 
+func TestMarkFirstAuthenticatedPersistsFirstValueAcrossRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := Open(context.Background(), dataDir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		return transaction.Tunnels().Create(context.Background(), testTunnel())
+	}); err != nil {
+		t.Fatalf("seed Tunnel error = %v", err)
+	}
+	if err := store.MarkFirstAuthenticated(context.Background(), repositoryTestTunnelID, 10); err != nil {
+		t.Fatalf("MarkFirstAuthenticated(first) error = %v", err)
+	}
+	writer, err := store.pool.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("acquire competing writer error = %v", err)
+	}
+	if _, err := writer.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		_ = writer.Close()
+		t.Fatalf("begin competing writer error = %v", err)
+	}
+	repeatContext, cancelRepeat := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	if err := store.MarkFirstAuthenticated(repeatContext, repositoryTestTunnelID, 20); err != nil {
+		cancelRepeat()
+		_, _ = writer.ExecContext(context.Background(), "ROLLBACK")
+		_ = writer.Close()
+		t.Fatalf("MarkFirstAuthenticated(repeat) error = %v", err)
+	}
+	cancelRepeat()
+	if _, err := writer.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		_ = writer.Close()
+		t.Fatalf("rollback competing writer error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close competing writer error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Store.Close() error = %v", err)
+	}
+
+	store, err = Open(context.Background(), dataDir)
+	if err != nil {
+		t.Fatalf("second Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		tunnel, err := view.Tunnels().Get(context.Background(), repositoryTestTunnelID)
+		if err != nil {
+			return err
+		}
+		if tunnel.FirstAuthenticatedAt == nil || *tunnel.FirstAuthenticatedAt != 10 {
+			return errors.New("first authentication was not preserved across restart")
+		}
+		if tunnel.Version != 1 || tunnel.UpdatedAt != 1 {
+			return errors.New("first authentication changed Management aggregate fields")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMarkFirstAuthenticatedRejectsInvalidInputAndMissingTunnel(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.MarkFirstAuthenticated(context.Background(), repositoryTestTunnelID, 0); !errors.Is(err, repository.ErrInvalidTunnel) {
+		t.Fatalf("MarkFirstAuthenticated(zero time) error = %v, want ErrInvalidTunnel", err)
+	}
+	if err := store.MarkFirstAuthenticated(context.Background(), repositoryTestTunnelID, 1); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("MarkFirstAuthenticated(missing Tunnel) error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestAdvanceDesiredRevisionUsesIndependentCAS(t *testing.T) {
 	store, err := Open(context.Background(), t.TempDir())
 	if err != nil {
@@ -625,7 +703,7 @@ func TestTunnelDomainMigrationUpgradesAndRollsBackFailedNextVersion(t *testing.T
 	}
 
 	available := append([]migration{}, productionMigrations...)
-	available = append(available, migration{version: 6, statements: []string{
+	available = append(available, migration{version: 7, statements: []string{
 		"CREATE TABLE interrupted_tunnel_migration (id INTEGER PRIMARY KEY)",
 		"THIS IS NOT VALID SQL",
 	}})
@@ -639,7 +717,7 @@ func TestTunnelDomainMigrationUpgradesAndRollsBackFailedNextVersion(t *testing.T
 	if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
 		t.Fatalf("count migration versions error = %v", err)
 	}
-	if interruptedCount != 0 || versionCount != 5 {
+	if interruptedCount != 0 || versionCount != 6 {
 		t.Fatalf("failed migration rollback = table:%d versions:%d", interruptedCount, versionCount)
 	}
 }

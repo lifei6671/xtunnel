@@ -37,6 +37,8 @@ type serviceHealthState struct {
 	receivedAt      time.Duration
 }
 
+// handleHealthBatch 校验并接收当前 generation 的健康批次，再把值型 Eligibility 发布
+// 给 Runtime。重复 Frame 和已被替换的 Session 都不能重新产生副作用。
 func (manager *Manager) handleHealthBatch(managed *managedSession, inbound controlsession.Inbound) error {
 	if inbound.Duplicate {
 		return nil
@@ -60,6 +62,8 @@ func (manager *Manager) handleHealthBatch(managed *managedSession, inbound contr
 	return nil
 }
 
+// validateHealthBatch 在建立去重 Map 和写入 Session 状态前限制批量大小、Service ID、
+// 重复项与枚举值，避免不受控分配或未知状态进入选择门禁。
 func validateHealthBatch(batch *protocolv1.ServiceHealthBatch) error {
 	if batch == nil || batch.GetGeneration() == 0 || len(batch.GetItems()) == 0 ||
 		len(batch.GetItems()) > maxAcceptedHealthBatchItems {
@@ -138,6 +142,8 @@ func (managed *managedSession) installServiceRequirementsLocked(snapshot *protoc
 	managed.serviceRequirements = next
 }
 
+// publishEligibility 先从协议侧 owner 复制不可变快照，再由 Runtime 按完整 Session
+// identity 做最终 fencing；返回 false 表示该 generation 已不再 Current。
 func (manager *Manager) publishEligibility(managed *managedSession) bool {
 	if manager == nil || manager.registry == nil || managed == nil {
 		return false
@@ -145,9 +151,16 @@ func (manager *Manager) publishEligibility(managed *managedSession) bool {
 	return manager.registry.PublishEligibility(managed.session, managed.eligibilitySnapshot(manager.startedAt))
 }
 
+// eligibilitySnapshot 在 configMu 下复制当前配置、Health 与新鲜度截止时间。
 func (managed *managedSession) eligibilitySnapshot(startedAt time.Time) serverruntime.SessionEligibility {
 	managed.configMu.Lock()
 	defer managed.configMu.Unlock()
+	return managed.eligibilitySnapshotLocked(startedAt)
+}
+
+// eligibilitySnapshotLocked 要求调用方持有 configMu，并为每个 Service 构造独立值，
+// 避免 Runtime 保存对 managedSession 可变 Map 或 protobuf 的引用。
+func (managed *managedSession) eligibilitySnapshotLocked(startedAt time.Time) serverruntime.SessionEligibility {
 	state := serverruntime.SessionEligibility{
 		ConfigReady: managed.configReady, HasObserved: managed.hasObserved,
 		ObservedRevision: managed.observedRevision,
@@ -171,4 +184,23 @@ func (managed *managedSession) eligibilitySnapshot(startedAt time.Time) serverru
 		state.Services[serviceID] = service
 	}
 	return state
+}
+
+// heartbeatFresh 使用本地单调 receipt time 判断 Control Session 是否仍新鲜。
+// Config/Health 状态不能从本对象读取给 Status；它们必须来自 TunnelRuntime 已发布
+// 的 Eligibility，避免展示先于数据面裁决。
+func (managed *managedSession) heartbeatFresh(
+	now time.Duration,
+	heartbeatTimeout time.Duration,
+) bool {
+	managed.configMu.Lock()
+	defer managed.configMu.Unlock()
+	return now >= managed.lastHeartbeatAt && now-managed.lastHeartbeatAt <= heartbeatTimeout
+}
+
+// observeHeartbeat 记录 Server 进程内单调接收时刻，不信任 Agent wall clock。
+func (managed *managedSession) observeHeartbeat(receivedAt time.Duration) {
+	managed.configMu.Lock()
+	managed.lastHeartbeatAt = receivedAt
+	managed.configMu.Unlock()
 }

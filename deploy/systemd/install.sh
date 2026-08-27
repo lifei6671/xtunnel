@@ -66,6 +66,20 @@ if ! command -v systemctl >/dev/null 2>&1 || ! command -v useradd >/dev/null 2>&
 	exit 1
 fi
 
+# 本开发版本不提供旧布局迁移。必须在创建服务身份或覆盖包装产物前拒绝，
+# 避免把旧数据库留在父目录后静默启动一套空实例。
+for legacy_path in \
+	/var/lib/xtunnel/xtunnel.db \
+	/var/lib/xtunnel/xtunnel.db-wal \
+	/var/lib/xtunnel/xtunnel.db-shm \
+	/var/lib/xtunnel/credentials \
+	/var/lib/xtunnel/pki; do
+	if [ -e "$legacy_path" ] || [ -L "$legacy_path" ]; then
+		printf 'legacy Server data layout is not migrated automatically: %s\n' "$legacy_path" >&2
+		exit 1
+	fi
+done
+
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 unit=xtunnel-server.service
 unit_source="$script_dir/$unit"
@@ -87,6 +101,10 @@ install -m 0755 "$binary" "$binary_target"
 # root 负责更新 Server 配置，服务只能通过自己的组读取。
 install -o root -g "$service_user" -m 0640 "$config" /etc/xtunnel/server.yaml
 install -m 0644 "$unit_source" "$unit_target"
+
+# StateDirectory 负责稳定父目录；正式 Data Target 必须预先存在，运行时不会
+# 为了通过 Canonical 校验而创建空 leaf。
+install -d -o "$service_user" -g "$service_user" -m 0700 /var/lib/xtunnel/data
 
 systemctl daemon-reload
 systemctl enable --now "$unit"

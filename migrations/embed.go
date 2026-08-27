@@ -29,3 +29,8 @@ var CredentialLifecycleAudit string
 //
 //go:embed 000005_services.sql
 var ServiceDomain string
+
+// TunnelFirstAuthentication 包含 M3-11 跨 Server 重启保留的首次认证事实。
+//
+//go:embed 000006_tunnel_first_authentication.sql
+var TunnelFirstAuthentication string

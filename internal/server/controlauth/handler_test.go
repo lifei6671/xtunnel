@@ -37,6 +37,12 @@ func (verify verifierFunc) Verify(ctx context.Context, token string) (applicatio
 	return verify(ctx, token)
 }
 
+type recorderFunc func(context.Context, string, int64) error
+
+func (record recorderFunc) MarkFirstAuthenticated(ctx context.Context, tunnelID string, authenticatedAt int64) error {
+	return record(ctx, tunnelID, authenticatedAt)
+}
+
 type handleOutcome struct {
 	established Established
 	err         error
@@ -78,6 +84,40 @@ func TestHandleSuccessFlushesBeforePublishingSession(t *testing.T) {
 	current, exists := registry.Current(testTunnelID, testConnectorID)
 	if !exists || current != outcome.established.Session {
 		t.Fatalf("Current() = %#v, %v, want established Session", current, exists)
+	}
+}
+
+func TestHandlePersistsFirstAuthenticationAfterSuccessFlush(t *testing.T) {
+	now := time.Now()
+	authenticatedAt := now.Unix()
+	recorded := make(chan struct {
+		tunnelID        string
+		authenticatedAt int64
+	}, 1)
+	options := testOptions()
+	options.AuthenticationRecorder = recorderFunc(func(_ context.Context, tunnelID string, at int64) error {
+		recorded <- struct {
+			tunnelID        string
+			authenticatedAt int64
+		}{tunnelID: tunnelID, authenticatedAt: at}
+		return nil
+	})
+	handler, err := newHandler(
+		successfulVerifier(), serverruntime.NewRegistry(), options,
+		bytes.NewReader(bytes.Repeat([]byte{0x5b}, 64)),
+		func() time.Time { return now },
+	)
+	if err != nil {
+		t.Fatalf("newHandler() error = %v", err)
+	}
+
+	response, outcome := exchange(t, handler, validRequest(testConnectorID))
+	if response.GetSuccess() == nil || outcome.err != nil {
+		t.Fatalf("Handle() response=%#v error=%v, want Success", response, outcome.err)
+	}
+	got := <-recorded
+	if got.tunnelID != testTunnelID || got.authenticatedAt != authenticatedAt {
+		t.Fatalf("recorded authentication = %#v, want tunnel=%s at=%d", got, testTunnelID, authenticatedAt)
 	}
 }
 
@@ -189,14 +229,26 @@ func TestHandleFirstConnectorHealthBudgetExceededReturnsRetryableFailure(t *test
 
 func TestHandleWriteFailureDoesNotPublishSession(t *testing.T) {
 	registry := serverruntime.NewRegistry()
-	handler := testHandler(t, registry, successfulVerifier(), bytes.NewReader(bytes.Repeat([]byte{0x3c}, 64)))
+	recorderCalled := false
+	options := testOptions()
+	options.AuthenticationRecorder = recorderFunc(func(context.Context, string, int64) error {
+		recorderCalled = true
+		return nil
+	})
+	handler, err := newHandler(
+		successfulVerifier(), registry, options,
+		bytes.NewReader(bytes.Repeat([]byte{0x3c}, 64)), time.Now,
+	)
+	if err != nil {
+		t.Fatalf("newHandler() error = %v", err)
+	}
 
 	var encoded bytes.Buffer
 	if err := frame.WriteAuth(&encoded, validRequest(testConnectorID)); err != nil {
 		t.Fatalf("WriteAuth(request) error = %v", err)
 	}
 	connection := &failingWriteConn{reader: bytes.NewReader(encoded.Bytes()), writeErr: io.ErrClosedPipe}
-	_, err := handler.Handle(context.Background(), connection)
+	_, err = handler.Handle(context.Background(), connection)
 	if err == nil || !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("Handle() error = %v, want write failure", err)
 	}
@@ -205,6 +257,47 @@ func TestHandleWriteFailureDoesNotPublishSession(t *testing.T) {
 	}
 	if !connection.isClosed() {
 		t.Fatal("write failure did not close the authentication connection")
+	}
+	if recorderCalled {
+		t.Fatal("write failure persisted a first-authentication fact")
+	}
+}
+
+func TestHandlePersistenceFailureClosesCommittedReplacementWithoutRevivingOldSession(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	initialHandler := testHandler(t, registry, successfulVerifier(), bytes.NewReader(bytes.Repeat([]byte{0x3d}, 64)))
+	_, initial := exchange(t, initialHandler, validRequest(testConnectorID))
+	if initial.err != nil {
+		t.Fatalf("initial Handle() error = %v", initial.err)
+	}
+
+	persistenceErr := errors.New("test authentication persistence failed")
+	options := testOptions()
+	options.AuthenticationRecorder = recorderFunc(func(context.Context, string, int64) error {
+		return persistenceErr
+	})
+	handler, err := newHandler(
+		successfulVerifier(), registry, options,
+		bytes.NewReader(bytes.Repeat([]byte{0x3e}, 64)), time.Now,
+	)
+	if err != nil {
+		t.Fatalf("newHandler() error = %v", err)
+	}
+
+	response, outcome := exchange(t, handler, validRequest(testConnectorID))
+	if response.GetSuccess() == nil {
+		t.Fatalf("ConnectorAuthResult = %#v, want already-flushed Success", response)
+	}
+	var handleErr *HandleError
+	if !errors.Is(outcome.err, persistenceErr) || !errors.As(outcome.err, &handleErr) ||
+		handleErr.FailureSent() || handleErr.Code() != protocolv1.ErrorCode_ERROR_CODE_OK {
+		t.Fatalf("Handle() error = %#v, want unsent internal persistence failure", outcome.err)
+	}
+	if strings.Contains(outcome.err.Error(), persistenceErr.Error()) || strings.Contains(outcome.err.Error(), testToken) {
+		t.Fatalf("Handle() error leaked sensitive/internal detail: %q", outcome.err)
+	}
+	if _, exists := registry.Current(testTunnelID, testConnectorID); exists {
+		t.Fatal("persistence failure kept the new Session or revived the old generation")
 	}
 }
 
@@ -621,6 +714,7 @@ func TestNewRejectsInvalidOptions(t *testing.T) {
 		name   string
 		mutate func(*Options)
 	}{
+		{name: "authentication recorder", mutate: func(options *Options) { options.AuthenticationRecorder = nil }},
 		{name: "read timeout", mutate: func(options *Options) { options.ReadTimeout = 0 }},
 		{name: "write timeout", mutate: func(options *Options) { options.WriteTimeout = 0 }},
 		{name: "auth frame above protocol", mutate: func(options *Options) { options.MaxFrameBytes = frame.MaxAuthFrameSize + 1 }},
@@ -666,7 +760,8 @@ func testHandler(t *testing.T, registry *serverruntime.Registry, verifier TokenV
 
 func testOptions() Options {
 	return Options{
-		ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second,
+		AuthenticationRecorder: recorderFunc(func(context.Context, string, int64) error { return nil }),
+		ReadTimeout:            2 * time.Second, WriteTimeout: 2 * time.Second,
 		HeartbeatInterval: 10 * time.Second, RetryAfter: 1500 * time.Millisecond,
 	}
 }

@@ -80,7 +80,7 @@ Server 当前按以下顺序初始化存储：
 ```text
 Resolve Stable Data Target
 → Acquire Linux External Lock
-→ Check Pending Restore Journal
+→ Recover / Roll Back Pending Restore Journal
 → Validate Canonical Data Directory
 → Open SQLite with GORM
 → Run Forward-only Migration
@@ -88,13 +88,22 @@ Resolve Stable Data Target
 → Validate stored Snapshots and rebuild Health Target Budget
 ```
 
-`server.data_dir` 必须是绝对路径，父目录和正式数据目录都需预先存在；Server 不会自动创建数据目录。Linux 运行环境还需预先创建归 Runtime UID 所有、权限为 `0700` 的 `/run/xtunnel`。数据库固定为 `<server.data_dir>/xtunnel.db`，连接使用 WAL、Foreign Keys、5 秒 Busy Timeout 和 Normal Synchronous。完整 Tunnel Token 只以 AES-256-GCM 密文写入数据库，独立 32 字节主密钥位于 `<server.data_dir>/credentials/tunnel-token.key`；只要数据库已有 Token 密文，密钥缺失、损坏或权限不安全就会阻止启动。发现待处理 Restore Journal 时，当前版本会在打开数据库前拒绝启动；正式恢复状态机由后续 M3-12 实现。
+`server.data_dir` 必须是绝对路径，父目录和正式数据目录都需预先存在；Server 不会自动创建数据目录。生产默认 Stable Parent 为 `/var/lib/xtunnel`，正式 Data Target 为 `/var/lib/xtunnel/data`；systemd StateDirectory 与 OCI Volume 必须挂载父目录，不能把可被 Restore rename 的 `data` leaf 直接用作挂载点。项目仍在开发中，不自动迁移旧 `/var/lib/xtunnel/xtunnel.db` 布局，systemd 安装器发现旧布局会在覆盖包装产物前拒绝。Linux 运行环境还需预先创建归 Runtime UID 所有、权限为 `0700` 的 `/run/xtunnel`。数据库固定为 `<server.data_dir>/xtunnel.db`，连接使用 WAL、Foreign Keys、5 秒 Busy Timeout 和 Normal Synchronous。完整 Tunnel Token 只以 AES-256-GCM 密文写入数据库，独立 32 字节主密钥位于 `<server.data_dir>/credentials/tunnel-token.key`；只要数据库已有 Token 密文，密钥缺失、损坏或权限不安全就会阻止启动。
+
+Linux root 可使用以下维护命令；Archive 路径必须是绝对路径，输出不允许 stdout，也不会覆盖已有文件：
+
+```sh
+xtunnel-server backup create --output /secure/backup/xtunnel-backup.tar
+xtunnel-server backup restore --input /secure/backup/xtunnel-backup.tar
+```
+
+运行中的 Server 通过 `/run/xtunnel/backup-<target-hash>.sock` 提供在线 Create Barrier；Socket 不存在时 Create 获取同一 External Lock 后离线执行，Socket 存在但连接或认证失败时不会静默回退。在线 Lease 断线会立即取消归档，只有完整落盘并收到 release ACK 的输出才会发布。Restore 始终要求 Server 已停止并独占 External Lock。CLI 以 `openat2` 固定 SQLite 源 inode，同一 FD 完成 Schema 检查和包含 WAL 可见状态的 Backup；原路径在操作期间被 symlink/rename 替换会 fail closed 并删除候选，不会切换源或遗漏原名 WAL。Archive 为权限 `0600` 的 canonical USTAR，包含 SQLite 自包含备份、32 字节 Tunnel Token Master Key，以及 pinned 模式下最终 Gateway key/certificate；Public TLS 外部证书不进入 Archive。存在未完成 Gateway Rotation Journal/临时文件时 Create 会拒绝，需先完成正常启动或维护 Reconciliation。Restore 会先在 sibling staging 中校验 Manifest/Hash、SQLite 完整性与实际 Schema、Token Key 对全部 Token 密文的解密和身份/Secret Hash 一致性、Pinned Identity，再以 rollback + Journal 原子切换；下次启动会在打开 SQLite 前自动完成或回滚中断的 Restore。该能力已进入本地 `REVIEW`，正式发布仍需 CI、M3 Gate 和后续 Filesystem Failpoint/Release Matrix 证据。
 
 收到 `SIGINT` 或 `SIGTERM` 后，Server 先让 Session 退出选路并执行 Drain，Agent 停止补充 WorkConn、等待 ACTIVE 连接自然结束，超过固定 Deadline 才强制关闭；随后 Server 关闭 SQLite 并释放 External Lock。XTunnel V0.1 Server 的生产运行边界仍为 Linux amd64/arm64，不提供 Windows Server External Lock；Agent 支持 Linux amd64/arm64 与 Windows amd64/arm64。Registry 已按 Tunnel 对 Current Connector Session 先执行未排空、Pool Idle 与容量过滤，再用 Least Active + 稳定 Round Robin 取得原子连接租约，并保留旧 generation ActiveWork tombstone。M2 的 Token Rotate/Revoke、跨 Connector 故障切换策略和在线生命周期可观测性已通过用户阶段 Review，仍待覆盖本地提交的全绿 CI 证据，因此不能标记为 `DONE`；这些实现不重复 M1 已有的默认负载选择。
 
 ## OCI 与 Agent Service Self-install
 
-当前提供 Linux `amd64`/`arm64` 的 OCI 构建骨架，以及 Server Shell 包装和 Agent Binary 自管理的 systemd 服务。Builder 与 Runtime Base 均以不可变摘要固定。Agent OCI Image 的默认命令是 `run`，容器不执行 `service install/uninstall`；镜像固定使用非 root `UID:GID 65532:65532`。只有 Server 使用 `/var/lib/xtunnel` 持久 Volume 和 `/run/xtunnel` 可写 tmpfs；Agent 不声明持久 Volume，通过 `XTUNNEL_TOKEN` 环境变量接收 Token。
+当前提供 Linux `amd64`/`arm64` 的 OCI 构建骨架，以及 Server Shell 包装和 Agent Binary 自管理的 systemd 服务。Builder 与 Runtime Base 均以不可变摘要固定。Agent OCI Image 的默认命令是 `run`，容器不执行 `service install/uninstall`；镜像固定使用非 root `UID:GID 65532:65532`。只有 Server 使用 `/var/lib/xtunnel` 稳定父目录 Volume 和 `/run/xtunnel` 可写 tmpfs；镜像在 Volume 首次 copy-up 前预创建权限 `0700` 的 `/var/lib/xtunnel/data` leaf。Agent 不声明持久 Volume，通过 `XTUNNEL_TOKEN` 环境变量接收 Token。
 
 Server 默认配置的启动 FD 预算为 `87188`。仓库提供的 Compose 和 systemd Unit 将 `nofile` soft/hard limit 固定为 `1048576`；若绕过这些入口直接运行 Server OCI 镜像，也必须向容器提供同等上限，例如 `--ulimit nofile=1048576:1048576`。应用仍按配置预算限制实际连接数，不会因为提高进程上限而无界占用 FD。
 

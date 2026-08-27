@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -362,7 +363,7 @@ func TestServerRenewsRunningPinnedIdentityAndHotLoadsNewHandshakes(t *testing.T)
 		t.Fatal("old TLS handshake did not receive the original certificate")
 	}
 
-	server.renewPinnedIdentity()
+	server.renewPinnedIdentity(context.Background())
 	if err := server.LastRenewalError(); err != nil {
 		t.Fatalf("Server.LastRenewalError() = %v", err)
 	}
@@ -377,6 +378,58 @@ func TestServerRenewsRunningPinnedIdentityAndHotLoadsNewHandshakes(t *testing.T)
 	}
 	if !bytes.Equal(oldConnection.ConnectionState().PeerCertificates[0].Raw, oldCertificate) {
 		t.Fatal("renewal changed the certificate already negotiated by an old connection")
+	}
+}
+
+func TestServerPinnedRenewalWaitsForMaintenanceBarrier(t *testing.T) {
+	dataDir := t.TempDir()
+	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	identity, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
+	}
+	barrierEntered := make(chan struct{})
+	barrierRelease := make(chan struct{})
+	server, err := NewServer(ServerOptions{
+		Listen:                  "127.0.0.1:0",
+		Identity:                identity,
+		MaxPendingTLSHandshakes: 1,
+		now:                     func() time.Time { return createdAt.Add(367 * 24 * time.Hour) },
+		AcquireMaintenanceBarrier: func(ctx context.Context) (func(), error) {
+			close(barrierEntered)
+			select {
+			case <-barrierRelease:
+				return func() {}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.renewPinnedIdentity(context.Background())
+	}()
+	<-barrierEntered
+
+	persisted, err := LoadPinnedIdentity(dataDir)
+	if err != nil {
+		t.Fatalf("LoadPinnedIdentity() while barrier held error = %v", err)
+	}
+	if !bytes.Equal(persisted.Leaf().Raw, identity.Leaf().Raw) {
+		t.Fatal("pinned identity changed before the maintenance barrier was acquired")
+	}
+	close(barrierRelease)
+	<-done
+	persisted, err = LoadPinnedIdentity(dataDir)
+	if err != nil {
+		t.Fatalf("LoadPinnedIdentity() after barrier release error = %v", err)
+	}
+	if bytes.Equal(persisted.Leaf().Raw, identity.Leaf().Raw) {
+		t.Fatal("pinned identity was not renewed after the maintenance barrier was acquired")
 	}
 }
 
@@ -406,6 +459,50 @@ func TestServerRenewalLoopStopsWithClose(t *testing.T) {
 	})
 	if err := server.Close(); err != nil {
 		t.Fatalf("Server.Close() error = %v", err)
+	}
+}
+
+func TestServerCloseCancelsRenewalWaitingForMaintenanceBarrier(t *testing.T) {
+	dataDir := t.TempDir()
+	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	identity, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
+	}
+	barrierWaiting := make(chan struct{})
+	var waitingOnce sync.Once
+	server, err := NewServer(ServerOptions{
+		Listen:                  "127.0.0.1:0",
+		Identity:                identity,
+		MaxPendingTLSHandshakes: 1,
+		renewalCheckInterval:    time.Millisecond,
+		now:                     func() time.Time { return createdAt.Add(367 * 24 * time.Hour) },
+		AcquireMaintenanceBarrier: func(ctx context.Context) (func(), error) {
+			waitingOnce.Do(func() { close(barrierWaiting) })
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatalf("Server.Start() error = %v", err)
+	}
+	select {
+	case <-barrierWaiting:
+	case <-time.After(time.Second):
+		t.Fatal("renewal did not begin waiting for the maintenance barrier")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- server.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Server.Close() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Server.Close() did not cancel a barrier-blocked renewal")
 	}
 }
 

@@ -107,7 +107,7 @@ func TestResolveRejectsDirectSymlinkParent(t *testing.T) {
 	}
 }
 
-func TestValidateCanonicalAndPendingRestore(t *testing.T) {
+func TestValidateCanonical(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := filepath.Join(parent, "data")
 	target, err := Resolve(dataDir)
@@ -122,17 +122,6 @@ func TestValidateCanonicalAndPendingRestore(t *testing.T) {
 	}
 	if err := ValidateCanonical(target); err != nil {
 		t.Fatalf("ValidateCanonical() error = %v", err)
-	}
-	if err := CheckPendingRestore(target); err != nil {
-		t.Fatalf("CheckPendingRestore() error = %v", err)
-	}
-
-	journalPath := filepath.Join(parent, ".xtunnel-restore-"+target.Hash+".journal")
-	if err := os.WriteFile(journalPath, []byte("pending"), 0o600); err != nil {
-		t.Fatalf("os.WriteFile() error = %v", err)
-	}
-	if err := CheckPendingRestore(target); !errors.Is(err, ErrPendingRestore) {
-		t.Fatalf("CheckPendingRestore() error = %v, want ErrPendingRestore", err)
 	}
 }
 

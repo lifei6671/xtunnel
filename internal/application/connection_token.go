@@ -85,6 +85,8 @@ func NewConnectionTokenService(store repository.Store, protector TokenProtector)
 	return newConnectionTokenService(store, protector, rand.Reader, time.Now)
 }
 
+// newConnectionTokenService 注入随机源与时钟，生产入口和确定性测试共享同一套
+// Credential 签发逻辑，避免测试另造一条弱化的 Token 路径。
 func newConnectionTokenService(store repository.Store, protector TokenProtector, random io.Reader, now func() time.Time) *ConnectionTokenService {
 	return &ConnectionTokenService{store: store, protector: protector, random: random, now: now}
 }
@@ -195,6 +197,8 @@ func (service *ConnectionTokenService) Current(ctx context.Context, tunnelID str
 	return result, err
 }
 
+// currentFrom 在调用方已经选定的只读视图或事务中同时读取 Tunnel 与 ACTIVE Token。
+// 两者必须来自同一个视图，避免在轮换或撤销并发窗口中把旧密文与新状态拼接后返回。
 func (service *ConnectionTokenService) currentFrom(
 	ctx context.Context,
 	transaction repository.RepositoryView,
@@ -218,24 +222,49 @@ func (service *ConnectionTokenService) currentFrom(
 		return ConnectionTokenResult{}, repository.TunnelToken{}, fmt.Errorf("load current connection token: %w", err)
 	}
 
-	protectionContext := TokenProtectionContext{TunnelID: metadata.TunnelID, TokenID: metadata.ID, Version: metadata.Version}
-	plaintext, err := service.protector.Open(metadata.TokenCiphertext, protectionContext)
+	plaintext, err := openProtectedConnectionToken(metadata, service.protector)
 	if err != nil {
 		return ConnectionTokenResult{}, repository.TunnelToken{}, ErrConnectionTokenUnavailable
 	}
 	defer clear(plaintext)
-	parsed, err := token.Parse(string(plaintext))
-	if err != nil || parsed.GetTunnelId() != metadata.TunnelID || parsed.GetTokenId() != metadata.ID ||
-		parsed.GetTokenVersion() != uint64(metadata.Version) {
-		return ConnectionTokenResult{}, repository.TunnelToken{}, ErrConnectionTokenUnavailable
-	}
-	secretHash := sha256.Sum256(parsed.GetAuthenticationSecret())
-	if subtle.ConstantTimeCompare(metadata.SecretHash[:], secretHash[:]) != 1 {
-		return ConnectionTokenResult{}, repository.TunnelToken{}, ErrConnectionTokenUnavailable
-	}
 	return ConnectionTokenResult{
 		TunnelID: metadata.TunnelID, TokenID: metadata.ID, TokenVersion: metadata.Version, Token: string(plaintext),
 	}, metadata, nil
+}
+
+// ValidateProtectedConnectionToken 验证持久化 Token 行、主密钥、AAD 行身份、
+// 冻结 Token 文本以及认证 Secret 摘要属于同一份 Credential。备份恢复在删除
+// rollback 前调用它，避免“格式合法但属于另一数据库的 32 字节密钥”被误判可用。
+func ValidateProtectedConnectionToken(metadata repository.TunnelToken, protector TokenProtector) error {
+	plaintext, err := openProtectedConnectionToken(metadata, protector)
+	clear(plaintext)
+	return err
+}
+
+// openProtectedConnectionToken 是运行时取回与备份恢复共同使用的完整性门禁。
+// 它不仅校验 AEAD，还把明文内的 Tunnel/Token/Version 和 Secret 摘要重新绑定到
+// 当前数据库行；任一不一致都清除明文并统一返回不可用，避免泄露具体认证差异。
+func openProtectedConnectionToken(metadata repository.TunnelToken, protector TokenProtector) ([]byte, error) {
+	if protector == nil || metadata.Validate() != nil {
+		return nil, ErrConnectionTokenUnavailable
+	}
+	protectionContext := TokenProtectionContext{TunnelID: metadata.TunnelID, TokenID: metadata.ID, Version: metadata.Version}
+	plaintext, err := protector.Open(metadata.TokenCiphertext, protectionContext)
+	if err != nil {
+		return nil, ErrConnectionTokenUnavailable
+	}
+	parsed, err := token.Parse(string(plaintext))
+	if err != nil || parsed.GetTunnelId() != metadata.TunnelID || parsed.GetTokenId() != metadata.ID ||
+		parsed.GetTokenVersion() != uint64(metadata.Version) {
+		clear(plaintext)
+		return nil, ErrConnectionTokenUnavailable
+	}
+	secretHash := sha256.Sum256(parsed.GetAuthenticationSecret())
+	if subtle.ConstantTimeCompare(metadata.SecretHash[:], secretHash[:]) != 1 {
+		clear(plaintext)
+		return nil, ErrConnectionTokenUnavailable
+	}
+	return plaintext, nil
 }
 
 // Verify 严格解析 Token 后按 Tunnel、Token ID、代次和 Secret 摘要精确核验。
@@ -286,6 +315,8 @@ func (service *ConnectionTokenService) Verify(ctx context.Context, encoded strin
 	return identity, nil
 }
 
+// randomSecret 从调用方提供的 CSPRNG 精确读取 256 位认证 Secret；短读与读取错误
+// 都视为签发失败，不能用部分随机数据继续生成 Credential。
 func randomSecret(random io.Reader) ([sha256.Size]byte, error) {
 	var secret [sha256.Size]byte
 	if _, err := io.ReadFull(random, secret[:]); err != nil {

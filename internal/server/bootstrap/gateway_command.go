@@ -17,6 +17,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	"github.com/lifei6671/xtunnel/internal/server/datadir"
+	"github.com/lifei6671/xtunnel/internal/server/durableops"
 	"github.com/lifei6671/xtunnel/internal/server/externallock"
 	"github.com/lifei6671/xtunnel/internal/server/gateway"
 )
@@ -31,6 +32,9 @@ func runGatewayCommand(ctx context.Context, program string, args, environ []stri
 	return runGatewayRotateKey(ctx, program, args[1:], environ, stderr, externallock.RuntimeDirectory, time.Now())
 }
 
+// runGatewayRotateKey 在 External Lock 保护的离线维护窗口中轮换 pinned 身份。
+// 文件替换先由 durable Journal 提交，再把对应安全审计写入 SQLite；若审计落库失败，
+// Journal 保留供下次启动或重试收敛，绝不能假装整次操作未发生。
 func runGatewayRotateKey(
 	ctx context.Context,
 	program string,
@@ -100,8 +104,8 @@ func runGatewayRotateKey(
 			resultErr = errors.Join(resultErr, fmt.Errorf("close gateway rotation external lock: %w", err))
 		}
 	}()
-	if err := datadir.CheckPendingRestore(target); err != nil {
-		return fmt.Errorf("check pending restore journal before gateway rotation: %w", err)
+	if _, err := durableops.RecoverPendingRestore(ctx, target); err != nil {
+		return fmt.Errorf("recover pending Restore Journal before gateway rotation: %w", err)
 	}
 	if err := datadir.ValidateCanonical(target); err != nil {
 		return fmt.Errorf("validate canonical server data directory before gateway rotation: %w", err)
@@ -160,6 +164,7 @@ func runGatewayRotateKey(
 	return nil
 }
 
+// isGatewayCommand 识别独立 gateway 子命令，避免进入常驻 Server 参数解析。
 func isGatewayCommand(args []string) bool {
 	return len(args) != 0 && args[0] == "gateway"
 }

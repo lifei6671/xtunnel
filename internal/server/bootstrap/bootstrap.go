@@ -24,6 +24,9 @@ func Execute(program string, args, environ []string, stderr io.Writer) int {
 	return executeWithRun(program, args, environ, stderr, run)
 }
 
+// executeWithRun 是进程命令分发与信号 Context 的唯一入口。管理命令、维护命令和
+// 常驻 Server 共用相同退出码和单行错误输出，测试只替换常驻 runner；具体错误
+// 是否包含敏感信息由各业务边界负责保证。
 func executeWithRun(
 	program string,
 	args, environ []string,
@@ -38,6 +41,8 @@ func executeWithRun(
 		err = runAdminCommand(ctx, program, args, environ, stderr)
 	} else if isGatewayCommand(args) {
 		err = runGatewayCommand(ctx, program, args[1:], environ, stderr)
+	} else if isBackupCommand(args) {
+		err = runBackupCommand(ctx, program, args[1:], environ, stderr)
 	} else {
 		err = runner(ctx, program, args, environ, stderr)
 	}
@@ -61,10 +66,14 @@ func run(ctx context.Context, program string, args, environ []string, stderr io.
 	})
 }
 
+// runWithStorage 保留给只验证存储生命周期的测试，不启动任何 Listener。
 func runWithStorage(ctx context.Context, program string, args, environ []string, stderr io.Writer, openStorage func(context.Context, string) (storage, error)) error {
 	return runWithStorageAndBootstrap(ctx, program, args, environ, stderr, openStorage, nil)
 }
 
+// runWithStorageAndBootstrap 按配置、日志、Web、存储、运行时的固定顺序启动，并在
+// 退出时先关闭所有 Listener/Session，再关闭 SQLite 和 External Lock。任一阶段失败
+// 都逆序释放已经取得的资源，运行时异步错误则优先于普通信号退出返回。
 func runWithStorageAndBootstrap(
 	ctx context.Context,
 	program string,
@@ -143,6 +152,8 @@ func runWithStorageAndBootstrap(
 	return nil
 }
 
+// parseConfigOptions 只收集 YAML、环境变量和显式 CLI override；字段解释、默认值与
+// 类型校验仍由配置 Schema 驱动的 Load 统一完成。
 func parseConfigOptions(program string, args, environ []string, stderr io.Writer) (baseconfig.Options, error) {
 	flags := flag.NewFlagSet(program, flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -174,12 +185,15 @@ func parseConfigOptions(program string, args, environ []string, stderr io.Writer
 	return baseconfig.Options{YAML: yamlData, Environment: environ, CLI: overrides}, nil
 }
 
+// configOverrides 实现可重复的 --set path=value flag，并保留最后一次显式赋值。
 type configOverrides map[string]string
 
+// String 避免 flag 包把可能包含敏感配置值的 override 集合打印到默认 Usage。
 func (configOverrides) String() string {
 	return ""
 }
 
+// Set 严格拆分第一个等号，允许值本身继续包含等号。
 func (values configOverrides) Set(raw string) error {
 	path, value, ok := strings.Cut(raw, "=")
 	if !ok || path == "" {

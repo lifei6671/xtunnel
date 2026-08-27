@@ -58,8 +58,16 @@ type TokenVerifier interface {
 
 var _ TokenVerifier = (*application.ConnectionTokenService)(nil)
 
+// AuthenticationRecorder 在完整 Success Frame 写出后保存 Tunnel 的首次成功认证事实。
+// 实现必须幂等、只保留第一次时刻，并在返回成功前完成耐久提交。
+type AuthenticationRecorder interface {
+	MarkFirstAuthenticated(context.Context, string, int64) error
+}
+
 // Options 固定一次 AUTH 的有界 IO 和成功响应参数。
 type Options struct {
+	// AuthenticationRecorder 是跨 Server 重启区分 PENDING/OFFLINE 的耐久写入口。
+	AuthenticationRecorder AuthenticationRecorder
 	// ReadTimeout 限制完整 ConnectorAuthRequest Frame 的读取时间。
 	ReadTimeout time.Duration
 	// WriteTimeout 限制完整 ConnectorAuthResult Frame 的写出时间。
@@ -131,6 +139,7 @@ func (err *HandleError) FailureSent() bool {
 // Handler 处理一条已经协商为 xtunnel-control/1 的连接。
 type Handler struct {
 	verifier   TokenVerifier
+	recorder   AuthenticationRecorder
 	registry   *serverruntime.Registry
 	options    Options
 	random     io.Reader
@@ -144,18 +153,19 @@ func New(verifier TokenVerifier, registry *serverruntime.Registry, options Optio
 	return newHandler(verifier, registry, options, rand.Reader, time.Now)
 }
 
+// newHandler 注入随机源与时钟供确定性测试使用；所有生产校验仍与 New 共用。
 func newHandler(verifier TokenVerifier, registry *serverruntime.Registry, options Options, random io.Reader, now func() time.Time) (*Handler, error) {
 	if options.MaxFrameBytes == 0 {
 		options.MaxFrameBytes = frame.MaxAuthFrameSize
 	}
 	heartbeat, heartbeatOK := durationMilliseconds(options.HeartbeatInterval, false)
 	retryAfter, retryOK := durationMilliseconds(options.RetryAfter, true)
-	if verifier == nil || registry == nil || random == nil || now == nil || options.ReadTimeout <= 0 ||
+	if verifier == nil || options.AuthenticationRecorder == nil || registry == nil || random == nil || now == nil || options.ReadTimeout <= 0 ||
 		options.WriteTimeout <= 0 || options.MaxFrameBytes > frame.MaxAuthFrameSize || !heartbeatOK || !retryOK {
 		return nil, ErrInvalidOptions
 	}
 	return &Handler{
-		verifier: verifier, registry: registry, options: options,
+		verifier: verifier, recorder: options.AuthenticationRecorder, registry: registry, options: options,
 		random: random, now: now, retryAfter: retryAfter, heartbeat: heartbeat,
 	}, nil
 }
@@ -288,6 +298,26 @@ func (handler *Handler) Handle(ctx context.Context, connection net.Conn) (Establ
 		control.Close()
 		return Established{}, handler.closeWithError(connection, &HandleError{cause: err})
 	}
+	// Success Frame 完整写出后，对端已经观察到认证成功，旧 Session 也不可恢复。
+	// 首次认证事实因此只能在这个提交点之后写入。持久化使用不继承请求取消、但仍有
+	// 固定超时的 Context，避免 Shutdown 恰好到达时丢失已经发生的历史事实；若写入
+	// 失败，则不能再发送第二个 AUTH 结果，只能清理本代 Session 并关闭连接。
+	authenticatedAt := handler.now().UTC().Unix()
+	var persistenceErr error
+	if authenticatedAt <= 0 {
+		persistenceErr = errors.New("successful authentication time is invalid")
+	} else {
+		persistenceContext, cancelPersistence := context.WithTimeout(context.WithoutCancel(ctx), handler.options.WriteTimeout)
+		persistenceErr = handler.recorder.MarkFirstAuthenticated(persistenceContext, verified.TunnelID, authenticatedAt)
+		cancelPersistence()
+	}
+	if persistenceErr != nil {
+		handler.registry.ClearIfCurrent(session)
+		control.Close()
+		return Established{}, handler.closeWithError(connection, &HandleError{
+			cause: fmt.Errorf("persist successful control authentication: %w", persistenceErr),
+		})
+	}
 	if err := connection.SetDeadline(time.Time{}); err != nil {
 		// Session 已按 Success flush 提交。若连接交接前的最后清理失败，必须用完整
 		// generation fencing 撤销本次 Session；并发重连已经替换它时不得误删新 Session。
@@ -308,6 +338,8 @@ func (handler *Handler) Handle(ctx context.Context, connection net.Conn) (Establ
 	}, nil
 }
 
+// fail 在协议状态允许时发送一个有界 ConnectorAuthFailure，并始终关闭连接。
+// cause 只保留给进程内错误链，Wire 和 Error 文本都不包含 Token 或请求内容。
 func (handler *Handler) fail(ctx context.Context, connection net.Conn, control *state.Control, code protocolv1.ErrorCode, retryAfter uint32, cause error) error {
 	result := &protocolv1.ConnectorAuthResult{Result: &protocolv1.ConnectorAuthResult_Failure{
 		Failure: &protocolv1.ConnectorAuthFailure{ErrorCode: code, RetryAfterMs: retryAfter},
@@ -327,6 +359,7 @@ func (handler *Handler) fail(ctx context.Context, connection net.Conn, control *
 	return handler.closeWithError(connection, &HandleError{code: code, failureSent: true, cause: cause})
 }
 
+// closeWithError 合并关闭错误，但保持 HandleError 的稳定脱敏外观。
 func (handler *Handler) closeWithError(connection net.Conn, handleErr *HandleError) error {
 	if err := connection.Close(); err != nil {
 		return errors.Join(handleErr, fmt.Errorf("close control authentication connection: %w", err))
@@ -334,6 +367,8 @@ func (handler *Handler) closeWithError(connection net.Conn, handleErr *HandleErr
 	return handleErr
 }
 
+// classifyVerificationError 把 Application 错误映射到冻结 Wire 错误码；未知错误统一
+// 视为内部失败，不能通过细粒度差异形成 Credential 探测通道。
 func (handler *Handler) classifyVerificationError(err error) (protocolv1.ErrorCode, uint32) {
 	switch {
 	case errors.Is(err, application.ErrConnectionTokenInactive):
@@ -353,6 +388,7 @@ func (handler *Handler) classifyVerificationError(err error) (protocolv1.ErrorCo
 	}
 }
 
+// validateRequest 在任何持久化读取或 Session 发布前严格校验认证请求边界。
 func validateRequest(request *protocolv1.ConnectorAuthRequest) error {
 	if request == nil || request.GetConnectionToken() == "" || len(request.GetConnectionToken()) > maxConnectionTokenBytes ||
 		!utf8.ValidString(request.GetConnectionToken()) ||
@@ -376,10 +412,12 @@ func validateRequest(request *protocolv1.ConnectorAuthRequest) error {
 	return nil
 }
 
+// validText 接受非空、有效 UTF-8、无首尾空白且不超过字节上限的标识文本。
 func validText(value string, maximumBytes int) bool {
 	return value != "" && len(value) <= maximumBytes && utf8.ValidString(value) && strings.TrimSpace(value) == value
 }
 
+// negotiateProtocol 在 Agent 声明的闭区间内选择 Server 支持的最高冻结版本。
 func negotiateProtocol(minimum, maximum uint32) (uint32, bool) {
 	if minimum <= protocolVersionV1 && protocolVersionV1 <= maximum {
 		return protocolVersionV1, true
@@ -387,6 +425,8 @@ func negotiateProtocol(minimum, maximum uint32) (uint32, bool) {
 	return 0, false
 }
 
+// durationMilliseconds 把本地 Duration 安全转换为 Wire uint32 毫秒，拒绝负数、
+// 非整毫秒和溢出，避免配置语义在传输时被静默截断。
 func durationMilliseconds(value time.Duration, allowZero bool) (uint32, bool) {
 	if value < 0 || (!allowZero && value == 0) || value%time.Millisecond != 0 {
 		return 0, false
@@ -398,6 +438,7 @@ func durationMilliseconds(value time.Duration, allowZero bool) (uint32, bool) {
 	return uint32(milliseconds), true
 }
 
+// deadline 取操作固定窗口与上游 Context deadline 的较早者。
 func (handler *Handler) deadline(ctx context.Context, timeout time.Duration) time.Time {
 	deadline := handler.now().Add(timeout)
 	if contextDeadline, exists := ctx.Deadline(); exists && contextDeadline.Before(deadline) {
@@ -406,12 +447,15 @@ func (handler *Handler) deadline(ctx context.Context, timeout time.Duration) tim
 	return deadline
 }
 
+// contextReader 用短轮询 Deadline 包装不可感知 Context 的 net.Conn.Read。
+// Context 取消时即使对端不发送数据，也能在下一轮 Deadline 主动退出。
 type contextReader struct {
 	ctx      context.Context
 	conn     net.Conn
 	deadline time.Time
 }
 
+// Read 持续设置下一段有界 Deadline，仅把轮询超时重试，真实 IO 错误原样返回。
 func (reader *contextReader) Read(buffer []byte) (int, error) {
 	for {
 		if err := reader.ctx.Err(); err != nil {
@@ -433,12 +477,14 @@ func (reader *contextReader) Read(buffer []byte) (int, error) {
 	}
 }
 
+// contextWriter 为认证响应写入同时施加 Context 与固定操作 Deadline。
 type contextWriter struct {
 	ctx      context.Context
 	conn     net.Conn
 	deadline time.Time
 }
 
+// Write 处理短写并在每轮检查取消；轮询超时之外的错误立即向上返回。
 func (writer *contextWriter) Write(buffer []byte) (int, error) {
 	for {
 		if err := writer.ctx.Err(); err != nil {
@@ -460,6 +506,7 @@ func (writer *contextWriter) Write(buffer []byte) (int, error) {
 	}
 }
 
+// nextDeadline 为一次轮询选择 Context、操作总截止时间与短轮询窗口中的最早值。
 func nextDeadline(ctx context.Context, operationDeadline time.Time) time.Time {
 	deadline := time.Now().Add(cancellationPollInterval)
 	if operationDeadline.Before(deadline) {
@@ -471,6 +518,7 @@ func nextDeadline(ctx context.Context, operationDeadline time.Time) time.Time {
 	return deadline
 }
 
+// isPollingTimeout 只允许尚未取消且总窗口未到期的临时超时继续重试。
 func isPollingTimeout(err error, ctx context.Context, operationDeadline time.Time) bool {
 	var networkError net.Error
 	return errors.As(err, &networkError) && networkError.Timeout() &&

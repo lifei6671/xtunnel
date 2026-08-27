@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,7 +49,7 @@ func TestOpenServerStorageLocksBeforeOpeningSQLite(t *testing.T) {
 	}
 }
 
-func TestOpenServerStorageChecksJournalBeforeLeaf(t *testing.T) {
+func TestOpenServerStorageRejectsMalformedJournalBeforeLeaf(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := filepath.Join(parent, "data")
 	runtimeDir := filepath.Join(t.TempDir(), "run")
@@ -64,8 +65,8 @@ func TestOpenServerStorageChecksJournalBeforeLeaf(t *testing.T) {
 		t.Fatalf("os.WriteFile() error = %v", err)
 	}
 
-	if _, err := openServerStorage(context.Background(), dataDir, runtimeDir); !errors.Is(err, datadir.ErrPendingRestore) {
-		t.Fatalf("openServerStorage() error = %v, want ErrPendingRestore", err)
+	if _, err := openServerStorage(context.Background(), dataDir, runtimeDir); err == nil || !strings.Contains(err.Error(), "parse restore journal") {
+		t.Fatalf("openServerStorage() error = %v, want malformed Restore Journal error", err)
 	}
 }
 

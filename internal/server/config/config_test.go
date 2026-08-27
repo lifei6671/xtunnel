@@ -1,11 +1,30 @@
 package config
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 )
+
+func TestLoadUsesStableParentDataLeafByDefault(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("production Server defaults use Linux absolute paths")
+	}
+	result, err := Load(baseconfig.Options{YAML: []byte(`
+management:
+  public_url: https://admin.example.com
+agent_gateway:
+  public_hostname: tunnel.example.com
+`)})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if result.Server.DataDir != "/var/lib/xtunnel/data" {
+		t.Fatalf("Server.DataDir = %q, want /var/lib/xtunnel/data", result.Server.DataDir)
+	}
+}
 
 func TestLoadDefaultsAndPrecedence(t *testing.T) {
 	result, err := Load(baseconfig.Options{

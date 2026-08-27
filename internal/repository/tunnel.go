@@ -44,6 +44,9 @@ type Tunnel struct {
 	DesiredRevision int64
 	// RevokedAt 是 Tunnel 被强制撤销的 UTC Unix 秒；nil 表示未撤销。
 	RevokedAt *int64
+	// FirstAuthenticatedAt 是任意 Connector 首次成功完成 Control 认证的 UTC Unix 秒。
+	// nil 表示从未成功认证；一旦设置就不得清空或改写。
+	FirstAuthenticatedAt *int64
 	// CreatedAt、UpdatedAt 使用 UTC Unix 秒。
 	CreatedAt int64
 	UpdatedAt int64
@@ -88,7 +91,8 @@ type TunnelToken struct {
 func (tunnel Tunnel) Validate() error {
 	if !validate.ValidID(tunnel.ID, "tun_") || strings.TrimSpace(tunnel.Name) == "" ||
 		tunnel.Version < 1 || tunnel.DesiredRevision < 0 || tunnel.CreatedAt <= 0 || tunnel.UpdatedAt <= 0 ||
-		(tunnel.RevokedAt != nil && *tunnel.RevokedAt <= 0) {
+		(tunnel.RevokedAt != nil && *tunnel.RevokedAt <= 0) ||
+		(tunnel.FirstAuthenticatedAt != nil && *tunnel.FirstAuthenticatedAt <= 0) {
 		return ErrInvalidTunnel
 	}
 	return nil
@@ -123,6 +127,7 @@ type TunnelRepository interface {
 	List(context.Context) ([]Tunnel, error)
 	AdvanceVersion(context.Context, string, int64, int64) (Tunnel, error)
 	AdvanceDesiredRevision(context.Context, string, int64, int64, int64) (Tunnel, error)
+	MarkFirstAuthenticated(context.Context, string, int64) error
 	Revoke(context.Context, string, int64, int64) (Tunnel, error)
 }
 

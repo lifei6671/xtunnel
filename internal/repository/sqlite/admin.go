@@ -67,10 +67,13 @@ func (store *Store) CreateFirstAdmin(ctx context.Context, username, password str
 		return errors.New("admin password must not be empty")
 	}
 
-	// Socket 处理器可并发接收请求；该互斥与 External Lock 一起保证先检查、
-	// 再写入的过程不会产生两个首管。数据库读写本身全部通过 GORM 完成。
-	store.firstAdminMu.Lock()
-	defer store.firstAdminMu.Unlock()
+	// 首管初始化与其他写事务共用 Store 写租约。这样在线备份等待租约时，
+	// 后到达的首管请求不能越过备份屏障修改数据库。
+	lease, err := store.writeGate.acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire first-admin write lease: %w", err)
+	}
+	defer lease.Release()
 
 	return store.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var count int64
@@ -99,6 +102,8 @@ func (store *Store) CreateFirstAdmin(ctx context.Context, username, password str
 	})
 }
 
+// hashPassword 使用每次独立随机 Salt 和冻结的 Argon2id 参数生成 PHC 字符串。
+// 返回值只用于持久化，明文密码与派生中间值不得进入日志或错误文本。
 func hashPassword(password string) (string, error) {
 	salt := make([]byte, argon2SaltBytes)
 	if _, err := rand.Read(salt); err != nil {
@@ -115,6 +120,8 @@ func hashPassword(password string) (string, error) {
 	), nil
 }
 
+// verifyPassword 严格解析本项目生成的 PHC 形状，并用常量时间比较验证派生值。
+// 参数或编码漂移视为存储损坏，不回落到其他算法或弱参数。
 func verifyPassword(encodedHash, password string) (bool, error) {
 	parts := strings.Split(encodedHash, "$")
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" || parts[2] != "v=19" {
@@ -148,6 +155,8 @@ func verifyPassword(encodedHash, password string) (bool, error) {
 	return subtle.ConstantTimeCompare(actualKey, wantKey) == 1, nil
 }
 
+// argon2Parallelism 把本机可用 CPU 数钳制到冻结上限，避免小机器得到零并行度，
+// 也避免大机器因核心数增长而让同一配置产生不可控的资源放大。
 func argon2Parallelism() uint8 {
 	return uint8(min(4, max(1, runtime.NumCPU())))
 }

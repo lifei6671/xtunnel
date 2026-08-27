@@ -3,6 +3,7 @@
 package sessionruntime
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -89,11 +91,16 @@ type MetricsSnapshot struct {
 	XTunnelTCPActiveWorkConnections uint64
 }
 
+// connectorKey 标识一个 Tunnel 内的稳定 Connector；generation 由映射值携带，
+// 因而 replacement 可以原子替换同一个 key 的当前代。
 type connectorKey struct {
 	tunnelID    string
 	connectorID string
 }
 
+// managedSession 聚合一条 Control Session 的全部进程内 owner。字段按职责分别由
+// Manager.mu、terminationMu、configMu、reconcileMu 和 demandMu 保护；外部资源的
+// 最终关闭只允许 cleanupManaged 经 cleanupOnce 执行。
 type managedSession struct {
 	session       serverruntime.Session
 	metadata      serverruntime.ConnectorMetadata
@@ -110,6 +117,7 @@ type managedSession struct {
 	cleanupErr        error
 
 	configMu            sync.Mutex
+	lastHeartbeatAt     time.Duration
 	configReady         bool
 	hasObserved         bool
 	observedRevision    uint64
@@ -135,6 +143,8 @@ type managedSession struct {
 	demandDeadline       time.Duration
 }
 
+// startupGroup 跟踪同一 Tunnel 尚在 Owner.Start 到 install 之间的短暂窗口。
+// done 在最后一个预留结束时关闭，供 Revoke/Shutdown 在锁外等待。
 type startupGroup struct {
 	count int
 	done  chan struct{}
@@ -168,6 +178,7 @@ type Manager struct {
 	afterRemoveForTest           func(serverruntime.Session)
 	beforeInitialDemandForTest   func(*managedSession)
 	beforeCleanupForTest         func(serverruntime.Session)
+	beforeStatusFenceForTest     func(serverruntime.Session)
 	shutdownStarted              bool
 	shutdownDone                 chan struct{}
 	shutdownErr                  error
@@ -242,6 +253,8 @@ func (manager *Manager) Serve(ctx context.Context, connection net.Conn, establis
 	return manager.waitForSession(ctx, sessionContext, managed)
 }
 
+// prepareSession 从认证结果构造 Work Authenticator、WorkPool 与 Control Owner，
+// 并在每个失败分支逆序关闭已创建资源。Session Secret 在复制后立即从认证结果清零。
 func (manager *Manager) prepareSession(
 	ctx context.Context,
 	connection net.Conn,
@@ -299,20 +312,23 @@ func (manager *Manager) prepareSession(
 
 	sessionContext, cancel := context.WithCancel(ctx)
 	managed := &managedSession{
-		session:        established.Session,
-		metadata:       established.ConnectorMetadata,
-		authenticator:  authenticator,
-		owner:          owner,
-		pool:           pool,
-		cancel:         cancel,
-		protocol:       established.ProtocolVersion,
-		cleanupDone:    make(chan struct{}),
-		initialDone:    make(chan struct{}),
-		initialMinimum: established.DesiredRevision,
+		session:         established.Session,
+		metadata:        established.ConnectorMetadata,
+		authenticator:   authenticator,
+		owner:           owner,
+		pool:            pool,
+		cancel:          cancel,
+		protocol:        established.ProtocolVersion,
+		cleanupDone:     make(chan struct{}),
+		initialDone:     make(chan struct{}),
+		initialMinimum:  established.DesiredRevision,
+		lastHeartbeatAt: time.Since(manager.startedAt),
 	}
 	return sessionContext, managed, nil
 }
 
+// startSession 先登记 startup fence，再启动 Owner 并原子发布最高 generation。
+// install 失败时必须等待 Owner 退出后才释放预留，防止 Revoke/Shutdown 越过连接。
 func (manager *Manager) startSession(
 	sessionContext context.Context,
 	connection net.Conn,
@@ -355,6 +371,8 @@ func (manager *Manager) startSession(
 	return previous, nil
 }
 
+// abortInstalledSession 收敛已经发布、但初始 Snapshot 或 Demand 建立失败的 Session。
+// 它先停止 Owner，再撤下查找入口，最后关闭全部 Work 资源。
 func (manager *Manager) abortInstalledSession(managed *managedSession, cause error) error {
 	managed.cancel()
 	ownerErr := managed.owner.Wait()
@@ -363,6 +381,8 @@ func (manager *Manager) abortInstalledSession(managed *managedSession, cause err
 	return errors.Join(cause, ownerErr, cleanupErr)
 }
 
+// waitForSession 同时等待唯一 Control Owner 与唯一入站消费者退出，并在二者都停止后
+// 撤下 Current 查找、触发 Snapshot 重算和 generation-fenced 资源清理。
 func (manager *Manager) waitForSession(
 	ctx context.Context,
 	sessionContext context.Context,
@@ -410,6 +430,8 @@ func (manager *Manager) waitForSession(
 	return errors.Join(ownerErr, inboundErr, cleanupErr)
 }
 
+// consumeInbound 是 Control Owner 入站队列的唯一消费者。它串行处理 Heartbeat、
+// ConfigAck、Health 与 Drain，从而保持协议顺序，并用本地 Timer 关闭失联 Session。
 func (manager *Manager) consumeInbound(sessionContext context.Context, managed *managedSession) error {
 	heartbeatTimer := time.NewTimer(manager.options.HeartbeatTimeout)
 	defer heartbeatTimer.Stop()
@@ -432,6 +454,8 @@ func (manager *Manager) consumeInbound(sessionContext context.Context, managed *
 	}
 }
 
+// handleInbound 按互斥 Payload 类型分发已通过 Control 状态机校验的消息。
+// DrainAck 会保留给重复 DrainRequest 重放，其他重复副作用由各处理器显式忽略。
 func (manager *Manager) handleInbound(
 	sessionContext context.Context,
 	managed *managedSession,
@@ -440,6 +464,7 @@ func (manager *Manager) handleInbound(
 	inbound controlsession.Inbound,
 ) (*protocolv1.ControlEnvelope, error) {
 	if inbound.Envelope.GetHeartbeat() != nil {
+		managed.observeHeartbeat(time.Since(manager.startedAt))
 		resetTimer(heartbeatTimer, manager.options.HeartbeatTimeout)
 		return drainAck, manager.handleHeartbeat(managed)
 	}
@@ -459,6 +484,8 @@ func (manager *Manager) handleInbound(
 	return manager.handleDrain(sessionContext, managed, heartbeatTimer, request)
 }
 
+// handleHeartbeat 只在配置已经 APPLIED 后刷新 Runtime 观测并调整 WorkDemand。
+// Registry fence 失败表示当前代已被替换，必须结束旧 Owner。
 func (manager *Manager) handleHeartbeat(managed *managedSession) error {
 	if !managed.isConfigReady() {
 		return nil
@@ -473,6 +500,8 @@ func (manager *Manager) handleHeartbeat(managed *managedSession) error {
 	return nil
 }
 
+// handleConfigAck 把 Ack 关联到唯一 outstanding Snapshot；首次 APPLIED 必须先发布
+// Lifecycle，再开放 configReady、Eligibility 与 WorkDemand，避免数据面抢跑。
 func (manager *Manager) handleConfigAck(managed *managedSession, inbound controlsession.Inbound) error {
 	// Owner 已经通过 message_id 确认这是一个已处理 Ack 的重放。即使此时已经
 	// 下发了更高 Revision，也不能让旧 Ack 与新 outstanding 建立错误关联。
@@ -516,6 +545,8 @@ func (manager *Manager) handleConfigAck(managed *managedSession, inbound control
 	return nil
 }
 
+// handleDrain 先从新 Work 选择路径摘除 Session，再等待 OPENING 收敛并关闭非 ACTIVE。
+// DrainAck 反映等待完成时的剩余 ACTIVE 数；ACTIVE 继续由其数据面 owner 自然关闭。
 func (manager *Manager) handleDrain(
 	sessionContext context.Context,
 	managed *managedSession,
@@ -546,6 +577,7 @@ func (manager *Manager) handleDrain(
 	return drainAck, nil
 }
 
+// enqueueDrainAck 统一普通与重复 DrainRequest 的发送错误上下文。
 func enqueueDrainAck(owner *controlsession.Owner, drainAck *protocolv1.ControlEnvelope, duplicate bool) error {
 	if err := owner.Enqueue(drainAck); err != nil {
 		if duplicate {
@@ -781,6 +813,58 @@ func (manager *Manager) ConnectorSnapshots() []serverruntime.ConnectorSnapshot {
 	return snapshots
 }
 
+// RuntimeStatusSnapshots 先在 Manager.mu 下复制候选 Session 引用，随后读取本地
+// Heartbeat 与 Pool，最后由 Registry 在同一个 Runtime 临界区取得 Lifecycle、已发布
+// Eligibility 并按完整 Session identity 执行 Current fence。Manager 锁不跨其他
+// owner；replacement/revoke 窗口中的旧代在最终 fence 被丢弃，返回值只包含某个
+// 真实 Current generation 的自有状态。
+func (manager *Manager) RuntimeStatusSnapshots() []serverruntime.SessionStatusSnapshot {
+	if manager == nil || manager.registry == nil {
+		return nil
+	}
+	now := time.Since(manager.startedAt)
+	manager.mu.Lock()
+	managedSessions := make([]*managedSession, 0, len(manager.byConnector))
+	for _, managed := range manager.byConnector {
+		managedSessions = append(managedSessions, managed)
+	}
+	manager.mu.Unlock()
+	snapshots := make([]serverruntime.SessionStatusSnapshot, 0, len(managedSessions))
+	for _, managed := range managedSessions {
+		heartbeatFresh := managed.heartbeatFresh(now, manager.options.HeartbeatTimeout)
+		counts := managed.pool.Snapshot()
+		if manager.beforeStatusFenceForTest != nil {
+			manager.beforeStatusFenceForTest(managed.session)
+		}
+		lifecycle, config, current, observed := manager.registry.CurrentConnectorSnapshot(managed.session)
+		if !current {
+			continue
+		}
+		snapshot := serverruntime.SessionStatusSnapshot{
+			Session: managed.session, ConnectorMetadata: managed.metadata,
+			CurrentControlSession: true, HeartbeatFresh: heartbeatFresh,
+			LifecycleStatus: lifecycle.Status, Config: config,
+			WorkPool: serverruntime.ConnectorWorkPoolSnapshot{
+				Connecting: counts.Connecting, Idle: counts.Idle, Opening: counts.Opening,
+				Active: counts.Active, Total: counts.Total, Closed: counts.Closed, Draining: counts.Draining,
+			},
+		}
+		if observed {
+			snapshot.ConnectorMetadata = lifecycle.ConnectorMetadata
+			snapshot.ConnectedAt = lifecycle.ConnectedAt
+			snapshot.LastHeartbeatAt = lifecycle.LastHeartbeatAt
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	slices.SortFunc(snapshots, func(left, right serverruntime.SessionStatusSnapshot) int {
+		if order := cmp.Compare(left.TunnelID, right.TunnelID); order != 0 {
+			return order
+		}
+		return cmp.Compare(left.ConnectorID, right.ConnectorID)
+	})
+	return snapshots
+}
+
 // MetricsSnapshot 返回 M2 冻结的五个无高基数 Label Gauge 输入。
 func (manager *Manager) MetricsSnapshot() MetricsSnapshot {
 	var metrics MetricsSnapshot
@@ -861,6 +945,8 @@ func (manager *Manager) SetPendingOpens(session serverruntime.Session, pending u
 	return nil
 }
 
+// install 在 Manager.mu 下执行 shutdown/revoke/generation 三重 fence，并同时更新
+// Connector 与 Session 两个查找索引；旧代只撤出索引，真正关闭留给锁外 cleanup。
 func (manager *Manager) install(managed *managedSession) (*managedSession, error) {
 	key := connectorKey{tunnelID: managed.session.TunnelID, connectorID: managed.session.ConnectorID}
 	manager.mu.Lock()
@@ -905,6 +991,7 @@ func (manager *Manager) beginStartup(tunnelID string) error {
 	return nil
 }
 
+// endStartup 释放一次 startup 预留，并在计数归零时唤醒所有等待收敛者。
 func (manager *Manager) endStartup(tunnelID string) {
 	manager.mu.Lock()
 	group := manager.startingByTunnel[tunnelID]
@@ -920,6 +1007,8 @@ func (manager *Manager) endStartup(tunnelID string) {
 	manager.mu.Unlock()
 }
 
+// startupDoneLocked 返回当前 Tunnel 的启动栅栏；调用方必须持有 Manager.mu，
+// 并在释放锁后等待返回的 channel。
 func (manager *Manager) startupDoneLocked(tunnelID string) <-chan struct{} {
 	group := manager.startingByTunnel[tunnelID]
 	if group == nil {
@@ -928,6 +1017,9 @@ func (manager *Manager) startupDoneLocked(tunnelID string) <-chan struct{} {
 	return group.done
 }
 
+// reconcileDemand 串行计算一个 Session 的绝对非 ACTIVE 目标、Lease 预算与 generation，
+// 先在 WorkPool/Authenticator 完成授权交接，再向 Control Owner 下发同一结果。
+// 任一步失败都向上返回并关闭 Session，不能留下双重 Lease 或静默丢失 Demand。
 func (manager *Manager) reconcileDemand(managed *managedSession, protocolVersion uint32) (bool, error) {
 	if managed == nil || !managed.isConfigReady() {
 		return false, nil
@@ -1059,12 +1151,14 @@ func (managed *managedSession) acceptConfigAck(
 	return applied, becameReady, next, nil
 }
 
+// markConfigReady 在首个 APPLIED Snapshot 已发布到 Registry 后开放数据面门禁。
 func (managed *managedSession) markConfigReady() {
 	managed.configMu.Lock()
 	managed.configReady = true
 	managed.configMu.Unlock()
 }
 
+// hasOutstandingSnapshot 返回是否仍有等待 Ack 的唯一 Snapshot。
 func (managed *managedSession) hasOutstandingSnapshot() bool {
 	managed.configMu.Lock()
 	outstanding := managed.outstanding != nil
@@ -1072,6 +1166,7 @@ func (managed *managedSession) hasOutstandingSnapshot() bool {
 	return outstanding
 }
 
+// isConfigReady 在线程安全的前提下读取首份配置是否已成功应用。
 func (managed *managedSession) isConfigReady() bool {
 	if managed == nil {
 		return false
@@ -1082,18 +1177,21 @@ func (managed *managedSession) isConfigReady() bool {
 	return ready
 }
 
+// setPendingOpens 记录数据面当前绝对等待数，后续 Demand 不累加历史增量。
 func (managed *managedSession) setPendingOpens(pending uint32) {
 	managed.demandMu.Lock()
 	defer managed.demandMu.Unlock()
 	managed.pendingOpens = pending
 }
 
+// desiredNonActive 取冻结的基础空闲目标与真实 Pending OPEN 的较大值。
 func (managed *managedSession) desiredNonActive() uint32 {
 	managed.demandMu.Lock()
 	defer managed.demandMu.Unlock()
 	return max(initialDesiredNonActive, managed.pendingOpens)
 }
 
+// installDemand 保存已成功授权并准备下发的 Demand 镜像，供后续抑制重复扩容。
 func (managed *managedSession) installDemand(slots, desired uint32, deadline time.Duration) {
 	managed.demandMu.Lock()
 	defer managed.demandMu.Unlock()
@@ -1103,6 +1201,7 @@ func (managed *managedSession) installDemand(slots, desired uint32, deadline tim
 	managed.demandDeadline = deadline
 }
 
+// consumeDemandSlot 在一个 READY WorkConn 消耗 Lease 后递减本地剩余槽位。
 func (managed *managedSession) consumeDemandSlot() {
 	managed.demandMu.Lock()
 	defer managed.demandMu.Unlock()
@@ -1113,6 +1212,7 @@ func (managed *managedSession) consumeDemandSlot() {
 	managed.demandExhausted = managed.demandSlotsRemaining == 0
 }
 
+// demandChange 判断目标是否下降，或上升是否应等当前未过期 Lease 用尽后再发布。
 func (managed *managedSession) demandChange(desired uint32, now time.Duration) (decreasing, deferChange bool) {
 	managed.demandMu.Lock()
 	defer managed.demandMu.Unlock()
@@ -1120,6 +1220,8 @@ func (managed *managedSession) demandChange(desired uint32, now time.Duration) (
 		desired > managed.demandDesired && managed.demandSlotsRemaining > 0 && now < managed.demandDeadline
 }
 
+// shouldRolloverDemand 判断已耗尽 Lease 对应的非 ACTIVE 存量是否再次低于目标，
+// 此时需要结束旧 generation 并签发新的缺口 Lease。
 func (managed *managedSession) shouldRolloverDemand(
 	counts serverworkpool.Counts,
 	maxWorkTotal, desired uint32,
@@ -1138,6 +1240,7 @@ func (managed *managedSession) shouldRolloverDemand(
 	return nonActive < desired
 }
 
+// setTerminationReason 只记录第一个具体终止原因，避免后续清理覆盖根因。
 func (managed *managedSession) setTerminationReason(reason string) {
 	if managed == nil || reason == "" {
 		return
@@ -1163,6 +1266,7 @@ func (managed *managedSession) setConvergenceReason(reason string) {
 	managed.terminationMu.Unlock()
 }
 
+// termination 返回稳定终止原因；没有更具体原因时使用普通 Control 关闭。
 func (managed *managedSession) termination() string {
 	if managed == nil {
 		return "control_session_closed"
@@ -1176,11 +1280,13 @@ func (managed *managedSession) termination() string {
 	return reason
 }
 
+// resetTimer 先排空可能已经触发的 Timer，再建立新的完整超时窗口。
 func resetTimer(timer *time.Timer, timeout time.Duration) {
 	stopTimer(timer)
 	timer.Reset(timeout)
 }
 
+// stopTimer 停止并非阻塞地排空 Timer，避免旧 tick 被下一次 Reset 误消费。
 func stopTimer(timer *time.Timer) {
 	if timer.Stop() {
 		return
@@ -1191,6 +1297,7 @@ func stopTimer(timer *time.Timer) {
 	}
 }
 
+// cleanupMode 区分普通 Session 退出保留 ACTIVE 与强制收敛全部 Work 的路径。
 type cleanupMode uint8
 
 const (
@@ -1212,6 +1319,7 @@ func (manager *Manager) removeLookup(managed *managedSession) {
 	}
 }
 
+// finishCleanup 只在全部外部资源已经关闭后移除 liveSessions 所有权记录。
 func (manager *Manager) finishCleanup(managed *managedSession) {
 	manager.mu.Lock()
 	delete(manager.liveSessions, managed)
@@ -1292,6 +1400,7 @@ func (manager *Manager) markDraining(managed *managedSession) {
 	}
 }
 
+// logLifecycle 在锁外记录不含 Credential 的值型事件；空字段不会伪造日志属性。
 func (manager *Manager) logLifecycle(event serverruntime.ConnectorLifecycleEvent) {
 	if manager == nil || manager.logger == nil || event.Name == "" {
 		return
@@ -1331,12 +1440,14 @@ func (manager *Manager) logLifecycle(event serverruntime.ConnectorLifecycleEvent
 	manager.logger.Info(event.Name, attributes...)
 }
 
+// validSession 校验所有 generation fence 都依赖的完整 Session identity。
 func validSession(session serverruntime.Session) bool {
 	return identity.ValidateTunnelID(session.TunnelID) == nil &&
 		identity.ValidateConnectorID(session.ConnectorID) == nil &&
 		identity.ValidateSessionID(session.SessionID) == nil && session.Generation > 0
 }
 
+// nilSnapshotProvider 同时识别 nil 接口与装入接口的 typed nil 实现。
 func nilSnapshotProvider(provider SnapshotProvider) bool {
 	if provider == nil {
 		return true

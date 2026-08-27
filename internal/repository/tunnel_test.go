@@ -23,6 +23,7 @@ func TestTunnelValidate(t *testing.T) {
 		{name: "无效版本", mutate: func(tunnel *Tunnel) { tunnel.Version = 0 }},
 		{name: "负期望版本", mutate: func(tunnel *Tunnel) { tunnel.DesiredRevision = -1 }},
 		{name: "无效撤销时间", mutate: func(tunnel *Tunnel) { value := int64(-1); tunnel.RevokedAt = &value }},
+		{name: "无效首次认证时间", mutate: func(tunnel *Tunnel) { value := int64(0); tunnel.FirstAuthenticatedAt = &value }},
 		{name: "无效创建时间", mutate: func(tunnel *Tunnel) { tunnel.CreatedAt = 0 }},
 	}
 
