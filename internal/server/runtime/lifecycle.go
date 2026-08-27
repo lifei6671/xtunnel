@@ -163,6 +163,10 @@ func (registry *Registry) ObserveDraining(session Session) (ConnectorLifecycleEv
 	}
 	observation.status = ConnectorStatusDraining
 	runtime.connectors[session.ConnectorID] = observation
+	delete(runtime.eligibility, session)
+	// Pending OPEN 可能仍阻塞在该 Session 的 Pool；广播只关闭内存 channel，
+	// 真正的 membership 释放与 Demand 调整由 waiter 在 Runtime 锁外完成。
+	runtime.signalEligibilityLocked()
 	snapshot := runtime.connectorSnapshotLocked(observation)
 	runtime.mu.Unlock()
 	return ConnectorLifecycleEvent{Name: ConnectorEventDraining, Snapshot: snapshot, Reason: "drain_requested"}, true

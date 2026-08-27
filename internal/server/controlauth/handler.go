@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/lifei6671/xtunnel/internal/application"
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/identity"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
@@ -257,6 +258,9 @@ func (handler *Handler) Handle(ctx context.Context, connection net.Conn) (Establ
 	if err != nil {
 		if errors.Is(err, serverruntime.ErrTunnelRuntimeRevoked) {
 			return Established{}, handler.fail(ctx, connection, control, protocolv1.ErrorCode_ERROR_CODE_TUNNEL_REVOKED, 0, err)
+		}
+		if errors.Is(err, healthbudget.ErrTargetCapacity) {
+			return Established{}, handler.fail(ctx, connection, control, protocolv1.ErrorCode_ERROR_CODE_HEALTH_BUDGET_EXCEEDED, handler.retryAfter, err)
 		}
 		return Established{}, handler.fail(ctx, connection, control, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR, handler.retryAfter, err)
 	}

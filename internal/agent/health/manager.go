@@ -127,9 +127,11 @@ type Manager struct {
 	err   error // 只保留第一个致命后台错误，便于定位真正的失败起点。
 
 	// states 是 Owner 发布的只读副本；State 不会让读者接触调度器的可变 target。
-	stateMu   sync.RWMutex
-	states    map[string]State
-	stateGate configruntime.Gate
+	stateMu      sync.RWMutex
+	states       map[string]State
+	stateGate    configruntime.Gate
+	stateVisible bool
+	changed      chan struct{}
 }
 
 // New 创建尚未启动的进程级 Health Manager。
@@ -149,6 +151,7 @@ func newManager(options managerOptions) *Manager {
 		done:    make(chan struct{}), commands: make(chan command, 64),
 		results: make(chan checkResult, options.workers),
 		jobs:    make(chan checkJob, options.globalLimit), states: make(map[string]State),
+		changed: make(chan struct{}, 1),
 	}
 }
 
@@ -217,6 +220,35 @@ func (manager *Manager) State(serviceID string) (State, bool) {
 	}
 	state, exists := manager.states[serviceID]
 	return state, exists
+}
+
+// Snapshot 返回当前 Active Plan 的完整 Health 状态副本。
+//
+// Changed 只负责非阻塞唤醒，调用方收到通知后总是重新读取这里的权威快照。这样即使
+// 多次状态变化合并为一个通知，也不会丢失最终状态，且 Reporter 不会反向阻塞 Scheduler。
+func (manager *Manager) Snapshot() map[string]State {
+	if manager == nil {
+		return nil
+	}
+	manager.stateMu.RLock()
+	defer manager.stateMu.RUnlock()
+	if manager.stateGate == nil || !manager.stateGate.Active() {
+		return nil
+	}
+	view := make(map[string]State, len(manager.states))
+	for serviceID, state := range manager.states {
+		view[serviceID] = state
+	}
+	return view
+}
+
+// Changed 返回容量为一的合并通知通道。通知本身不携带状态，也不要求逐条消费；
+// Snapshot 才是无丢失读取面。
+func (manager *Manager) Changed() <-chan struct{} {
+	if manager == nil {
+		return nil
+	}
+	return manager.changed
 }
 
 // Done 在 Owner、Worker 与全部受控检查退出后关闭。
@@ -350,9 +382,19 @@ func (manager *Manager) publishStates(states map[string]*target, gate configrunt
 		view[serviceID] = target.state
 	}
 	manager.stateMu.Lock()
+	oldVisible := manager.stateVisible
+	newVisible := gate != nil && gate.Active()
+	changed := oldVisible != newVisible || (newVisible && !reflect.DeepEqual(manager.states, view))
 	manager.states = view
 	manager.stateGate = gate
+	manager.stateVisible = newVisible
 	manager.stateMu.Unlock()
+	if changed {
+		select {
+		case manager.changed <- struct{}{}:
+		default:
+		}
+	}
 }
 
 type originFingerprint struct {

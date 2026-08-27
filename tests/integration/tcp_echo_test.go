@@ -16,6 +16,7 @@ import (
 
 	"github.com/lifei6671/xtunnel/internal/agent/connector"
 	"github.com/lifei6671/xtunnel/internal/application"
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository"
@@ -178,7 +179,14 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	waitForEchoOrigin(t, firstOriginDone, "first")
 
 	updatedOrigin := integrationOriginInput(t, secondOrigin)
-	serviceManagement := application.NewServiceManagementService(store, snapshotBuilder, sessions)
+	healthBudget, err := healthbudget.New(healthbudget.Options{MaxTargetsPerTunnel: 2_000, MaxTargetsGlobal: 50_000})
+	if err != nil {
+		t.Fatalf("create Health Budget Manager: %v", err)
+	}
+	if err := healthBudget.InitializeTunnel(testTunnelID, 1, 0); err != nil {
+		t.Fatalf("initialize Health Budget Manager: %v", err)
+	}
+	serviceManagement := application.NewServiceManagementService(store, snapshotBuilder, sessions, healthBudget)
 	updated, err := serviceManagement.Update(ctx, application.UpdateServiceInput{
 		TunnelID: testTunnelID, ServiceID: testServiceID,
 		ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Origin: &updatedOrigin,

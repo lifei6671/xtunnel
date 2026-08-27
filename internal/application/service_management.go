@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/identity"
 	"github.com/lifei6671/xtunnel/internal/repository"
 )
@@ -115,8 +117,17 @@ type ServiceManagementService struct {
 	store        repository.Store
 	gate         TunnelSnapshotGate
 	notifier     SnapshotReconcileNotifier
+	budget       *healthbudget.Manager
 	newServiceID func() (string, error)
 	now          func() time.Time
+
+	mutationOwnersMu sync.Mutex
+	mutationOwners   map[string]*serviceMutationOwner
+}
+
+type serviceMutationOwner struct {
+	mu         sync.Mutex
+	references uint64
 }
 
 // NewServiceManagementService 返回使用 CSPRNG Service ID 与系统时钟的生产服务。
@@ -124,9 +135,12 @@ func NewServiceManagementService(
 	store repository.Store,
 	gate TunnelSnapshotGate,
 	notifier SnapshotReconcileNotifier,
+	budget *healthbudget.Manager,
 ) *ServiceManagementService {
 	return &ServiceManagementService{
-		store: store, gate: gate, notifier: notifier, newServiceID: identity.NewServiceID, now: time.Now,
+		store: store, gate: gate, notifier: notifier, budget: budget,
+		newServiceID: identity.NewServiceID, now: time.Now,
+		mutationOwners: make(map[string]*serviceMutationOwner),
 	}
 }
 
@@ -147,9 +161,22 @@ func (service *ServiceManagementService) Create(ctx context.Context, input Creat
 	if err != nil {
 		return ServiceMutationResult{}, err
 	}
+	unlockMutation := service.lockTunnelMutation(input.TunnelID)
+	mutationLocked := true
+	defer func() {
+		if mutationLocked {
+			unlockMutation()
+		}
+	}()
 
 	var result ServiceMutationResult
-	if err := service.store.WithTx(ctx, func(transaction repository.TxStore) error {
+	var reservation *healthbudget.ConfigurationLease
+	defer func() {
+		if reservation != nil && !reservation.Release() {
+			panic("health target budget configuration release invariant violated")
+		}
+	}()
+	transactionErr := service.store.WithTx(ctx, func(transaction repository.TxStore) error {
 		tunnel, err := loadServiceMutationTunnel(ctx, transaction, input.TunnelID, input.ExpectedTunnelVersion)
 		if err != nil {
 			return err
@@ -159,15 +186,22 @@ func (service *ServiceManagementService) Create(ctx context.Context, input Creat
 			return err
 		}
 		candidate.RequiredRevision = nextRevision
-		if err := transaction.Services().Create(ctx, candidate); err != nil {
-			return fmt.Errorf("create service: %w", err)
-		}
 		services, err := transaction.Services().ListByTunnel(ctx, input.TunnelID)
 		if err != nil {
 			return fmt.Errorf("list service snapshot candidate: %w", err)
 		}
+		services = append(services, candidate)
 		if err := service.gate.Validate(input.TunnelID, nextRevision, services); err != nil {
 			return fmt.Errorf("validate service snapshot candidate: %w", err)
+		}
+		reservation, err = service.budget.ReserveConfiguration(
+			input.TunnelID, uint64(nextRevision), healthEnabledServiceCount(services),
+		)
+		if err != nil {
+			return fmt.Errorf("reserve health target budget: %w", err)
+		}
+		if err := transaction.Services().Create(ctx, candidate); err != nil {
+			return fmt.Errorf("create service: %w", err)
 		}
 		updatedTunnel, err := transaction.Tunnels().AdvanceDesiredRevision(
 			ctx, input.TunnelID, input.ExpectedTunnelVersion, tunnel.DesiredRevision, now,
@@ -177,10 +211,18 @@ func (service *ServiceManagementService) Create(ctx context.Context, input Creat
 		}
 		result = serviceMutationResult(candidate, updatedTunnel, true)
 		return nil
-	}); err != nil {
-		return ServiceMutationResult{}, err
+	})
+	if transactionErr != nil && !errors.Is(transactionErr, repository.ErrPostCommitCleanup) {
+		return ServiceMutationResult{}, transactionErr
 	}
-	return service.notifySnapshotReconcile(input.TunnelID, result)
+	if !reservation.Commit() {
+		panic("health target budget configuration commit invariant violated")
+	}
+	reservation = nil
+	unlockMutation()
+	mutationLocked = false
+	result, notifyErr := service.notifySnapshotReconcile(input.TunnelID, result)
+	return result, errors.Join(transactionErr, notifyErr)
 }
 
 // Update 应用 Service PATCH。只有影响 Agent Snapshot 的字段才推进 Tunnel Revision；
@@ -191,10 +233,23 @@ func (service *ServiceManagementService) Update(ctx context.Context, input Updat
 	) || (input.Health != nil && input.DisableHealth) {
 		return ServiceMutationResult{}, ErrServiceManagementInput
 	}
+	unlockMutation := service.lockTunnelMutation(input.TunnelID)
+	mutationLocked := true
+	defer func() {
+		if mutationLocked {
+			unlockMutation()
+		}
+	}()
 
 	var result ServiceMutationResult
 	var notifyReconcile bool
-	if err := service.store.WithTx(ctx, func(transaction repository.TxStore) error {
+	var reservation *healthbudget.ConfigurationLease
+	defer func() {
+		if reservation != nil && !reservation.Release() {
+			panic("health target budget configuration release invariant violated")
+		}
+	}()
+	transactionErr := service.store.WithTx(ctx, func(transaction repository.TxStore) error {
 		tunnel, err := loadServiceMutationTunnel(ctx, transaction, input.TunnelID, input.ExpectedTunnelVersion)
 		if err != nil {
 			return err
@@ -227,11 +282,11 @@ func (service *ServiceManagementService) Update(ctx context.Context, input Updat
 			}
 			candidate.RequiredRevision = nextRevision
 		}
-		updated, err := transaction.Services().Update(ctx, candidate, input.ExpectedServiceVersion)
-		if err != nil {
-			return err
-		}
 		if !snapshotChanged {
+			updated, err := transaction.Services().Update(ctx, candidate, input.ExpectedServiceVersion)
+			if err != nil {
+				return err
+			}
 			result = serviceMutationResult(updated, tunnel, true)
 			return nil
 		}
@@ -239,8 +294,24 @@ func (service *ServiceManagementService) Update(ctx context.Context, input Updat
 		if err != nil {
 			return fmt.Errorf("list service snapshot candidate: %w", err)
 		}
+		for index := range services {
+			if services[index].ID == candidate.ID {
+				services[index] = candidate
+				break
+			}
+		}
 		if err := service.gate.Validate(input.TunnelID, candidate.RequiredRevision, services); err != nil {
 			return fmt.Errorf("validate service snapshot candidate: %w", err)
+		}
+		reservation, err = service.budget.ReserveConfiguration(
+			input.TunnelID, uint64(candidate.RequiredRevision), healthEnabledServiceCount(services),
+		)
+		if err != nil {
+			return fmt.Errorf("reserve health target budget: %w", err)
+		}
+		updated, err := transaction.Services().Update(ctx, candidate, input.ExpectedServiceVersion)
+		if err != nil {
+			return err
 		}
 		updatedTunnel, err := transaction.Tunnels().AdvanceDesiredRevision(
 			ctx, input.TunnelID, input.ExpectedTunnelVersion, tunnel.DesiredRevision, now,
@@ -251,13 +322,23 @@ func (service *ServiceManagementService) Update(ctx context.Context, input Updat
 		result = serviceMutationResult(updated, updatedTunnel, true)
 		notifyReconcile = true
 		return nil
-	}); err != nil {
-		return ServiceMutationResult{}, err
+	})
+	if transactionErr != nil && !errors.Is(transactionErr, repository.ErrPostCommitCleanup) {
+		return ServiceMutationResult{}, transactionErr
 	}
 	if notifyReconcile {
-		return service.notifySnapshotReconcile(input.TunnelID, result)
+		if !reservation.Commit() {
+			panic("health target budget configuration commit invariant violated")
+		}
+		reservation = nil
+		unlockMutation()
+		mutationLocked = false
+		result, notifyErr := service.notifySnapshotReconcile(input.TunnelID, result)
+		return result, errors.Join(transactionErr, notifyErr)
 	}
-	return result, nil
+	unlockMutation()
+	mutationLocked = false
+	return result, transactionErr
 }
 
 // Delete 删除 Service，并以删除后的完整 Candidate 推进一次 Tunnel Revision。
@@ -267,9 +348,22 @@ func (service *ServiceManagementService) Delete(ctx context.Context, input Delet
 	) {
 		return ServiceMutationResult{}, ErrServiceManagementInput
 	}
+	unlockMutation := service.lockTunnelMutation(input.TunnelID)
+	mutationLocked := true
+	defer func() {
+		if mutationLocked {
+			unlockMutation()
+		}
+	}()
 
 	var result ServiceMutationResult
-	if err := service.store.WithTx(ctx, func(transaction repository.TxStore) error {
+	var reservation *healthbudget.ConfigurationLease
+	defer func() {
+		if reservation != nil && !reservation.Release() {
+			panic("health target budget configuration release invariant violated")
+		}
+	}()
+	transactionErr := service.store.WithTx(ctx, func(transaction repository.TxStore) error {
 		tunnel, err := loadServiceMutationTunnel(ctx, transaction, input.TunnelID, input.ExpectedTunnelVersion)
 		if err != nil {
 			return err
@@ -285,15 +379,28 @@ func (service *ServiceManagementService) Delete(ctx context.Context, input Delet
 		if err != nil {
 			return err
 		}
-		if err := transaction.Services().Delete(ctx, input.TunnelID, input.ServiceID, input.ExpectedServiceVersion); err != nil {
-			return err
-		}
 		services, err := transaction.Services().ListByTunnel(ctx, input.TunnelID)
 		if err != nil {
 			return fmt.Errorf("list service snapshot candidate: %w", err)
 		}
+		candidateServices := services[:0]
+		for _, candidate := range services {
+			if candidate.ID != input.ServiceID {
+				candidateServices = append(candidateServices, candidate)
+			}
+		}
+		services = candidateServices
 		if err := service.gate.Validate(input.TunnelID, nextRevision, services); err != nil {
 			return fmt.Errorf("validate service snapshot candidate: %w", err)
+		}
+		reservation, err = service.budget.ReserveConfiguration(
+			input.TunnelID, uint64(nextRevision), healthEnabledServiceCount(services),
+		)
+		if err != nil {
+			return fmt.Errorf("reserve health target budget: %w", err)
+		}
+		if err := transaction.Services().Delete(ctx, input.TunnelID, input.ServiceID, input.ExpectedServiceVersion); err != nil {
+			return err
 		}
 		now, err := service.timestamp()
 		if err != nil {
@@ -307,15 +414,60 @@ func (service *ServiceManagementService) Delete(ctx context.Context, input Delet
 		}
 		result = serviceMutationResult(current, updatedTunnel, true)
 		return nil
-	}); err != nil {
-		return ServiceMutationResult{}, err
+	})
+	if transactionErr != nil && !errors.Is(transactionErr, repository.ErrPostCommitCleanup) {
+		return ServiceMutationResult{}, transactionErr
 	}
-	return service.notifySnapshotReconcile(input.TunnelID, result)
+	if !reservation.Commit() {
+		panic("health target budget configuration commit invariant violated")
+	}
+	reservation = nil
+	unlockMutation()
+	mutationLocked = false
+	result, notifyErr := service.notifySnapshotReconcile(input.TunnelID, result)
+	return result, errors.Join(transactionErr, notifyErr)
 }
 
 func (service *ServiceManagementService) valid(ctx context.Context) bool {
 	return service != nil && ctx != nil && service.store != nil && service.gate != nil && service.notifier != nil &&
-		service.newServiceID != nil && service.now != nil
+		service.budget != nil && service.newServiceID != nil && service.now != nil && service.mutationOwners != nil
+}
+
+// lockTunnelMutation 让同一 Tunnel 的 Candidate 读取、SQLite 提交与 Budget
+// Commit/Release 形成一个连续 owner 区间。不同 Tunnel 使用不同锁，不会被全局串行。
+func (service *ServiceManagementService) lockTunnelMutation(tunnelID string) func() {
+	service.mutationOwnersMu.Lock()
+	owner := service.mutationOwners[tunnelID]
+	if owner == nil {
+		owner = &serviceMutationOwner{}
+		service.mutationOwners[tunnelID] = owner
+	}
+	owner.references++
+	service.mutationOwnersMu.Unlock()
+
+	owner.mu.Lock()
+	return func() {
+		// 必须先释放 owner.mu，再在索引锁下递减引用。这样新调用要么加入旧
+		// owner，要么在旧 owner 已完全退出后创建新 owner，不会出现同 Tunnel
+		// 两把锁并行进入 Mutation 的窗口。
+		owner.mu.Unlock()
+		service.mutationOwnersMu.Lock()
+		owner.references--
+		if owner.references == 0 {
+			delete(service.mutationOwners, tunnelID)
+		}
+		service.mutationOwnersMu.Unlock()
+	}
+}
+
+func healthEnabledServiceCount(services []repository.Service) uint64 {
+	var count uint64
+	for _, candidate := range services {
+		if candidate.Enabled && candidate.Health != nil {
+			count++
+		}
+	}
+	return count
 }
 
 func (service *ServiceManagementService) notifySnapshotReconcile(

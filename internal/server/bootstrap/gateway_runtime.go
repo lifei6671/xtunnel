@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/application"
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	servercontrolauth "github.com/lifei6671/xtunnel/internal/server/controlauth"
@@ -42,7 +43,16 @@ const (
 
 // openGatewayLifecycle 在 Server 已持有 External Lock 且 SQLite 已完成 Migration 后加载身份。
 // 它只装配 Listener，不在这里监听；首个 Admin 成功前不得调用 Start。
-func openGatewayLifecycle(config serverconfig.Config, resources storage, logger *slog.Logger, reportRuntimeError func(error)) (*gateway.Server, *sessionruntime.Manager, error) {
+func openGatewayLifecycle(
+	config serverconfig.Config,
+	resources storage,
+	logger *slog.Logger,
+	reportRuntimeError func(error),
+	healthBudget *healthbudget.Manager,
+) (*gateway.Server, *sessionruntime.Manager, error) {
+	if healthBudget == nil {
+		return nil, nil, errors.New("health target budget manager is required")
+	}
 	serverResources, ok := resources.(*serverStorage)
 	if !ok {
 		return nil, nil, errors.New("unexpected server storage implementation")
@@ -112,7 +122,7 @@ func openGatewayLifecycle(config serverconfig.Config, resources storage, logger 
 	if err != nil {
 		return nil, nil, fmt.Errorf("construct gateway Snapshot source: %w", err)
 	}
-	registry := serverruntime.NewRegistryWithLimits(limitManager)
+	registry := serverruntime.NewRegistryWithLimitsAndHealthBudget(limitManager, healthBudget)
 	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
 		HighPriorityCapacity: config.Control.HighPriorityQueue,
 		NormalCapacity:       config.Control.NormalQueue,
@@ -302,8 +312,9 @@ func openGatewayAndBootstrapWith(
 	// SQLite 已在 openServerStorage 中完成 Migration。任何 Listener 或本机
 	// Bootstrap Socket 建立前先验证全部存量 Desired State，避免 Connector
 	// 在超大 Snapshot 上进入永久重连循环。
-	if err := validateStoredSnapshots(ctx, config, serverResources.database); err != nil {
-		return nil, fmt.Errorf("validate stored tunnel snapshots before gateway startup: %w", err)
+	healthBudget, err := initializeStoredSnapshotsAndHealthBudget(ctx, config, serverResources.database)
+	if err != nil {
+		return nil, fmt.Errorf("initialize stored state before gateway startup: %w", err)
 	}
 	runtimeErrors := make(chan error, 1)
 	reportRuntimeError := func(err error) {
@@ -312,7 +323,7 @@ func openGatewayAndBootstrapWith(
 		default:
 		}
 	}
-	gatewayServer, sessions, err := openGatewayLifecycle(config, resources, logger, reportRuntimeError)
+	gatewayServer, sessions, err := openGatewayLifecycle(config, resources, logger, reportRuntimeError, healthBudget)
 	if err != nil {
 		return nil, err
 	}

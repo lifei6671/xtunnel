@@ -58,12 +58,16 @@ type readEvent struct {
 	err      error
 }
 
+type flushRequest struct {
+	result chan error
+}
+
 // Owner 独占一条已认证 Control 连接及其非并发安全的协议状态。
 //
 // Start 固定创建一个 readLoop、一个 writeLoop 和一个中央 ownerLoop。只有 readLoop
 // 调用 ReadControl，只有 writeLoop 调用 WriteControl，只有 ownerLoop 调用 Control
-// 的 AcceptInbound、AcceptOutbound 与 Close。业务代码只能使用 Enqueue 和 Inbound，
-// 永远不会取得 net.Conn，也不能绕过 Owner 直接修改协议状态。
+// 的 AcceptInbound、AcceptOutbound 与 Close。业务代码只能使用 Enqueue、Flush 和
+// Inbound，永远不会取得 net.Conn，也不能绕过 Owner 直接修改协议状态。
 type Owner struct {
 	connection net.Conn
 	control    *state.Control
@@ -76,6 +80,7 @@ type Owner struct {
 	readEvents    chan readEvent
 	writeRequests chan *protocolv1.ControlEnvelope
 	writeResults  chan error
+	flushRequests chan flushRequest
 	done          chan struct{}
 
 	lifecycleMu sync.Mutex
@@ -120,6 +125,7 @@ func NewOwner(connection net.Conn, control *state.Control, options Options) (*Ow
 		// 单槽只允许 ownerLoop 安排一个已通过状态校验的待写 Frame。
 		writeRequests: make(chan *protocolv1.ControlEnvelope, 1),
 		writeResults:  make(chan error, 1),
+		flushRequests: make(chan flushRequest, 1),
 		done:          make(chan struct{}),
 	}, nil
 }
@@ -176,6 +182,64 @@ func (owner *Owner) Start(parent context.Context) error {
 // 返回 nil 只表示消息已进入当前 Session 的发送序列，不表示网络已经写出。
 // 任一入队错误都会关闭 Session，防止调用方忽略错误后继续制造失序消息。
 func (owner *Owner) Enqueue(envelope *protocolv1.ControlEnvelope) error {
+	return owner.enqueueOutbox(func() error {
+		return owner.outbox.Enqueue(envelope)
+	})
+}
+
+// ReplaceHealth 原子替换当前 Session 尚未出队的完整 Health 集合。
+// 它与 Enqueue 共用串行入口和失败关闭语义，避免全量替换与并发增量交错。
+func (owner *Owner) ReplaceHealth(items []*protocolv1.ServiceHealth) error {
+	return owner.enqueueOutbox(func() error {
+		return owner.outbox.ReplaceHealth(items)
+	})
+}
+
+// EnqueueConfigAckAndReplaceHealth 原子提交 APPLIED ConfigAck 与该
+// Revision 的完整 Health 集合，两者之间不开放 writer 出队窗口。
+func (owner *Owner) EnqueueConfigAckAndReplaceHealth(
+	ack *protocolv1.ControlEnvelope,
+	items []*protocolv1.ServiceHealth,
+) error {
+	return owner.enqueueOutbox(func() error {
+		return owner.outbox.EnqueueConfigAckAndReplaceHealth(ack, items)
+	})
+}
+
+// Flush 等待调用前已经进入 Outbox 的消息完成真实网络写出。屏障由唯一 ownerLoop
+// 裁决：只有 Outbox 为空且没有 in-flight Frame 时才返回成功；等待期间不持有任何锁。
+func (owner *Owner) Flush(ctx context.Context) error {
+	if ctx == nil {
+		return ErrInvalidOwnerOptions
+	}
+	if !owner.startedState() {
+		return ErrOwnerNotRunning
+	}
+	owner.enqueueMu.Lock()
+	accepting := owner.accepting
+	owner.enqueueMu.Unlock()
+	if !accepting {
+		return ErrOwnerClosed
+	}
+	request := flushRequest{result: make(chan error, 1)}
+	select {
+	case owner.flushRequests <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-owner.done:
+		return ErrOwnerClosed
+	}
+	select {
+	case err := <-request.result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-owner.done:
+		return ErrOwnerClosed
+	}
+}
+
+func (owner *Owner) enqueueOutbox(enqueue func() error) error {
 	if !owner.startedState() {
 		return ErrOwnerNotRunning
 	}
@@ -184,7 +248,7 @@ func (owner *Owner) Enqueue(envelope *protocolv1.ControlEnvelope) error {
 	if !owner.accepting {
 		return ErrOwnerClosed
 	}
-	if err := owner.outbox.Enqueue(envelope); err != nil {
+	if err := enqueue(); err != nil {
 		owner.accepting = false
 		owner.signalFatal(err)
 		return err
@@ -225,6 +289,7 @@ func (owner *Owner) Wait() error {
 func (owner *Owner) ownerLoop(ctx context.Context) {
 	var writeInFlight bool
 	var terminal error
+	var flushes []flushRequest
 
 	for terminal == nil {
 		// fatal 优先于继续调度已有消息，确保容量或调用错误尽快进入单一关闭路径。
@@ -255,6 +320,10 @@ func (owner *Owner) ownerLoop(ctx context.Context) {
 					continue
 				}
 			}
+			if !ok && owner.outbox.empty() && len(flushes) > 0 {
+				completeFlushRequests(flushes, nil)
+				flushes = nil
+			}
 		}
 
 		select {
@@ -274,12 +343,21 @@ func (owner *Owner) ownerLoop(ctx context.Context) {
 				continue
 			}
 			writeInFlight = false
+		case request := <-owner.flushRequests:
+			flushes = append(flushes, request)
 		case <-owner.wake:
 			// 下一轮从 Outbox 取出合并后的最终消息。
 		}
 	}
 
+	completeFlushRequests(flushes, errors.Join(ErrOwnerClosed, terminal))
 	owner.finish(terminal)
+}
+
+func completeFlushRequests(requests []flushRequest, err error) {
+	for _, request := range requests {
+		request.result <- err
+	}
 }
 
 func (owner *Owner) acceptInbound(event readEvent) error {

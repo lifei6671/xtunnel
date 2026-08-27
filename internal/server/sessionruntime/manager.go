@@ -109,19 +109,22 @@ type managedSession struct {
 	cleanupDone       chan struct{}
 	cleanupErr        error
 
-	configMu         sync.Mutex
-	configReady      bool
-	hasObserved      bool
-	observedRevision uint64
-	observedDigest   [sha256.Size]byte
-	outstanding      *snapshotCandidate
-	pending          *snapshotCandidate
-	hasRejected      bool
-	rejectedRevision uint64
-	initialMinimum   uint64
-	initialDone      chan struct{}
-	initialOnce      sync.Once
-	initialErr       error
+	configMu            sync.Mutex
+	configReady         bool
+	hasObserved         bool
+	observedRevision    uint64
+	observedDigest      [sha256.Size]byte
+	outstanding         *snapshotCandidate
+	pending             *snapshotCandidate
+	hasRejected         bool
+	rejectedRevision    uint64
+	initialMinimum      uint64
+	initialDone         chan struct{}
+	initialOnce         sync.Once
+	initialErr          error
+	serviceRequirements map[string]serviceRequirement
+	serviceHealth       map[string]serviceHealthState
+	healthGeneration    uint64
 
 	reconcileMu          sync.Mutex
 	demandMu             sync.Mutex
@@ -443,6 +446,9 @@ func (manager *Manager) handleInbound(
 	if inbound.Envelope.GetConfigAck() != nil {
 		return drainAck, manager.handleConfigAck(managed, inbound)
 	}
+	if inbound.Envelope.GetServiceHealthBatch() != nil {
+		return drainAck, manager.handleHealthBatch(managed, inbound)
+	}
 	request := inbound.Envelope.GetDrainRequest()
 	if request == nil {
 		return drainAck, nil
@@ -482,7 +488,13 @@ func (manager *Manager) handleConfigAck(managed *managedSession, inbound control
 			return err
 		}
 	}
-	if !applied || !becameReady {
+	if !applied {
+		return nil
+	}
+	if !becameReady {
+		if !manager.publishEligibility(managed) {
+			return ErrSessionUnavailable
+		}
 		return nil
 	}
 	lifecycleEvent, observed := manager.registry.ObserveConnected(managed.session, managed.metadata)
@@ -491,6 +503,9 @@ func (manager *Manager) handleConfigAck(managed *managedSession, inbound control
 	}
 	manager.logLifecycle(lifecycleEvent)
 	managed.markConfigReady()
+	if !manager.publishEligibility(managed) {
+		return ErrSessionUnavailable
+	}
 	if manager.beforeInitialDemandForTest != nil {
 		manager.beforeInitialDemandForTest(managed)
 	}
@@ -702,6 +717,32 @@ func (manager *Manager) Pool(session serverruntime.Session) (*serverworkpool.Poo
 		return nil, false
 	}
 	return managed.pool, true
+}
+
+// Pools 返回当前已 Ready Session 到 WorkPool 的不可变索引副本。Tunnel Proxy 在
+// 进入 TunnelRuntime.mu 前取得该副本，使选择 predicate 只读取 Pool，不回调 Manager。
+func (manager *Manager) Pools() map[serverruntime.Session]*serverworkpool.Pool {
+	if manager == nil {
+		return nil
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	pools := make(map[serverruntime.Session]*serverworkpool.Pool, len(manager.bySession))
+	for _, managed := range manager.bySession {
+		if managed.isConfigReady() {
+			pools[managed.session] = managed.pool
+		}
+	}
+	return pools
+}
+
+// Eligible 转发到 TunnelRuntime 的单一线性化门禁。Manager
+// 只负责把 Control Session 观测到的配置与 Health 发布为值型快照。
+func (manager *Manager) Eligible(session serverruntime.Session, serviceID string) bool {
+	if manager == nil || manager.registry == nil || !validSession(session) || identity.ValidateServiceID(serviceID) != nil {
+		return false
+	}
+	return manager.registry.Eligible(session, serviceID)
 }
 
 // ConnectorSnapshots 返回 Registry 生命周期快照，并只用完整 Session identity

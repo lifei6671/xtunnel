@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	"github.com/lifei6671/xtunnel/internal/server/snapshot"
@@ -18,7 +19,17 @@ const (
 	startupSecondTunnelID  = "tun_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	startupFirstServiceID  = "svc_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 	startupSecondServiceID = "svc_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	startupThirdServiceID  = "svc_01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	startupFourthServiceID = "svc_01ARZ3NDEKTSV4RRFFQ69G5FAY"
+	startupFifthServiceID  = "svc_01ARZ3NDEKTSV4RRFFQ69G5FAZ"
+	startupFirstConnector  = "con_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	startupSecondConnector = "con_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 )
+
+func validateStoredSnapshots(ctx context.Context, config serverconfig.Config, store repository.Store) error {
+	_, err := initializeStoredSnapshotsAndHealthBudget(ctx, config, store)
+	return err
+}
 
 func TestValidateStoredSnapshotsAllowsEmptyStore(t *testing.T) {
 	fixture := newSnapshotStartupFixture(nil, nil)
@@ -233,6 +244,138 @@ func TestValidateStoredSnapshotsHonorsContextCancellation(t *testing.T) {
 	})
 }
 
+func TestInitializeStoredSnapshotsAndHealthBudget(t *testing.T) {
+	firstScheduled := validStartupService(startupFirstTunnelID, startupFirstServiceID, 5)
+	firstScheduled.Health = validStartupHealth()
+	secondScheduled := validStartupService(startupFirstTunnelID, startupSecondServiceID, 5)
+	secondScheduled.Health = validStartupHealth()
+	withoutHealth := validStartupService(startupFirstTunnelID, startupThirdServiceID, 5)
+	disabled := validStartupService(startupFirstTunnelID, startupFourthServiceID, 5)
+	disabled.Health = validStartupHealth()
+	disabled.Enabled = false
+	otherTunnel := validStartupService(startupSecondTunnelID, startupFifthServiceID, 8)
+	otherTunnel.Health = validStartupHealth()
+
+	tests := []struct {
+		name       string
+		perTunnel  int
+		global     int
+		acquire    []healthbudget.ConnectorKey
+		fail       *healthbudget.ConnectorKey
+		wantGlobal uint64
+	}{
+		{
+			name: "multiple tunnels aggregate only scheduled services", perTunnel: 4, global: 5,
+			acquire: []healthbudget.ConnectorKey{
+				{TunnelID: startupFirstTunnelID, ConnectorID: startupFirstConnector},
+				{TunnelID: startupSecondTunnelID, ConnectorID: startupFirstConnector},
+			},
+			wantGlobal: 3,
+		},
+		{
+			name: "per tunnel exceeded", perTunnel: 3, global: 10,
+			acquire: []healthbudget.ConnectorKey{
+				{TunnelID: startupFirstTunnelID, ConnectorID: startupFirstConnector},
+			},
+			fail:       &healthbudget.ConnectorKey{TunnelID: startupFirstTunnelID, ConnectorID: startupSecondConnector},
+			wantGlobal: 2,
+		},
+		{
+			name: "global exceeded across tunnels", perTunnel: 4, global: 4,
+			acquire: []healthbudget.ConnectorKey{
+				{TunnelID: startupFirstTunnelID, ConnectorID: startupFirstConnector},
+				{TunnelID: startupSecondTunnelID, ConnectorID: startupFirstConnector},
+			},
+			fail:       &healthbudget.ConnectorKey{TunnelID: startupFirstTunnelID, ConnectorID: startupSecondConnector},
+			wantGlobal: 3,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSnapshotStartupFixture(
+				[]repository.Tunnel{
+					{ID: startupSecondTunnelID, DesiredRevision: 8},
+					{ID: startupFirstTunnelID, DesiredRevision: 5},
+				},
+				map[string][]repository.Service{
+					startupFirstTunnelID:  {firstScheduled, secondScheduled, withoutHealth, disabled},
+					startupSecondTunnelID: {otherTunnel},
+				},
+			)
+			config := validSnapshotStartupConfig()
+			config.Limits.MaxHealthTargetsPerTunnel = test.perTunnel
+			config.Limits.MaxHealthTargetsGlobal = test.global
+			budget, err := initializeStoredSnapshotsAndHealthBudget(context.Background(), config, fixture.store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fixture.store.readCalls != 1 {
+				t.Fatalf("Store.Read() calls = %d, want one shared startup view", fixture.store.readCalls)
+			}
+			initial := budget.Snapshot()
+			if initial.Tunnels[startupFirstTunnelID].Revision != 5 ||
+				initial.Tunnels[startupFirstTunnelID].EnabledCount != 2 ||
+				initial.Tunnels[startupSecondTunnelID].Revision != 8 ||
+				initial.Tunnels[startupSecondTunnelID].EnabledCount != 1 {
+				t.Fatalf("initialized Health budget = %+v", initial)
+			}
+			leases := make([]*healthbudget.ConnectorLease, 0, len(test.acquire))
+			for _, key := range test.acquire {
+				lease, err := budget.AcquireConnector(key.TunnelID, key.ConnectorID)
+				if err != nil {
+					t.Fatalf("AcquireConnector(%+v) error = %v", key, err)
+				}
+				leases = append(leases, lease)
+			}
+			if test.fail != nil {
+				if _, err := budget.AcquireConnector(test.fail.TunnelID, test.fail.ConnectorID); !errors.Is(err, healthbudget.ErrTargetCapacity) {
+					t.Fatalf("AcquireConnector(over capacity %+v) error = %v, want ErrTargetCapacity", *test.fail, err)
+				}
+			}
+			if got := budget.Snapshot().TargetsGlobal; got != test.wantGlobal {
+				t.Fatalf("TargetsGlobal = %d, want %d", got, test.wantGlobal)
+			}
+			for _, lease := range leases {
+				lease.Release()
+			}
+		})
+	}
+}
+
+func TestInitializeStoredSnapshotsAndHealthBudgetReturnsNoManagerOnFailure(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*snapshotStartupFixture) context.Context
+		want  error
+	}{
+		{
+			name: "repository", want: errSnapshotStartupRead,
+			setup: func(fixture *snapshotStartupFixture) context.Context {
+				fixture.store.readErr = errSnapshotStartupRead
+				return context.Background()
+			},
+		},
+		{
+			name: "context", want: context.Canceled,
+			setup: func(*snapshotStartupFixture) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSnapshotStartupFixture(nil, nil)
+			ctx := test.setup(&fixture)
+			manager, err := initializeStoredSnapshotsAndHealthBudget(ctx, validSnapshotStartupConfig(), fixture.store)
+			if manager != nil || !errors.Is(err, test.want) {
+				t.Fatalf("initializeStoredSnapshotsAndHealthBudget() = (%v, %v), want (nil, %v)", manager, err, test.want)
+			}
+		})
+	}
+}
+
 type snapshotStartupFixture struct {
 	store    *snapshotStartupStore
 	tunnels  *snapshotStartupTunnelRepository
@@ -316,10 +459,21 @@ func (repo *snapshotStartupServiceRepository) ListByTunnel(_ context.Context, tu
 
 func validSnapshotStartupConfig() serverconfig.Config {
 	return serverconfig.Config{Limits: serverconfig.Limits{
-		MaxServicesPerTunnel:   10,
-		MaxTunnelSnapshotBytes: snapshot.MaxTunnelSnapshotSize,
-		MaxControlFrameBytes:   1 << 20,
+		MaxServicesPerTunnel:      10,
+		MaxTunnelSnapshotBytes:    snapshot.MaxTunnelSnapshotSize,
+		MaxControlFrameBytes:      1 << 20,
+		MaxHealthTargetsPerTunnel: 10,
+		MaxHealthTargetsGlobal:    20,
 	}}
+}
+
+var errSnapshotStartupRead = errors.New("startup repository read failed")
+
+func validStartupHealth() *repository.HealthCheck {
+	return &repository.HealthCheck{
+		Type: repository.HealthTypeTCP, IntervalMS: 1_000, TimeoutMS: 100,
+		FailureThreshold: 1, SuccessThreshold: 1,
+	}
 }
 
 func validStartupService(tunnelID, serviceID string, requiredRevision int64) repository.Service {

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/identity"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 )
@@ -70,6 +71,7 @@ type AuthenticatedSessionInstall struct {
 type authenticatedInstallNode struct {
 	session        Session
 	connectorLimit *serverlimits.ConnectorLease
+	healthTarget   *healthbudget.ConnectorLease
 	previous       *authenticatedInstallNode
 	state          authenticatedInstallState
 }
@@ -149,9 +151,12 @@ func (lease *ConnectorLease) releaseFromActive() bool {
 //   - mu 只定位/创建 TunnelRuntime，临界区内绝不获取 TunnelRuntime.mu；
 //   - sessionIDsMu 只维护全局 Session ID 唯一集合；
 //   - 每个 TunnelRuntime.mu 统一线性化该 Tunnel 的 Current、generation、pending、
-//     Connector Lease 负载与 ActiveWork；
-//   - 三类锁永不嵌套。跨锁操作拆成安全的单向阶段，允许短暂保守占用 Session ID，
-//     但绝不允许同一 ID 被重复签发。
+//     Service Eligibility、Connector Lease 负载与 ActiveWork；
+//   - Registry.mu、sessionIDsMu 与 TunnelRuntime.mu 永不嵌套；唯一允许的外部嵌套
+//     是 TunnelRuntime.mu -> healthbudget.Manager.mu，用于把 Target 引用与 Current
+//     发布/删除线性化。Budget Manager 不回调 Runtime，也不执行 IO 或等待。
+//     其他跨锁操作拆成安全的单向阶段，允许短暂保守占用 Session ID，但绝不允许
+//     同一 ID 被重复签发。
 //
 // 因此一个 Tunnel 的 Session/ActiveWork 慢路径不会阻塞其他 Tunnel，也不存在反向
 // 锁序造成的跨 Tunnel 死锁。
@@ -169,6 +174,7 @@ type Registry struct {
 	newSession func() (string, error)
 	now        func() time.Time
 	limits     *serverlimits.Manager
+	health     *healthbudget.Manager
 }
 
 // NewRegistry 创建空的 per-Tunnel Runtime Registry。
@@ -182,6 +188,19 @@ func NewRegistry() *Registry {
 func NewRegistryWithLimits(manager *serverlimits.Manager) *Registry {
 	registry := newRegistry(identity.NewSessionID)
 	registry.limits = manager
+	return registry
+}
+
+// NewRegistryWithLimitsAndHealthBudget 创建同时接入 Connector 与 Health Target
+// 进程级硬预算的 Registry。Health Target 在 InstallAuthenticated 的 Runtime
+// 临界区内获取，使预算成功与 Current 发布共享同一个线性化顺序。
+func NewRegistryWithLimitsAndHealthBudget(
+	limitManager *serverlimits.Manager,
+	healthManager *healthbudget.Manager,
+) *Registry {
+	registry := newRegistry(identity.NewSessionID)
+	registry.limits = limitManager
+	registry.health = healthManager
 	return registry
 }
 
@@ -293,6 +312,18 @@ func (registry *Registry) InstallAuthenticated(pending PendingSession) (*Authent
 		runtime.mu.Unlock()
 		return nil, ErrPendingSessionNotFound
 	}
+	// Health Target 的唯一 Owner Key 是 (Tunnel, Connector)，generation 只持有
+	// 独立引用。固定锁序是 TunnelRuntime.mu -> healthbudget.Manager.mu；获取失败时
+	// pending 尚未消费，Control Auth 可完整取消 Session/Connector 预留。
+	var healthTarget *healthbudget.ConnectorLease
+	var err error
+	if registry.health != nil {
+		healthTarget, err = registry.health.AcquireConnector(pending.tunnelID, pending.connectorID)
+		if err != nil {
+			runtime.mu.Unlock()
+			return nil, err
+		}
+	}
 	delete(runtime.pending, pending.sessionID)
 	connectorLimit := runtime.pendingConnectorLimits[pending.sessionID]
 	delete(runtime.pendingConnectorLimits, pending.sessionID)
@@ -310,16 +341,21 @@ func (registry *Registry) InstallAuthenticated(pending PendingSession) (*Authent
 	} else if hadPrevious {
 		previousNode = &authenticatedInstallNode{
 			session: previous, connectorLimit: runtime.currentConnectorLimits[pending.connectorID],
-			state: authenticatedInstallFinalized,
+			healthTarget: runtime.currentHealthTargets[pending.connectorID],
+			state:        authenticatedInstallFinalized,
 		}
 	}
 	node := &authenticatedInstallNode{
-		session: session, connectorLimit: connectorLimit, previous: previousNode,
+		session: session, connectorLimit: connectorLimit, healthTarget: healthTarget, previous: previousNode,
 		state: authenticatedInstallPending,
 	}
 	runtime.current[pending.connectorID] = session
 	runtime.currentConnectorLimits[pending.connectorID] = connectorLimit
+	runtime.currentHealthTargets[pending.connectorID] = healthTarget
 	registry.authenticatedInstalls.Store(key, node)
+	// Current generation 的变化必须唤醒仍等待旧 Session 的 Pending OPEN。
+	// Eligibility Map 按完整 Session 保留旧值，AUTH flush 失败回滚后可立即恢复。
+	runtime.signalEligibilityLocked()
 	runtime.mu.Unlock()
 	return &AuthenticatedSessionInstall{registry: registry, runtime: runtime, node: node}, nil
 }
@@ -376,6 +412,7 @@ func (install *AuthenticatedSessionInstall) Rollback() bool {
 	if candidate == nil {
 		delete(runtime.current, install.node.session.ConnectorID)
 		delete(runtime.currentConnectorLimits, install.node.session.ConnectorID)
+		delete(runtime.currentHealthTargets, install.node.session.ConnectorID)
 		if len(runtime.current) == 0 {
 			runtime.lastPicked = ""
 		}
@@ -383,12 +420,14 @@ func (install *AuthenticatedSessionInstall) Rollback() bool {
 	} else {
 		runtime.current[install.node.session.ConnectorID] = candidate.session
 		runtime.currentConnectorLimits[install.node.session.ConnectorID] = candidate.connectorLimit
+		runtime.currentHealthTargets[install.node.session.ConnectorID] = candidate.healthTarget
 		if candidate.state == authenticatedInstallPending {
 			install.registry.authenticatedInstalls.Store(key, candidate)
 		} else {
 			install.registry.authenticatedInstalls.Delete(key)
 		}
 	}
+	runtime.signalEligibilityLocked()
 	releases := install.registry.discardAuthenticatedInstallPathLocked(runtime, install.node, candidate)
 	runtime.mu.Unlock()
 	install.registry.releaseAuthenticatedInstalls(releases)
@@ -450,8 +489,9 @@ func (registry *Registry) discardAuthenticatedInstallNodeLocked(
 		return
 	}
 	node.state = authenticatedInstallDiscarded
+	runtime.discardEligibilityLocked(node.session)
 	releases.connectorLimits = append(releases.connectorLimits, node.connectorLimit)
-	if sessionID := runtime.retireSessionLocked(node.session); sessionID != "" {
+	if sessionID := runtime.retireSessionLocked(node.session, node.healthTarget); sessionID != "" {
 		releases.sessionIDs = append(releases.sessionIDs, sessionID)
 	}
 }
@@ -505,7 +545,7 @@ func (registry *Registry) Current(tunnelID, connectorID string) (Session, bool) 
 // AcquireConnector 以“最少活跃 + 稳定 RR”从指定 Tunnel 选择 Current Connector。
 // 选择与唯一负载计数递增都在该 TunnelRuntime.mu 内线性化。
 func (registry *Registry) AcquireConnector(tunnelID string) (*ConnectorLease, error) {
-	return registry.acquireConnectorWhere(tunnelID, nil)
+	return registry.acquireConnectorWhere(tunnelID, "", nil)
 }
 
 // AcquireConnectorWhere 只在调用方判定 eligible 的 Current Session 中执行最少活跃
@@ -515,10 +555,23 @@ func (registry *Registry) AcquireConnectorWhere(tunnelID string, predicate func(
 	if predicate == nil {
 		return nil, ErrNoAvailableConnector
 	}
-	return registry.acquireConnectorWhere(tunnelID, predicate)
+	return registry.acquireConnectorWhere(tunnelID, "", predicate)
 }
 
-func (registry *Registry) acquireConnectorWhere(tunnelID string, predicate func(Session) bool) (*ConnectorLease, error) {
+// AcquireEligibleConnectorWhere 在同一 TunnelRuntime.mu 临界区内先执行
+// Current/Revision/Health/Stale TTL 门禁，再使用 predicate 检查调用方预先取得的
+// Pool 状态。predicate 不得回调 Registry 或 Session Manager。
+func (registry *Registry) AcquireEligibleConnectorWhere(
+	tunnelID, serviceID string,
+	predicate func(Session) bool,
+) (*ConnectorLease, error) {
+	if predicate == nil || identity.ValidateServiceID(serviceID) != nil {
+		return nil, ErrNoAvailableConnector
+	}
+	return registry.acquireConnectorWhere(tunnelID, serviceID, predicate)
+}
+
+func (registry *Registry) acquireConnectorWhere(tunnelID, serviceID string, predicate func(Session) bool) (*ConnectorLease, error) {
 	if err := identity.ValidateTunnelID(tunnelID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidTunnelID, err)
 	}
@@ -537,6 +590,9 @@ func (registry *Registry) acquireConnectorWhere(tunnelID string, predicate func(
 	}
 	candidates := make([]Session, 0, len(runtime.current))
 	for _, session := range runtime.current {
+		if serviceID != "" && !runtime.sessionEligibleLocked(session, serviceID, runtime.now()) {
+			continue
+		}
 		if predicate != nil && !predicate(session) {
 			continue
 		}
@@ -602,24 +658,40 @@ func (runtime *TunnelRuntime) releaseConnector(session Session) bool {
 	return true
 }
 
-// retireSessionLocked 在 Session 离开 Current 后决定能否立即释放其全局 ID。
-// 调用方必须持有 runtime.mu；本方法只更新 Tunnel 内存状态，不获取全局索引锁。
-func (runtime *TunnelRuntime) retireSessionLocked(session Session) string {
+// retireSessionLocked 在 Session 离开 Current 后决定能否立即释放其全局 ID 与
+// Health Target 引用。调用方必须持有 runtime.mu；Health Release 遵循固定的
+// TunnelRuntime.mu -> healthbudget.Manager.mu 锁序，全局 Session ID 仍在锁外清理。
+func (runtime *TunnelRuntime) retireSessionLocked(
+	session Session,
+	healthTarget *healthbudget.ConnectorLease,
+) string {
 	if runtime.sessionReferencedLocked(session) {
 		runtime.retired[session] = struct{}{}
+		runtime.retiredHealthTargets[session] = healthTarget
 		return ""
 	}
+	runtime.releaseHealthTargetLocked(healthTarget)
 	return session.SessionID
 }
 
 // releaseRetiredSessionIfUnusedLocked 在最后一个运行时引用归零时摘除 retired。
-// 返回的 ID 由调用方在释放 runtime.mu 后清理，以保持 Tunnel 锁与全局索引锁不嵌套。
+// Health Target 与摘除在同一 Runtime 临界区内线性化；返回的 ID 由调用方在释放
+// runtime.mu 后清理，以保持 Tunnel 锁与全局索引锁不嵌套。
 func (runtime *TunnelRuntime) releaseRetiredSessionIfUnusedLocked(session Session) string {
 	if _, exists := runtime.retired[session]; !exists || runtime.sessionReferencedLocked(session) {
 		return ""
 	}
 	delete(runtime.retired, session)
+	healthTarget := runtime.retiredHealthTargets[session]
+	delete(runtime.retiredHealthTargets, session)
+	runtime.releaseHealthTargetLocked(healthTarget)
 	return session.SessionID
+}
+
+func (runtime *TunnelRuntime) releaseHealthTargetLocked(lease *healthbudget.ConnectorLease) {
+	if lease != nil && !lease.Release() {
+		panic("runtime health target lease released more than once")
+	}
 }
 
 func (runtime *TunnelRuntime) sessionReferencedLocked(session Session) bool {
@@ -670,6 +742,7 @@ func (registry *Registry) disconnectIfCurrent(session Session, reason string) (C
 			for node := rawHead.(*authenticatedInstallNode).previous; node != nil; node = node.previous {
 				if node.session == session && node.state != authenticatedInstallFailed && node.state != authenticatedInstallDiscarded {
 					node.state = authenticatedInstallFailed
+					runtime.discardEligibilityLocked(session)
 					runtime.mu.Unlock()
 					return ConnectorLifecycleEvent{}, true
 				}
@@ -679,13 +752,18 @@ func (registry *Registry) disconnectIfCurrent(session Session, reason string) (C
 		return ConnectorLifecycleEvent{}, false
 	}
 	delete(runtime.current, session.ConnectorID)
+	delete(runtime.eligibility, session)
+	// 即使该 Session 尚未发布 Eligibility，Current 摘除也必须唤醒旧 waiter。
+	runtime.signalEligibilityLocked()
 	connectorLimit := runtime.currentConnectorLimits[session.ConnectorID]
 	delete(runtime.currentConnectorLimits, session.ConnectorID)
+	healthTarget := runtime.currentHealthTargets[session.ConnectorID]
+	delete(runtime.currentHealthTargets, session.ConnectorID)
 	if len(runtime.current) == 0 {
 		runtime.lastPicked = ""
 	}
 	event := runtime.disconnectObservationLocked(session, reason)
-	releaseSessionID := runtime.retireSessionLocked(session)
+	releaseSessionID := runtime.retireSessionLocked(session, healthTarget)
 	runtime.mu.Unlock()
 	connectorLimit.Release()
 	if releaseSessionID != "" {

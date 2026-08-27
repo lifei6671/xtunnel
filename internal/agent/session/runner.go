@@ -232,6 +232,25 @@ func (session *Session) Enqueue(envelope *protocolv1.ControlEnvelope) error {
 	return session.owner.Enqueue(envelope)
 }
 
+// ReplaceHealth 原子替换本代 Session 尚未出队的完整 Health 集合。
+func (session *Session) ReplaceHealth(items []*protocolv1.ServiceHealth) error {
+	return session.owner.ReplaceHealth(items)
+}
+
+// EnqueueConfigAckAndReplaceHealth 原子提交 APPLIED Ack 与完整 Health
+// 集合，防止旧 Revision Health 在两次入队之间被 writer 摘取。
+func (session *Session) EnqueueConfigAckAndReplaceHealth(
+	ack *protocolv1.ControlEnvelope,
+	items []*protocolv1.ServiceHealth,
+) error {
+	return session.owner.EnqueueConfigAckAndReplaceHealth(ack, items)
+}
+
+// Flush 等待本代 Session 已入队消息完成真实网络写出。
+func (session *Session) Flush(ctx context.Context) error {
+	return session.owner.Flush(ctx)
+}
+
 // Inbound 返回已经由唯一状态 Owner 校验过的只读入站事件流。
 func (session *Session) Inbound() <-chan controlsession.Inbound {
 	return session.owner.Inbound()

@@ -13,6 +13,7 @@ import (
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
 	"github.com/lifei6671/xtunnel/internal/proxy"
+	"github.com/lifei6671/xtunnel/internal/safego"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
@@ -44,9 +45,10 @@ type Options struct {
 type Proxy struct {
 	options Options
 
-	pendingMu       sync.Mutex
-	pendingGroups   map[string]*pendingGroup
-	newConnectionID func() (string, error)
+	pendingMu        sync.Mutex
+	pendingGroups    map[string]*pendingGroup
+	pendingBySession map[serverruntime.Session]uint32
+	newConnectionID  func() (string, error)
 	// afterAlternateAcquire 仅为同 package 的确定性竞态测试提供提交前同步点。
 	afterAlternateAcquire func(serverruntime.Session)
 }
@@ -55,6 +57,7 @@ type pendingGroup struct {
 	session serverruntime.Session
 	pool    *serverworkpool.Pool
 	waiters uint32
+	done    chan struct{}
 }
 
 type pendingMembership struct {
@@ -71,8 +74,10 @@ func NewProxy(options Options) (*Proxy, error) {
 		return nil, ErrInvalidOptions
 	}
 	return &Proxy{
-		options: options, pendingGroups: make(map[string]*pendingGroup),
-		newConnectionID: identity.NewConnectionID,
+		options:          options,
+		pendingGroups:    make(map[string]*pendingGroup),
+		pendingBySession: make(map[serverruntime.Session]uint32),
+		newConnectionID:  identity.NewConnectionID,
 	}, nil
 }
 
@@ -119,7 +124,7 @@ func (tunnelProxy *Proxy) Serve(
 		return err
 	}
 
-	connectorLease, session, pool, selectedWork, err := tunnelProxy.acquireWork(ctx, tunnelID)
+	connectorLease, session, pool, selectedWork, err := tunnelProxy.acquireWork(ctx, tunnelID, serviceID)
 	if err != nil {
 		return err
 	}
@@ -210,7 +215,9 @@ func (tunnelProxy *Proxy) Serve(
 			return errors.Join(openErr, errors.New("release failed Connector lease before cross-Connector reselect"))
 		}
 		connectorLease = nil
-		connectorLease, session, pool, selectedWork, err = tunnelProxy.tryAcquireAlternateWork(ctx, tunnelID, failedConnectorID)
+		connectorLease, session, pool, selectedWork, err = tunnelProxy.tryAcquireAlternateWork(
+			ctx, tunnelID, serviceID, failedConnectorID,
+		)
 		if err != nil {
 			return errors.Join(openErr, err)
 		}
@@ -257,7 +264,7 @@ func (tunnelProxy *Proxy) Serve(
 
 func (tunnelProxy *Proxy) tryAcquireAlternateWork(
 	ctx context.Context,
-	tunnelID, excludedConnectorID string,
+	tunnelID, serviceID, excludedConnectorID string,
 ) (*serverruntime.ConnectorLease, serverruntime.Session, *serverworkpool.Pool, *serverworkpool.Work, error) {
 	attempted := map[string]struct{}{excludedConnectorID: {}}
 	var attemptErr error
@@ -265,11 +272,12 @@ func (tunnelProxy *Proxy) tryAcquireAlternateWork(
 		if err := ctx.Err(); err != nil {
 			return nil, serverruntime.Session{}, nil, nil, errors.Join(attemptErr, err)
 		}
-		connectorLease, err := tunnelProxy.options.Registry.AcquireConnectorWhere(tunnelID, func(session serverruntime.Session) bool {
+		pools := tunnelProxy.options.Sessions.Pools()
+		connectorLease, err := tunnelProxy.options.Registry.AcquireEligibleConnectorWhere(tunnelID, serviceID, func(session serverruntime.Session) bool {
 			if _, exists := attempted[session.ConnectorID]; exists {
 				return false
 			}
-			pool, exists := tunnelProxy.options.Sessions.Pool(session)
+			pool, exists := pools[session]
 			if !exists {
 				return false
 			}
@@ -288,7 +296,7 @@ func (tunnelProxy *Proxy) tryAcquireAlternateWork(
 			connectorLease.Release()
 			return nil, serverruntime.Session{}, nil, nil, errors.Join(attemptErr, err)
 		}
-		pool, exists := tunnelProxy.options.Sessions.Pool(session)
+		pool, exists := pools[session]
 		if !exists {
 			connectorLease.Release()
 			attemptErr = errors.Join(attemptErr, ErrSessionPoolUnavailable)
@@ -313,6 +321,12 @@ func (tunnelProxy *Proxy) tryAcquireAlternateWork(
 			connectorLease.Release()
 			return nil, serverruntime.Session{}, nil, nil, errors.Join(attemptErr, err)
 		}
+		if !tunnelProxy.options.Registry.Eligible(session, serviceID) {
+			_ = work.Close()
+			connectorLease.Release()
+			attemptErr = errors.Join(attemptErr, ErrSessionPoolUnavailable)
+			continue
+		}
 		return connectorLease, session, pool, work, nil
 	}
 }
@@ -324,7 +338,7 @@ func isOpenDraining(err error) bool {
 
 func (tunnelProxy *Proxy) acquireWork(
 	ctx context.Context,
-	tunnelID string,
+	tunnelID, serviceID string,
 ) (*serverruntime.ConnectorLease, serverruntime.Session, *serverworkpool.Pool, *serverworkpool.Work, error) {
 	waitContext, cancelWait := context.WithTimeout(ctx, tunnelProxy.options.AcquireTimeout)
 	defer cancelWait()
@@ -335,7 +349,7 @@ func (tunnelProxy *Proxy) acquireWork(
 			}
 			return nil, serverruntime.Session{}, nil, nil, err
 		}
-		connectorLease, session, pool, membership, err := tunnelProxy.selectConnector(tunnelID)
+		connectorLease, session, pool, membership, err := tunnelProxy.selectConnector(waitContext, tunnelID, serviceID)
 		if err != nil {
 			if errors.Is(err, ErrSessionPoolUnavailable) {
 				continue
@@ -356,13 +370,18 @@ func (tunnelProxy *Proxy) acquireWork(
 				continue
 			}
 		} else {
-			work, acquireErr = pool.Acquire(waitContext, tunnelProxy.options.AcquireTimeout)
+			work, acquireErr = tunnelProxy.acquirePendingWork(waitContext, session, serviceID, pool)
 		}
 		var releaseErr error
 		if membership != nil {
 			releaseErr = membership.Release()
 		}
 		if acquireErr == nil && releaseErr == nil {
+			if !tunnelProxy.options.Registry.Eligible(session, serviceID) {
+				_ = work.Close()
+				connectorLease.Release()
+				continue
+			}
 			return connectorLease, session, pool, work, nil
 		}
 		connectorLease.Release()
@@ -373,7 +392,8 @@ func (tunnelProxy *Proxy) acquireWork(
 			return nil, serverruntime.Session{}, nil, nil, releaseErr
 		}
 		if errors.Is(acquireErr, serverworkpool.ErrPoolClosed) ||
-			errors.Is(acquireErr, serverworkpool.ErrPoolDraining) {
+			errors.Is(acquireErr, serverworkpool.ErrPoolDraining) ||
+			errors.Is(acquireErr, ErrSessionPoolUnavailable) {
 			continue
 		}
 		if errors.Is(acquireErr, context.DeadlineExceeded) && ctx.Err() == nil {
@@ -383,11 +403,77 @@ func (tunnelProxy *Proxy) acquireWork(
 	}
 }
 
+type pendingAcquireResult struct {
+	work *serverworkpool.Work
+	err  error
+}
+
+// acquirePendingWork 让 Pool IDLE 与 Runtime Eligibility 共享同一个等待窗口。
+// Pool.Acquire 的受控 goroutine 在本方法返回前必然结束；Eligibility 失效时先取消
+// 阻塞，再由上层 exactly-once 释放 membership/Connector Lease 并重新选择。
+func (tunnelProxy *Proxy) acquirePendingWork(
+	waitContext context.Context,
+	session serverruntime.Session,
+	serviceID string,
+	pool *serverworkpool.Pool,
+) (*serverworkpool.Work, error) {
+	acquireContext, cancelAcquire := context.WithCancel(waitContext)
+	defer cancelAcquire()
+	result := make(chan pendingAcquireResult, 1)
+	safego.Go(func(err error) {
+		result <- pendingAcquireResult{err: err}
+	}, nil, func() {
+		work, err := pool.Acquire(acquireContext, tunnelProxy.options.AcquireTimeout)
+		result <- pendingAcquireResult{work: work, err: err}
+	})
+
+	for {
+		watch, eligible := tunnelProxy.options.Registry.WatchEligibility(session, serviceID)
+		if !eligible {
+			cancelAcquire()
+			acquired := <-result
+			if acquired.work != nil {
+				_ = acquired.work.Close()
+			}
+			return nil, ErrSessionPoolUnavailable
+		}
+
+		var (
+			expiryTimer *time.Timer
+			expired     <-chan time.Time
+		)
+		if watch.HasExpiry {
+			expiryTimer = time.NewTimer(watch.ExpiresAfter)
+			expired = expiryTimer.C
+		}
+		select {
+		case acquired := <-result:
+			stopPendingTimer(expiryTimer)
+			return acquired.work, acquired.err
+		case <-watch.Changed:
+			stopPendingTimer(expiryTimer)
+		case <-expired:
+		}
+	}
+}
+
+func stopPendingTimer(timer *time.Timer) {
+	if timer == nil || timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
+	}
+}
+
 func (tunnelProxy *Proxy) selectConnector(
-	tunnelID string,
+	ctx context.Context,
+	tunnelID, serviceID string,
 ) (*serverruntime.ConnectorLease, serverruntime.Session, *serverworkpool.Pool, *pendingMembership, error) {
-	connectorLease, err := tunnelProxy.options.Registry.AcquireConnectorWhere(tunnelID, func(session serverruntime.Session) bool {
-		pool, exists := tunnelProxy.options.Sessions.Pool(session)
+	pools := tunnelProxy.options.Sessions.Pools()
+	connectorLease, err := tunnelProxy.options.Registry.AcquireEligibleConnectorWhere(tunnelID, serviceID, func(session serverruntime.Session) bool {
+		pool, exists := pools[session]
 		if !exists {
 			return false
 		}
@@ -396,7 +482,7 @@ func (tunnelProxy *Proxy) selectConnector(
 	})
 	if err == nil {
 		session := connectorLease.Session()
-		pool, exists := tunnelProxy.options.Sessions.Pool(session)
+		pool, exists := pools[session]
 		if !exists {
 			connectorLease.Release()
 			return nil, serverruntime.Session{}, nil, nil, ErrSessionPoolUnavailable
@@ -407,12 +493,12 @@ func (tunnelProxy *Proxy) selectConnector(
 		return nil, serverruntime.Session{}, nil, nil, err
 	}
 
-	membership, err := tunnelProxy.joinPendingGroup(tunnelID)
+	membership, err := tunnelProxy.joinPendingGroup(ctx, tunnelID, serviceID)
 	if err != nil {
 		return nil, serverruntime.Session{}, nil, nil, err
 	}
 	group := membership.group
-	connectorLease, err = tunnelProxy.options.Registry.AcquireConnectorWhere(tunnelID, func(session serverruntime.Session) bool {
+	connectorLease, err = tunnelProxy.options.Registry.AcquireEligibleConnectorWhere(tunnelID, serviceID, func(session serverruntime.Session) bool {
 		return session == group.session
 	})
 	if err != nil {
@@ -427,53 +513,82 @@ func (tunnelProxy *Proxy) selectConnector(
 	return connectorLease, group.session, group.pool, membership, nil
 }
 
-func (tunnelProxy *Proxy) joinPendingGroup(tunnelID string) (*pendingMembership, error) {
-	tunnelProxy.pendingMu.Lock()
-	defer tunnelProxy.pendingMu.Unlock()
-	group := tunnelProxy.pendingGroups[tunnelID]
-	if group != nil {
-		pool, exists := tunnelProxy.options.Sessions.Pool(group.session)
-		if !exists || pool != group.pool {
-			delete(tunnelProxy.pendingGroups, tunnelID)
-			group = nil
-		} else {
-			counts := pool.Snapshot()
-			if counts.Closed || counts.Draining {
-				delete(tunnelProxy.pendingGroups, tunnelID)
-				group = nil
-			}
-		}
-	}
-	if group == nil {
-		selector, err := tunnelProxy.options.Registry.AcquireConnectorWhere(tunnelID, func(session serverruntime.Session) bool {
-			pool, exists := tunnelProxy.options.Sessions.Pool(session)
-			if !exists {
-				return false
-			}
-			counts := pool.Snapshot()
-			return !counts.Closed && !counts.Draining
-		})
-		if err != nil {
+func (tunnelProxy *Proxy) joinPendingGroup(
+	ctx context.Context,
+	tunnelID, serviceID string,
+) (*pendingMembership, error) {
+	for {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		session := selector.Session()
-		selector.Release()
-		pool, exists := tunnelProxy.options.Sessions.Pool(session)
-		if !exists {
-			return nil, ErrSessionPoolUnavailable
-		}
-		group = &pendingGroup{session: session, pool: pool}
-		tunnelProxy.pendingGroups[tunnelID] = group
-	}
-	group.waiters++
-	if err := tunnelProxy.options.Sessions.SetPendingOpens(group.session, group.waiters); err != nil {
-		group.waiters--
-		if group.waiters == 0 {
+		tunnelProxy.pendingMu.Lock()
+		group := tunnelProxy.pendingGroups[tunnelID]
+		if group != nil && group.waiters == 0 {
 			delete(tunnelProxy.pendingGroups, tunnelID)
+			close(group.done)
+			group = nil
 		}
-		return nil, err
+		if group != nil {
+			pools := tunnelProxy.options.Sessions.Pools()
+			pool, exists := pools[group.session]
+			counts := group.pool.Snapshot()
+			if !exists || pool != group.pool || counts.Closed || counts.Draining ||
+				!tunnelProxy.options.Registry.Eligible(group.session, serviceID) {
+				// 冻结契约只允许每个 Tunnel 存在一个投机 Demand。当前组不再适合
+				// 新 Service 时，等待已有 membership exactly-once 离场后再重选，
+				// 不能并行创建第二个 Service 级组。
+				done := group.done
+				tunnelProxy.pendingMu.Unlock()
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-done:
+					continue
+				}
+			}
+		}
+		if group == nil {
+			pools := tunnelProxy.options.Sessions.Pools()
+			selector, err := tunnelProxy.options.Registry.AcquireEligibleConnectorWhere(tunnelID, serviceID, func(session serverruntime.Session) bool {
+				pool, exists := pools[session]
+				if !exists {
+					return false
+				}
+				counts := pool.Snapshot()
+				return !counts.Closed && !counts.Draining
+			})
+			if err != nil {
+				tunnelProxy.pendingMu.Unlock()
+				return nil, err
+			}
+			session := selector.Session()
+			selector.Release()
+			pool, exists := pools[session]
+			if !exists {
+				tunnelProxy.pendingMu.Unlock()
+				return nil, ErrSessionPoolUnavailable
+			}
+			group = &pendingGroup{session: session, pool: pool, done: make(chan struct{})}
+			tunnelProxy.pendingGroups[tunnelID] = group
+		}
+		group.waiters++
+		tunnelProxy.pendingBySession[group.session]++
+		if err := tunnelProxy.options.Sessions.SetPendingOpens(group.session, tunnelProxy.pendingBySession[group.session]); err != nil {
+			group.waiters--
+			tunnelProxy.pendingBySession[group.session]--
+			if tunnelProxy.pendingBySession[group.session] == 0 {
+				delete(tunnelProxy.pendingBySession, group.session)
+			}
+			if group.waiters == 0 {
+				delete(tunnelProxy.pendingGroups, tunnelID)
+				close(group.done)
+			}
+			tunnelProxy.pendingMu.Unlock()
+			return nil, err
+		}
+		tunnelProxy.pendingMu.Unlock()
+		return &pendingMembership{proxy: tunnelProxy, tunnelID: tunnelID, group: group}, nil
 	}
-	return &pendingMembership{proxy: tunnelProxy, tunnelID: tunnelID, group: group}, nil
 }
 
 func (membership *pendingMembership) Release() error {
@@ -484,16 +599,24 @@ func (membership *pendingMembership) Release() error {
 		proxy := membership.proxy
 		proxy.pendingMu.Lock()
 		defer proxy.pendingMu.Unlock()
-		if proxy.pendingGroups[membership.tunnelID] != membership.group {
-			return
-		}
 		if membership.group.waiters == 0 {
 			panic("tunnel pending OPEN group counter invariant violated")
 		}
 		membership.group.waiters--
-		membership.err = proxy.options.Sessions.SetPendingOpens(membership.group.session, membership.group.waiters)
-		if membership.group.waiters == 0 {
+		pending := proxy.pendingBySession[membership.group.session]
+		if pending == 0 {
+			panic("tunnel pending OPEN session counter invariant violated")
+		}
+		pending--
+		if pending == 0 {
+			delete(proxy.pendingBySession, membership.group.session)
+		} else {
+			proxy.pendingBySession[membership.group.session] = pending
+		}
+		membership.err = proxy.options.Sessions.SetPendingOpens(membership.group.session, pending)
+		if proxy.pendingGroups[membership.tunnelID] == membership.group && membership.group.waiters == 0 {
 			delete(proxy.pendingGroups, membership.tunnelID)
+			close(membership.group.done)
 		}
 	})
 	return membership.err

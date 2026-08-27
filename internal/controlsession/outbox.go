@@ -35,6 +35,10 @@ type normalKind uint8
 type highKind uint8
 
 const (
+	// maxHealthBatchItems 是 Agent Binary 冻结的单个 Health Report Batch 上限。
+	// Outbox 仍需执行这道边界，因为多个 Reporter Flush 可能在真正出队前再次合并。
+	maxHealthBatchItems = 128
+
 	highError highKind = iota + 1
 	highDrain
 	highConfigAck
@@ -126,6 +130,112 @@ func (outbox *Outbox) Enqueue(envelope *protocolv1.ControlEnvelope) error {
 	}
 }
 
+// ReplaceHealth 以完整集合原子替换当前尚未出队的 Health accumulator。
+//
+// 该入口只供 ConfigAck(APPLIED) 后的全量恢复使用：它允许空集合清除旧 Health，
+// 但保留普通队列中的 Snapshot、WorkDemand 及其相对顺序。调用方之后的普通
+// Enqueue 仍只按 service_id 合并增量，不会触发集合删除。Batch generation 继续
+// 只由 Dequeue 分配。
+func (outbox *Outbox) ReplaceHealth(items []*protocolv1.ServiceHealth) error {
+	owned, err := outbox.cloneHealthItems(items)
+	if err != nil {
+		return err
+	}
+	latest, firstSeen, err := outbox.prepareHealthItems(owned)
+	if err != nil {
+		return err
+	}
+
+	outbox.mu.Lock()
+	defer outbox.mu.Unlock()
+	replacement, err := outbox.healthReplacementLocked(latest, firstSeen)
+	if err != nil {
+		return err
+	}
+	outbox.normal = replacement
+	return nil
+}
+
+// EnqueueConfigAckAndReplaceHealth 在同一 Outbox 临界区内提交 APPLIED
+// ConfigAck 与完整 Health 集合。writer 因此不可能在 Ack 与集合替换之间
+// 摘取旧 Health；任一容量或校验失败都不修改队列。
+func (outbox *Outbox) EnqueueConfigAckAndReplaceHealth(
+	ack *protocolv1.ControlEnvelope,
+	items []*protocolv1.ServiceHealth,
+) error {
+	if err := validateEnvelopeShape(ack, outbox.protocolVersion); err != nil {
+		return err
+	}
+	configAck := ack.GetConfigAck()
+	if configAck == nil || configAck.GetApplyStatus() != protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED {
+		return ErrInvalidOutboxMessage
+	}
+	ownedAck := proto.Clone(ack).(*protocolv1.ControlEnvelope)
+	ownedItems, err := outbox.cloneHealthItems(items)
+	if err != nil {
+		return err
+	}
+	latest, firstSeen, err := outbox.prepareHealthItems(ownedItems)
+	if err != nil {
+		return err
+	}
+
+	outbox.mu.Lock()
+	defer outbox.mu.Unlock()
+	if len(outbox.high) >= outbox.highCapacity {
+		return ErrOutboxFull
+	}
+	replacement, err := outbox.healthReplacementLocked(latest, firstSeen)
+	if err != nil {
+		return err
+	}
+	if err := outbox.enqueueHigh(ownedAck); err != nil {
+		return err
+	}
+	outbox.normal = replacement
+	return nil
+}
+
+func (outbox *Outbox) healthReplacementLocked(
+	latest map[string]*protocolv1.ServiceHealth,
+	firstSeen []string,
+) ([]normalEntry, error) {
+
+	nonHealth := 0
+	for _, entry := range outbox.normal {
+		if entry.kind != normalServiceHealth {
+			nonHealth++
+		}
+	}
+	if nonHealth+len(firstSeen) > outbox.normalCapacity {
+		return nil, ErrOutboxFull
+	}
+
+	replacement := make([]normalEntry, 0, nonHealth+len(firstSeen))
+	inserted := false
+	appendHealth := func() {
+		for _, serviceID := range firstSeen {
+			replacement = append(replacement, normalEntry{
+				kind: normalServiceHealth, key: serviceID, health: latest[serviceID],
+			})
+		}
+		inserted = true
+	}
+	for _, entry := range outbox.normal {
+		if entry.kind == normalServiceHealth {
+			if !inserted {
+				appendHealth()
+			}
+			continue
+		}
+		replacement = append(replacement, entry)
+	}
+	if !inserted {
+		appendHealth()
+	}
+	return replacement, nil
+}
+
 // Dequeue 立即取出下一条消息，高优先级始终先于普通消息。
 // 返回的消息已经脱离 Outbox 所有内部引用；之后的合并不会改写已出队 Frame。
 func (outbox *Outbox) Dequeue() (*protocolv1.ControlEnvelope, bool) {
@@ -149,6 +259,12 @@ func (outbox *Outbox) Dequeue() (*protocolv1.ControlEnvelope, bool) {
 	}
 
 	return outbox.dequeueHealthBatch(), true
+}
+
+func (outbox *Outbox) empty() bool {
+	outbox.mu.Lock()
+	defer outbox.mu.Unlock()
+	return len(outbox.high) == 0 && len(outbox.normal) == 0
 }
 
 // dequeueBeforeConfigAck 只取允许越过 outstanding Snapshot 的高优先级消息。
@@ -251,20 +367,9 @@ func (outbox *Outbox) enqueueWorkDemand(envelope *protocolv1.ControlEnvelope, de
 func (outbox *Outbox) enqueueHealth(batch *protocolv1.ServiceHealthBatch) error {
 	// 同一输入 Batch 内重复 service_id 时，以最后出现的观测为最新值；firstSeen
 	// 只用于让新增 Key 的队列次序保持确定。
-	latest := make(map[string]*protocolv1.ServiceHealth, len(batch.GetItems()))
-	firstSeen := make([]string, 0, len(batch.GetItems()))
-	for _, item := range batch.GetItems() {
-		// 使用最大 uint64 generation 做单项上限检查，保证条目进入队列后不会因
-		// generation 的 Varint 长度增长而变成无法发送的永久队头。
-		batchPayloadSize := protowire.SizeTag(1) + protowire.SizeVarint(math.MaxUint64) + healthItemSize(item)
-		if uint64(healthEnvelopeSize(outbox.protocolVersion, math.MaxUint64, batchPayloadSize)) > outbox.maxFrameBytes {
-			return ErrOutboxMessageTooLarge
-		}
-		serviceID := item.GetServiceId()
-		if _, exists := latest[serviceID]; !exists {
-			firstSeen = append(firstSeen, serviceID)
-		}
-		latest[serviceID] = item
+	latest, firstSeen, err := outbox.prepareHealthItems(batch.GetItems())
+	if err != nil {
+		return err
 	}
 
 	existing := make(map[string]int, len(latest))
@@ -296,6 +401,46 @@ func (outbox *Outbox) enqueueHealth(batch *protocolv1.ServiceHealthBatch) error 
 	return nil
 }
 
+func (outbox *Outbox) cloneHealthItems(items []*protocolv1.ServiceHealth) ([]*protocolv1.ServiceHealth, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	envelope := &protocolv1.ControlEnvelope{
+		ProtocolVersion: outbox.protocolVersion,
+		Payload: &protocolv1.ControlEnvelope_ServiceHealthBatch{ServiceHealthBatch: &protocolv1.ServiceHealthBatch{
+			Items: items,
+		}},
+	}
+	if err := validateEnvelopeShape(envelope, outbox.protocolVersion); err != nil {
+		return nil, err
+	}
+	owned := proto.Clone(envelope).(*protocolv1.ControlEnvelope)
+	return owned.GetServiceHealthBatch().GetItems(), nil
+}
+
+func (outbox *Outbox) prepareHealthItems(items []*protocolv1.ServiceHealth) (
+	map[string]*protocolv1.ServiceHealth,
+	[]string,
+	error,
+) {
+	latest := make(map[string]*protocolv1.ServiceHealth, len(items))
+	firstSeen := make([]string, 0, len(items))
+	for _, item := range items {
+		// 使用最大 uint64 generation 做单项上限检查，保证条目进入队列后不会因
+		// generation 的 Varint 长度增长而变成无法发送的永久队头。
+		batchPayloadSize := protowire.SizeTag(1) + protowire.SizeVarint(math.MaxUint64) + healthItemSize(item)
+		if uint64(healthEnvelopeSize(outbox.protocolVersion, math.MaxUint64, batchPayloadSize)) > outbox.maxFrameBytes {
+			return nil, nil, ErrOutboxMessageTooLarge
+		}
+		serviceID := item.GetServiceId()
+		if _, exists := latest[serviceID]; !exists {
+			firstSeen = append(firstSeen, serviceID)
+		}
+		latest[serviceID] = item
+	}
+	return latest, firstSeen, nil
+}
+
 func (outbox *Outbox) dequeueHealthBatch() *protocolv1.ControlEnvelope {
 	nextGeneration := outbox.healthGeneration + 1
 	items := make([]*protocolv1.ServiceHealth, 0, len(outbox.normal))
@@ -304,7 +449,8 @@ func (outbox *Outbox) dequeueHealthBatch() *protocolv1.ControlEnvelope {
 	batchFull := false
 	for index := range outbox.normal {
 		entry := outbox.normal[index]
-		if entry.kind != normalServiceHealth || batchFull {
+		if entry.kind != normalServiceHealth || batchFull || len(items) == maxHealthBatchItems {
+			batchFull = batchFull || len(items) == maxHealthBatchItems
 			remaining = append(remaining, entry)
 			continue
 		}

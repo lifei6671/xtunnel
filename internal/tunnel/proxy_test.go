@@ -28,6 +28,7 @@ const (
 	testConnectorID  = "con_01J00000000000000000000000"
 	testConnectorTwo = "con_01J00000000000000000000001"
 	testServiceID    = "svc_01J00000000000000000000000"
+	testServiceTwo   = "svc_01J00000000000000000000001"
 	testWorkID       = "work_01J00000000000000000000000"
 	testTimeout      = 3 * time.Second
 )
@@ -35,7 +36,32 @@ const (
 type tunnelSnapshotProvider struct{}
 
 func (tunnelSnapshotProvider) Current(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
-	return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{TunnelId: tunnelID}}, nil
+	return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{
+		TunnelId: tunnelID,
+		Services: []*protocolv1.ServiceConfig{{
+			ServiceId: testServiceID,
+			Enabled:   true,
+			Health: &protocolv1.HealthCheckConfig{
+				Type: protocolv1.HealthType_HEALTH_TYPE_DISABLED,
+			},
+		}},
+	}}, nil
+}
+
+type healthTunnelSnapshotProvider struct{}
+
+func (healthTunnelSnapshotProvider) Current(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
+	return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{
+		TunnelId: tunnelID,
+		Services: []*protocolv1.ServiceConfig{{
+			ServiceId: testServiceID,
+			Enabled:   true,
+			Health: &protocolv1.HealthCheckConfig{
+				Type: protocolv1.HealthType_HEALTH_TYPE_TCP, IntervalMs: 1_000,
+				TimeoutMs: 100, FailureThreshold: 2, SuccessThreshold: 2,
+			},
+		}},
+	}}, nil
 }
 
 func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
@@ -263,6 +289,520 @@ func TestProxyAggregatesConcurrentPendingOpensAndRefillsBeyondInitialDemand(t *t
 		case <-result:
 		case <-time.After(testTimeout):
 			t.Fatalf("Control Session(%d) did not finish", index)
+		}
+	}
+}
+
+func TestProxySelectsOnlyConnectorHealthyForService(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
+		HighPriorityCapacity: 16, NormalCapacity: 32, InboundCapacity: 16,
+		WriteTimeout: time.Second, MaxReplayEntries: 128,
+		MaxWorkTotal: 64, MaxWorkConnecting: 16, SnapshotProvider: healthTunnelSnapshotProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startSessionManager(t, sessions)
+
+	connectorIDs := []string{testConnectorID, testConnectorTwo}
+	peers := make([]net.Conn, 0, len(connectorIDs))
+	results := make([]<-chan error, 0, len(connectorIDs))
+	var healthySession serverruntime.Session
+	for _, connectorID := range connectorIDs {
+		pending, reserveErr := registry.ReserveAuthenticated(testTunnelID, connectorID)
+		if reserveErr != nil {
+			t.Fatal(reserveErr)
+		}
+		current, commitErr := registry.CommitAuthenticated(pending)
+		if commitErr != nil {
+			t.Fatal(commitErr)
+		}
+		serverConn, agentConn := net.Pipe()
+		peers = append(peers, agentConn)
+		established := establishedControl(t, current)
+		result := make(chan error, 1)
+		results = append(results, result)
+		go func() { result <- sessions.Serve(context.Background(), serverConn, &established) }()
+		readDemand(t, agentConn)
+		if connectorID == testConnectorTwo {
+			healthySession = current
+			if writeErr := frame.WriteControl(agentConn, &protocolv1.ControlEnvelope{
+				ProtocolVersion: 1,
+				Payload: &protocolv1.ControlEnvelope_ServiceHealthBatch{ServiceHealthBatch: &protocolv1.ServiceHealthBatch{
+					Generation: 1,
+					Items: []*protocolv1.ServiceHealth{{
+						ServiceId: testServiceID, Status: protocolv1.HealthStatus_HEALTH_STATUS_HEALTHY,
+					}},
+				}},
+			}); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+		}
+	}
+	waitFor(t, func() bool { return sessions.Eligible(healthySession, testServiceID) })
+
+	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnelProxy, err := NewProxy(Options{
+		Registry: registry, Sessions: sessions, OpenHandler: openHandler, AcquireTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, selected, _, membership, err := tunnelProxy.selectConnector(context.Background(), testTunnelID, testServiceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected != healthySession {
+		t.Fatalf("selected Session = %#v, want only HEALTHY Session %#v", selected, healthySession)
+	}
+	if membership == nil {
+		t.Fatal("selection without IDLE WorkConn did not create pending membership")
+	}
+	if err := membership.Release(); err != nil {
+		t.Fatal(err)
+	}
+	lease.Release()
+
+	for _, peer := range peers {
+		_ = peer.Close()
+	}
+	for _, result := range results {
+		select {
+		case <-result:
+		case <-time.After(testTimeout):
+			t.Fatal("Control Session did not finish")
+		}
+	}
+}
+
+func TestAcquireWorkReselectsWhenPendingSessionBecomesUnhealthy(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	limits := newLimitManager(t, 4)
+	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
+		HighPriorityCapacity: 16, NormalCapacity: 32, InboundCapacity: 16,
+		WriteTimeout: time.Second, MaxReplayEntries: 128,
+		MaxWorkTotal: 64, MaxWorkConnecting: 16, LimitManager: limits,
+		SnapshotProvider: healthTunnelSnapshotProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startSessionManager(t, sessions)
+
+	sessionByConnector := make(map[string]serverruntime.Session, 2)
+	controlBySession := make(map[serverruntime.Session]net.Conn, 2)
+	results := make([]<-chan error, 0, 2)
+	for _, connectorID := range []string{testConnectorID, testConnectorTwo} {
+		pending, reserveErr := registry.ReserveAuthenticated(testTunnelID, connectorID)
+		if reserveErr != nil {
+			t.Fatal(reserveErr)
+		}
+		session, commitErr := registry.CommitAuthenticated(pending)
+		if commitErr != nil {
+			t.Fatal(commitErr)
+		}
+		serverConn, agentConn := net.Pipe()
+		result := make(chan error, 1)
+		established := establishedControl(t, session)
+		go func() { result <- sessions.Serve(context.Background(), serverConn, &established) }()
+		readDemand(t, agentConn)
+		writeServiceHealth(t, agentConn, 1, protocolv1.HealthStatus_HEALTH_STATUS_HEALTHY)
+		sessionByConnector[connectorID] = session
+		controlBySession[session] = agentConn
+		results = append(results, result)
+	}
+	for _, session := range sessionByConnector {
+		waitFor(t, func() bool { return registry.Eligible(session, testServiceID) })
+	}
+
+	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnelProxy, err := NewProxy(Options{
+		Registry: registry, Sessions: sessions, OpenHandler: openHandler,
+		AcquireTimeout: 2 * time.Second, LimitManager: limits,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type acquireResult struct {
+		lease   *serverruntime.ConnectorLease
+		session serverruntime.Session
+		work    *serverworkpool.Work
+		err     error
+	}
+	result := make(chan acquireResult, 1)
+	go func() {
+		lease, session, _, work, acquireErr := tunnelProxy.acquireWork(context.Background(), testTunnelID, testServiceID)
+		result <- acquireResult{lease: lease, session: session, work: work, err: acquireErr}
+	}()
+
+	var selected serverruntime.Session
+	waitFor(t, func() bool {
+		tunnelProxy.pendingMu.Lock()
+		defer tunnelProxy.pendingMu.Unlock()
+		group := tunnelProxy.pendingGroups[testTunnelID]
+		if group == nil || group.waiters != 1 {
+			return false
+		}
+		selected = group.session
+		return true
+	})
+	fallback := sessionByConnector[testConnectorID]
+	if fallback == selected {
+		fallback = sessionByConnector[testConnectorTwo]
+	}
+	serverWork, agentWork := tcpPair(t)
+	defer agentWork.Close()
+	workID, err := identity.NewWorkID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.RegisterIdle(serverWork, authenticatedIdleWithWorkID(t, fallback, workID)); err != nil {
+		t.Fatal(err)
+	}
+	writeServiceHealth(t, controlBySession[selected], 2, protocolv1.HealthStatus_HEALTH_STATUS_UNHEALTHY)
+
+	select {
+	case got := <-result:
+		if got.err != nil || got.session != fallback || got.work == nil || got.lease == nil {
+			t.Fatalf("acquireWork() session=%#v work=%p lease=%p error=%v, want healthy fallback %#v",
+				got.session, got.work, got.lease, got.err, fallback)
+		}
+		if err := got.work.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !got.lease.Release() {
+			t.Fatal("ConnectorLease.Release() = false")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("acquireWork() did not wake and reselect after Health became UNHEALTHY")
+	}
+	waitForSnapshot(t, limits, func(snapshot serverlimits.Snapshot) bool { return snapshot.PendingOpens == 0 })
+
+	for _, control := range controlBySession {
+		_ = control.Close()
+	}
+	for _, sessionResult := range results {
+		select {
+		case <-sessionResult:
+		case <-time.After(testTimeout):
+			t.Fatal("Control Session did not finish")
+		}
+	}
+}
+
+func TestAcquirePendingWorkReselectsAfterHealthTTLExpires(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
+		HighPriorityCapacity: 16, NormalCapacity: 32, InboundCapacity: 16,
+		WriteTimeout: time.Second, MaxReplayEntries: 128,
+		MaxWorkTotal: 64, MaxWorkConnecting: 16, SnapshotProvider: tunnelSnapshotProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startSessionManager(t, sessions)
+
+	sessionByConnector := make(map[string]serverruntime.Session, 2)
+	controlBySession := make(map[serverruntime.Session]net.Conn, 2)
+	results := make([]<-chan error, 0, 2)
+	for _, connectorID := range []string{testConnectorID, testConnectorTwo} {
+		pending, reserveErr := registry.ReserveAuthenticated(testTunnelID, connectorID)
+		if reserveErr != nil {
+			t.Fatal(reserveErr)
+		}
+		session, commitErr := registry.CommitAuthenticated(pending)
+		if commitErr != nil {
+			t.Fatal(commitErr)
+		}
+		serverConn, agentConn := net.Pipe()
+		result := make(chan error, 1)
+		established := establishedControl(t, session)
+		go func() { result <- sessions.Serve(context.Background(), serverConn, &established) }()
+		readDemand(t, agentConn)
+		sessionByConnector[connectorID] = session
+		controlBySession[session] = agentConn
+		results = append(results, result)
+	}
+
+	expiresAt := time.Now().Add(150 * time.Millisecond)
+	first := sessionByConnector[testConnectorID]
+	fallback := sessionByConnector[testConnectorTwo]
+	if !registry.PublishEligibility(first, serverruntime.SessionEligibility{
+		ConfigReady: true, HasObserved: true,
+		Services: map[string]serverruntime.ServiceEligibility{testServiceID: {
+			Enabled: true, HealthHealthy: true, HealthyUntil: expiresAt,
+		}},
+	}) {
+		t.Fatal("PublishEligibility(first) rejected current Session")
+	}
+	if !registry.PublishEligibility(fallback, serverruntime.SessionEligibility{
+		ConfigReady: true, HasObserved: true,
+		Services: map[string]serverruntime.ServiceEligibility{testServiceID: {
+			Enabled: true, HealthDisabled: true,
+		}},
+	}) {
+		t.Fatal("PublishEligibility(fallback) rejected current Session")
+	}
+
+	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnelProxy, err := NewProxy(Options{
+		Registry: registry, Sessions: sessions, OpenHandler: openHandler, AcquireTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type acquireResult struct {
+		lease   *serverruntime.ConnectorLease
+		session serverruntime.Session
+		work    *serverworkpool.Work
+		err     error
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	acquired := make(chan acquireResult, 1)
+	go func() {
+		lease, session, _, work, acquireErr := tunnelProxy.acquireWork(ctx, testTunnelID, testServiceID)
+		acquired <- acquireResult{lease: lease, session: session, work: work, err: acquireErr}
+	}()
+
+	waitFor(t, func() bool {
+		tunnelProxy.pendingMu.Lock()
+		defer tunnelProxy.pendingMu.Unlock()
+		group := tunnelProxy.pendingGroups[testTunnelID]
+		return group != nil && group.session == first && group.waiters == 1
+	})
+	serverWork, agentWork := tcpPair(t)
+	defer agentWork.Close()
+	workID, err := identity.NewWorkID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.RegisterIdle(serverWork, authenticatedIdleWithWorkID(t, fallback, workID)); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-acquired:
+		if got.err != nil || got.session != fallback || got.work == nil || got.lease == nil {
+			t.Fatalf("acquireWork() session=%#v work=%p lease=%p error=%v, want TTL fallback %#v",
+				got.session, got.work, got.lease, got.err, fallback)
+		}
+		if err := got.work.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !got.lease.Release() {
+			t.Fatal("ConnectorLease.Release() = false")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("acquireWork() did not reselect after Health TTL expired")
+	}
+
+	for _, control := range controlBySession {
+		_ = control.Close()
+	}
+	for _, sessionResult := range results {
+		select {
+		case <-sessionResult:
+		case <-time.After(testTimeout):
+			t.Fatal("Control Session did not finish")
+		}
+	}
+}
+
+func TestPendingGroupsAggregateCountsAcrossServicesPerSession(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
+		HighPriorityCapacity: 16, NormalCapacity: 32, InboundCapacity: 16,
+		WriteTimeout: time.Second, MaxReplayEntries: 128,
+		MaxWorkTotal: 64, MaxWorkConnecting: 16, SnapshotProvider: tunnelSnapshotProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startSessionManager(t, sessions)
+	pending, err := registry.ReserveAuthenticated(testTunnelID, testConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := registry.CommitAuthenticated(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverConn, agentConn := net.Pipe()
+	result := make(chan error, 1)
+	established := establishedControl(t, session)
+	go func() { result <- sessions.Serve(context.Background(), serverConn, &established) }()
+	readDemand(t, agentConn)
+	if !registry.PublishEligibility(session, serverruntime.SessionEligibility{
+		ConfigReady: true, HasObserved: true,
+		Services: map[string]serverruntime.ServiceEligibility{
+			testServiceID:  {Enabled: true, HealthDisabled: true},
+			testServiceTwo: {Enabled: true, HealthDisabled: true},
+		},
+	}) {
+		t.Fatal("PublishEligibility() rejected current Session")
+	}
+	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnelProxy, err := NewProxy(Options{
+		Registry: registry, Sessions: sessions, OpenHandler: openHandler, AcquireTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := tunnelProxy.joinPendingGroup(context.Background(), testTunnelID, testServiceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := tunnelProxy.joinPendingGroup(context.Background(), testTunnelID, testServiceTwo)
+	if err != nil {
+		_ = first.Release()
+		t.Fatal(err)
+	}
+	assertPending := func(want uint32, wantGroup bool) {
+		t.Helper()
+		tunnelProxy.pendingMu.Lock()
+		defer tunnelProxy.pendingMu.Unlock()
+		if got := tunnelProxy.pendingBySession[session]; got != want {
+			t.Fatalf("pendingBySession = %d, want %d", got, want)
+		}
+		group, exists := tunnelProxy.pendingGroups[testTunnelID]
+		var waiters uint32
+		if group != nil {
+			waiters = group.waiters
+		}
+		if exists != wantGroup || (exists && waiters != want) {
+			t.Fatalf("pending group = exists:%t waiters:%d, want exists:%t waiters:%d",
+				exists, waiters, wantGroup, want)
+		}
+	}
+	assertPending(2, true)
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	assertPending(1, true)
+	if err := second.Release(); err != nil {
+		t.Fatal(err)
+	}
+	assertPending(0, false)
+
+	_ = agentConn.Close()
+	select {
+	case <-result:
+	case <-time.After(testTimeout):
+		t.Fatal("Control Session did not finish")
+	}
+}
+
+func TestPendingGroupSerializesServicesWithDisjointEligibleConnectors(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
+		HighPriorityCapacity: 16, NormalCapacity: 32, InboundCapacity: 16,
+		WriteTimeout: time.Second, MaxReplayEntries: 128,
+		MaxWorkTotal: 64, MaxWorkConnecting: 16, SnapshotProvider: tunnelSnapshotProvider{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startSessionManager(t, sessions)
+
+	sessionByService := make(map[string]serverruntime.Session, 2)
+	peers := make([]net.Conn, 0, 2)
+	results := make([]<-chan error, 0, 2)
+	for index, connectorID := range []string{testConnectorID, testConnectorTwo} {
+		pending, reserveErr := registry.ReserveAuthenticated(testTunnelID, connectorID)
+		if reserveErr != nil {
+			t.Fatal(reserveErr)
+		}
+		session, commitErr := registry.CommitAuthenticated(pending)
+		if commitErr != nil {
+			t.Fatal(commitErr)
+		}
+		serverConn, agentConn := net.Pipe()
+		peers = append(peers, agentConn)
+		result := make(chan error, 1)
+		results = append(results, result)
+		established := establishedControl(t, session)
+		go func() { result <- sessions.Serve(context.Background(), serverConn, &established) }()
+		readDemand(t, agentConn)
+
+		serviceID := []string{testServiceID, testServiceTwo}[index]
+		if !registry.PublishEligibility(session, serverruntime.SessionEligibility{
+			ConfigReady: true, HasObserved: true,
+			Services: map[string]serverruntime.ServiceEligibility{
+				serviceID: {Enabled: true, HealthDisabled: true},
+			},
+		}) {
+			t.Fatalf("PublishEligibility(%s) rejected current Session", serviceID)
+		}
+		sessionByService[serviceID] = session
+	}
+
+	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnelProxy, err := NewProxy(Options{
+		Registry: registry, Sessions: sessions, OpenHandler: openHandler, AcquireTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := tunnelProxy.joinPendingGroup(context.Background(), testTunnelID, testServiceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.group.session != sessionByService[testServiceID] {
+		t.Fatalf("first pending Session = %#v, want Service one eligible Session", first.group.session)
+	}
+
+	waitContext, cancelWait := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancelWait()
+	if second, err := tunnelProxy.joinPendingGroup(waitContext, testTunnelID, testServiceTwo); second != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second Service join while Tunnel group active = (%#v, %v), want deadline", second, err)
+	}
+	tunnelProxy.pendingMu.Lock()
+	groups := len(tunnelProxy.pendingGroups)
+	tunnelProxy.pendingMu.Unlock()
+	if groups != 1 {
+		t.Fatalf("Pending groups while Services disagree = %d, want one per Tunnel", groups)
+	}
+
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := tunnelProxy.joinPendingGroup(context.Background(), testTunnelID, testServiceTwo)
+	if err != nil {
+		t.Fatalf("second Service join after prior Tunnel group drained: %v", err)
+	}
+	if second.group.session != sessionByService[testServiceTwo] {
+		t.Fatalf("second pending Session = %#v, want Service two eligible Session", second.group.session)
+	}
+	if err := second.Release(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, peer := range peers {
+		_ = peer.Close()
+	}
+	for _, result := range results {
+		select {
+		case <-result:
+		case <-time.After(testTimeout):
+			t.Fatal("Control Session did not finish")
 		}
 	}
 }
@@ -536,7 +1076,9 @@ func TestAcquireWorkRetriesStalePendingSessionAfterGenerationReplacement(t *test
 	}
 	// 固定在“旧 pending group 已选定、尚未按该 Session 取得 ConnectorLease”的
 	// 线性化窗口；下一次 join 会成为这个 group 的唯一 membership。
-	tunnelProxy.pendingGroups[testTunnelID] = &pendingGroup{session: oldSession, pool: oldPool}
+	tunnelProxy.pendingGroups[testTunnelID] = &pendingGroup{
+		session: oldSession, pool: oldPool, done: make(chan struct{}),
+	}
 	replacement, err := registry.ReserveAuthenticated(testTunnelID, testConnectorID)
 	if err != nil {
 		t.Fatalf("ReserveAuthenticated(replacement) error = %v", err)
@@ -554,7 +1096,7 @@ func TestAcquireWorkRetriesStalePendingSessionAfterGenerationReplacement(t *test
 	}
 	result := make(chan acquireResult, 1)
 	go func() {
-		lease, session, pool, work, acquireErr := tunnelProxy.acquireWork(context.Background(), testTunnelID)
+		lease, session, pool, work, acquireErr := tunnelProxy.acquireWork(context.Background(), testTunnelID, testServiceID)
 		result <- acquireResult{lease: lease, session: session, pool: pool, work: work, err: acquireErr}
 	}()
 
@@ -723,6 +1265,26 @@ func registerEchoWork(
 	result := make(chan error, 1)
 	go func() { result <- runEchoConnector(agentWork) }()
 	return result
+}
+
+func writeServiceHealth(
+	t *testing.T,
+	connection net.Conn,
+	generation uint64,
+	status protocolv1.HealthStatus,
+) {
+	t.Helper()
+	if err := frame.WriteControl(connection, &protocolv1.ControlEnvelope{
+		ProtocolVersion: 1,
+		Payload: &protocolv1.ControlEnvelope_ServiceHealthBatch{ServiceHealthBatch: &protocolv1.ServiceHealthBatch{
+			Generation: generation,
+			Items: []*protocolv1.ServiceHealth{{
+				ServiceId: testServiceID, Status: status,
+			}},
+		}},
+	}); err != nil {
+		t.Fatalf("write ServiceHealthBatch generation %d: %v", generation, err)
+	}
 }
 
 func readDemand(t *testing.T, connection net.Conn) *protocolv1.WorkDemand {

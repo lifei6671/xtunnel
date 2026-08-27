@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/identity"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
@@ -136,17 +137,27 @@ type TunnelRuntime struct {
 	pending                map[string]string
 	pendingConnectorLimits map[string]*serverlimits.ConnectorLease
 	currentConnectorLimits map[string]*serverlimits.ConnectorLease
+	currentHealthTargets   map[string]*healthbudget.ConnectorLease
 	connectorActive        map[Session]uint64
 	// connectors 只保存 Current Connector 或仍有 ActiveWork 的 Tombstone；它不是
 	// 持久化设备历史，也不会在无 Current/Active 后保留 OFFLINE 对象。
 	connectors map[string]connectorObservation
 	// retired 保存已不再是 Current、但仍被 Lease 或 ActiveWork 引用的 Session。
 	// 对应 Session ID 必须继续占用全局索引，避免极端随机碰撞复用正在运行的身份。
-	retired     map[Session]struct{}
-	lastPicked  string
-	activeWorks map[string]*ActiveWork
-	revoked     bool
-	now         func() time.Time
+	// retiredHealthTargets 与 retired 使用相同 Session key 保存旧 generation
+	// 的 Health 引用。只有 Lease/ActiveWork 全部归零时才能释放，避免 Tombstone
+	// 尚在承载业务流量时把同 Connector 的 Target 提前归还。
+	retiredHealthTargets map[Session]*healthbudget.ConnectorLease
+	retired              map[Session]struct{}
+	lastPicked           string
+	activeWorks          map[string]*ActiveWork
+	// eligibility 只保存完整 Session identity 对应的值型门禁快照。Current、
+	// generation、Health/Revision 门禁与 Connector 负载因此都在同一把锁下裁决；
+	// changed 通过关闭旧 channel 广播变化，锁内不执行回调或阻塞等待。
+	eligibility        map[Session]SessionEligibility
+	eligibilityChanged chan struct{}
+	revoked            bool
+	now                func() time.Time
 }
 
 func newTunnelRuntime(registry *Registry, tunnelID string, now func() time.Time) *TunnelRuntime {
@@ -154,8 +165,11 @@ func newTunnelRuntime(registry *Registry, tunnelID string, now func() time.Time)
 		TunnelID: tunnelID, registry: registry, current: make(map[string]Session), generations: make(map[string]uint64),
 		pending: make(map[string]string), pendingConnectorLimits: make(map[string]*serverlimits.ConnectorLease),
 		currentConnectorLimits: make(map[string]*serverlimits.ConnectorLease), connectorActive: make(map[Session]uint64),
-		connectors: make(map[string]connectorObservation), retired: make(map[Session]struct{}),
-		activeWorks: make(map[string]*ActiveWork), now: now,
+		currentHealthTargets: make(map[string]*healthbudget.ConnectorLease),
+		connectors:           make(map[string]connectorObservation), retired: make(map[Session]struct{}),
+		retiredHealthTargets: make(map[Session]*healthbudget.ConnectorLease),
+		activeWorks:          make(map[string]*ActiveWork), eligibility: make(map[Session]SessionEligibility),
+		eligibilityChanged: make(chan struct{}), now: now,
 	}
 }
 
@@ -313,9 +327,11 @@ func (runtime *TunnelRuntime) revoke() ([]*ActiveWork, []*serverlimits.Connector
 	for connectorID, session := range runtime.current {
 		lease := runtime.currentConnectorLimits[connectorID]
 		connectorLimits = append(connectorLimits, lease)
+		healthTarget := runtime.currentHealthTargets[connectorID]
 		delete(runtime.current, connectorID)
 		delete(runtime.currentConnectorLimits, connectorID)
-		if sessionID := runtime.retireSessionLocked(session); sessionID != "" {
+		delete(runtime.currentHealthTargets, connectorID)
+		if sessionID := runtime.retireSessionLocked(session, healthTarget); sessionID != "" {
 			sessionIDs = append(sessionIDs, sessionID)
 		}
 	}
@@ -328,6 +344,8 @@ func (runtime *TunnelRuntime) revoke() ([]*ActiveWork, []*serverlimits.Connector
 	}
 	runtime.lastPicked = ""
 	clear(runtime.connectors)
+	clear(runtime.eligibility)
+	runtime.signalEligibilityLocked()
 
 	retained := runtime.registry.discardAuthenticatedInstallsLocked(runtime)
 	connectorLimits = append(connectorLimits, retained.connectorLimits...)

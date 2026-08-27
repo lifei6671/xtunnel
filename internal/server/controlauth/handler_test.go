@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/application"
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/identity"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
@@ -105,6 +106,84 @@ func TestHandleConnectorCapacityRejectsBeforeSuccessAndAllowsReplacement(t *test
 	}
 	if got := limitManager.Snapshot().Connectors; got != 1 {
 		t.Fatalf("Connector count = %d, want one replacement identity", got)
+	}
+}
+
+func TestHandleHealthBudgetRejectsBeforeSuccessAndRollsBackFailedReplacement(t *testing.T) {
+	budget, err := healthbudget.New(healthbudget.Options{MaxTargetsPerTunnel: 1, MaxTargetsGlobal: 1})
+	if err != nil {
+		t.Fatalf("healthbudget.New() error = %v", err)
+	}
+	if err := budget.InitializeTunnel(testTunnelID, 7, 1); err != nil {
+		t.Fatalf("InitializeTunnel() error = %v", err)
+	}
+	registry := serverruntime.NewRegistryWithLimitsAndHealthBudget(nil, budget)
+	handler := testHandler(t, registry, successfulVerifier(), bytes.NewReader(bytes.Repeat([]byte{0x6b}, 256)))
+
+	response, first := exchange(t, handler, validRequest(testConnectorID))
+	if first.err != nil || response.GetSuccess() == nil {
+		t.Fatalf("first Connector auth = %#v, %v, want Success", response, first.err)
+	}
+	response, replacement := exchange(t, handler, validRequest(testConnectorID))
+	if replacement.err != nil || response.GetSuccess() == nil {
+		t.Fatalf("at-cap replacement auth = %#v, %v, want Success", response, replacement.err)
+	}
+	if replacement.established.Session.Generation != first.established.Session.Generation+1 {
+		t.Fatalf("replacement Generation = %d, want %d", replacement.established.Session.Generation, first.established.Session.Generation+1)
+	}
+
+	var encoded bytes.Buffer
+	if err := frame.WriteAuth(&encoded, validRequest(testConnectorID)); err != nil {
+		t.Fatalf("WriteAuth(replacement request) error = %v", err)
+	}
+	connection := &failingWriteConn{reader: bytes.NewReader(encoded.Bytes()), writeErr: io.ErrClosedPipe}
+	if _, err := handler.Handle(context.Background(), connection); err == nil || !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("Handle(failed replacement write) error = %v, want write failure", err)
+	}
+	if current, exists := registry.Current(testTunnelID, testConnectorID); !exists || current != replacement.established.Session {
+		t.Fatalf("Current() = %#v, %v, want prior replacement %#v", current, exists, replacement.established.Session)
+	}
+	key := healthbudget.ConnectorKey{TunnelID: testTunnelID, ConnectorID: testConnectorID}
+	snapshot := budget.Snapshot()
+	if snapshot.TargetsGlobal != 1 || snapshot.ConnectorReferences[key] != 1 {
+		t.Fatalf("budget after failed replacement write = %#v, want prior generation only", snapshot)
+	}
+
+	response, rejected := exchange(t, handler, validRequest(testConnectorIDTwo))
+	assertFailure(t, response, rejected.err, protocolv1.ErrorCode_ERROR_CODE_HEALTH_BUDGET_EXCEEDED, 1_500)
+	if _, exists := registry.Current(testTunnelID, testConnectorIDTwo); exists {
+		t.Fatal("over-budget Connector was published after failure response")
+	}
+	snapshot = budget.Snapshot()
+	if snapshot.TargetsGlobal != 1 || len(snapshot.ConnectorReferences) != 1 || snapshot.ConnectorReferences[key] != 1 {
+		t.Fatalf("budget after rejected Connector = %#v, want prior owner unchanged", snapshot)
+	}
+}
+
+func TestHandleFirstConnectorHealthBudgetExceededReturnsRetryableFailure(t *testing.T) {
+	budget, err := healthbudget.New(healthbudget.Options{MaxTargetsPerTunnel: 1, MaxTargetsGlobal: 1})
+	if err != nil {
+		t.Fatalf("healthbudget.New() error = %v", err)
+	}
+	// 两个启用 Health 的 Service 在没有 Connector 时不占 Target；首个 Connector
+	// 认证会一次需要两个 Target，因此必须在 Success 发布前被预算拒绝。
+	if err := budget.InitializeTunnel(testTunnelID, 7, 2); err != nil {
+		t.Fatalf("InitializeTunnel() error = %v", err)
+	}
+	registry := serverruntime.NewRegistryWithLimitsAndHealthBudget(nil, budget)
+	handler := testHandler(t, registry, successfulVerifier(), bytes.NewReader(bytes.Repeat([]byte{0x6c}, 64)))
+
+	response, outcome := exchange(t, handler, validRequest(testConnectorID))
+	assertFailure(t, response, outcome.err, protocolv1.ErrorCode_ERROR_CODE_HEALTH_BUDGET_EXCEEDED, 1_500)
+	if response.GetSuccess() != nil {
+		t.Fatalf("ConnectorAuthResult = %#v, want Failure without Success", response)
+	}
+	if _, exists := registry.Current(testTunnelID, testConnectorID); exists {
+		t.Fatal("first over-budget authentication published a partial Session")
+	}
+	snapshot := budget.Snapshot()
+	if snapshot.TargetsGlobal != 0 || len(snapshot.ConnectorReferences) != 0 {
+		t.Fatalf("budget after first rejected authentication = %#v, want no reservation", snapshot)
 	}
 }
 

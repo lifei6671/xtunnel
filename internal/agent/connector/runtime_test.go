@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/agent/configruntime"
+	agenthealth "github.com/lifei6671/xtunnel/internal/agent/health"
 	agentorigin "github.com/lifei6671/xtunnel/internal/agent/origin"
 	"github.com/lifei6671/xtunnel/internal/agent/reconnect"
 	agentsession "github.com/lifei6671/xtunnel/internal/agent/session"
@@ -733,14 +734,19 @@ type fakeWorkPool struct {
 type fakeHealthRuntime struct {
 	recorder *lifecycleRecorder
 	done     chan struct{}
+	changed  chan struct{}
 	doneOnce sync.Once
 	errMu    sync.Mutex
 	err      error
+	states   map[string]agenthealth.State
 	shutdown func(context.Context) error
 }
 
 func newFakeHealthRuntime(recorder *lifecycleRecorder) *fakeHealthRuntime {
-	return &fakeHealthRuntime{recorder: recorder, done: make(chan struct{})}
+	return &fakeHealthRuntime{
+		recorder: recorder, done: make(chan struct{}), changed: make(chan struct{}, 1),
+		states: make(map[string]agenthealth.State),
+	}
 }
 
 func (runtime *fakeHealthRuntime) Start(context.Context) error {
@@ -749,6 +755,16 @@ func (runtime *fakeHealthRuntime) Start(context.Context) error {
 }
 
 func (runtime *fakeHealthRuntime) Done() <-chan struct{} { return runtime.done }
+
+func (runtime *fakeHealthRuntime) Snapshot() map[string]agenthealth.State {
+	result := make(map[string]agenthealth.State, len(runtime.states))
+	for serviceID, state := range runtime.states {
+		result[serviceID] = state
+	}
+	return result
+}
+
+func (runtime *fakeHealthRuntime) Changed() <-chan struct{} { return runtime.changed }
 
 func (runtime *fakeHealthRuntime) Err() error {
 	runtime.errMu.Lock()
@@ -846,6 +862,8 @@ type fakeEstablishedSession struct {
 	done       chan struct{}
 	enqueued   chan *protocolv1.ControlEnvelope
 	enqueueErr error
+	flushErr   error
+	flushCalls atomic.Int32
 }
 
 func newFakeEstablishedSession() *fakeEstablishedSession {
@@ -858,6 +876,29 @@ func newFakeEstablishedSession() *fakeEstablishedSession {
 func (session *fakeEstablishedSession) Enqueue(envelope *protocolv1.ControlEnvelope) error {
 	session.enqueued <- envelope
 	return session.enqueueErr
+}
+
+func (session *fakeEstablishedSession) ReplaceHealth(items []*protocolv1.ServiceHealth) error {
+	if len(items) > 0 {
+		session.enqueued <- healthBatchEnvelope(0, items)
+	}
+	return session.enqueueErr
+}
+
+func (session *fakeEstablishedSession) EnqueueConfigAckAndReplaceHealth(
+	ack *protocolv1.ControlEnvelope,
+	items []*protocolv1.ServiceHealth,
+) error {
+	session.enqueued <- ack
+	if session.enqueueErr == nil && len(items) > 0 {
+		session.enqueued <- healthBatchEnvelope(0, items)
+	}
+	return session.enqueueErr
+}
+
+func (session *fakeEstablishedSession) Flush(context.Context) error {
+	session.flushCalls.Add(1)
+	return session.flushErr
 }
 
 func (session *fakeEstablishedSession) Inbound() <-chan controlsession.Inbound {

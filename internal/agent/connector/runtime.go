@@ -25,12 +25,14 @@ import (
 )
 
 const (
-	controlAuthTimeout  = 10 * time.Second
-	workAuthTimeout     = 10 * time.Second
-	openReadTimeout     = 10 * time.Second
-	openWriteTimeout    = 10 * time.Second
-	controlHighQueue    = 32
-	controlNormalQueue  = 128
+	controlAuthTimeout = 10 * time.Second
+	workAuthTimeout    = 10 * time.Second
+	openReadTimeout    = 10 * time.Second
+	openWriteTimeout   = 10 * time.Second
+	controlHighQueue   = 32
+	// Health Outbox 按 service_id 占槽。重连后的完整恢复必须能一次容纳单 Tunnel
+	// 上限内的全部 Service，不能依赖 writeLoop 恰好在多个 Reporter 子批次之间抢先出队。
+	controlNormalQueue  = configruntime.MaxServicesPerTunnel
 	controlInboundQueue = 128
 	controlWriteTimeout = 5 * time.Second
 
@@ -95,12 +97,17 @@ type workPool interface {
 
 type establishedSession interface {
 	Enqueue(*protocolv1.ControlEnvelope) error
+	ReplaceHealth([]*protocolv1.ServiceHealth) error
+	EnqueueConfigAckAndReplaceHealth(*protocolv1.ControlEnvelope, []*protocolv1.ServiceHealth) error
+	Flush(context.Context) error
 	Inbound() <-chan controlsession.Inbound
 	Done() <-chan struct{}
 }
 
 type healthRuntime interface {
 	Start(context.Context) error
+	Snapshot() map[string]agenthealth.State
+	Changed() <-chan struct{}
 	Done() <-chan struct{}
 	Err() error
 	Shutdown(context.Context) error
@@ -330,18 +337,35 @@ func (runtime *Runtime) runEstablished(
 	pool workPool,
 	ticker *time.Ticker,
 ) error {
+	reporter := newHealthReporter(runtime.health, session)
+	reportTicker := time.NewTicker(healthReportFlushInterval)
+	defer reportTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return runtime.drain(ctx, session, configSession, pool, ticker)
+			return runtime.drain(ctx, session, configSession, pool, ticker, reporter, reportTicker)
 		case <-session.Done():
 			return nil
 		case inbound, ok := <-session.Inbound():
 			if !ok {
 				return nil
 			}
-			if err := applyInbound(ctx, session, configSession, pool, inbound); err != nil {
+			if err := applyInboundAndReport(ctx, session, configSession, pool, inbound, reporter); err != nil {
 				return err
+			}
+		case <-reporter.changed():
+			if err := reporter.collectChanges(); err != nil {
+				if errors.Is(err, controlsession.ErrOwnerClosed) {
+					return nil
+				}
+				return fmt.Errorf("enqueue Agent health report: %w", err)
+			}
+		case <-reportTicker.C:
+			if err := reporter.flush(); err != nil {
+				if errors.Is(err, controlsession.ErrOwnerClosed) {
+					return nil
+				}
+				return fmt.Errorf("flush Agent health report: %w", err)
 			}
 		case now := <-ticker.C:
 			if err := session.Enqueue(heartbeatEnvelope(now, observedRevision(configSession))); err != nil {
@@ -445,7 +469,17 @@ func (runtime *Runtime) drain(
 	configSession *configruntime.Session,
 	pool workPool,
 	ticker *time.Ticker,
+	reporter *healthReporter,
+	reportTicker *time.Ticker,
 ) error {
+	// DrainRequest 可能让 Server 很快停止等待普通增量；先把最新权威快照合并进
+	// pending 并完整提交，不能把最后一批健康结果留到下一次 Session。
+	if err := reporter.collectChanges(); err != nil {
+		return errors.Join(processContext.Err(), fmt.Errorf("collect Agent health before drain: %w", err))
+	}
+	if err := reporter.flush(); err != nil {
+		return errors.Join(processContext.Err(), fmt.Errorf("flush Agent health before drain: %w", err))
+	}
 	if err := pool.BeginDrain(); err != nil && !errors.Is(err, agentworkpool.ErrPoolClosed) {
 		return errors.Join(processContext.Err(), fmt.Errorf("begin Agent WorkPool drain: %w", err))
 	}
@@ -458,6 +492,9 @@ func (runtime *Runtime) drain(
 	// 禁止与 Server 比较绝对时间，也禁止把用户可变配置引入冻结的 V0.1 基线。
 	drainContext, cancelDrain := context.WithTimeout(context.WithoutCancel(processContext), runtime.drainTimeout)
 	defer cancelDrain()
+	if err := session.Flush(drainContext); err != nil {
+		return errors.Join(processContext.Err(), fmt.Errorf("write Agent health before drain: %w", err))
+	}
 	if err := session.Enqueue(drainEnvelope(drainID, runtime.drainTimeout)); err != nil {
 		return errors.Join(processContext.Err(), fmt.Errorf("enqueue Agent DrainRequest: %w", err))
 	}
@@ -478,7 +515,7 @@ func (runtime *Runtime) drain(
 			if ack == nil || ack.GetDrainId() != drainID {
 				// 旧代或错误 ID 的 Ack 已由协议 Owner 做过方向/字段校验，但不能完成
 				// 本次两阶段握手；其他合法消息继续按既有业务路径消费。
-				if err := applyInbound(drainContext, session, configSession, pool, inbound); err != nil {
+				if err := applyInboundAndReport(drainContext, session, configSession, pool, inbound, reporter); err != nil {
 					return errors.Join(processContext.Err(), err)
 				}
 				continue
@@ -487,6 +524,14 @@ func (runtime *Runtime) drain(
 				return errors.Join(processContext.Err(), fmt.Errorf("complete Agent WorkPool drain: %w", err))
 			}
 			return processContext.Err()
+		case <-reporter.changed():
+			if err := reporter.collectChanges(); err != nil {
+				return errors.Join(processContext.Err(), fmt.Errorf("enqueue draining health report: %w", err))
+			}
+		case <-reportTicker.C:
+			if err := reporter.flush(); err != nil {
+				return errors.Join(processContext.Err(), fmt.Errorf("flush draining health report: %w", err))
+			}
 		case now := <-ticker.C:
 			// Heartbeat 在 DRAINING 仍为合法方向；握手期间继续发送，避免长连接被误判失联。
 			if err := session.Enqueue(heartbeatEnvelope(now, observedRevision(configSession))); err != nil {
@@ -512,6 +557,17 @@ func applyInbound(
 	pool workPool,
 	inbound controlsession.Inbound,
 ) error {
+	return applyInboundAndReport(ctx, session, configSession, pool, inbound, nil)
+}
+
+func applyInboundAndReport(
+	ctx context.Context,
+	session establishedSession,
+	configSession *configruntime.Session,
+	pool workPool,
+	inbound controlsession.Inbound,
+	reporter *healthReporter,
+) error {
 	if inbound.Envelope == nil {
 		return ErrUnsupportedControlMessage
 	}
@@ -525,11 +581,19 @@ func applyInbound(
 		}
 		return nil
 	case *protocolv1.ControlEnvelope_ConfigSnapshot:
-		if err := configSession.Apply(ctx, payload.ConfigSnapshot, session); err != nil {
+		sink := &configAckHealthSink{
+			session: session, reporter: reporter, snapshot: payload.ConfigSnapshot,
+		}
+		if err := configSession.Apply(ctx, payload.ConfigSnapshot, sink); err != nil {
 			if errors.Is(err, configruntime.ErrConfigRejected) {
 				return nil
 			}
 			return fmt.Errorf("apply Agent config snapshot: %w", err)
+		}
+		if sink.committed {
+			// Outbox 已在同一临界区提交 Ack 与完整集合；只有成功后
+			// 才更新 Reporter 本地基线，使后续 Changed 仅发送新 Snapshot 的增量。
+			reporter.commitFull(sink.full)
 		}
 		return nil
 	case *protocolv1.ControlEnvelope_DrainAck:

@@ -161,12 +161,12 @@ func (manager *Manager) snapshotLoop(ctx context.Context) {
 				manager.reportSnapshotRuntimeError(err)
 				continue
 			}
-			stale, sends, failures := manager.commitSnapshotCandidate(tunnelID, generation, candidate)
+			stale, updates, sends, failures := manager.commitSnapshotCandidate(tunnelID, generation, candidate)
 			if stale {
 				continue
 			}
 			manager.clearSnapshotFailure(tunnelID)
-			manager.finishSnapshotCommit(sends, failures)
+			manager.finishSnapshotCommit(updates, sends, failures)
 		}
 
 		select {
@@ -237,15 +237,16 @@ func (manager *Manager) commitSnapshotCandidate(
 	tunnelID string,
 	generation uint64,
 	candidate *snapshotCandidate,
-) (bool, []snapshotSend, []snapshotFailure) {
+) (bool, []*managedSession, []snapshotSend, []snapshotFailure) {
 	manager.mu.Lock()
 	manager.snapshotMu.Lock()
 	if manager.shutdownStarted || !manager.snapshotAccepting || manager.snapshotDirty[tunnelID] > generation {
 		manager.snapshotMu.Unlock()
 		manager.mu.Unlock()
-		return true, nil, nil
+		return true, nil, nil, nil
 	}
 
+	var updates []*managedSession
 	var sends []snapshotSend
 	var failures []snapshotFailure
 	for key, managed := range manager.byConnector {
@@ -257,16 +258,26 @@ func (manager *Manager) commitSnapshotCandidate(
 			failures = append(failures, snapshotFailure{managed: managed, err: err})
 			continue
 		}
+		updates = append(updates, managed)
 		if send != nil {
 			sends = append(sends, snapshotSend{managed: managed, candidate: send})
 		}
 	}
 	manager.snapshotMu.Unlock()
 	manager.mu.Unlock()
-	return false, sends, failures
+	return false, updates, sends, failures
 }
 
-func (manager *Manager) finishSnapshotCommit(sends []snapshotSend, failures []snapshotFailure) {
+func (manager *Manager) finishSnapshotCommit(
+	updates []*managedSession,
+	sends []snapshotSend,
+	failures []snapshotFailure,
+) {
+	// stageSnapshot 在 Manager/config 锁内只更新协议镜像；值型门禁必须在这些锁
+	// 全部释放后发布到 TunnelRuntime，避免形成 Manager -> Runtime 的反向锁序。
+	for _, managed := range updates {
+		manager.publishEligibility(managed)
+	}
 	for _, failure := range failures {
 		failure.managed.completeInitialSnapshot(failure.err)
 		failure.managed.cancel()
@@ -311,6 +322,7 @@ func (managed *managedSession) stageSnapshot(candidate *snapshotCandidate) (*sna
 			return nil, nil
 		}
 		if managed.pending == nil || candidate.revision > managed.pending.revision {
+			managed.installServiceRequirementsLocked(candidate.snapshot)
 			managed.pending = candidate
 			return nil, nil
 		}
@@ -333,6 +345,7 @@ func (managed *managedSession) stageSnapshot(candidate *snapshotCandidate) (*sna
 	if managed.hasRejected && candidate.revision <= managed.rejectedRevision {
 		return nil, nil
 	}
+	managed.installServiceRequirementsLocked(candidate.snapshot)
 	managed.outstanding = candidate
 	return candidate, nil
 }

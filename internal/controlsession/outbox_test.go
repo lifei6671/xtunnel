@@ -2,6 +2,7 @@ package controlsession
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"sync"
@@ -204,6 +205,225 @@ func TestOutboxHealthAccumulatorFreezesImmutableIncreasingBatches(t *testing.T) 
 	}
 }
 
+func TestOutboxReplaceHealthAtomicallyReplacesFullPendingSet(t *testing.T) {
+	const serviceCount = 1000
+	outbox := mustOutbox(t, 1, serviceCount)
+	oldItems := make([]*protocolv1.ServiceHealth, 0, serviceCount)
+	for index := range serviceCount {
+		oldItems = append(oldItems, &protocolv1.ServiceHealth{
+			ServiceId:   fmt.Sprintf("svc_000000000000000000000%05d", index),
+			CheckedAtMs: 1,
+		})
+	}
+	if err := outbox.Enqueue(healthEnvelope(oldItems...)); err != nil {
+		t.Fatalf("Enqueue(%d old health items) error = %v", serviceCount, err)
+	}
+
+	replacementID := "svc_11111111111111111111111111"
+	newItems := append([]*protocolv1.ServiceHealth(nil), oldItems[:serviceCount-1]...)
+	newItems = append(newItems, &protocolv1.ServiceHealth{ServiceId: replacementID, CheckedAtMs: 2})
+	if err := outbox.ReplaceHealth(newItems); err != nil {
+		t.Fatalf("ReplaceHealth(%d items) error = %v", serviceCount, err)
+	}
+
+	seen := make(map[string]*protocolv1.ServiceHealth, serviceCount)
+	wantGeneration := uint64(1)
+	for {
+		envelope, exists := outbox.Dequeue()
+		if !exists {
+			break
+		}
+		batch := envelope.GetServiceHealthBatch()
+		if batch.GetGeneration() != wantGeneration || len(batch.GetItems()) > maxHealthBatchItems {
+			t.Fatalf("batch generation/items = %d/%d, want %d/<=%d",
+				batch.GetGeneration(), len(batch.GetItems()), wantGeneration, maxHealthBatchItems)
+		}
+		wantGeneration++
+		for _, item := range batch.GetItems() {
+			seen[item.GetServiceId()] = item
+		}
+	}
+	removedID := oldItems[serviceCount-1].GetServiceId()
+	if len(seen) != serviceCount {
+		t.Fatalf("dequeued service count = %d, want %d", len(seen), serviceCount)
+	}
+	if _, exists := seen[removedID]; exists {
+		t.Fatalf("removed service %q survived replacement", removedID)
+	}
+	if got := seen[replacementID]; got == nil || got.GetCheckedAtMs() != 2 {
+		t.Fatalf("replacement service = %#v, want checked_at_ms 2", got)
+	}
+}
+
+func TestOutboxReplaceHealthPreservesNonHealthAndIncrementalMerge(t *testing.T) {
+	outbox := mustOutbox(t, 1, 4)
+	if err := outbox.Enqueue(snapshotEnvelope(testTunnelID, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.Enqueue(healthEnvelope(
+		&protocolv1.ServiceHealth{ServiceId: testServiceID, CheckedAtMs: 1},
+		&protocolv1.ServiceHealth{ServiceId: testServiceIDTwo, CheckedAtMs: 1},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.ReplaceHealth([]*protocolv1.ServiceHealth{
+		{ServiceId: testServiceID, CheckedAtMs: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.Enqueue(healthEnvelope(
+		&protocolv1.ServiceHealth{ServiceId: testServiceIDTwo, CheckedAtMs: 3},
+	)); err != nil {
+		t.Fatal(err)
+	}
+
+	if snapshot := mustDequeue(t, outbox).GetConfigSnapshot(); snapshot.GetRevision() != 1 {
+		t.Fatalf("preserved snapshot = %#v", snapshot)
+	}
+	batch := mustDequeue(t, outbox).GetServiceHealthBatch()
+	items := make(map[string]*protocolv1.ServiceHealth, len(batch.GetItems()))
+	for _, item := range batch.GetItems() {
+		items[item.GetServiceId()] = item
+	}
+	if len(items) != 2 || items[testServiceID].GetCheckedAtMs() != 2 ||
+		items[testServiceIDTwo].GetCheckedAtMs() != 3 {
+		t.Fatalf("replacement plus incremental Health = %#v", batch.GetItems())
+	}
+	assertEmpty(t, outbox)
+}
+
+func TestOutboxReplaceHealthEmptyClearsOnlyPendingHealth(t *testing.T) {
+	outbox := mustOutbox(t, 1, 2)
+	if err := outbox.Enqueue(snapshotEnvelope(testTunnelID, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.Enqueue(healthEnvelope(
+		&protocolv1.ServiceHealth{ServiceId: testServiceID},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.ReplaceHealth(nil); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := mustDequeue(t, outbox).GetConfigSnapshot(); snapshot.GetRevision() != 1 {
+		t.Fatalf("preserved snapshot = %#v", snapshot)
+	}
+	assertEmpty(t, outbox)
+}
+
+func TestOutboxReplaceHealthCapacityFailureIsAtomic(t *testing.T) {
+	outbox := mustOutbox(t, 1, 2)
+	if err := outbox.Enqueue(snapshotEnvelope(testTunnelID, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.Enqueue(healthEnvelope(
+		&protocolv1.ServiceHealth{ServiceId: testServiceID, CheckedAtMs: 1},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.ReplaceHealth([]*protocolv1.ServiceHealth{
+		{ServiceId: testServiceID, CheckedAtMs: 2},
+		{ServiceId: testServiceIDTwo, CheckedAtMs: 2},
+	}); !errors.Is(err, ErrOutboxFull) {
+		t.Fatalf("ReplaceHealth(over capacity) error = %v, want ErrOutboxFull", err)
+	}
+
+	if snapshot := mustDequeue(t, outbox).GetConfigSnapshot(); snapshot.GetRevision() != 1 {
+		t.Fatalf("preserved snapshot = %#v", snapshot)
+	}
+	batch := mustDequeue(t, outbox).GetServiceHealthBatch()
+	if len(batch.GetItems()) != 1 || batch.GetItems()[0].GetServiceId() != testServiceID ||
+		batch.GetItems()[0].GetCheckedAtMs() != 1 {
+		t.Fatalf("Health after failed replacement = %#v", batch.GetItems())
+	}
+	assertEmpty(t, outbox)
+}
+
+func TestOutboxEnqueueConfigAckAndReplaceHealthCommitsOneAtomicSequence(t *testing.T) {
+	outbox := mustOutbox(t, 1, 1)
+	if err := outbox.Enqueue(healthEnvelope(
+		&protocolv1.ServiceHealth{ServiceId: testServiceID, CheckedAtMs: 1},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.EnqueueConfigAckAndReplaceHealth(configAckEnvelope(7), []*protocolv1.ServiceHealth{
+		{ServiceId: testServiceIDTwo, CheckedAtMs: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if ack := mustDequeue(t, outbox).GetConfigAck(); ack.GetObservedRevision() != 7 {
+		t.Fatalf("first message = %#v, want ConfigAck revision 7", ack)
+	}
+	batch := mustDequeue(t, outbox).GetServiceHealthBatch()
+	if batch.GetGeneration() != 1 || len(batch.GetItems()) != 1 ||
+		batch.GetItems()[0].GetServiceId() != testServiceIDTwo || batch.GetItems()[0].GetCheckedAtMs() != 2 {
+		t.Fatalf("Health after atomic Ack = %#v, want only replacement", batch)
+	}
+	assertEmpty(t, outbox)
+}
+
+func TestOutboxEnqueueConfigAckAndReplaceHealthFailureIsAtomic(t *testing.T) {
+	t.Run("high queue full", func(t *testing.T) {
+		outbox := mustOutbox(t, 1, 1)
+		if err := outbox.Enqueue(drainRequestEnvelope("drain-1")); err != nil {
+			t.Fatal(err)
+		}
+		if err := outbox.Enqueue(healthEnvelope(
+			&protocolv1.ServiceHealth{ServiceId: testServiceID, CheckedAtMs: 1},
+		)); err != nil {
+			t.Fatal(err)
+		}
+
+		err := outbox.EnqueueConfigAckAndReplaceHealth(configAckEnvelope(7), []*protocolv1.ServiceHealth{
+			{ServiceId: testServiceIDTwo, CheckedAtMs: 2},
+		})
+		if !errors.Is(err, ErrOutboxFull) {
+			t.Fatalf("EnqueueConfigAckAndReplaceHealth(full high queue) error = %v, want ErrOutboxFull", err)
+		}
+
+		if drain := mustDequeue(t, outbox).GetDrainRequest(); drain.GetDrainId() != "drain-1" {
+			t.Fatalf("preserved high message = %#v, want original DrainRequest", drain)
+		}
+		batch := mustDequeue(t, outbox).GetServiceHealthBatch()
+		if len(batch.GetItems()) != 1 || batch.GetItems()[0].GetServiceId() != testServiceID ||
+			batch.GetItems()[0].GetCheckedAtMs() != 1 {
+			t.Fatalf("Health after failed atomic enqueue = %#v, want original item", batch.GetItems())
+		}
+		assertEmpty(t, outbox)
+	})
+
+	t.Run("health replacement full", func(t *testing.T) {
+		outbox := mustOutbox(t, 1, 2)
+		if err := outbox.Enqueue(snapshotEnvelope(testTunnelID, 1)); err != nil {
+			t.Fatal(err)
+		}
+		if err := outbox.Enqueue(healthEnvelope(
+			&protocolv1.ServiceHealth{ServiceId: testServiceID, CheckedAtMs: 1},
+		)); err != nil {
+			t.Fatal(err)
+		}
+
+		err := outbox.EnqueueConfigAckAndReplaceHealth(configAckEnvelope(7), []*protocolv1.ServiceHealth{
+			{ServiceId: testServiceID, CheckedAtMs: 2},
+			{ServiceId: testServiceIDTwo, CheckedAtMs: 2},
+		})
+		if !errors.Is(err, ErrOutboxFull) {
+			t.Fatalf("EnqueueConfigAckAndReplaceHealth(full Health replacement) error = %v, want ErrOutboxFull", err)
+		}
+
+		if snapshot := mustDequeue(t, outbox).GetConfigSnapshot(); snapshot.GetRevision() != 1 {
+			t.Fatalf("preserved normal message = %#v, want original ConfigSnapshot", snapshot)
+		}
+		batch := mustDequeue(t, outbox).GetServiceHealthBatch()
+		if len(batch.GetItems()) != 1 || batch.GetItems()[0].GetServiceId() != testServiceID ||
+			batch.GetItems()[0].GetCheckedAtMs() != 1 {
+			t.Fatalf("Health after failed atomic replacement = %#v, want original item", batch.GetItems())
+		}
+		assertEmpty(t, outbox)
+	})
+}
+
 func TestOutboxHealthBatchSplitsAtConfiguredFrameLimit(t *testing.T) {
 	first := &protocolv1.ServiceHealth{ServiceId: testServiceID, ErrorCode: "origin_timeout"}
 	second := &protocolv1.ServiceHealth{ServiceId: testServiceIDTwo, ErrorCode: "origin_refused"}
@@ -228,6 +448,29 @@ func TestOutboxHealthBatchSplitsAtConfiguredFrameLimit(t *testing.T) {
 		if size := uint64(proto.Size(envelope)); size > limit {
 			t.Fatalf("batch %d size = %d, limit = %d", generation+1, size, limit)
 		}
+	}
+	assertEmpty(t, outbox)
+}
+
+func TestOutboxHealthBatchHonorsFixedItemLimit(t *testing.T) {
+	outbox := mustOutbox(t, 1, maxHealthBatchItems+1)
+	items := make([]*protocolv1.ServiceHealth, 0, maxHealthBatchItems+1)
+	for index := range maxHealthBatchItems + 1 {
+		items = append(items, &protocolv1.ServiceHealth{
+			ServiceId: fmt.Sprintf("svc_000000000000000000000%05d", index),
+		})
+	}
+	if err := outbox.Enqueue(healthEnvelope(items...)); err != nil {
+		t.Fatalf("Enqueue(health items) error = %v", err)
+	}
+
+	first := mustDequeue(t, outbox).GetServiceHealthBatch()
+	second := mustDequeue(t, outbox).GetServiceHealthBatch()
+	if first.GetGeneration() != 1 || len(first.GetItems()) != maxHealthBatchItems {
+		t.Fatalf("first batch = generation %d items %d, want 1/%d", first.GetGeneration(), len(first.GetItems()), maxHealthBatchItems)
+	}
+	if second.GetGeneration() != 2 || len(second.GetItems()) != 1 {
+		t.Fatalf("second batch = generation %d items %d, want 2/1", second.GetGeneration(), len(second.GetItems()))
 	}
 	assertEmpty(t, outbox)
 }

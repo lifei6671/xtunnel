@@ -73,9 +73,11 @@ func TestGatewayStartupRejectsRevokedStoredSnapshotBeforeExistingAdminListener(t
 	config := serverconfig.Config{
 		AgentGateway: serverconfig.AgentGateway{Listen: gatewayAddress},
 		Limits: serverconfig.Limits{
-			MaxServicesPerTunnel:   1,
-			MaxTunnelSnapshotBytes: snapshot.MaxTunnelSnapshotSize,
-			MaxControlFrameBytes:   1 << 20,
+			MaxServicesPerTunnel:      1,
+			MaxTunnelSnapshotBytes:    snapshot.MaxTunnelSnapshotSize,
+			MaxControlFrameBytes:      1 << 20,
+			MaxHealthTargetsPerTunnel: 2_000,
+			MaxHealthTargetsGlobal:    50_000,
 		},
 	}
 	bootstrapSocketOpened := false
@@ -148,9 +150,11 @@ func TestGatewayStartupRejectsStoredSnapshotBeforeOpeningFirstAdminSocket(t *tes
 	}
 
 	config := serverconfig.Config{Limits: serverconfig.Limits{
-		MaxServicesPerTunnel:   1,
-		MaxTunnelSnapshotBytes: snapshot.MaxTunnelSnapshotSize,
-		MaxControlFrameBytes:   1 << 20,
+		MaxServicesPerTunnel:      1,
+		MaxTunnelSnapshotBytes:    snapshot.MaxTunnelSnapshotSize,
+		MaxControlFrameBytes:      1 << 20,
+		MaxHealthTargetsPerTunnel: 2_000,
+		MaxHealthTargetsGlobal:    50_000,
 	}}
 	bootstrapSocketOpened := false
 	closer, err := openGatewayAndBootstrapWith(

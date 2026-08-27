@@ -3,12 +3,14 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	repositorysqlite "github.com/lifei6671/xtunnel/internal/repository/sqlite"
 )
@@ -18,7 +20,196 @@ const (
 	serviceManagementTunnelIDTwo = "tun_01J00000000000000000000011"
 	serviceManagementIDOne       = "svc_01J00000000000000000000010"
 	serviceManagementIDTwo       = "svc_01J00000000000000000000011"
+	serviceManagementIDThree     = "svc_01J00000000000000000000012"
+	serviceManagementConnector   = "con_01J00000000000000000000010"
 )
+
+func TestServiceManagementRequiresHealthBudget(t *testing.T) {
+	store := openServiceManagementStore(t)
+	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+	service := NewServiceManagementService(store, &recordingSnapshotGate{}, &recordingSnapshotNotifier{}, nil)
+	if _, err := service.Create(
+		context.Background(), validCreateServiceInput(serviceManagementTunnelID, "missing-budget"),
+	); !errors.Is(err, ErrServiceManagementInput) {
+		t.Fatalf("Create(without Health Budget) error = %v, want ErrServiceManagementInput", err)
+	}
+	assertServiceManagementState(t, store, serviceManagementTunnelID, 0, 0)
+}
+
+func TestServiceManagementHealthBudgetRejectsTunnelAndGlobalCapacity(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		perTunnel, global uint64
+		secondTunnel      string
+	}{
+		{name: "per tunnel", perTunnel: 1, global: 2, secondTunnel: serviceManagementTunnelID},
+		{name: "global", perTunnel: 1, global: 1, secondTunnel: serviceManagementTunnelIDTwo},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := openServiceManagementStore(t)
+			seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+			seedServiceManagementTunnel(t, store, serviceManagementTunnelIDTwo)
+			budget := newServiceManagementBudget(store, test.perTunnel, test.global)
+			firstConnector, err := budget.AcquireConnector(serviceManagementTunnelID, serviceManagementConnector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer firstConnector.Release()
+			if test.secondTunnel != serviceManagementTunnelID {
+				secondConnector, err := budget.AcquireConnector(test.secondTunnel, serviceManagementConnector)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer secondConnector.Release()
+			}
+			service := newServiceManagementTestServiceWithBudget(
+				store, &recordingSnapshotGate{}, &recordingSnapshotNotifier{}, budget,
+				serviceManagementIDOne, serviceManagementIDTwo,
+			)
+			first := validCreateServiceInput(serviceManagementTunnelID, "first")
+			first.Health = &ServiceHealthInput{Type: repository.HealthTypeTCP}
+			if _, err := service.Create(context.Background(), first); err != nil {
+				t.Fatalf("Create(first) error = %v", err)
+			}
+			second := validCreateServiceInput(test.secondTunnel, "second")
+			second.Health = &ServiceHealthInput{Type: repository.HealthTypeTCP}
+			if _, err := service.Create(context.Background(), second); !errors.Is(err, healthbudget.ErrTargetCapacity) {
+				t.Fatalf("Create(over capacity) error = %v, want ErrTargetCapacity", err)
+			}
+			assertServiceManagementState(t, store, test.secondTunnel, map[string]int64{
+				serviceManagementTunnelID: 1, serviceManagementTunnelIDTwo: 0,
+			}[test.secondTunnel], map[string]int64{
+				serviceManagementTunnelID: 1, serviceManagementTunnelIDTwo: 0,
+			}[test.secondTunnel])
+			snapshot := budget.Snapshot()
+			if snapshot.Tunnels[test.secondTunnel].ReservationActive || snapshot.TargetsGlobal != 1 {
+				t.Fatalf("failed budget reservation changed state: %+v", snapshot)
+			}
+		})
+	}
+}
+
+func TestServiceManagementHealthBudgetTracksEnableDisableAndDelete(t *testing.T) {
+	store := openServiceManagementStore(t)
+	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+	budget := newServiceManagementBudget(store, 10, 10)
+	connector, err := budget.AcquireConnector(serviceManagementTunnelID, serviceManagementConnector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connector.Release()
+	service := newServiceManagementTestServiceWithBudget(
+		store, &recordingSnapshotGate{}, &recordingSnapshotNotifier{}, budget, serviceManagementIDOne,
+	)
+	input := validCreateServiceInput(serviceManagementTunnelID, "health")
+	input.Health = &ServiceHealthInput{Type: repository.HealthTypeTCP}
+	created, err := service.Create(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHealthBudgetTunnel(t, budget, 1, 1, 1)
+
+	disabled := false
+	updated, err := service.Update(context.Background(), UpdateServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Enabled: &disabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHealthBudgetTunnel(t, budget, 2, 0, 0)
+
+	enabled := true
+	updated, err = service.Update(context.Background(), UpdateServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: updated.Service.Version, Enabled: &enabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHealthBudgetTunnel(t, budget, 3, 1, 1)
+	if _, err := service.Delete(context.Background(), DeleteServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: updated.Service.Version,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertHealthBudgetTunnel(t, budget, 4, 0, 0)
+}
+
+func TestServiceManagementHealthBudgetReleasesFailuresAndCommitsBeforeNotify(t *testing.T) {
+	store := openServiceManagementStore(t)
+	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+	budget := newServiceManagementBudget(store, 10, 10)
+	connector, err := budget.AcquireConnector(serviceManagementTunnelID, serviceManagementConnector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connector.Release()
+
+	gate := &recordingSnapshotGate{err: errors.New("gate failed")}
+	service := newServiceManagementTestServiceWithBudget(
+		store, gate, &recordingSnapshotNotifier{}, budget, serviceManagementIDOne, serviceManagementIDTwo,
+	)
+	input := validCreateServiceInput(serviceManagementTunnelID, "gate")
+	input.Health = &ServiceHealthInput{Type: repository.HealthTypeTCP}
+	if _, err := service.Create(context.Background(), input); err == nil {
+		t.Fatal("Create(gate failure) succeeded")
+	}
+	assertHealthBudgetTunnel(t, budget, 0, 0, 0)
+
+	gate.setError(nil)
+	created, err := service.Create(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHealthBudgetTunnel(t, budget, 1, 1, 1)
+
+	duplicateService := newServiceManagementTestServiceWithBudget(
+		store, gate, &recordingSnapshotNotifier{}, budget, serviceManagementIDTwo,
+	)
+	duplicate := validCreateServiceInput(serviceManagementTunnelID, "duplicate")
+	duplicate.Health = &ServiceHealthInput{Type: repository.HealthTypeTCP}
+	if _, err := duplicateService.Create(context.Background(), duplicate); err == nil {
+		t.Fatal("Create(database failure) succeeded")
+	}
+	assertHealthBudgetTunnel(t, budget, 1, 1, 1)
+
+	name := "renamed"
+	held, err := budget.ReserveConfiguration(serviceManagementTunnelID, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nameOnly, err := service.Update(context.Background(), UpdateServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Name: &name,
+	})
+	if err != nil {
+		t.Fatalf("Update(name only with active budget reservation) error = %v", err)
+	}
+	noOp, err := service.Update(context.Background(), UpdateServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: nameOnly.Service.Version, Name: &name,
+	})
+	if err != nil || noOp.Changed {
+		t.Fatalf("Update(no-op with active budget reservation) = changed:%t error:%v", noOp.Changed, err)
+	}
+	if !held.Release() {
+		t.Fatal("release held configuration reservation failed")
+	}
+
+	notifier := &recordingSnapshotNotifier{afterMark: func(_ string, _ int) {
+		assertHealthBudgetTunnel(t, budget, 2, 0, 0)
+	}}
+	service = newServiceManagementTestServiceWithBudget(store, gate, notifier, budget)
+	disabled := false
+	if _, err := service.Update(context.Background(), UpdateServiceInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: 1, ExpectedServiceVersion: nameOnly.Service.Version, Enabled: &disabled,
+	}); err != nil {
+		t.Fatalf("Update(commit before notifier) error = %v", err)
+	}
+}
 
 func TestServiceManagementCreateAppliesDefaultsAndGatesCandidate(t *testing.T) {
 	store := openServiceManagementStore(t)
@@ -314,6 +505,89 @@ func TestServiceManagementNotifierFailureReturnsCommittedResult(t *testing.T) {
 	}
 }
 
+func TestServiceManagementPostCommitCleanupStillCommitsBudgetAndNotifies(t *testing.T) {
+	cleanupErr := errors.New("injected service transaction cleanup failure")
+	signalErr := errors.New("injected service reconcile signal failure")
+	for _, operation := range []string{"Create", "Update", "Delete"} {
+		t.Run(operation, func(t *testing.T) {
+			store := openServiceManagementStore(t)
+			seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+			gate := &recordingSnapshotGate{}
+			budget := newServiceManagementBudget(store, 10, 10)
+
+			var created ServiceMutationResult
+			if operation != "Create" {
+				seed := validCreateServiceInput(serviceManagementTunnelID, "before")
+				if operation == "Delete" {
+					seed.Health = &ServiceHealthInput{Type: repository.HealthTypeTCP}
+				}
+				var err error
+				created, err = newServiceManagementTestServiceWithBudget(
+					store, gate, &recordingSnapshotNotifier{}, budget, serviceManagementIDOne,
+				).Create(context.Background(), seed)
+				if err != nil {
+					t.Fatalf("seed Create() error = %v", err)
+				}
+			}
+			connector, err := budget.AcquireConnector(serviceManagementTunnelID, serviceManagementConnector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connector.Release()
+
+			faultStore := &serviceManagementPostCommitCleanupStore{Store: store, err: cleanupErr}
+			notifier := &recordingSnapshotNotifier{err: signalErr}
+			identifiers := []string(nil)
+			if operation == "Create" {
+				identifiers = []string{serviceManagementIDOne}
+			}
+			service := newServiceManagementTestServiceWithBudget(
+				faultStore, gate, notifier, budget, identifiers...,
+			)
+			var result ServiceMutationResult
+			switch operation {
+			case "Create":
+				input := validCreateServiceInput(serviceManagementTunnelID, "created")
+				input.Health = &ServiceHealthInput{Type: repository.HealthTypeTCP}
+				result, err = service.Create(context.Background(), input)
+			case "Update":
+				result, err = service.Update(context.Background(), UpdateServiceInput{
+					TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+					ExpectedTunnelVersion: 1, ExpectedServiceVersion: created.Service.Version,
+					Health: &ServiceHealthInput{Type: repository.HealthTypeTCP},
+				})
+			case "Delete":
+				result, err = service.Delete(context.Background(), DeleteServiceInput{
+					TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+					ExpectedTunnelVersion: 1, ExpectedServiceVersion: created.Service.Version,
+				})
+			}
+
+			if !errors.Is(err, repository.ErrPostCommitCleanup) || !errors.Is(err, cleanupErr) ||
+				!errors.Is(err, ErrServiceRuntimeConvergence) || !errors.Is(err, signalErr) {
+				t.Fatalf("%s() error = %v, want cleanup and convergence causes", operation, err)
+			}
+			if !result.Changed || result.Service.ID == "" {
+				t.Fatalf("%s() committed result = %+v", operation, nonSensitiveMutationState(result))
+			}
+			if calls := notifier.snapshot(); !reflect.DeepEqual(calls, []string{serviceManagementTunnelID}) {
+				t.Fatalf("%s() dirty calls = %v", operation, calls)
+			}
+			switch operation {
+			case "Create":
+				assertServiceManagementState(t, store, serviceManagementTunnelID, 1, 1)
+				assertHealthBudgetTunnel(t, budget, 1, 1, 1)
+			case "Update":
+				assertServiceManagementState(t, store, serviceManagementTunnelID, 2, 1)
+				assertHealthBudgetTunnel(t, budget, 2, 1, 1)
+			case "Delete":
+				assertServiceManagementState(t, store, serviceManagementTunnelID, 2, 0)
+				assertHealthBudgetTunnel(t, budget, 2, 0, 0)
+			}
+		})
+	}
+}
+
 func TestServiceManagementUpdateHandlesNameNoopAndZeroValueSnapshotFields(t *testing.T) {
 	store := openServiceManagementStore(t)
 	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
@@ -558,13 +832,13 @@ func TestServiceManagementConcurrentSameServiceHasSingleCASWinner(t *testing.T) 
 
 	start := make(chan struct{})
 	errorsByAttempt := make(chan error, 2)
-	for _, name := range []string{"left", "right"} {
-		name := name
+	for range 2 {
 		go func() {
 			<-start
+			disabled := false
 			_, err := service.Update(context.Background(), UpdateServiceInput{
 				TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
-				ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Name: &name,
+				ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Enabled: &disabled,
 			})
 			errorsByAttempt <- err
 		}()
@@ -586,9 +860,10 @@ func TestServiceManagementConcurrentSameServiceHasSingleCASWinner(t *testing.T) 
 		t.Fatalf("concurrent Update() outcomes = success:%d conflict:%d", successes, conflicts)
 	}
 	stored := readServiceManagementService(t, store, serviceManagementTunnelID, created.Service.ID)
-	if stored.Version != 2 || stored.RequiredRevision != 1 {
+	if stored.Version != 2 || stored.RequiredRevision != 2 || stored.Enabled {
 		t.Fatalf("concurrent Update() stored state = %+v", nonSensitiveServiceState(stored))
 	}
+	assertHealthBudgetTunnel(t, service.budget, 2, 0, 0)
 }
 
 func TestServiceManagementConcurrentDifferentServicesAdvanceDistinctRevisions(t *testing.T) {
@@ -645,6 +920,125 @@ func TestServiceManagementConcurrentDifferentServicesAdvanceDistinctRevisions(t 
 	assertServiceManagementState(t, store, serviceManagementTunnelID, 4, 2)
 }
 
+func TestServiceManagementMutationOwnerSerializesSameTunnelWithoutBlockingOthers(t *testing.T) {
+	store := openServiceManagementStore(t)
+	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+	seedServiceManagementTunnel(t, store, serviceManagementTunnelIDTwo)
+	gate := &recordingSnapshotGate{}
+	setup := newServiceManagementTestService(
+		store, gate, serviceManagementIDOne, serviceManagementIDTwo, serviceManagementIDThree,
+	)
+	first, err := setup.Create(context.Background(), validCreateServiceInput(serviceManagementTunnelID, "first"))
+	if err != nil {
+		t.Fatalf("Create(first) error = %v", err)
+	}
+	second, err := setup.Create(context.Background(), validCreateServiceInput(serviceManagementTunnelID, "second"))
+	if err != nil {
+		t.Fatalf("Create(second) error = %v", err)
+	}
+	other, err := setup.Create(context.Background(), validCreateServiceInput(serviceManagementTunnelIDTwo, "other"))
+	if err != nil {
+		t.Fatalf("Create(other Tunnel) error = %v", err)
+	}
+
+	blockingStore := &serviceManagementCommitBlockingStore{
+		Store: store, blockTag: "first", committed: make(chan struct{}), release: make(chan struct{}),
+	}
+	service := NewServiceManagementService(blockingStore, gate, &recordingSnapshotNotifier{}, setup.budget)
+	service.now = func() time.Time { return time.Unix(200, 0) }
+	type mutationOutcome struct {
+		result ServiceMutationResult
+		err    error
+	}
+	firstOutcome := make(chan mutationOutcome, 1)
+	go func() {
+		disabled := false
+		result, updateErr := service.Update(
+			context.WithValue(context.Background(), serviceManagementMutationContextKey{}, "first"),
+			UpdateServiceInput{
+				TunnelID: serviceManagementTunnelID, ServiceID: first.Service.ID,
+				ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Enabled: &disabled,
+			},
+		)
+		firstOutcome <- mutationOutcome{result: result, err: updateErr}
+	}()
+	select {
+	case <-blockingStore.committed:
+	case <-time.After(time.Second):
+		t.Fatal("first Tunnel mutation did not reach the post-COMMIT budget window")
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(blockingStore.release)
+		}
+	}()
+
+	secondOutcome := make(chan mutationOutcome, 1)
+	go func() {
+		disabled := false
+		result, updateErr := service.Update(context.Background(), UpdateServiceInput{
+			TunnelID: serviceManagementTunnelID, ServiceID: second.Service.ID,
+			ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Enabled: &disabled,
+		})
+		secondOutcome <- mutationOutcome{result: result, err: updateErr}
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		service.mutationOwnersMu.Lock()
+		owner := service.mutationOwners[serviceManagementTunnelID]
+		waiting := owner != nil && owner.references == 2
+		service.mutationOwnersMu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second same-Tunnel mutation did not wait on the existing owner")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	otherOutcome := make(chan mutationOutcome, 1)
+	go func() {
+		disabled := false
+		result, updateErr := service.Update(context.Background(), UpdateServiceInput{
+			TunnelID: serviceManagementTunnelIDTwo, ServiceID: other.Service.ID,
+			ExpectedTunnelVersion: 1, ExpectedServiceVersion: 1, Enabled: &disabled,
+		})
+		otherOutcome <- mutationOutcome{result: result, err: updateErr}
+	}()
+	select {
+	case outcome := <-otherOutcome:
+		if outcome.err != nil || outcome.result.TunnelRevision != 2 {
+			t.Fatalf("different-Tunnel Update() = (%+v, %v), want revision 2 while first Tunnel is blocked", outcome.result, outcome.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("different-Tunnel mutation was globally blocked")
+	}
+	select {
+	case outcome := <-secondOutcome:
+		t.Fatalf("same-Tunnel mutation completed before prior Budget Commit: (%+v, %v)", outcome.result, outcome.err)
+	default:
+	}
+
+	close(blockingStore.release)
+	released = true
+	firstResult := <-firstOutcome
+	secondResult := <-secondOutcome
+	if firstResult.err != nil || firstResult.result.TunnelRevision != 3 {
+		t.Fatalf("first same-Tunnel Update() = (%+v, %v), want revision 3", firstResult.result, firstResult.err)
+	}
+	if secondResult.err != nil || secondResult.result.TunnelRevision != 4 {
+		t.Fatalf("second same-Tunnel Update() = (%+v, %v), want revision 4", secondResult.result, secondResult.err)
+	}
+	service.mutationOwnersMu.Lock()
+	owners := len(service.mutationOwners)
+	service.mutationOwnersMu.Unlock()
+	if owners != 0 {
+		t.Fatalf("mutation owner entries after completion = %d, want 0", owners)
+	}
+}
+
 type snapshotGateCall struct {
 	tunnelID string
 	revision int64
@@ -667,6 +1061,42 @@ type recordingSnapshotNotifier struct {
 type revisionOverrideStore struct {
 	repository.Store
 	revision int64
+}
+
+type serviceManagementMutationContextKey struct{}
+
+type serviceManagementCommitBlockingStore struct {
+	repository.Store
+	blockTag  string
+	committed chan struct{}
+	release   chan struct{}
+}
+
+type serviceManagementPostCommitCleanupStore struct {
+	repository.Store
+	err error
+}
+
+func (store *serviceManagementCommitBlockingStore) WithTx(
+	ctx context.Context,
+	fn func(repository.TxStore) error,
+) error {
+	err := store.Store.WithTx(ctx, fn)
+	if err == nil && ctx.Value(serviceManagementMutationContextKey{}) == store.blockTag {
+		close(store.committed)
+		<-store.release
+	}
+	return err
+}
+
+func (store *serviceManagementPostCommitCleanupStore) WithTx(
+	ctx context.Context,
+	fn func(repository.TxStore) error,
+) error {
+	if err := store.Store.WithTx(ctx, fn); err != nil {
+		return err
+	}
+	return errors.Join(repository.ErrPostCommitCleanup, store.err)
 }
 
 func (store revisionOverrideStore) WithTx(ctx context.Context, fn func(repository.TxStore) error) error {
@@ -759,7 +1189,19 @@ func newServiceManagementTestServiceWithNotifier(
 	notifier SnapshotReconcileNotifier,
 	identifiers ...string,
 ) *ServiceManagementService {
-	service := NewServiceManagementService(store, gate, notifier)
+	return newServiceManagementTestServiceWithBudget(
+		store, gate, notifier, newServiceManagementBudget(store, 1_000_000, 1_000_000), identifiers...,
+	)
+}
+
+func newServiceManagementTestServiceWithBudget(
+	store repository.Store,
+	gate TunnelSnapshotGate,
+	notifier SnapshotReconcileNotifier,
+	budget *healthbudget.Manager,
+	identifiers ...string,
+) *ServiceManagementService {
+	service := NewServiceManagementService(store, gate, notifier, budget)
 	var mutex sync.Mutex
 	next := 0
 	service.newServiceID = func() (string, error) {
@@ -771,6 +1213,54 @@ func newServiceManagementTestServiceWithNotifier(
 	}
 	service.now = func() time.Time { return time.Unix(100, 0) }
 	return service
+}
+
+func assertHealthBudgetTunnel(
+	t *testing.T,
+	budget *healthbudget.Manager,
+	revision, enabled, targets uint64,
+) {
+	t.Helper()
+	snapshot := budget.Snapshot().Tunnels[serviceManagementTunnelID]
+	if snapshot.Revision != revision || snapshot.EnabledCount != enabled || snapshot.Targets != targets ||
+		snapshot.ReservationActive {
+		t.Fatalf("Health Budget Tunnel = %+v, want revision:%d enabled:%d targets:%d no reservation",
+			snapshot, revision, enabled, targets)
+	}
+}
+
+func newServiceManagementBudget(store repository.Store, perTunnel, global uint64) *healthbudget.Manager {
+	manager, err := healthbudget.New(healthbudget.Options{
+		MaxTargetsPerTunnel: perTunnel, MaxTargetsGlobal: global,
+	})
+	if err != nil {
+		panic(fmt.Sprintf("create Health Budget Manager: %v", err))
+	}
+	for _, tunnelID := range []string{serviceManagementTunnelID, serviceManagementTunnelIDTwo} {
+		var tunnel repository.Tunnel
+		var services []repository.Service
+		err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+			var err error
+			tunnel, err = view.Tunnels().Get(context.Background(), tunnelID)
+			if err != nil {
+				return err
+			}
+			services, err = view.Services().ListByTunnel(context.Background(), tunnelID)
+			return err
+		})
+		if errors.Is(err, repository.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			panic(fmt.Sprintf("read Health Budget baseline: %v", err))
+		}
+		if err := manager.InitializeTunnel(
+			tunnelID, uint64(tunnel.DesiredRevision), healthEnabledServiceCount(services),
+		); err != nil {
+			panic(fmt.Sprintf("initialize Health Budget baseline: %v", err))
+		}
+	}
+	return manager
 }
 
 func validCreateServiceInput(tunnelID, name string) CreateServiceInput {

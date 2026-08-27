@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/identity"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 )
@@ -138,6 +139,95 @@ func TestRegistryConnectorLimitsCountReplacementOnce(t *testing.T) {
 	}
 	if got := limitManager.Snapshot().Connectors; got != 0 {
 		t.Fatalf("Connectors after clear = %d, want 0", got)
+	}
+}
+
+func TestRegistryHealthBudgetRejectsNewConnectorAndAllowsAtCapReplacement(t *testing.T) {
+	budget := newRuntimeHealthBudget(t, 1, 1)
+	registry := NewRegistryWithLimitsAndHealthBudget(nil, budget)
+	registry.newSession = sessionGenerator(1)
+
+	first, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID)
+	if err != nil {
+		t.Fatalf("installAuthenticated(first) error = %v", err)
+	}
+	replacement, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID)
+	if err != nil {
+		t.Fatalf("installAuthenticated(at-cap replacement) error = %v", err)
+	}
+	if replacement.Generation != first.Generation+1 {
+		t.Fatalf("replacement Generation = %d, want %d", replacement.Generation, first.Generation+1)
+	}
+	snapshot := budget.Snapshot()
+	key := healthbudget.ConnectorKey{TunnelID: runtimeTunnelID, ConnectorID: runtimeConnectorID}
+	if snapshot.TargetsGlobal != 1 || snapshot.ConnectorReferences[key] != 1 {
+		t.Fatalf("budget after replacement = %#v, want one Target and one finalized reference", snapshot)
+	}
+
+	pending, err := registry.ReserveAuthenticated(runtimeTunnelID, runtimeConnectorIDTwo)
+	if err != nil {
+		t.Fatalf("ReserveAuthenticated(over budget) error = %v", err)
+	}
+	if _, err := registry.InstallAuthenticated(pending); !errors.Is(err, healthbudget.ErrTargetCapacity) {
+		t.Fatalf("InstallAuthenticated(over budget) error = %v, want ErrTargetCapacity", err)
+	}
+	if _, exists := registry.Current(runtimeTunnelID, runtimeConnectorIDTwo); exists {
+		t.Fatal("over-budget InstallAuthenticated published a partial Current Session")
+	}
+	if !registry.CancelAuthenticated(pending) {
+		t.Fatal("failed Health acquisition consumed the pending Session")
+	}
+	snapshot = budget.Snapshot()
+	if snapshot.TargetsGlobal != 1 || len(snapshot.ConnectorReferences) != 1 || snapshot.ConnectorReferences[key] != 1 {
+		t.Fatalf("budget after rejected Connector = %#v, want original owner unchanged", snapshot)
+	}
+}
+
+func TestAuthenticatedInstallHealthBudgetRollbackChainReleasesEachGenerationOnce(t *testing.T) {
+	budget := newRuntimeHealthBudget(t, 1, 1)
+	registry := NewRegistryWithLimitsAndHealthBudget(nil, budget)
+	registry.newSession = sessionGenerator(1)
+	stable, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID)
+	if err != nil {
+		t.Fatalf("installAuthenticated(stable) error = %v", err)
+	}
+	installReplacement := func(name string) *AuthenticatedSessionInstall {
+		t.Helper()
+		pending, reserveErr := registry.ReserveAuthenticated(runtimeTunnelID, runtimeConnectorID)
+		if reserveErr != nil {
+			t.Fatalf("ReserveAuthenticated(%s) error = %v", name, reserveErr)
+		}
+		install, installErr := registry.InstallAuthenticated(pending)
+		if installErr != nil {
+			t.Fatalf("InstallAuthenticated(%s) error = %v", name, installErr)
+		}
+		return install
+	}
+
+	older := installReplacement("older")
+	newer := installReplacement("newer")
+	key := healthbudget.ConnectorKey{TunnelID: runtimeTunnelID, ConnectorID: runtimeConnectorID}
+	if got := budget.Snapshot().ConnectorReferences[key]; got != 3 {
+		t.Fatalf("references before rollback = %d, want 3 generations", got)
+	}
+	if older.Rollback() {
+		t.Fatal("older Rollback() replaced newer Current")
+	}
+	if !newer.Rollback() {
+		t.Fatal("newer Rollback() did not resolve replacement chain")
+	}
+	if current, exists := registry.Current(runtimeTunnelID, runtimeConnectorID); !exists || current != stable {
+		t.Fatalf("Current() = %#v, %v, want stable %#v", current, exists, stable)
+	}
+	snapshot := budget.Snapshot()
+	if snapshot.TargetsGlobal != 1 || snapshot.ConnectorReferences[key] != 1 {
+		t.Fatalf("budget after rollback chain = %#v, want only stable generation", snapshot)
+	}
+	if newer.Rollback() || newer.Finalize() || older.Finalize() {
+		t.Fatal("completed replacement chain changed state on repeated finalization")
+	}
+	if got := budget.Snapshot().ConnectorReferences[key]; got != 1 {
+		t.Fatalf("references after repeated cleanup = %d, want 1", got)
 	}
 }
 
@@ -424,7 +514,9 @@ func TestRegistryDifferentTunnelSessionLocksAreIndependent(t *testing.T) {
 
 func TestRegistryConcurrentReplacement(t *testing.T) {
 	const replacements = 64
-	registry := newRegistry(sessionGenerator(1))
+	budget := newRuntimeHealthBudget(t, 1, 1)
+	registry := NewRegistryWithLimitsAndHealthBudget(nil, budget)
+	registry.newSession = sessionGenerator(1)
 	var wait sync.WaitGroup
 	errorsCh := make(chan error, replacements)
 	sessionsCh := make(chan Session, replacements)
@@ -461,6 +553,11 @@ func TestRegistryConcurrentReplacement(t *testing.T) {
 	current, found := registry.Current(runtimeTunnelID, runtimeConnectorID)
 	if !found || current.Generation != replacements {
 		t.Fatalf("Current() = %#v, %v, want generation %d", current, found, replacements)
+	}
+	key := healthbudget.ConnectorKey{TunnelID: runtimeTunnelID, ConnectorID: runtimeConnectorID}
+	snapshot := budget.Snapshot()
+	if snapshot.TargetsGlobal != 1 || snapshot.ConnectorReferences[key] != 1 {
+		t.Fatalf("budget after concurrent replacements = %#v, want one Current reference", snapshot)
 	}
 }
 
@@ -799,4 +896,19 @@ func sessionGenerator(start int) func() (string, error) {
 		next++
 		return id, nil
 	}
+}
+
+func newRuntimeHealthBudget(t *testing.T, perTunnel, global uint64) *healthbudget.Manager {
+	t.Helper()
+	manager, err := healthbudget.New(healthbudget.Options{
+		MaxTargetsPerTunnel: perTunnel,
+		MaxTargetsGlobal:    global,
+	})
+	if err != nil {
+		t.Fatalf("healthbudget.New() error = %v", err)
+	}
+	if err := manager.InitializeTunnel(runtimeTunnelID, 1, 1); err != nil {
+		t.Fatalf("InitializeTunnel() error = %v", err)
+	}
+	return manager
 }

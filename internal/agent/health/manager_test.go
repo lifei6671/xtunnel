@@ -29,6 +29,58 @@ func (*unusedDialer) DialOrigin(context.Context, string) (net.Conn, protocolv1.E
 	return nil, protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE, errors.New("unused dialer")
 }
 
+func TestSnapshotAndChangedPublishLatestStateWithoutBlockingOwner(t *testing.T) {
+	manager := newManager(defaultOptions())
+	gate := &testGate{}
+	gate.active.Store(true)
+	states := map[string]*target{
+		testServiceID: {state: State{Status: protocolv1.HealthStatus_HEALTH_STATUS_UNKNOWN, ServiceRevision: 1}},
+	}
+	manager.publishStates(states, gate)
+	select {
+	case <-manager.Changed():
+	default:
+		t.Fatal("first visible state did not publish a change notification")
+	}
+
+	view := manager.Snapshot()
+	view[testServiceID] = State{Status: protocolv1.HealthStatus_HEALTH_STATUS_UNHEALTHY, ServiceRevision: 99}
+	if state := manager.Snapshot()[testServiceID]; state.ServiceRevision != 1 {
+		t.Fatalf("caller mutated Manager snapshot: %#v", state)
+	}
+
+	// 两次发布发生在通知消费前时，容量一的 channel 只保留一个唤醒；重新读取快照
+	// 仍必须得到最后一次状态，而不是通知对应的中间状态。
+	states[testServiceID].state.Status = protocolv1.HealthStatus_HEALTH_STATUS_HEALTHY
+	manager.publishStates(states, gate)
+	states[testServiceID].state.Status = protocolv1.HealthStatus_HEALTH_STATUS_UNHEALTHY
+	manager.publishStates(states, gate)
+	select {
+	case <-manager.Changed():
+	default:
+		t.Fatal("coalesced state changes did not retain a notification")
+	}
+	select {
+	case <-manager.Changed():
+		t.Fatal("coalesced state changes queued more than one notification")
+	default:
+	}
+	if state := manager.Snapshot()[testServiceID]; state.Status != protocolv1.HealthStatus_HEALTH_STATUS_UNHEALTHY {
+		t.Fatalf("Snapshot() status = %s, want latest UNHEALTHY", state.Status)
+	}
+
+	gate.active.Store(false)
+	manager.publishStates(states, nil)
+	select {
+	case <-manager.Changed():
+	default:
+		t.Fatal("Gate hide did not notify snapshot readers")
+	}
+	if snapshot := manager.Snapshot(); snapshot != nil {
+		t.Fatalf("inactive Gate Snapshot() = %#v, want nil", snapshot)
+	}
+}
+
 func TestTargetStateTransitions(t *testing.T) {
 	current := &target{
 		spec:  targetSpec{serviceRevision: 7, failureThreshold: 2, successThreshold: 2},

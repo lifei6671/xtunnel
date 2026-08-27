@@ -284,6 +284,8 @@ func gatewayLifecycleTestConfig(dataDir, listen string) serverconfig.Config {
 		Limits: serverconfig.Limits{
 			MaxConnectors:                8,
 			MaxConnectorsPerTunnel:       4,
+			MaxHealthTargetsPerTunnel:    2_000,
+			MaxHealthTargetsGlobal:       50_000,
 			MaxServicesPerTunnel:         1_000,
 			MaxTunnelSnapshotBytes:       768 << 10,
 			MaxPendingTLSHandshakes:      1,

@@ -1,6 +1,6 @@
 # XTunnel
 
-XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面已通过阶段 Review 与全绿 CI；M2 Credential Lifecycle & Failover Hardening 已通过用户阶段 Review，仍等待覆盖本地提交的 CI 证据；M3-01 至 M3-08 已完成本地实现与独立复审，当前保持 `REVIEW`。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换与持续 Snapshot Reconcile；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，并由进程级中心调度器执行服务健康检查。Health Batch/Eligible、Management REST、生产 Public Listener 和 `/metrics` 导出仍由后续里程碑实现。
+XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面已通过阶段 Review 与全绿 CI；M2 Credential Lifecycle & Failover Hardening 已通过用户阶段 Review，仍等待覆盖本地提交的 CI 证据；M3-01 至 M3-10 已完成本地实现与独立复审，当前保持 `REVIEW`。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot Reconcile、按 Service Health/Revision 过滤的 Connector 选择，以及两级 Health Target 硬预算；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。Tunnel/Connector/Service Status、Management REST、生产 Public Listener 和 `/metrics` 导出仍由后续里程碑实现。
 
 ## 开发运行
 
@@ -71,7 +71,7 @@ Server 的 `--config` 可省略；`--set` 可以重复使用，同一路径以�
 
 Connection Token 对用户始终是单个不透明的 `xta_...` 字符串，语义上携带 Server Endpoint、TLS Trust、Tunnel/Token Identity 与认证 Secret。创建 Tunnel 时首次签发；之后“添加 Connector”只取回逐字节相同的当前 Token，不创建 Connector 数据库行，也不新增 Token Version。只有显式 Rotate 才产生新版本；Token Revoke 只阻止新认证，Tunnel Revoke 则在持久提交后关闭全部 generation。上述 Application Workflow 已完成，REST Handler 仍归 M5。`run` 按 `--token`、`XTUNNEL_TOKEN`、OS Service Credential 的顺序取值；Linux systemd 使用运行时 Credential `xtunnel-agent.token`，Windows SCM 使用 DPAPI Machine-scope 加密 Credential。缺失时启动失败。
 
-`--token` 只用于 `run` 的前台交互运行和 `service install` 的一次性安装输入。持久 Linux Unit 或 Windows SCM 配置都不包含 Token；Linux 自安装将它保存为 root-only `LoadCredential` Source，Windows 自安装将它保存为 `%ProgramData%\XTunnel\credentials\agent.token.dpapi` 的 DPAPI Machine-scope 密文。Tunnel 下的 Service、Origin 和 Health Policy 由 Server 远端下发，Agent 只在内存中应用。每次启动或重连都由 Server 先发送当前完整 Snapshot；APPLIED ConfigAck 前，Connector 不会进入 ONLINE、Work Auth、Pool 或 WorkDemand。后续 Service Origin 变更经持续 Reconcile 原子生效，无需重启 Agent；每条新连接使用系统 Resolver 解析 DNS，并让 DNS、IPv4/IPv6、TCP 与 HTTPS TLS 握手共同受该 Service 的 `connect_timeout` 约束。Agent 使用单个中心 Scheduler、固定并发与 Rate Budget、Heap 时序和 Jitter 执行 TCP/HTTP Health Check，结果只保存在当前 Snapshot generation 的内存状态中。V0.1 允许受信管理面配置 Loopback、RFC1918 和其他内网 Origin；可选 Egress Policy 以及 Health Batch/Eligible 仍属于后续阶段。
+`--token` 只用于 `run` 的前台交互运行和 `service install` 的一次性安装输入。持久 Linux Unit 或 Windows SCM 配置都不包含 Token；Linux 自安装将它保存为 root-only `LoadCredential` Source，Windows 自安装将它保存为 `%ProgramData%\XTunnel\credentials\agent.token.dpapi` 的 DPAPI Machine-scope 密文。Tunnel 下的 Service、Origin 和 Health Policy 由 Server 远端下发，Agent 只在内存中应用。每次启动或重连都由 Server 先发送当前完整 Snapshot；APPLIED ConfigAck 前，Connector 不会进入 ONLINE、Work Auth、Pool 或 WorkDemand。后续 Service Origin 变更经持续 Reconcile 原子生效，无需重启 Agent；每条新连接使用系统 Resolver 解析 DNS，并让 DNS、IPv4/IPv6、TCP 与 HTTPS TLS 握手共同受该 Service 的 `connect_timeout` 约束。Agent 使用单个中心 Scheduler、固定并发与 Rate Budget、Heap 时序和 Jitter 执行 TCP/HTTP Health Check；结果按 Service 合并，固定每批最多 128 项、每秒 Flush，并在 Outbox 出队时按当前 Control Session 分配 generation。APPLIED ConfigAck 与重连全量 Health 通过同一 Outbox 事务提交，不会夹入旧状态。Server 只让 Current、非 Draining、已观测目标 Revision 且 Service 启用的 Connector 参与选择；Health Disabled 直接通过健康门禁，启用 Health 的 Service 必须具有当前 Revision、未超过 `2 × interval` 的 HEALTHY 报告，再按 Idle/Capacity、Least Active + RR 选择。Server 同时按 `(tunnel_id, connector_id)` 对 Health-enabled Service 计费，单 Tunnel 与全局上限来自 Server Schema；同 Connector 重连只增加 generation 引用而不重复计费，超限的新 Control Auth 返回可重试的 `HEALTH_BUDGET_EXCEEDED`，配置变更则在 SQLite 写入前 Reserve，并在事务提交后 Commit。V0.1 允许受信管理面配置 Loopback、RFC1918 和其他内网 Origin；可选 Egress Policy 仍属于后续阶段。
 
 当前进程在启动输入校验通过后初始化标准库 `log/slog` JSON Handler，并在 `info` 级别输出 `process_started`、`process_stopped` 以及 Connector connected/replaced/draining/disconnected 生命周期事件。基础字段固定为 `timestamp`、`level`、`component`、`event`；真实请求或 Trace 上下文存在时可追加 `request_id`、`trace_id`。Session Manager 同时提供五项无 Label Runtime Metric Source，HTTP `/metrics` 导出归 M6。
 
@@ -85,6 +85,7 @@ Resolve Stable Data Target
 → Open SQLite with GORM
 → Run Forward-only Migration
 → Load/Create independent Tunnel Token Master Key
+→ Validate stored Snapshots and rebuild Health Target Budget
 ```
 
 `server.data_dir` 必须是绝对路径，父目录和正式数据目录都需预先存在；Server 不会自动创建数据目录。Linux 运行环境还需预先创建归 Runtime UID 所有、权限为 `0700` 的 `/run/xtunnel`。数据库固定为 `<server.data_dir>/xtunnel.db`，连接使用 WAL、Foreign Keys、5 秒 Busy Timeout 和 Normal Synchronous。完整 Tunnel Token 只以 AES-256-GCM 密文写入数据库，独立 32 字节主密钥位于 `<server.data_dir>/credentials/tunnel-token.key`；只要数据库已有 Token 密文，密钥缺失、损坏或权限不安全就会阻止启动。发现待处理 Restore Journal 时，当前版本会在打开数据库前拒绝启动；正式恢复状态机由后续 M3-12 实现。

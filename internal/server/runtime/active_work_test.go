@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 )
 
 const (
@@ -231,6 +233,74 @@ func TestRetiredSessionIDRemainsReservedUntilActiveWorkFinishes(t *testing.T) {
 	}
 	if !registry.CancelAuthenticated(reused) {
 		t.Fatal("CancelAuthenticated(reused) = false")
+	}
+}
+
+func TestRetiredSessionHealthTargetRemainsReservedUntilActiveWorkFinishes(t *testing.T) {
+	budget := newRuntimeHealthBudget(t, 1, 1)
+	registry := NewRegistryWithLimitsAndHealthBudget(nil, budget)
+	registry.newSession = sessionGenerator(1)
+	fixture := newActiveWorkFixtureWithRegistry(t, registry, runtimeTunnelID, runtimeConnectorID)
+	work, err := fixture.tunnel.RegisterActiveWork(fixture.spec(runtimeWorkID, runtimeConnectionID))
+	if err != nil {
+		t.Fatalf("RegisterActiveWork() error = %v", err)
+	}
+	replacement, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID)
+	if err != nil {
+		t.Fatalf("installAuthenticated(replacement) error = %v", err)
+	}
+	if !registry.ClearIfCurrent(replacement) {
+		t.Fatal("ClearIfCurrent(replacement) = false")
+	}
+
+	key := healthbudget.ConnectorKey{TunnelID: runtimeTunnelID, ConnectorID: runtimeConnectorID}
+	snapshot := budget.Snapshot()
+	if snapshot.TargetsGlobal != 1 || snapshot.ConnectorReferences[key] != 1 {
+		t.Fatalf("budget while old ActiveWork is alive = %#v, want old generation reference retained", snapshot)
+	}
+	pending, err := registry.ReserveAuthenticated(runtimeTunnelID, runtimeConnectorIDTwo)
+	if err != nil {
+		t.Fatalf("ReserveAuthenticated(second Connector) error = %v", err)
+	}
+	if _, err := registry.InstallAuthenticated(pending); !errors.Is(err, healthbudget.ErrTargetCapacity) {
+		t.Fatalf("InstallAuthenticated(before old Finish) error = %v, want ErrTargetCapacity", err)
+	}
+	if !registry.CancelAuthenticated(pending) {
+		t.Fatal("CancelAuthenticated(second Connector) = false")
+	}
+
+	if err := work.Finish(); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	snapshot = budget.Snapshot()
+	if snapshot.TargetsGlobal != 0 || len(snapshot.ConnectorReferences) != 0 {
+		t.Fatalf("budget after old ActiveWork Finish = %#v, want fully released", snapshot)
+	}
+	if _, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorIDTwo); err != nil {
+		t.Fatalf("installAuthenticated(after old Finish) error = %v", err)
+	}
+}
+
+func TestRevokeTunnelReleasesHealthTargetAfterClosingActiveWork(t *testing.T) {
+	budget := newRuntimeHealthBudget(t, 1, 1)
+	registry := NewRegistryWithLimitsAndHealthBudget(nil, budget)
+	registry.newSession = sessionGenerator(1)
+	fixture := newActiveWorkFixtureWithRegistry(t, registry, runtimeTunnelID, runtimeConnectorID)
+	if _, err := fixture.tunnel.RegisterActiveWork(fixture.spec(runtimeWorkID, runtimeConnectionID)); err != nil {
+		t.Fatalf("RegisterActiveWork() error = %v", err)
+	}
+	if err := registry.RevokeTunnel(runtimeTunnelID); err != nil {
+		t.Fatalf("RevokeTunnel() error = %v", err)
+	}
+	snapshot := budget.Snapshot()
+	if snapshot.TargetsGlobal != 0 || len(snapshot.ConnectorReferences) != 0 {
+		t.Fatalf("budget after Revoke = %#v, want exactly-once release after ActiveWork close", snapshot)
+	}
+	if err := registry.RevokeTunnel(runtimeTunnelID); err != nil {
+		t.Fatalf("RevokeTunnel(repeated) error = %v", err)
+	}
+	if snapshot = budget.Snapshot(); snapshot.TargetsGlobal != 0 || len(snapshot.ConnectorReferences) != 0 {
+		t.Fatalf("budget after repeated Revoke = %#v, want unchanged", snapshot)
 	}
 }
 

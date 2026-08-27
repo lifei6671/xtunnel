@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -93,6 +94,127 @@ func TestOwnerWritesSingleOrderedStreamWithPriorityAndCoalescing(t *testing.T) {
 	}
 	if phase := owner.control.Phase(); phase != state.ControlClosed {
 		t.Fatalf("control phase = %v, want CLOSED", phase)
+	}
+}
+
+func TestOwnerAppliedAckAtomicallyReplacesBlockedOldHealth(t *testing.T) {
+	agent, peer := net.Pipe()
+	owner := mustOwner(t, agent, state.EndpointAgent, ownerOptions(2, 2, 2, time.Second))
+	if err := owner.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	setConnectionDeadline(t, peer)
+	writeSnapshot := sendEnvelope(peer, snapshotEnvelope(testTunnelID, 7))
+	select {
+	case inbound := <-owner.Inbound():
+		if inbound.Envelope.GetConfigSnapshot().GetRevision() != 7 {
+			t.Fatalf("inbound Snapshot = %#v", inbound.Envelope)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for ConfigSnapshot")
+	}
+	if err := <-writeSnapshot; err != nil {
+		t.Fatalf("write ConfigSnapshot error = %v", err)
+	}
+
+	if err := owner.Enqueue(healthEnvelope(
+		&protocolv1.ServiceHealth{ServiceId: testServiceID, CheckedAtMs: 1},
+	)); err != nil {
+		t.Fatalf("Enqueue(old Health) error = %v", err)
+	}
+	if err := owner.EnqueueConfigAckAndReplaceHealth(configAckEnvelope(7), []*protocolv1.ServiceHealth{
+		{ServiceId: testServiceIDTwo, CheckedAtMs: 2},
+	}); err != nil {
+		t.Fatalf("EnqueueConfigAckAndReplaceHealth() error = %v", err)
+	}
+
+	ackEnvelope := &protocolv1.ControlEnvelope{}
+	if err := frame.ReadControl(peer, ackEnvelope); err != nil {
+		t.Fatalf("ReadControl(ConfigAck) error = %v", err)
+	}
+	if ack := ackEnvelope.GetConfigAck(); ack.GetObservedRevision() != 7 {
+		t.Fatalf("first outbound = %#v, want ConfigAck revision 7", ackEnvelope)
+	}
+	healthEnvelope := &protocolv1.ControlEnvelope{}
+	if err := frame.ReadControl(peer, healthEnvelope); err != nil {
+		t.Fatalf("ReadControl(Health) error = %v", err)
+	}
+	batch := healthEnvelope.GetServiceHealthBatch()
+	if batch.GetGeneration() != 1 || len(batch.GetItems()) != 1 ||
+		batch.GetItems()[0].GetServiceId() != testServiceIDTwo || batch.GetItems()[0].GetCheckedAtMs() != 2 {
+		t.Fatalf("second outbound = %#v, want only replacement Health", healthEnvelope)
+	}
+
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Wait(); err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+}
+
+func TestOwnerFlushWritesEveryHealthBatchBeforeDrain(t *testing.T) {
+	agent, peer := net.Pipe()
+	defer peer.Close()
+	owner := mustOwner(t, agent, state.EndpointAgent, ownerOptions(2, maxHealthBatchItems+1, 2, time.Second))
+	if err := owner.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	items := make([]*protocolv1.ServiceHealth, 0, maxHealthBatchItems+1)
+	for index := range maxHealthBatchItems + 1 {
+		items = append(items, &protocolv1.ServiceHealth{
+			ServiceId: fmt.Sprintf("svc_000000000000000000000%05d", index),
+		})
+	}
+	if err := owner.Enqueue(healthEnvelope(items...)); err != nil {
+		t.Fatalf("Enqueue(Health) error = %v", err)
+	}
+	flushed := make(chan error, 1)
+	go func() { flushed <- owner.Flush(context.Background()) }()
+	select {
+	case err := <-flushed:
+		t.Fatalf("Flush() returned before peer read the in-flight Health Frame: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	setConnectionDeadline(t, peer)
+	for generation, wantItems := range []int{maxHealthBatchItems, 1} {
+		envelope := &protocolv1.ControlEnvelope{}
+		if err := frame.ReadControl(peer, envelope); err != nil {
+			t.Fatalf("ReadControl(Health %d) error = %v", generation+1, err)
+		}
+		batch := envelope.GetServiceHealthBatch()
+		if batch.GetGeneration() != uint64(generation+1) || len(batch.GetItems()) != wantItems {
+			t.Fatalf("Health %d = generation %d items %d, want %d/%d",
+				generation+1, batch.GetGeneration(), len(batch.GetItems()), generation+1, wantItems)
+		}
+	}
+	select {
+	case err := <-flushed:
+		if err != nil {
+			t.Fatalf("Flush() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Flush() did not finish after every Health Frame was written")
+	}
+	const drainID = "drain_01J00000000000000000000000"
+	drainRequest := drainRequestEnvelope(drainID)
+	drainRequest.GetDrainRequest().DrainTimeoutMs = 1_000
+	if err := owner.Enqueue(drainRequest); err != nil {
+		t.Fatalf("Enqueue(DrainRequest) error = %v", err)
+	}
+	drain := &protocolv1.ControlEnvelope{}
+	if err := frame.ReadControl(peer, drain); err != nil {
+		t.Fatalf("ReadControl(DrainRequest) error = %v", err)
+	}
+	if drain.GetDrainRequest().GetDrainId() != drainID {
+		t.Fatalf("frame after Flush = %#v, want DrainRequest", drain)
+	}
+	if err := peer.Close(); err != nil {
+		t.Fatalf("peer Close() error = %v", err)
+	}
+	if err := owner.Wait(); err != nil {
+		t.Fatalf("Wait() after clean EOF error = %v", err)
 	}
 }
 
@@ -205,6 +327,26 @@ func TestOwnerWriteTimeoutClosesBlockedSession(t *testing.T) {
 	}
 	if phase := owner.control.Phase(); phase != state.ControlClosed {
 		t.Fatalf("control phase = %v, want CLOSED", phase)
+	}
+}
+
+func TestOwnerFlushContextDeadlineDoesNotBlockShutdown(t *testing.T) {
+	agent, peer := net.Pipe()
+	defer peer.Close()
+	owner := mustOwner(t, agent, state.EndpointAgent, ownerOptions(1, 1, 1, 30*time.Millisecond))
+	if err := owner.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := owner.Enqueue(heartbeatEnvelope(1)); err != nil {
+		t.Fatalf("Enqueue(heartbeat) error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	if err := owner.Flush(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Flush() error = %v, want context.DeadlineExceeded", err)
+	}
+	if err := owner.Wait(); !errors.Is(err, ErrControlWrite) {
+		t.Fatalf("Wait() error = %v, want ErrControlWrite", err)
 	}
 }
 
@@ -405,6 +547,9 @@ func TestOwnerLifecycleAndConstructorValidation(t *testing.T) {
 	if err := owner.Enqueue(errorEnvelope(protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR)); !errors.Is(err, ErrOwnerNotRunning) {
 		t.Fatalf("Enqueue(before Start) error = %v, want ErrOwnerNotRunning", err)
 	}
+	if err := owner.Flush(context.Background()); !errors.Is(err, ErrOwnerNotRunning) {
+		t.Fatalf("Flush(before Start) error = %v, want ErrOwnerNotRunning", err)
+	}
 	if err := owner.Wait(); !errors.Is(err, ErrOwnerNotRunning) {
 		t.Fatalf("Wait(before Start) error = %v, want ErrOwnerNotRunning", err)
 	}
@@ -421,6 +566,9 @@ func TestOwnerLifecycleAndConstructorValidation(t *testing.T) {
 	}
 	if err := owner.Enqueue(errorEnvelope(protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR)); !errors.Is(err, ErrOwnerClosed) {
 		t.Fatalf("Enqueue(after close) error = %v, want ErrOwnerClosed", err)
+	}
+	if err := owner.Flush(context.Background()); !errors.Is(err, ErrOwnerClosed) {
+		t.Fatalf("Flush(after close) error = %v, want ErrOwnerClosed", err)
 	}
 }
 
