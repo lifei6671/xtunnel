@@ -32,7 +32,7 @@ OpenAPI 机器契约固定为 3.1.0，并使用仓库锁定的 vacuum 校验。�
 ./tools/test-openapi.sh
 ```
 
-当前 `api/openapi/openapi.yaml` 已冻结 19 个 Path、25 个 Operation，并由独立不可变初始 Baseline、真实 Breaking 负例和 CI Step 保护。当前工作区的 Validate、Breaking 和 Contract Test 已通过，最终独立复审无 P0/P1/P2 阻塞；M5-01 仍需 Commit SHA 与精确绑定的 CI Run 后才能转为 `DONE`，Generated Contract Drift 继续属于 M5-02，不能把本地校验冒充完整 M5 Gate。
+当前 `api/openapi/openapi.yaml` 已冻结 19 个 Path、25 个 Operation，并由独立不可变初始 Baseline、真实 Breaking 负例和 CI Step 保护。当前工作区的 Validate、Breaking 和 Contract Test 已通过，最终独立复审无 P0/P1/P2 阻塞，契约提交为 `ed3e5bf`；M5-01 仍需精确绑定的 CI Run 后才能转为 `DONE`，Generated Contract Drift 继续属于 M5-02，不能把本地校验冒充完整 M5 Gate。
 
 Web 工程固定使用 Node 24.19.0、npm 11.17.0，直接依赖由 `web/package-lock.json` 精确锁定。生产构建必须先于任何会编译 `web` Go Package 的命令：
 
