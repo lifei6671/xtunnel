@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-28
 >
-> **当前阶段**：M5-01 OpenAPI Contract Freeze · REVIEW（M2、M3、M4 均已 `DONE`）
+> **当前阶段**：M5-02 Generated Client/Server Contract · READY（M2、M3、M4、M5-01 均已 `DONE`）
 >
-> **当前结论**：M3 与 M4 已完成，M5-01 在用户明确批准公共 REST 契约、OpenAPI Breaking 基线及 CI 接线后进入 `REVIEW`。完整契约现含 19 个 Path、25 个 Operation，冻结 Auth、Tunnel/Connector/Credential、Service/Nested Exposure、Dashboard/System、Security Audit Query、Pagination、Merge Patch、强 ETag、Typed Error 和 Secret no-store；不可变初始 Baseline、真实 Breaking 负例与 CI Step 已落盘，本地 Validate/Breaking/Contract Test 均通过，最终独立复审无 P0/P1/P2 阻塞，契约提交为 `ed3e5bf`。全局仍为 `64/95`；M5-01 尚无精确绑定后续推送 SHA 的 CI Run，不能转为 `DONE`，M5-02 也尚未解锁。
+> **当前结论**：M5-01 完整 OpenAPI 现含 19 个 Path、25 个 Operation，已冻结 Auth、Tunnel/Connector/Credential、Service/Nested Exposure、Dashboard/System、Security Audit Query、Pagination、Merge Patch、强 ETag、Typed Error 和 Secret no-store；不可变初始 Baseline、真实 Breaking 负例与 CI Step 已落盘，本地 Validate/Breaking/Contract Test 均通过，最终独立复审无 P0/P1/P2 阻塞。契约提交为 `ed3e5bf`，精确绑定 `8aac03e` 的 CI #22 全绿，因此 M5-01 转为 `DONE`，M5-02 解锁为 `READY`。M5 为 `1/11`，全局为 `65/95`；M5 Gate Checklist 仍全部未通过。
 
 ---
 
@@ -109,10 +109,10 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M2 Credential/Failover Hardening | 8 | 8 | `DONE` | M1-14 | M2-08 |
 | M3 Config/Health | 13 | 13 | `DONE` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
-| M5 REST API/Web | 11 | 0 | `IN_PROGRESS` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
+| M5 REST API/Web | 11 | 1 | `IN_PROGRESS` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 0 | `NOT_STARTED` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **64** |  |  |  |
+| **合计** | **95** | **65** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -343,8 +343,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M5-01 | 冻结完整 OpenAPI | M3-02、M3-11、M4-02 | `api/openapi/openapi.yaml` | 全部 Schema/Required/Nullable/Error/Status/Pagination/PATCH/ETag 完整；冻结 Security Audit Event 只读查询 Schema、稳定分页与错误结构，不提供 UPDATE/DELETE；Lint/Breaking PASS | `REVIEW` |
-| M5-02 | 生成 Client/Server Contract | M5-01 | Go Server Types + TypeScript Client | 可重复生成；干净 checkout 零漂移 | `NOT_STARTED` |
+| M5-01 | 冻结完整 OpenAPI | M3-02、M3-11、M4-02 | `api/openapi/openapi.yaml` | 全部 Schema/Required/Nullable/Error/Status/Pagination/PATCH/ETag 完整；冻结 Security Audit Event 只读查询 Schema、稳定分页与错误结构，不提供 UPDATE/DELETE；Lint/Breaking PASS | `DONE` |
+| M5-02 | 生成 Client/Server Contract | M5-01 | Go Server Types + TypeScript Client | 可重复生成；干净 checkout 零漂移 | `READY` |
 | M5-03 | Admin Login/Session/CSRF | M5-02、M0-08、M0-11 | Auth Handler + Web Login | Secure/HttpOnly/SameSite Cookie；Origin/Host 规则；Login/Logout/CSRF E2E | `NOT_STARTED` |
 | M5-04 | Tunnel/Connector/Credential API | M2-08、M5-02 | REST Handler | Tunnel CRUD/Tunnel Revoke；Token Reveal/Rotate/Revoke；Add Connector/Reveal 返回当前同一 Token；Connector 列表只读运行态；`Cache-Control: no-store` | `NOT_STARTED` |
 | M5-05 | Service API | M3-13、M4-10、M5-02 | REST Handler | Service 直接归属 Tunnel；调用既有 Application Service；不在 Handler 重写事务逻辑 | `NOT_STARTED` |
@@ -424,13 +424,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 已完成。当前待办为：
 
-1. `M5-01` — 完整 OpenAPI、不可变 Baseline、Breaking Wrapper/负例和 CI 接线已进入 `REVIEW`，最终独立复审已通过，契约提交为 `ed3e5bf`；下一步在用户授权推送后取得精确绑定推送 SHA 的 CI Run。M5-02 只有在本任务 `DONE` 后才解锁。
+1. `M5-02` — M5-01 已通过 CI #22 并转为 `DONE`，本任务解锁为 `READY`；生成器选型、精确版本与依赖变更需在实施前单独确认。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4 已完成，M5-01 已解锁；M0-02 与 M0-09 保留各自独立 Review 边界，不因 M3/M4 Gate 闭环自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 已完成，M5-02 已解锁；M0-02 与 M0-09 保留各自独立 Review 边界，不因 M3/M4 Gate 闭环自动转为 `DONE`。
 
 推进规则：
 
@@ -1250,7 +1250,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 独立复审：只读 Gate 审计逐项映射 M3-01 至 M3-12 的实现、失败分支、Commit 和自动化证据，确认新 CI 成功后可关闭 M3；同时确认 M4 只需等待 M3 入口依赖，不存在新的 P0/P1/P2 阻塞项。
 - 文档同步：根 README 同步 M2/M3/M4 完成状态、DurableOps 与 M4 依赖闭环；开发计划同步当前阶段、仪表盘、M3/M4 任务、M3 Checklist、队列与执行证据。总技术方案、Proto、OpenAPI、Server Schema、Migration、依赖/锁文件、部署行为契约和 `AGENTS.md` 不更新，因为本轮没有改变产品、Wire、REST、配置、持久化或运行行为。
 
-## 2026-08-28 · M5-01 OpenAPI Contract Freeze · REVIEW
+## 2026-08-28 · M5-01 OpenAPI Contract Freeze · DONE
 
 - 授权与范围：用户明确确认首次冻结公共 REST 契约，并同时授权不可变 OpenAPI Baseline、Breaking Wrapper、真实负例和 CI 接线。本轮未新增第三方依赖或修改 Lockfile，也未实现 Handler、Generated Contract 或 Web。
 - 机器契约：`api/openapi/openapi.yaml` 从 M0 空骨架扩展为 19 个 Path、25 个 Operation，冻结 Session Cookie/CSRF、Tunnel/Connector/Credential、Service/Nested Exposure、Dashboard/System、安全配置白名单、Security Audit GET-only Query、RFC3339 UTC、opaque Cursor、JSON Merge Patch、Tunnel/Service 强 ETag、Typed Error Details、Secret no-store 和全部状态码。Service ETag 绑定 Service/Tunnel 双版本；Token Reveal/Rotate/Revoke 与 Tunnel Revoke 明确分离。
@@ -1258,5 +1258,6 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 本地验证：WSL Linux 下受管 Vacuum `0.30.0` 执行 `./tools/openapi.sh validate`、`./tools/openapi.sh breaking`、`./tools/test-openapi.sh` 全部通过；53 条启用规则、0 Error、Quality 100/100。主契约与 Baseline 字节一致且 SHA-256 均为 `3F44D6C66F4CEE1276C661DF523EF8F5F6BC8B235DBEE4380B788174B4616354`；Shell 三种语法、CI/Spec/Baseline/Ruleset YAML、19 Path/25 Operation、Audit GET-only、双 Diff Check 均通过。
 - 实现对齐风险：OpenAPI 以既有 Security Audit `adm_<ULID>` 机器契约为准，M5-03 需修正当前 Admin UUID 生成；M5-05 需把单 Nested Exposure 与 Service Create/PATCH/Delete 纳入同一事务并补齐 DB/Route 不变量；M5-07 需新增 Audit 只读 Query Repository/Application Owner。上述是后续 Handler 达到契约一致性的前置实现项，不以修改 OpenAPI 迁就当前缺口。
 - 独立复审：最终只读复审独立复跑 Validate、Breaking 和真实负例，核对主契约与 Baseline 的字节一致性及文档证据，结论为无 P0/P1/P2 阻塞。
-- 状态边界：M5-01 产物和本地验收已齐备，因此从 `READY` 进入 `REVIEW`；契约提交为 `ed3e5bf`，M5 仍为 `0/11`、全局仍为 `64/95`。当前尚无覆盖该契约提交且精确绑定后续推送 SHA 的 CI Run，不能标记 `DONE`，M5-02 仍未解锁，M5 Gate Checklist 全部保持未勾选。
-- 文档同步：总技术方案同步 Cookie/CSRF Wire、Exposure、Service Composite ETag、Token Revoke、只读 Audit Query、安全 Config 白名单与 Typed Error；开发计划同步当前阶段、M5 状态、任务行、队列和本记录；README 同步 19 Path/25 Operation、Breaking 命令与 `REVIEW` 证据边界。Proto、Server Schema、Migration、依赖/Lockfile、运行日志契约和 `AGENTS.md` 均未改变。
+- CI 证据：契约实现提交 `ed3e5bf4332bbc275d926580de87c38fbebd4132`；推送与证据同步提交 `8aac03edce94dd076f4b0b256c81412e2b261e91` 精确触发 [CI #22](https://github.com/lifei6671/xtunnel/actions/runs/33178322621)，总耗时 5 分 9 秒，Windows Agent Service 与 Linux amd64/arm64 Verify Matrix 全部通过。GitHub Action 运行时报告 Node 20 弃用 Warning，不是任务失败，不影响本任务结论。
+- 状态边界：M5-01 的产物、关键断言、Breaking 失败分支、独立复审、本地验收与精确 CI 证据已齐备，因此从 `REVIEW` 转为 `DONE`；M5 为 `1/11`、全局为 `65/95`，M5-02 解锁为 `READY`。M5 Gate Checklist 全部保持未勾选，不把 OpenAPI 单任务验收冒充完整 M5 Gate。
+- 文档同步：总技术方案已同步 Cookie/CSRF Wire、Exposure、Service Composite ETag、Token Revoke、只读 Audit Query、安全 Config 白名单与 Typed Error；开发计划同步当前阶段、M5 状态、任务行、队列和本记录；README 同步 19 Path/25 Operation、Breaking 命令与 `DONE` 证据边界。Proto、Server Schema、Migration、依赖/Lockfile、运行日志契约和 `AGENTS.md` 均未改变。
