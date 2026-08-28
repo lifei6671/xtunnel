@@ -244,6 +244,7 @@ printf 'invalid archive\n' >"$test_root/invalid-archive.tar.gz"
 {
     printf "VACUUM_DOWNLOAD_BASE_URL='file://%s'\n" "$test_root"
     printf "VACUUM_LINUX_AMD64_ASSET='invalid-archive.tar.gz'\n"
+    printf "VACUUM_LINUX_ARM64_ASSET='invalid-archive.tar.gz'\n"
 } >>"$bootstrap_tools/versions.env"
 expect_status 1 archive-checksum sh "$bootstrap_tools/bootstrap-openapi.sh"
 grep -F 'vacuum archive SHA-256 mismatch' "$test_root/archive-checksum.out" >/dev/null || \
