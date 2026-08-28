@@ -148,6 +148,19 @@ jobs:
           ./deploy/docker/smoke.sh --target server --platform '${{ matrix.platform }}'
           ./deploy/docker/smoke.sh --target agent --platform '${{ matrix.platform }}'
 
+      - name: Run native systemd packaging smoke
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          server_binary="$RUNNER_TEMP/xtunnel-server"
+          agent_binary="$RUNNER_TEMP/xtunnel-agent"
+          go build -trimpath -o "$server_binary" ./cmd/server
+          go build -trimpath -o "$agent_binary" ./cmd/agent
+          sudo ./deploy/systemd/smoke.sh \
+            --server-binary "$server_binary" \
+            --agent-binary "$agent_binary"
+
       - name: Verify generated files remain clean
         shell: bash
         run: |

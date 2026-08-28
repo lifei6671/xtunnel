@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-28
 >
-> **当前阶段**：M4 Product Data Plane · IN_PROGRESS（M4-01 至 M4-10 均保持 `REVIEW`，等待用户阶段 Review、最终 Commit 与原生 CI）
+> **当前阶段**：M3 Gate 证据闭环 · IN_PROGRESS（M2 已 `DONE`；M4 阶段 Review 已通过，但等待入口依赖 M3-13 `DONE`）
 >
-> **当前结论**：M4-01 至 M4-10 已完成本地实现并保持 `REVIEW`。M4-10 新增完整 Server Bootstrap、真实 Gateway/Token-only Agent/Origin 与公网 Socket 组成的 HTTP、WebSocket、SSH、Raw TCP 生产链路，HTTP Rate/Body/Header 和 TCP Accept/Open/Active 均从真实入口验证；固定摘要 Caddy/Nginx 继续覆盖公网 HTTPS/WSS、Header/Forwarded 与断开收敛，并在 HTTP Ingress 边界与生产 WebSocket Gate 组合。Linux amd64 Product Gate、Race、1 GiB Streaming 和修正后的 Caddy/Nginx Runtime 已通过；仍缺少最终 Commit、原生 arm64 与对应 GitHub CI Run，且尚未经过用户阶段 Review，因此 M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`，不勾选最终 M4 Gate Checklist。
+> **当前结论**：M2-01 至 M2-08 的用户阶段 Review、提交与 CI 证据已经闭环，M2 转为 `DONE`。M4-01 至 M4-10 已完成实现、Checklist、独立复审和用户阶段 Review；提交 `834a9de` 对应的 [CI #19](https://github.com/lifei6671/xtunnel/actions/runs/33168998225) 已在原生 Linux amd64/arm64 与 Windows Job 全部通过 Product Gate、Race、1 GiB Streaming 和固定摘要 Caddy/Nginx Runtime。由于 M4 的入口依赖 M3-13 仍为 `REVIEW`，M4 任务不得越过依赖提前标记 `DONE`，因此 M4 `DONE` 仍为 `0/10`、全局为 `41/95`，M5 不解锁。原生双架构 CI 已接入 systemd Packaging Smoke，但尚无包含该 Workflow 的 Commit/Run，M3-13 继续保持 `REVIEW`。
 
 ---
 
@@ -106,13 +106,13 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M0 工程初始化 | 12 | 9 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
 | M0.5 Protocol Freeze | 10 | 10 | `DONE` | M0-06 | M05-10 |
 | M1 Secure TCP Baseline | 14 | 14 | `DONE` | M05-10 | M1-14 |
-| M2 Credential/Failover Hardening | 8 | 0 | `REVIEW` | M1-14 | M2-08 |
+| M2 Credential/Failover Hardening | 8 | 8 | `DONE` | M1-14 | M2-08 |
 | M3 Config/Health | 13 | 0 | `IN_PROGRESS` | M1-14 | M3-13 |
-| M4 Product Data Plane | 10 | 0 | `IN_PROGRESS` | M2-08 + M3-13 | M4-10 |
+| M4 Product Data Plane | 10 | 0 | `REVIEW` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 0 | `NOT_STARTED` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 0 | `NOT_STARTED` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **33** |  |  |  |
+| **合计** | **95** | **41** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -249,14 +249,14 @@ M1 的静态 Service 只能由 Integration Test Harness 注入，不得为过渡
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M2-01 | Multi-Connector Scale/Isolation Suite | M1-14 | 并发 Connector/Session/Pool 测试矩阵 | 同一 Tunnel/Token 的 3 个以上 ephemeral Connector 在连接 churn 下保持独立 Session/Pool/Counter；无饥饿、无计数泄漏、无 Connector 持久化行 | `REVIEW` |
-| M2-02 | Connector Selection Hardening | M2-01 | Selection Soak + Churn Suite | 在 Current Session 替换、DRAINING、Idle/Capacity 快速变化下保持 Least Active + RR 原子公平；Revision/Health Eligible 留给 M3-09 接入 | `REVIEW` |
-| M2-03 | Online Connector Lifecycle/Observability | M1-03、M1-14 | Runtime Lifecycle Events + Query/Metrics | 连接、Session Replacement、DRAINING、断开状态可查询并有结构化日志/指标；Agent 重启产生新 Connector；不维护机器/主机历史 | `REVIEW` |
-| M2-04 | Token Rotate/Revoke | M1-02、M1-14 | Credential Lifecycle Service | Rotate 使用当前 Endpoint/TLS Trust 签发新版本并撤销旧 Token 的新认证；普通 Add Connector 只返回当前同一 Token；Revoke 新认证失败；完整 Token 只加密入库且不入日志 | `REVIEW` |
-| M2-05 | Tunnel Revoke | M2-04 | Tunnel Revoke Workflow | 阻止新 Auth；关闭该 Tunnel 全代 Session/ActiveWork；幂等 | `REVIEW` |
-| M2-06 | Credential/Session Replacement 保留 ActiveWork | M2-04、M1-13 | Tombstone + Cross-generation Cleanup | Rotate 与 Session Replacement 期间旧 Active 自然结束；旧 cleanup 只清 Idle/Opening；`closeOnce` | `REVIEW` |
-| M2-07 | Connector Failover + Pre-RAW Reselect | M2-02、M2-06 | Failover Integration Test | Connector 崩溃后新连接选其他 Connector；RAW 前符合契约的失败可最多跨 Connector 重选一次；已进 RAW 或已转发业务字节不自动重放 | `REVIEW` |
-| M2-08 | M2 Gate | M2-01至 M2-07 | M2 验收证据 | 多 Connector 规模/抖动、Rotate/Revoke、Failover、ActiveWork 保留全通过 | `REVIEW` |
+| M2-01 | Multi-Connector Scale/Isolation Suite | M1-14 | 并发 Connector/Session/Pool 测试矩阵 | 同一 Tunnel/Token 的 3 个以上 ephemeral Connector 在连接 churn 下保持独立 Session/Pool/Counter；无饥饿、无计数泄漏、无 Connector 持久化行 | `DONE` |
+| M2-02 | Connector Selection Hardening | M2-01 | Selection Soak + Churn Suite | 在 Current Session 替换、DRAINING、Idle/Capacity 快速变化下保持 Least Active + RR 原子公平；Revision/Health Eligible 留给 M3-09 接入 | `DONE` |
+| M2-03 | Online Connector Lifecycle/Observability | M1-03、M1-14 | Runtime Lifecycle Events + Query/Metrics | 连接、Session Replacement、DRAINING、断开状态可查询并有结构化日志/指标；Agent 重启产生新 Connector；不维护机器/主机历史 | `DONE` |
+| M2-04 | Token Rotate/Revoke | M1-02、M1-14 | Credential Lifecycle Service | Rotate 使用当前 Endpoint/TLS Trust 签发新版本并撤销旧 Token 的新认证；普通 Add Connector 只返回当前同一 Token；Revoke 新认证失败；完整 Token 只加密入库且不入日志 | `DONE` |
+| M2-05 | Tunnel Revoke | M2-04 | Tunnel Revoke Workflow | 阻止新 Auth；关闭该 Tunnel 全代 Session/ActiveWork；幂等 | `DONE` |
+| M2-06 | Credential/Session Replacement 保留 ActiveWork | M2-04、M1-13 | Tombstone + Cross-generation Cleanup | Rotate 与 Session Replacement 期间旧 Active 自然结束；旧 cleanup 只清 Idle/Opening；`closeOnce` | `DONE` |
+| M2-07 | Connector Failover + Pre-RAW Reselect | M2-02、M2-06 | Failover Integration Test | Connector 崩溃后新连接选其他 Connector；RAW 前符合契约的失败可最多跨 Connector 重选一次；已进 RAW 或已转发业务字节不自动重放 | `DONE` |
+| M2-08 | M2 Gate | M2-01至 M2-07 | M2 验收证据 | 多 Connector 规模/抖动、Rotate/Revoke、Failover、ActiveWork 保留全通过 | `DONE` |
 
 ## 8.2 M2 Gate Checklist
 
@@ -320,14 +320,14 @@ M1 的静态 Service 只能由 Integration Test Harness 注入，不得为过渡
 
 ## 10.2 M4 Gate Checklist
 
-- [ ] HTTP Host + Path 路由通过，含 canonical Route Prefix、RawPath/RequestURI/encoded separator/dot-segment 歧义拒绝矩阵，以及公网请求重复斜线、Trailing Slash 保留语义。
-- [ ] Caddy/Nginx 后 HTTPS 和 WebSocket 通过。
-- [ ] 1GB Upload/Download 不整体缓冲，内存不随 Body 线性增长。
-- [ ] HTTP Service Proxy 选项默认值、Host 优先级、disable-chunked 拒绝分支、Transport/WorkConn 隔离键和全局预算均有自动化证据。
-- [ ] SSH 和通用 Raw TCP 可持续传输、Half-Close 和取消。
-- [ ] HTTP/HTTPS/TCP Origin 共用的 Happy Eyeballs 开关、TCP KeepAlive 间隔与 `connect_timeout` 总预算通过真实 Dial 路径验收。
-- [ ] Route/Listener Snapshot 并发更新无窗口期错路由；Reconcile 风暴只发布最新 generation，旧 Candidate 不覆盖新 Desired State。
-- [ ] Public Ingress 所有上限在真实入口生效。
+- [x] HTTP Host + Path 路由通过，含 canonical Route Prefix、RawPath/RequestURI/encoded separator/dot-segment 歧义拒绝矩阵，以及公网请求重复斜线、Trailing Slash 保留语义。
+- [x] Caddy/Nginx 后 HTTPS 和 WebSocket 通过。
+- [x] 1GB Upload/Download 不整体缓冲，内存不随 Body 线性增长。
+- [x] HTTP Service Proxy 选项默认值、Host 优先级、disable-chunked 拒绝分支、Transport/WorkConn 隔离键和全局预算均有自动化证据。
+- [x] SSH 和通用 Raw TCP 可持续传输、Half-Close 和取消。
+- [x] HTTP/HTTPS/TCP Origin 共用的 Happy Eyeballs 开关、TCP KeepAlive 间隔与 `connect_timeout` 总预算通过真实 Dial 路径验收。
+- [x] Route/Listener Snapshot 并发更新无窗口期错路由；Reconcile 风暴只发布最新 generation，旧 Candidate 不覆盖新 Desired State。
+- [x] Public Ingress 所有上限在真实入口生效。
 
 ---
 
@@ -424,29 +424,14 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14` 已完成。M2-01 至 M2-08 已完成本地实现、提交、验收与用户阶段 Review，但仍等待对应 CI 证据；M3-01 至 M3-13 已完成本地实现与独立复审。M4 已开始推进，当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08` 已完成。M3-01 至 M3-13 已完成实现、独立复审、提交与双架构 CI；M4-01 至 M4-10 已完成实现、Checklist、独立复审、提交、双架构 CI 和用户阶段 Review。当前待办为：
 
-1. `M4-10` — 完整 Server Bootstrap、真实 Gateway/Agent/Origin、公网 HTTP/TCP Socket 与生产 WebSocket 已形成 Product Gate；固定摘要 Caddy/Nginx HTTPS/WSS Runtime、1 GiB Streaming 和定向 Race 同步纳入原生双架构 CI。当前保持 `REVIEW`，等待用户阶段 Review、最终 Commit、原生 arm64 和对应 CI Run。
-2. `M4-09` — Public Ingress Limits 的 Per-source/Service/Tunnel/Global 配额、有界 LRU + TTL、HTTP Rate/Body/Header 与 TCP Accept/Open/Active 已完成并独立复审，且 M4-10 已补完整启动装配后的公网黑盒证据；仍需最终 Commit 与原生 amd64/arm64 CI。
-3. `M4-08` — Caddy/Nginx 前置 HTTPS/WSS 示例、固定镜像摘要、Linux amd64 真实 E2E 与原生 amd64/arm64 CI 接线已完成，保持 `REVIEW`；仍需最终 Commit SHA 和对应 CI Run 后才能转为 `DONE` 或勾选 M4 Gate 条目。
-4. `M3-13` — 本地 Gate 自动化证据、独立复审、提交 `a3213e4` 对应 CI 与 OCI amd64/arm64 Runtime Smoke 已完成，保持 `REVIEW`；仍需隔离 Linux amd64/arm64 上的 systemd 原生安装/启动 Smoke，才能勾选 Checklist 或转为 `DONE`。本地失败的 WSL/Docker 构建尝试不计为通过证据。
-5. `M3-12` — Linux root Backup/Restore、在线/离线互斥、Manifest、Token Key/密文一致性、Restore Journal Recovery、Stable Parent/data leaf 部署接线已完成并独立复审，保持 `REVIEW`；不提供旧布局迁移兼容层。
-6. `M3-11` — 状态优先级、首次认证耐久事实、Control Auth 提交、已发布 Runtime 联合快照与生产输入组装已完成并独立复审，保持 `REVIEW`。
-7. `M3-10` — 两级 Health Target Budget、配置事务 Reservation、启动重建、Control Auth 容量拒绝与 Runtime generation fencing 已完成并独立复审，保持 `REVIEW`。
-8. `M3-09` — Health Pending/Batch、Control Session generation、ConfigAck+全量 Health 原子提交、Server revision/freshness fencing 与服务级 Eligible Selection 已完成并独立复审，保持 `REVIEW`。
-9. `M3-08` — 中心 Heap Scheduler、固定并发/Rate Budget、Jitter、TCP/HTTP Check、三态阈值、Stale/Budget fail-closed 与 Snapshot fencing 已完成并独立复审，保持 `REVIEW`。
-10. `M3-07` — 当前已 Ack Snapshot 的 HTTP/HTTPS/TCP Origin Resolver、原子 Gate、DNS/IP、TLS 与受信管理面 SSRF 边界已完成并独立复审，保持 `REVIEW`。
-11. `M3-06` — Single Reconcile Loop、post-COMMIT dirty 合并、generation fencing、outstanding/pending Ack 串行和 Agent revision/digest 语义已完成并独立复审，保持 `REVIEW`。
-12. `M3-05` — Token-only 启动/重连、完整 Snapshot、ConfigAck 与 Connector config-ready 门禁已完成并独立复审，保持 `REVIEW`。
-13. `M3-04` — 独立 Config Runtime 内核、并发资源生命周期、ConfigAck 入队门闩与失败清理已完成并独立复审，保持 `REVIEW`。
-14. `M3-03` — Transaction Gate 与 Startup Gate 均已完成并独立复审，保持 `REVIEW`；未来 M4 的 Management/HTTP/TCP Listener 必须继续位于 Startup Gate 下游。
-15. `M3-02` — 单事务 Application Service 与真实 Builder 容量回滚链已完成并独立复审，保持 `REVIEW`。
-16. `M3-01` — 本地实现与独立复审完成，未来 Origin 持久化预留约束也已复核，保持 `REVIEW`。
-17. `M2-01` 至 `M2-08` — 用户阶段 Review 已通过，本地提交 `4447602` 尚未推送；待对应 CI 证据后才能从 `REVIEW` 转为 `DONE`。
-18. `M0-09` — 正式 Dockerfile 双架构与 Windows SCM 已在 CI #11/#12 通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
-19. `M0-02` — Token-only Bootstrap 等待用户复审。
+1. `M3-13` — 原生 Linux amd64/arm64 `verify` Matrix 已接入 systemd Packaging Smoke：在临时 Runner 构建当前架构 Binary，以 root 验证受管 Unit、服务身份、Credential、目录权限、启动/停止/卸载与残留清理。当前等待包含该 Workflow 的 Commit 和双架构 CI Run，不在本地 WSL 执行破坏性测试。
+2. `M4-10` — M4 专属实现、Checklist、复审和 CI 均已通过；等待 M3-13 `DONE` 后，再按依赖把 M4-01 至 M4-10 转为 `DONE` 并解锁 M5。
+3. `M0-09` — 正式 Dockerfile 双架构与 Windows SCM 已在 CI #11/#12 通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
+4. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M4-01 至 M4-10 当前均为 `REVIEW`，没有最终 Commit、原生 arm64 和对应 CI Run 前不得转为 `DONE` 或解锁 M5；M3-01 至 M3-13 仍均为 `REVIEW`，取得最终提交 CI 与隔离部署 Runtime Smoke 后，才能完成 M3 Gate。
+`M0-12` 仍是 Alpha 前 Gate。M2-01 至 M2-08 已完成。M4-01 至 M4-10 当前均为 `REVIEW`，不是因为 M4 专属证据缺失，而是入口依赖 M3-13 尚未 `DONE`；完成隔离 systemd Runtime Smoke 并关闭 M3 Gate 后，才可把 M4 转为 `DONE` 或解锁 M5。
 
 推进规则：
 
@@ -1227,7 +1212,32 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - TCP 与限额：SSH identification、包含零字节的通用 Raw TCP、逐字节相等与公网 Half-Close 均通过真实 Agent。Accept Rate 使用同源连接先完成握手再做集合断言；ACTIVE 使用不同来源并证明 Agent Origin 已拨通、但 ACTIVE 提交失败前没有公网负载进入 Origin；Pending OPEN 使用独立完整 Server/Agent Runtime 和单 Work 硬预算稳定占满唯一 Pending 槽位，不依赖 Token 回填或固定睡眠。所有公网连接具有 10 秒总 Deadline，失败路径拒绝带内字节并排空 Origin 队列。
 - HTTPS/WSS 组合 Gate：固定摘要 Caddy/Nginx 测试验证真实公网 TLS、HTTPS/WSS、Host/Origin/Forwarded 与客户端断开收敛；本任务的生产 WebSocket 测试验证同一 HTTP Ingress/TunnelDialer 边界之后的 Gateway→Agent→Origin。两者构成边界重叠的组合证据，不声称已存在单条 WSS→Agent 连续测试链。Nginx `proxy_read_timeout`/`proxy_send_timeout` 从超过实现上限、会导致固定镜像拒绝启动的 `1y` 修正为 `24d`，并同步部署 README、总技术方案、根 README 与静态策略测试；严格单向超过 24 天仍需反向 heartbeat 或使用 Caddy。
 - CI 接线：原生 Linux amd64/arm64 `verify` Job 新增 M4 Product Gate 与显式 1 GiB 双向 Streaming Gate；定向 Race 扩展到 Route、HTTP/TCP Ingress、Tunnel 和 Integration。Caddy/Nginx Gate 继续显式拉取固定多架构摘要并核对当前 Runner 架构。没有修改 Proto、OpenAPI、Server Schema、Migration、第三方依赖、锁文件、日志字段或权限模型。
-- 本地验证：Windows `go1.27.0`、`GOTOOLCHAIN=local` 下，全仓 `go test -count=1 -timeout 300s ./...`、`go vet ./...` 与扩展定向 Race 通过；显式 1 GiB Upload/Download Gate 通过。Linux amd64 Go 1.27 容器中 Product Gate 连续 5 轮和定向 Race 通过，全仓 Test/Vet 通过。使用交叉编译的 linux/amd64 HTTP Ingress 测试二进制在 WSL 原生 Docker daemon 中运行固定摘要 Caddy/Nginx，修正后的真实 HTTPS/WSS E2E 通过。`git diff --check` 与 staged diff check 通过；这些均为 mixed 工作区开发反馈，不冒充干净 checkout、arm64 Runtime 或 GitHub CI。
+- 本地验证：Windows `go1.27.0`、`GOTOOLCHAIN=local` 下，全仓 `go test -count=1 -timeout 300s ./...`、`go vet ./...` 与扩展定向 Race 通过；显式 1 GiB Upload/Download Gate 通过。Linux amd64 Go 1.27 容器中 Product Gate 连续 5 轮和定向 Race 通过，全仓 Test/Vet 通过。使用交叉编译的 linux/amd64 HTTP Ingress 测试二进制在 WSL 原生 Docker daemon 中运行固定摘要 Caddy/Nginx，修正后的真实 HTTPS/WSS E2E 通过。外部提交发生后又按最终内容复跑 Linux Product Gate、定向 Race、全仓 Test/Vet，Windows 全仓 Test/Vet、扩展 Race、1 GiB Gate，以及固定摘要 Caddy/Nginx Runtime E2E，均通过；`git diff --check` 与 staged diff check 通过。
 - 独立复审：只读复审先后发现 TCP Accept/Open/Active 证据不完整、来源 Token 墙钟竞态、拒绝路径未断言零字节、成功连接缺少 Deadline、Origin 失败清理、生产 WebSocket 缺口与 Nginx 文档漂移；现已分别使用独立 Runtime/资源预算、集合断言、真实 masked frame 和 owner 顺序修复。最终复审确认代码无剩余阻塞发现，并限定 HTTPS/WSS 为边界重叠的组合 Gate。
-- 状态与证据边界：M4-10 进入 `REVIEW`，M4-01 至 M4-09 继续 `REVIEW`。当前 HEAD 仍是 `a0dd308`，本轮没有新 Commit、push、原生 arm64 结果或对应 GitHub CI Run，因此 M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`；本次未勾选任何产品任务或 M4 Gate Checklist，也不解锁 M5。工作区存在用户已有的 staged `task-continuity`、`skills-lock.json`，且本轮 Product Gate 文件本身存在 staged/unstaged 差异，提交前必须重新暂存最终版本并从 staged snapshot 复验。
-- 文档同步：总技术方案、根 README 与部署 README 只同步 Nginx `24d` 支持边界和组合 Gate 事实；开发计划同步 M4-10 状态、当前阶段、队列与执行证据。Proto、OpenAPI、Server Schema、Migration、V1.0、依赖/锁文件和 `AGENTS.md` 无需更新，因为本轮没有改变这些权威契约。
+- 提交与 CI：工作期间由外部操作将最终代码、文档与此前用户暂存的 `task-continuity`/`skills-lock.json` 一并提交并推送为 `834a9de`；本 Agent 未执行该 Commit 或 push。[CI #19](https://github.com/lifei6671/xtunnel/actions/runs/33168998225) 于 2026-08-28 通过，耗时 3 分 46 秒，原生 Linux amd64/arm64 `verify` 与 Windows Agent Service Job 均成功，覆盖本任务新增的 Product Gate、1 GiB Gate、扩展 Race、固定摘要 Caddy/Nginx Runtime E2E、全仓 Test/Vet、生成物与工作树清洁检查。
+- 状态与证据边界：M4-10 与 M4-01 至 M4-09 继续保持 `REVIEW`。Commit、push、原生 Linux amd64/arm64 和对应 GitHub CI 证据均已齐备，但尚未获得用户阶段 Review 结论，因此 M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`；本次未勾选任何产品任务或 M4 Gate Checklist，也不解锁 M5。当前未提交内容仅为 CI 通过后的 README 与开发计划证据同步，后续提交前需重新暂存并复验这些文档差异。
+- 文档同步：总技术方案、根 README 与部署 README 已同步 Nginx `24d` 支持边界和组合 Gate 事实；本次继续同步根 README 的提交/CI 状态，以及开发计划的当前阶段、队列和 Commit/CI 证据。Proto、OpenAPI、Server Schema、Migration、V1.0、依赖/锁文件和 `AGENTS.md` 无需更新，因为本轮没有改变这些权威契约。
+
+## 2026-08-28 · M2 CI 证据闭环 · DONE
+
+- Review 与提交：M2-01 至 M2-08 已在 2026-08-26 完成用户阶段 Review；实现提交为 `4447602984b3d58d0e35a8ba3a5c07d2226bdb62`。本轮通过 `git merge-base --is-ancestor 4447602 HEAD` 取得退出码 0，确认该提交完整包含在当前 `834a9de3838c5743c6b02864148cf6646c24b0a0` 中，不再是未推送的孤立本地证据。
+- CI 证据：[CI #19](https://github.com/lifei6671/xtunnel/actions/runs/33168998225) 精确绑定 `834a9de` 并成功完成原生 Linux amd64/arm64 `verify` 与 Windows Agent Service Job；当前 Workflow 执行全仓 Test/Vet、Tunnel/Integration 等扩展 Race、双进程 Build、OCI Smoke 和工作树清洁检查，覆盖 M2 的最终代码状态。
+- 状态影响：M2-01 至 M2-08 从 `REVIEW` 转为 `DONE`，M2 仪表盘改为 `8/8 DONE`，全局由 `33/95` 更新为 `41/95`。M2 Gate Checklist 早已在用户 Review 时逐项通过，本轮不改变其验收语义。
+- 文档边界：本轮只回写开发计划的任务状态、仪表盘、当前队列和证据记录；M2 行为、Proto、Schema、OpenAPI、数据库、依赖、日志与部署契约均未变化。
+
+## 2026-08-28 · M4 阶段 Review 通过 · REVIEW
+
+- 用户结论：在明确提示“下一步需要确认是否通过 M4 阶段 Review”后，用户回复“继续”，本记录将其作为 M4 阶段 Review 通过。M4 专属的实现、失败分支、独立复审、Checklist、提交 `834a9de` 与 CI #19 证据均已齐备。
+- Checklist：M4 Gate 八项均已有真实 Socket、固定摘要 Caddy/Nginx、1 GiB Streaming、HTTP/HTTPS/WebSocket/SSH/Raw TCP、Route/Listener generation fencing 与真实入口限额证据，因此本轮逐项勾选。
+- 依赖边界：M4 的里程碑入口依赖明确为 `M2-08 + M3-13`。M2-08 已在本轮转为 `DONE`，但 M3-13 仍缺隔离 Linux amd64/arm64 的 systemd 原生安装/启动 Smoke，继续保持 `REVIEW`。因此 M4-01 至 M4-10 也继续保持 `REVIEW`，不得仅凭 M4 自身证据绕过依赖标记 `DONE`，M5 不解锁。
+- 下一步：用户已确认只在 GitHub 临时原生 Linux amd64/arm64 Runner 中运行 systemd Smoke；Workflow 接线已完成。取得精确绑定本次 Workflow Commit 的双架构 CI Run 前，M3-13、M4 和 M5 状态保持不变。
+- 文档同步：根 README 同步 M4 Review 已通过及 M3-13 依赖边界；开发计划同步 M2 `DONE`、M4 Checklist、仪表盘、当前队列与执行记录。总技术方案、Proto、OpenAPI、Server Schema、Migration、依赖/锁文件、部署文件和 `AGENTS.md` 无需更新，因为本轮只确认既有证据和任务状态，没有改变任何产品或机器契约。
+
+## 2026-08-28 · M3-13 systemd Packaging Smoke CI 接线 · REVIEW
+
+- 授权与范围：用户明确确认修改 CI，只允许在 GitHub 临时原生 Linux amd64/arm64 Runner 上执行破坏性的 systemd Smoke；本轮不在当前 WSL 或持久主机创建 Unit、服务身份、Binary、Credential、配置、运行目录或数据目录。
+- CI 接线：Linux `verify` Matrix 在原生 OCI Smoke 后、最终工作树清洁检查前新增 5 分钟上限的 `Run native systemd packaging smoke` Step。每个 Runner 在 `$RUNNER_TEMP` 原生构建 Server/Agent Binary，再以 `sudo deploy/systemd/smoke.sh` 执行既有 root/systemd/路径/身份预检、安装、Agent 重装换 PID、enable/restart/stop/start、权限与 `LoadCredential` 校验、受管卸载和退出清理；不使用交叉编译 Binary，不把产物写入仓库。
+- 本地非破坏性验证：`go1.27.0` 与 `GOTOOLCHAIN=local` 检查通过；PyYAML 解析和 CI Step Contract 断言通过；`sh -n`、`dash -n`、`bash --posix -n`、ShellCheck 通过；Linux amd64/arm64 Server/Agent 的 `CGO_ENABLED=0` 交叉构建通过；三个 systemd 脚本 Git Mode 均为 `100755`；双 Diff Check 通过。交叉构建和语法检查只作为接线反馈，不冒充原生 systemd Runtime。
+- 独立复审：两路只读复审均确认 Step 位置、原生 Matrix、显式 Binary 路径、`sudo`、冲突预检、退出清理、5 分钟上限与最终 clean check 正确，没有 P0/P1/P2 阻塞项。Runner 镜像未来若失去 root/systemd 前提，既有预检会显式失败，不会静默跳过。
+- 状态边界：当前 Workflow 改动尚未提交、推送，也没有精确绑定其 Commit SHA 的 GitHub Actions Run；因此 M3-01 至 M3-13 继续 `REVIEW`，M3 Checklist 不勾选，M4-01 至 M4-10 继续 `REVIEW`，M5 不解锁。本次 CI 接线未新增 `DONE` 产品任务。
+- 文档同步：开发计划同步当前结论、队列和本执行记录。README、总技术方案、Proto、OpenAPI、Server Schema、Migration、依赖/锁文件、systemd/OCI 行为契约和 `AGENTS.md` 无需更新，因为本轮只扩展验证矩阵，没有改变用户命令或运行行为。
