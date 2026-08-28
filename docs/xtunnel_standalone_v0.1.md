@@ -5336,6 +5336,10 @@ api/openapi/openapi.yaml
 
 M5 Handler、TypeScript Client、Mock、DTO 校验和契约测试必须从该文件生成或由 CI 验证一致；本文只定义产品语义。M5 开始前必须冻结全部 Request/Response Schema、Required/Nullable、分页、错误响应、ETag 和 HTTP Status，禁止由 Handler 与 Web 分别维护 DTO。
 
+M5-02 固定使用 `oapi-codegen v2.8.0` 从同一 OpenAPI 生成 Go Models、`net/http` Server 与 Strict Server Contract，提交路径为 `internal/server/managementapi/contract.gen.go`；Go Runtime 锁定 `oapi-codegen/runtime v1.6.0` 与 `nullable v1.1.0`，PATCH 的 omitted/null/value 由生成类型表达。TypeScript Schema 固定使用 `openapi-typescript 7.13.0` 生成到 `web/src/api/schema.gen.ts`，开启 immutable 与 read/write markers；`web/src/api/client.ts` 只用 `openapi-fetch 0.17.0` 装配 `/api/v1` 和 same-origin Credential，不手写第二套 DTO。
+
+Web 工程继续使用 TypeScript `6.0.2`；由于 `openapi-typescript 7.13.0` 的工具侧 Peer Range 不包含 TypeScript 6，生成 CLI 隔离在 `tools/openapi-ts` 并以独立 Lockfile 锁定 TypeScript `5.9.3`。统一入口是 `tools/openapi.sh generate|generate-check`，CI 必须先按两个 Lockfile 执行 `npm ci`，再以 `generate-check` 同时比较 Go 与 TypeScript 字节。生成文件禁止手工修改；OpenAPI 中为联合类型显式声明的 discriminator mapping 只纠正生成器选择的类型名，不改变既有 Wire 值，也不改写不可变初始 Baseline。
+
 基础：
 
 ```text

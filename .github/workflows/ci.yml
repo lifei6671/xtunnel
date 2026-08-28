@@ -46,7 +46,9 @@ jobs:
           node-version: '24.19.0'
           check-latest: false
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            tools/openapi-ts/package-lock.json
+            web/package-lock.json
 
       - name: Verify runner and fixed toolchains
         shell: bash
@@ -68,6 +70,13 @@ jobs:
           ./tools/proto.sh breaking
           ./tools/proto.sh generate-check
 
+      - name: Install Node dependencies from locked manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix tools/openapi-ts ci
+          npm --prefix web ci
+
       - name: Verify OpenAPI toolchain and wrapper path
         shell: bash
         run: |
@@ -75,13 +84,13 @@ jobs:
           ./tools/bootstrap-openapi.sh
           ./tools/openapi.sh validate
           ./tools/openapi.sh breaking
+          ./tools/openapi.sh generate-check
           ./tools/test-openapi.sh
 
       - name: Build the embedded web assets
         shell: bash
         run: |
           set -euo pipefail
-          npm --prefix web ci
           npm --prefix web run check
           npm --prefix web run build
 

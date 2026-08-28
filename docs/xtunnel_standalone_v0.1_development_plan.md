@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-08-28
+> **进度基线日期**：2026-08-29
 >
-> **当前阶段**：M5-02 Generated Client/Server Contract · READY（M2、M3、M4、M5-01 均已 `DONE`）
+> **当前阶段**：M5-02 Generated Client/Server Contract · REVIEW（M2、M3、M4、M5-01 均已 `DONE`）
 >
-> **当前结论**：M5-01 完整 OpenAPI 现含 19 个 Path、25 个 Operation，已冻结 Auth、Tunnel/Connector/Credential、Service/Nested Exposure、Dashboard/System、Security Audit Query、Pagination、Merge Patch、强 ETag、Typed Error 和 Secret no-store；不可变初始 Baseline、真实 Breaking 负例与 CI Step 已落盘，本地 Validate/Breaking/Contract Test 均通过，最终独立复审无 P0/P1/P2 阻塞。契约提交为 `ed3e5bf`，精确绑定 `8aac03e` 的 CI #22 全绿，因此 M5-01 转为 `DONE`，M5-02 解锁为 `READY`。M5 为 `1/11`，全局为 `65/95`；M5 Gate Checklist 仍全部未通过。
+> **当前结论**：M5-02 已锁定 `oapi-codegen 2.8.0`、`openapi-typescript 7.13.0` 与 `openapi-fetch 0.17.0`，从 19 Path、25 Operation 的唯一 OpenAPI 机器契约可重复生成 Go Strict Server Contract 与 TypeScript Schema；双端真实漂移负例、语义断言、WSL/Windows Go 空缓存重建和 CI `generate-check` 接线已完成，本地 Validate/Breaking/Contract/Web/Go 验证通过。最终独立复审发现的错误原因伪通过 P2 已修复并复验，结论为无 P0/P1/P2 阻塞。当前改动尚无 Commit SHA 与精确 CI Run，因此 M5-02 只进入 `REVIEW`，不转 `DONE`，也不解锁依赖它的 M5-03 等任务。M5 仍为 `1/11`，全局仍为 `65/95`；M5 Gate Checklist 继续全部未通过。
 
 ---
 
@@ -344,7 +344,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M5-01 | 冻结完整 OpenAPI | M3-02、M3-11、M4-02 | `api/openapi/openapi.yaml` | 全部 Schema/Required/Nullable/Error/Status/Pagination/PATCH/ETag 完整；冻结 Security Audit Event 只读查询 Schema、稳定分页与错误结构，不提供 UPDATE/DELETE；Lint/Breaking PASS | `DONE` |
-| M5-02 | 生成 Client/Server Contract | M5-01 | Go Server Types + TypeScript Client | 可重复生成；干净 checkout 零漂移 | `READY` |
+| M5-02 | 生成 Client/Server Contract | M5-01 | Go Server Types + TypeScript Client | 可重复生成；干净 checkout 零漂移 | `REVIEW` |
 | M5-03 | Admin Login/Session/CSRF | M5-02、M0-08、M0-11 | Auth Handler + Web Login | Secure/HttpOnly/SameSite Cookie；Origin/Host 规则；Login/Logout/CSRF E2E | `NOT_STARTED` |
 | M5-04 | Tunnel/Connector/Credential API | M2-08、M5-02 | REST Handler | Tunnel CRUD/Tunnel Revoke；Token Reveal/Rotate/Revoke；Add Connector/Reveal 返回当前同一 Token；Connector 列表只读运行态；`Cache-Control: no-store` | `NOT_STARTED` |
 | M5-05 | Service API | M3-13、M4-10、M5-02 | REST Handler | Service 直接归属 Tunnel；调用既有 Application Service；不在 Handler 重写事务逻辑 | `NOT_STARTED` |
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 已完成。当前待办为：
 
-1. `M5-02` — M5-01 已通过 CI #22 并转为 `DONE`，本任务解锁为 `READY`；生成器选型、精确版本与依赖变更需在实施前单独确认。
+1. `M5-02` — 生成器、双端 Contract、真实漂移负例、CI 接线和最终独立复审已完成并进入 `REVIEW`；等待 Commit SHA 和精确绑定该提交的 CI Run 后，才可决定是否转为 `DONE`。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 已完成，M5-02 已解锁；M0-02 与 M0-09 保留各自独立 Review 边界，不因 M3/M4 Gate 闭环自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 已完成，M5-02 正在 `REVIEW`；依赖 M5-02 的 M5-03/M5-04/M5-05/M5-07/M5-08 仍未解锁。M0-02 与 M0-09 保留各自独立 Review 边界，不因 M3/M4 Gate 闭环自动转为 `DONE`。
 
 推进规则：
 
@@ -451,7 +451,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | Go Module Path 与 Go 1.27.x 补丁版本 | M0-01 完成前 | `go.mod` 声明 `go 1.27`；选择稳定的精确补丁版本并同步到根/工具 Module、CI、OCI Builder 和版本检查；设置 `GOTOOLCHAIN=local`，禁止占位值、自动切换、旧版本回落和未记录升级 |
 | SQLite Driver/GORM/Migration 方案 | M0-05 开工前 | 用户已明确要求数据库访问使用 GORM；开工时仍需记录 GORM、SQLite Driver 和 Migration 组件的精确版本与选择依据，Migration 保持显式 forward-only，不以 `AutoMigrate` 取代版本管理 |
 | Buf/protoc-gen-go 精确版本 | M0-06 完成前 | 记录版本、下载源、分发包 SHA-256 和生成结果 |
-| OpenAPI Validator/Generator | M0-07/M5-01 开工前 | M0-07 已批准并锁定 vacuum `v0.30.0` 官方 Linux amd64/arm64 归档与二进制 SHA-256，唯一入口为 `tools/openapi.sh validate`；M5-01 首次引入 Generator 前仍需单独确认，CI 不维护第二套方式 |
+| OpenAPI Validator/Generator | M0-07/M5-02 开工前 | M0-07 已批准并锁定 vacuum `v0.30.0` 官方 Linux amd64/arm64 归档与二进制 SHA-256；M5-02 已批准并锁定 `oapi-codegen v2.8.0`、`oapi-codegen/runtime v1.6.0`、`nullable v1.1.0`、`openapi-typescript 7.13.0`、工具侧 TypeScript `5.9.3` 与 `openapi-fetch 0.17.0`。唯一入口为 `tools/openapi.sh validate|breaking|generate|generate-check`，CI 不维护第二套方式；TypeScript Generator 因 Web TypeScript 6 Peer Range 冲突隔离在 `tools/openapi-ts`，不得使用 `--force` 或 `--legacy-peer-deps` 绕过。 |
 | Web 依赖与 Node 版本 | M0-08 开工前 | 已批准 Node `24.19.0`、npm `11.17.0`、React/React DOM `19.2.8`、Vite `8.2.2`、Plugin React `6.1.0`、TypeScript `6.0.2` 与对应类型包；用户在管理菜单出现真实图标需求后追加批准 `lucide-react 1.34.0`；直接依赖精确锁定，npm 11 生成并提交 Lockfile，CI 只运行 `npm ci`；Tailwind/shadcn/Router/Query 等继续等待 M5 真实使用点 |
 | OCI 基础镜像、Compose 双栈与跨平台 Agent Service 权限模型 | M0-09 开工前 | 已批准三个固定多架构基础镜像摘要、Compose 双栈 Profile 与原生 tcp4/tcp6 监听原语；OCI 使用 `65532:65532` 与只读根，只有 Server 挂载 Data Volume 和 `/run/xtunnel` tmpfs，Agent 无 Volume，从 `XTUNNEL_TOKEN` 取得 Token 并默认执行 `run`；Compose 输入 `XTUNNEL_AGENT_TOKEN` 映射到容器环境；Server 保留 Shell 包装。Agent 在 Linux/Windows 统一使用 Binary `service install --token` 与 `service uninstall`，不提供用户安装脚本。Linux 要求 root/systemd>=249，原子安装到 `/usr/local/bin/xtunnel-agent`，Credential 目录/Source 为 `root:root 0700/0600`，Unit 首行为 `# Managed by xtunnel-agent service install` 且 `ExecStart=/usr/local/bin/xtunnel-agent run`。Windows 支持 amd64/arm64，要求提升权限的 Administrator 与 SCM；ServiceName=`XTunnelAgent`、DisplayName=`XTunnel Agent`、账户=`NT AUTHORITY\LocalService`，Binary=`%ProgramFiles%\XTunnel\xtunnel-agent.exe`，Credential=`%ProgramData%\XTunnel\credentials\agent.token.dpapi` 并使用 `CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN`，SCM ImagePath 仅含安装 Binary + `run`，Description marker 精确为 `Managed by xtunnel-agent service install`；重复安装使用 `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)`，Stop/Shutdown 最多 30s，运行异常返回非零并配置 non-crash recovery。两端均拒绝覆盖/删除非受管同名服务，卸载删除受管服务并保留平台 Credential；Windows 从运行中已安装 EXE 自卸载时使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排重启删除 Binary，Linux 另保留服务用户 |
 | Minimal Security Audit Event Contract | M1-04 收口前 | 用户于 2026-08-26 明确确认数据库 Schema 变更；已冻结 bounded/nullable、`event_id`/`operation_id`、`event`/`action` 枚举、actor/resource/result、稳定失败语义和幂等边界，并以 `000003_security_audit_events.sql`、Repository 校验和 v2 Rotation Journal 落地。Security Audit append-only，禁止 UPDATE/DELETE，Secret/Credential/Private Key/Cookie 禁止入库；M1 写事件，M5 提供只读查询，M6 提供结构化导出、Dashboard 和 Runbook |
@@ -1261,3 +1261,15 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - CI 证据：契约实现提交 `ed3e5bf4332bbc275d926580de87c38fbebd4132`；推送与证据同步提交 `8aac03edce94dd076f4b0b256c81412e2b261e91` 精确触发 [CI #22](https://github.com/lifei6671/xtunnel/actions/runs/33178322621)，总耗时 5 分 9 秒，Windows Agent Service 与 Linux amd64/arm64 Verify Matrix 全部通过。GitHub Action 运行时报告 Node 20 弃用 Warning，不是任务失败，不影响本任务结论。
 - 状态边界：M5-01 的产物、关键断言、Breaking 失败分支、独立复审、本地验收与精确 CI 证据已齐备，因此从 `REVIEW` 转为 `DONE`；M5 为 `1/11`、全局为 `65/95`，M5-02 解锁为 `READY`。M5 Gate Checklist 全部保持未勾选，不把 OpenAPI 单任务验收冒充完整 M5 Gate。
 - 文档同步：总技术方案已同步 Cookie/CSRF Wire、Exposure、Service Composite ETag、Token Revoke、只读 Audit Query、安全 Config 白名单与 Typed Error；开发计划同步当前阶段、M5 状态、任务行、队列和本记录；README 同步 19 Path/25 Operation、Breaking 命令与 `DONE` 证据边界。Proto、Server Schema、Migration、依赖/Lockfile、运行日志契约和 `AGENTS.md` 均未改变。
+
+## 2026-08-29 · M5-02 Generated Client/Server Contract · REVIEW
+
+- 授权与选型：用户明确确认 Generator 选型、精确版本和依赖/Lockfile 变更。Go 侧锁定 `oapi-codegen v2.8.0`、`oapi-codegen/runtime v1.6.0` 与 `nullable v1.1.0`，生成 Models、标准库 HTTP Server 和 Strict Server Contract；Web 侧锁定 `openapi-typescript 7.13.0` 与 `openapi-fetch 0.17.0`。`openapi-typescript` 的工具 Peer Range 不包含 Web TypeScript `6.0.2`，因此没有使用 `--force`/`--legacy-peer-deps`，而是在 `tools/openapi-ts` 以独立 Lockfile 锁定工具侧 TypeScript `5.9.3`。
+- 生成产物：唯一机器权威仍是 `api/openapi/openapi.yaml`。Go 生成物提交到 `internal/server/managementapi/contract.gen.go`，覆盖 25 个 Strict Operation、Request/Response Model、状态码、Header 和 Media Type；TypeScript Schema 提交到 `web/src/api/schema.gen.ts`，开启 immutable 与 read/write markers。`web/src/api/client.ts` 只使用 `openapi-fetch` 装配 `/api/v1` 和 `credentials: same-origin`，不维护第二套 DTO。生成物由 `tools/openapi.sh generate|generate-check` 统一管理，禁止手改。
+- 契约澄清：七组 OpenAPI 联合类型补齐显式 discriminator mapping，使生成类型使用既有 Wire 值 `http`/`https`/`tcp`、`TCP`/`HTTP` 和现有 Typed Error code；该变更不改变 Request/Response Wire Shape，也不改写不可变初始 Baseline。Vacuum Breaking 报告为纯 Additive Mapping，没有 Breaking Change。
+- 工具与 CI：`tools/bootstrap-openapi.sh` 从 `tools/go.mod` 只读构建受管 `oapi-codegen`，不会回落开发机 PATH；同时支持原生 Linux Go 和 WSL 调用锁定的 Windows Go，并通过 `WSLENV` 真实透传 `GOTOOLCHAIN=local`。CI 在 OpenAPI Step 前按两个 Lockfile 执行 `npm ci`，随后执行 Validate、Breaking、`generate-check` 与 Contract Test。`tools/test-openapi.sh` 真实篡改 Go、TypeScript 生成物并删除 Go 生成物，逐项证明漂移/缺失会失败，退出时恢复仓库文件；另断言 25 Operation、Nullable PATCH、Strict Server、Merge Patch、ETag、Cache-Control、Discriminator、writeOnly 和 Client Base/Credential 语义。
+- 本地验证：Windows `go1.27.0`、`GOTOOLCHAIN=local`，Node `24.19.0`、npm `11.17.0`。受管 Generator 空缓存隔离重建成功；Shell `sh`/`dash`/`bash --posix` 语法通过；`openapi.sh validate|breaking|generate-check` 与 `test-openapi.sh` 通过，Vacuum Quality `100/100`；两个 `npm ci` 均为 0 Vulnerability，Web `check`/`build` 通过；根/工具 Module Verify 与 Tidy 零漂移、工具 Generator 只读 Build、全仓 `go test -count=1 -timeout 300s ./...` 和 `go vet ./...` 通过；CI YAML 与两个 Package/Lock JSON 解析、双 Diff Check 通过。npm 首次读取本机 Cache 时报告部分 Tarball 损坏，但按完整性校验自动重新获取后安装成功且 0 Vulnerability；这不是 Lockfile 漂移或被忽略的失败。当前没有原生 Linux 双架构或 GitHub CI 证据。
+- 独立复审：复审独立重跑 Validate、Breaking、Generate Check、Contract Test、Module Verify、生成 Package Test/Vet、Web Check、npm Audit、三种 Shell 语法和 Diff Check。首次发现 Archive Checksum 负例只断言退出码，未设置 `GOTOOLCHAIN` 时可能因错误原因伪通过；修复后 `test-openapi.sh` 先强制 `GOTOOLCHAIN=local`，并分别精确匹配 Vacuum SHA-256 与 Generator Build 失败文本，反向实测缺失环境变量明确失败。最终结论为无 P0/P1/P2 阻塞，可进入 `REVIEW`。
+- 剩余契约风险：当前冻结 OpenAPI 的 `int64` 由 TypeScript 忠实生成成 `number`，而 Schema 尚未统一限制为 `Number.MAX_SAFE_INTEGER`。并发控制使用字符串 ETag，不受该问题影响，且这不是本任务静默修改 Wire 的理由；在 M5-07/M5-08 实际输出或消费相关字段前，必须单独发起公共 Contract Review，选择安全上限或字符串 Wire。Strict Server 也不等于完整运行时 Schema 校验，CSRF、ETag 业务规则和 `additionalProperties` 等仍由 M5-03 至 M5-10 实现。
+- 状态与 Gate 边界：当前产物、本地验证与独立复审已完成，但工作区尚无包含本任务最终状态的 Commit SHA，也没有精确绑定该提交的 GitHub CI Run。因此 M5-02 进入 `REVIEW` 而非 `DONE`，M5 仍为 `1/11`、全局仍为 `65/95`，依赖 M5-02 的后续任务不解锁。M5 Gate Checklist 六项全部保持未勾选；第一项是 M5-11 的完整退出门禁，不能仅凭 M5-02 本地 Generated Drift 通过提前勾选。
+- 文档同步：总技术方案同步 Generator/Runtime/生成路径、Nullable/Strict/read-write 语义和 TS 工具隔离；根 README 同步唯一命令入口与 `REVIEW` 边界；根 `AGENTS.md` 同步生成物所有权和禁止手改规则；根 `.gitignore` 排除工具侧 `node_modules`；开发计划同步当前阶段、任务状态、审批决定、队列和本记录。Proto、Server Schema、Migration、部署、生产配置、权限模型和日志契约未改变。

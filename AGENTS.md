@@ -11,7 +11,7 @@
 - `api/proto/*.proto`：Protocol v1 的唯一 Wire Authority； `internal/protocol/gen/*.pb.go` 是提交仓库的生成物，不得手工修改。
 - `configs/server.schema.json`：Server 配置字段、类型、默认值、范围、Secret 和热加载属性的唯一机器权威；Go Struct、示例和文档不得独立发明第二套默认值。
 - Agent 不使用本地业务配置 Schema 或 YAML；Bootstrap 本地输入只接受版本化 Connection Token。Service、Origin 和 Health Policy 只经已认证的 Control Session 以 Snapshot 下发并在内存应用，不得新增第二套本地业务配置来源。
-- `api/openapi/openapi.yaml`：REST Request/Response、状态码和错误结构的唯一机器权威； Handler 和 Web 不得用手写 DTO 反向定义 OpenAPI。
+- `api/openapi/openapi.yaml`：REST Request/Response、状态码和错误结构的唯一机器权威；`internal/server/managementapi/contract.gen.go` 与 `web/src/api/schema.gen.ts` 是提交仓库的生成物，不得手工修改，Handler 和 Web 也不得用手写 DTO 反向定义 OpenAPI。
 - `migrations/` 与 `internal/repository/`：持久化 Schema、迁移和 Repository 实现；运行时 Session、Connector 和连接状态不得因实现方便而写入 SQLite。
 - `tools/`：版本检查、Proto/OpenAPI 工具安装与校验入口；不得维护绕过 Wrapper 的第二套生成命令，Proto/OpenAPI Wrapper 也不得回落到开发机 `PATH` 中的同名工具。
 - `web/`：React/Vite 源码；`web/dist` 是被忽略的可重复构建产物，不提交占位文件。
@@ -46,7 +46,7 @@ export GOTOOLCHAIN=local
 - 修改 Go 代码后，至少对改动文件运行 `gofmt`，并执行相关 package 测试和静态检查； 全量基础验证为 `go test ./...`、`go vet ./...`。
 - 修改 Web 或在缺少 `web/dist` 时执行会编译 Embed Package 的 Go 命令，先运行 `npm --prefix web ci`、`npm --prefix web run check`、`npm --prefix web run build`。
 - 修改 Proto 时，在 Linux amd64/arm64 环境使用 `./tools/bootstrap-proto.sh`、 `./tools/proto.sh lint` 和 `./tools/proto.sh breaking`。`generate-check` 只在包含本次生成物的干净 checkout 或 CI 中作为正式通过证据；脏工作区中的生成和等价检查只能作为开发反馈。
-- 修改 OpenAPI 时，使用 `./tools/bootstrap-openapi.sh`、`./tools/openapi.sh validate` 和 `./tools/test-openapi.sh`。
+- 修改 OpenAPI 或生成契约时，先运行 `npm --prefix tools/openapi-ts ci`，再使用 `./tools/bootstrap-openapi.sh`、`./tools/openapi.sh validate`、`./tools/openapi.sh breaking`、`./tools/openapi.sh generate-check` 和 `./tools/test-openapi.sh`。只有显式更新生成物时才运行 `./tools/openapi.sh generate`。
 - 完整验证顺序和跨平台矩阵以 `.github/workflows/ci.yml` 为准；不要把定向测试、脏工作区等价检查或单项 Schema/Fixture `VALID` 冒充完整 CI/Gate。
 - 长时间运行的测试、Race、Fuzz、Smoke 和部署检查必须设置与对应任务一致的超时。
 
@@ -98,6 +98,7 @@ export GOTOOLCHAIN=local
 - 仅在确认没有共享环境变量、全局状态、固定端口、目录、SQLite、证书、Fixture 或时序依赖后使用 `t.Parallel()`；不能确认时保持串行。
 - 并发、Session、WorkPool、Tunnel、Listener、Config Write 和 Usage Flush 等路径按任务要求运行 `go test -race ./...` 或更小的定向 Race Suite。
 - 修改 `.proto` 后只通过仓库 Wrapper 重新生成并提交 `internal/protocol/gen`；不得手改`*.pb.go`，不得维护孤立生成物。
+- 修改 `api/openapi/openapi.yaml` 或 OpenAPI Generator 配置后，只通过仓库 Wrapper 重新生成并提交 Go/TypeScript Contract；不得手改 `contract.gen.go` 或 `schema.gen.ts`，CI 必须执行 `generate-check` 拒绝任一端漂移。
 - Golden 测试逐字节比较已有 Fixture。更新 Fixture 必须作为显式 Protocol Review 变更，普通测试运行不得自动接受或覆盖新输出。
 - 新增平台实现时同步考虑对应的 `*_linux.go`、`*_windows.go` 或 `*_unsupported.go` 失败路径，并执行任务要求的原生运行或交叉编译验证；交叉编译不能冒充原生 Runtime Smoke。
 

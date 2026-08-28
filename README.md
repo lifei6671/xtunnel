@@ -1,6 +1,6 @@
 # XTunnel
 
-XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面、M2 Credential Lifecycle & Failover Hardening、M3 Configuration/Health/Durable Operations、M4 Product Data Plane 和 M5-01 OpenAPI Contract Freeze 均已通过验收与全绿 CI。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算、生产 HTTP Ingress，以及按持久化 Route 恢复的 Raw TCP/SSH Listener 与转发生命周期；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。Management REST、Web Console 和 `/metrics` 导出仍由后续里程碑实现。
+XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面、M2 Credential Lifecycle & Failover Hardening、M3 Configuration/Health/Durable Operations、M4 Product Data Plane 和 M5-01 OpenAPI Contract Freeze 均已通过验收与全绿 CI；M5-02 Generated Client/Server Contract 已完成本地实现并进入 `REVIEW`。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算、生产 HTTP Ingress，以及按持久化 Route 恢复的 Raw TCP/SSH Listener 与转发生命周期；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。Management REST Handler、Web Console 页面和 `/metrics` 导出仍由后续里程碑实现。
 
 ## 开发运行
 
@@ -26,13 +26,16 @@ export GOTOOLCHAIN=local
 OpenAPI 机器契约固定为 3.1.0，并使用仓库锁定的 vacuum 校验。工具同样只安装到 `.tools/bin`，Windows 开发机通过 WSL 执行：
 
 ```sh
+export GOTOOLCHAIN=local
+npm --prefix tools/openapi-ts ci
 ./tools/bootstrap-openapi.sh
 ./tools/openapi.sh validate
 ./tools/openapi.sh breaking
+./tools/openapi.sh generate-check
 ./tools/test-openapi.sh
 ```
 
-当前 `api/openapi/openapi.yaml` 已冻结 19 个 Path、25 个 Operation，并由独立不可变初始 Baseline、真实 Breaking 负例和 CI Step 保护。本地 Validate、Breaking 和 Contract Test 已通过，最终独立复审无 P0/P1/P2 阻塞，契约提交为 `ed3e5bf`，精确绑定 `8aac03e` 的 CI #22 全绿，M5-01 已转为 `DONE`。Generated Contract Drift 仍属于刚解锁的 M5-02，不能把 OpenAPI 契约验收冒充完整 M5 Gate。
+当前 `api/openapi/openapi.yaml` 已冻结 19 个 Path、25 个 Operation，并由独立不可变初始 Baseline、真实 Breaking 负例和 CI Step 保护。Go Strict Server Contract 生成到 `internal/server/managementapi/contract.gen.go`，TypeScript Schema 生成到 `web/src/api/schema.gen.ts`，`web/src/api/client.ts` 只负责装配 `/api/v1` 与同源 Cookie。需要显式更新两端生成物时运行 `./tools/openapi.sh generate`；普通开发和 CI 使用 `generate-check`，任一端漂移都会失败。M5-02 当前只有本地实现与验证证据，尚无 Commit SHA 和精确 CI Run，因此保持 `REVIEW`；M5 总 Gate 仍全部未勾选。
 
 Web 工程固定使用 Node 24.19.0、npm 11.17.0，直接依赖由 `web/package-lock.json` 精确锁定。生产构建必须先于任何会编译 `web` Go Package 的命令：
 

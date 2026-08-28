@@ -785,7 +785,12 @@ components:
         - { $ref: '#/components/schemas/HTTPOrigin' }
         - { $ref: '#/components/schemas/HTTPSOrigin' }
         - { $ref: '#/components/schemas/TCPOrigin' }
-      discriminator: { propertyName: scheme }
+      discriminator:
+        propertyName: scheme
+        mapping:
+          http: '#/components/schemas/HTTPOrigin'
+          https: '#/components/schemas/HTTPSOrigin'
+          tcp: '#/components/schemas/TCPOrigin'
     HTTPOrigin:
       type: object
       additionalProperties: false
@@ -822,7 +827,12 @@ components:
         - { $ref: '#/components/schemas/HTTPOriginInput' }
         - { $ref: '#/components/schemas/HTTPSOriginInput' }
         - { $ref: '#/components/schemas/TCPOriginInput' }
-      discriminator: { propertyName: scheme }
+      discriminator:
+        propertyName: scheme
+        mapping:
+          http: '#/components/schemas/HTTPOriginInput'
+          https: '#/components/schemas/HTTPSOriginInput'
+          tcp: '#/components/schemas/TCPOriginInput'
     HTTPOriginInput:
       type: object
       additionalProperties: false
@@ -914,7 +924,11 @@ components:
       oneOf:
         - { $ref: '#/components/schemas/TCPHealthCheck' }
         - { $ref: '#/components/schemas/HTTPHealthCheck' }
-      discriminator: { propertyName: type }
+      discriminator:
+        propertyName: type
+        mapping:
+          TCP: '#/components/schemas/TCPHealthCheck'
+          HTTP: '#/components/schemas/HTTPHealthCheck'
     TCPHealthCheck:
       type: object
       additionalProperties: false
@@ -955,7 +969,11 @@ components:
       oneOf:
         - { $ref: '#/components/schemas/TCPHealthCheckInput' }
         - { $ref: '#/components/schemas/HTTPHealthCheckInput' }
-      discriminator: { propertyName: type }
+      discriminator:
+        propertyName: type
+        mapping:
+          TCP: '#/components/schemas/TCPHealthCheckInput'
+          HTTP: '#/components/schemas/HTTPHealthCheckInput'
     TCPHealthCheckInput:
       type: object
       additionalProperties: false
@@ -984,7 +1002,11 @@ components:
       oneOf:
         - { $ref: '#/components/schemas/HTTPExposure' }
         - { $ref: '#/components/schemas/TCPExposure' }
-      discriminator: { propertyName: type }
+      discriminator:
+        propertyName: type
+        mapping:
+          http: '#/components/schemas/HTTPExposure'
+          tcp: '#/components/schemas/TCPExposure'
     HTTPExposure:
       type: object
       additionalProperties: false
@@ -1016,7 +1038,11 @@ components:
       oneOf:
         - { $ref: '#/components/schemas/HTTPExposureInput' }
         - { $ref: '#/components/schemas/TCPExposureInput' }
-      discriminator: { propertyName: type }
+      discriminator:
+        propertyName: type
+        mapping:
+          http: '#/components/schemas/HTTPExposureInput'
+          tcp: '#/components/schemas/TCPExposureInput'
     HTTPExposureInput:
       type: object
       additionalProperties: false
@@ -1372,7 +1398,13 @@ components:
             - { $ref: '#/components/schemas/TunnelInUseDetails' }
             - { $ref: '#/components/schemas/SnapshotLimitDetails' }
             - { $ref: '#/components/schemas/ResourceVersionConflictDetails' }
-          discriminator: { propertyName: type }
+          discriminator:
+            propertyName: type
+            mapping:
+              FIELD_VIOLATIONS: '#/components/schemas/FieldViolationsDetails'
+              TUNNEL_IN_USE: '#/components/schemas/TunnelInUseDetails'
+              SNAPSHOT_LIMIT: '#/components/schemas/SnapshotLimitDetails'
+              RESOURCE_VERSION_CONFLICT: '#/components/schemas/ResourceVersionConflictDetails'
     APIErrorCode:
       type: string
       enum:

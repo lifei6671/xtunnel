@@ -5,7 +5,14 @@ set -eu
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 repo_root=$(CDPATH= cd "$script_dir/.." && pwd)
 managed_vacuum="$repo_root/.tools/bin/vacuum"
+managed_oapi_codegen="$repo_root/.tools/bin/oapi-codegen"
+typescript_cli="$repo_root/tools/openapi-ts/node_modules/openapi-typescript/bin/cli.js"
+go_generated_file="$repo_root/internal/server/managementapi/contract.gen.go"
+typescript_generated_file="$repo_root/web/src/api/schema.gen.ts"
+typescript_client_file="$repo_root/web/src/api/client.ts"
 test_root=''
+go_generated_backup=''
+typescript_generated_backup=''
 
 fail() {
     printf 'openapi test: %s\n' "$1" >&2
@@ -13,6 +20,12 @@ fail() {
 }
 
 cleanup() {
+    if [ -n "$go_generated_backup" ] && [ -f "$go_generated_backup" ]; then
+        cp -- "$go_generated_backup" "$go_generated_file"
+    fi
+    if [ -n "$typescript_generated_backup" ] && [ -f "$typescript_generated_backup" ]; then
+        cp -- "$typescript_generated_backup" "$typescript_generated_file"
+    fi
     if [ -n "$test_root" ]; then
         rm -rf -- "$test_root"
     fi
@@ -43,7 +56,13 @@ trap 'cleanup; exit 1' HUP INT TERM
 
 command -v mktemp >/dev/null 2>&1 || fail 'mktemp is required'
 command -v cp >/dev/null 2>&1 || fail 'cp is required'
+[ "${GOTOOLCHAIN-}" = 'local' ] || fail 'GOTOOLCHAIN must be set to local'
 [ -x "$managed_vacuum" ] || fail "missing managed vacuum; run $script_dir/bootstrap-openapi.sh"
+[ -x "$managed_oapi_codegen" ] || \
+    fail "missing managed oapi-codegen; run $script_dir/bootstrap-openapi.sh"
+[ -r "$typescript_cli" ] || \
+    fail 'missing managed openapi-typescript; run npm --prefix tools/openapi-ts ci'
+[ -r "$typescript_client_file" ] || fail "missing TypeScript API client: $typescript_client_file"
 
 test_root=$(mktemp -d "$repo_root/.tools/openapi-test.XXXXXX") || \
     fail 'cannot create temporary test directory'
@@ -227,7 +246,106 @@ printf 'invalid archive\n' >"$test_root/invalid-archive.tar.gz"
     printf "VACUUM_LINUX_AMD64_ASSET='invalid-archive.tar.gz'\n"
 } >>"$bootstrap_tools/versions.env"
 expect_status 1 archive-checksum sh "$bootstrap_tools/bootstrap-openapi.sh"
+grep -F 'vacuum archive SHA-256 mismatch' "$test_root/archive-checksum.out" >/dev/null || \
+    fail 'archive checksum case failed for an unexpected reason'
 [ "$(cat "$bootstrap_bin/vacuum")" = 'existing vacuum' ] || \
     fail 'failed bootstrap replaced the existing vacuum binary'
 
-printf 'OpenAPI validation tests passed.\n'
+# Generator 构建失败也必须保留已有受管二进制，不能把半成品发布到工具目录。
+generator_bootstrap_root="$test_root/generator-bootstrap-repository"
+generator_bootstrap_tools="$generator_bootstrap_root/tools"
+generator_bootstrap_bin="$generator_bootstrap_root/.tools/bin"
+fake_go_bin="$test_root/fake-go-bin"
+mkdir -p "$generator_bootstrap_tools" "$generator_bootstrap_bin" "$fake_go_bin"
+cp "$script_dir/bootstrap-openapi.sh" "$script_dir/check-go-version.sh" \
+    "$script_dir/versions.env" "$generator_bootstrap_tools/"
+cp "$managed_vacuum" "$generator_bootstrap_bin/vacuum"
+cat >"$generator_bootstrap_bin/oapi-codegen" <<'EOF'
+#!/bin/sh
+printf 'existing generator\n'
+EOF
+cp "$generator_bootstrap_bin/oapi-codegen" "$test_root/existing-oapi-codegen"
+cat >"$fake_go_bin/go" <<'EOF'
+#!/bin/sh
+case "${1-}:${2-}" in
+    env:GOVERSION)
+        printf 'go1.27.0\n'
+        ;;
+    env:GOTOOLCHAIN)
+        printf 'local\n'
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod 0755 "$generator_bootstrap_tools/bootstrap-openapi.sh" \
+    "$generator_bootstrap_tools/check-go-version.sh" \
+    "$generator_bootstrap_bin/vacuum" "$generator_bootstrap_bin/oapi-codegen" \
+    "$fake_go_bin/go"
+expect_status 1 generator-build-failure env GOTOOLCHAIN=local \
+    PATH="$fake_go_bin:$PATH" sh "$generator_bootstrap_tools/bootstrap-openapi.sh"
+grep -F 'oapi-codegen build failed' "$test_root/generator-build-failure.out" >/dev/null || \
+    fail 'generator build case failed for an unexpected reason'
+cmp -s "$test_root/existing-oapi-codegen" "$generator_bootstrap_bin/oapi-codegen" || \
+    fail 'failed generator build replaced the existing oapi-codegen binary'
+
+# 生成检查必须真实拒绝 Go/TypeScript 任意一端的漂移，并在退出时恢复原始产物。
+expect_status 0 canonical-generated-contract sh "$script_dir/openapi.sh" generate-check
+go_generated_backup="$test_root/contract.gen.go"
+typescript_generated_backup="$test_root/schema.gen.ts"
+cp "$go_generated_file" "$go_generated_backup"
+cp "$typescript_generated_file" "$typescript_generated_backup"
+
+printf '\n// drift\n' >>"$go_generated_file"
+expect_status 1 go-generated-drift sh "$script_dir/openapi.sh" generate-check
+cp "$go_generated_backup" "$go_generated_file"
+
+printf '\n// drift\n' >>"$typescript_generated_file"
+expect_status 1 typescript-generated-drift sh "$script_dir/openapi.sh" generate-check
+cp "$typescript_generated_backup" "$typescript_generated_file"
+
+rm -f -- "$go_generated_file"
+expect_status 1 missing-go-generated-contract sh "$script_dir/openapi.sh" generate-check
+cp "$go_generated_backup" "$go_generated_file"
+
+# 字节一致只能证明可重复；这些断言额外锁定 M5 后续 Handler/Web 依赖的传输语义。
+strict_operations=$(
+    sed -n '/^type StrictServerInterface interface {$/,/^}$/p' "$go_generated_file" |
+        grep -c 'ResponseObject, error)'
+)
+[ "$strict_operations" -eq 25 ] || \
+    fail "generated Go strict interface has $strict_operations operations, want 25"
+typescript_operations=$(grep -c 'operations\["' "$typescript_generated_file")
+[ "$typescript_operations" -eq 25 ] || \
+    fail "generated TypeScript paths have $typescript_operations operations, want 25"
+grep -F 'Health   nullable.Nullable[HealthCheckInput]' "$go_generated_file" >/dev/null || \
+    fail 'generated Go PATCH contract lost nullable health state'
+grep -F 'Exposure nullable.Nullable[ExposurePatch]' "$go_generated_file" >/dev/null || \
+    fail 'generated Go PATCH contract lost nullable exposure state'
+grep -F 'type StrictServerInterface interface {' "$go_generated_file" >/dev/null || \
+    fail 'generated Go strict server interface is missing'
+grep -F 'type UpdateServiceApplicationMergePatchPlusJSONRequestBody' "$go_generated_file" >/dev/null || \
+    fail 'generated Go contract lost merge-patch media type'
+grep -F 'ETag *string' "$go_generated_file" >/dev/null || \
+    fail 'generated Go contract lost ETag response headers'
+grep -F 'CacheControl *string' "$go_generated_file" >/dev/null || \
+    fail 'generated Go contract lost Cache-Control response headers'
+grep -F 'readonly scheme: "http";' "$typescript_generated_file" >/dev/null || \
+    fail 'generated TypeScript HTTP discriminator differs from the Wire value'
+grep -F 'readonly type: "TCP";' "$typescript_generated_file" >/dev/null || \
+    fail 'generated TypeScript TCP health discriminator differs from the Wire value'
+grep -F 'readonly password: $Write<string>;' "$typescript_generated_file" >/dev/null || \
+    fail 'generated TypeScript contract lost writeOnly password semantics'
+grep -F 'readonly "application/merge-patch+json"' "$typescript_generated_file" >/dev/null || \
+    fail 'generated TypeScript contract lost merge-patch media type'
+grep -F 'readonly ETag:' "$typescript_generated_file" >/dev/null || \
+    fail 'generated TypeScript contract lost ETag response headers'
+grep -F 'readonly "Cache-Control":' "$typescript_generated_file" >/dev/null || \
+    fail 'generated TypeScript contract lost Cache-Control response headers'
+grep -F 'baseUrl: "/api/v1"' "$typescript_client_file" >/dev/null || \
+    fail 'TypeScript API client base URL differs from the OpenAPI server base path'
+grep -F 'credentials: "same-origin"' "$typescript_client_file" >/dev/null || \
+    fail 'TypeScript API client lost same-origin cookie credentials'
+
+printf 'OpenAPI validation and generation tests passed.\n'
