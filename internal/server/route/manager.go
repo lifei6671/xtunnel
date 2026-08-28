@@ -44,9 +44,24 @@ type Manager struct {
 
 	lifecycleMu sync.Mutex
 	started     bool
+	observerMu  sync.RWMutex
+	observers   []func(uint64)
 
 	errorMu   sync.RWMutex
 	lastError error
+}
+
+// ObservePublished 注册一个只在完整 Snapshot 成功原子发布后调用的非阻塞观察者。
+// 观察者不能参与构建或替换 Snapshot；它只桥接依赖 Route 视图的下游 Runtime dirty，
+// 避免 Config Write 同时 fanout 时下游先读到旧代次并吞掉唯一唤醒。
+func (manager *Manager) ObservePublished(observer func(uint64)) error {
+	if manager == nil || observer == nil {
+		return ErrInvalidSource
+	}
+	manager.observerMu.Lock()
+	manager.observers = append(manager.observers, observer)
+	manager.observerMu.Unlock()
+	return nil
 }
 
 // NewManager 创建尚未启动的路由快照管理器。
@@ -228,7 +243,17 @@ func (manager *Manager) reconcile(ctx context.Context) error {
 			}
 		}
 		manager.setLastError(nil)
+		manager.notifyPublished(state.Generation)
 		return nil
+	}
+}
+
+func (manager *Manager) notifyPublished(generation uint64) {
+	manager.observerMu.RLock()
+	observers := append([]func(uint64){}, manager.observers...)
+	manager.observerMu.RUnlock()
+	for _, observer := range observers {
+		observer(generation)
 	}
 }
 

@@ -105,31 +105,32 @@ type Logging struct {
 
 // Limits 定义 Server 的硬资源预算；默认值和范围只来自 Server Schema。
 type Limits struct {
-	MaxTunnels                          int `json:"max_tunnels"`
-	MaxConnectors                       int `json:"max_connectors"`
-	MaxConnectorsPerTunnel              int `json:"max_connectors_per_tunnel"`
-	MaxServicesPerTunnel                int `json:"max_services_per_tunnel"`
-	MaxHealthTargetsPerTunnel           int `json:"max_health_targets_per_tunnel"`
-	MaxHealthTargetsGlobal              int `json:"max_health_targets_global"`
-	MaxTunnelSnapshotBytes              int `json:"max_tunnel_snapshot_bytes"`
-	MaxActiveConnections                int `json:"max_active_connections"`
-	MaxConnectionsPerTunnel             int `json:"max_connections_per_tunnel"`
-	MaxConnectionsPerService            int `json:"max_connections_per_service"`
-	MaxConnectionsPerSourceIP           int `json:"max_connections_per_source_ip"`
-	MaxOpenRatePerSourceIP              int `json:"max_open_rate_per_source_ip"`
-	MaxOpenBurstPerSourceIP             int `json:"max_open_burst_per_source_ip"`
-	MaxHTTPRequestsPerSourceIPPerSecond int `json:"max_http_requests_per_source_ip_per_second"`
-	MaxWorkConnections                  int `json:"max_work_connections"`
-	MaxIdleWorkConnections              int `json:"max_idle_work_connections"`
-	MaxConnectingWorkConnections        int `json:"max_connecting_work_connections"`
-	MaxPendingOpens                     int `json:"max_pending_opens"`
-	MaxPendingAuth                      int `json:"max_pending_auth"`
-	MaxPendingTLSHandshakes             int `json:"max_pending_tls_handshakes"`
-	MaxReplayEntriesPerSession          int `json:"max_replay_entries_per_session"`
-	MaxControlFrameBytes                int `json:"max_control_frame_bytes"`
-	MaxAuthFrameBytes                   int `json:"max_auth_frame_bytes"`
-	MaxWorkFrameBytes                   int `json:"max_work_frame_bytes"`
-	MaxHTTPHeaderBytes                  int `json:"max_http_header_bytes"`
+	MaxTunnels                          int   `json:"max_tunnels"`
+	MaxConnectors                       int   `json:"max_connectors"`
+	MaxConnectorsPerTunnel              int   `json:"max_connectors_per_tunnel"`
+	MaxServicesPerTunnel                int   `json:"max_services_per_tunnel"`
+	MaxHealthTargetsPerTunnel           int   `json:"max_health_targets_per_tunnel"`
+	MaxHealthTargetsGlobal              int   `json:"max_health_targets_global"`
+	MaxTunnelSnapshotBytes              int   `json:"max_tunnel_snapshot_bytes"`
+	MaxActiveConnections                int   `json:"max_active_connections"`
+	MaxConnectionsPerTunnel             int   `json:"max_connections_per_tunnel"`
+	MaxConnectionsPerService            int   `json:"max_connections_per_service"`
+	MaxConnectionsPerSourceIP           int   `json:"max_connections_per_source_ip"`
+	MaxOpenRatePerSourceIP              int   `json:"max_open_rate_per_source_ip"`
+	MaxOpenBurstPerSourceIP             int   `json:"max_open_burst_per_source_ip"`
+	MaxHTTPRequestsPerSourceIPPerSecond int   `json:"max_http_requests_per_source_ip_per_second"`
+	MaxWorkConnections                  int   `json:"max_work_connections"`
+	MaxIdleWorkConnections              int   `json:"max_idle_work_connections"`
+	MaxConnectingWorkConnections        int   `json:"max_connecting_work_connections"`
+	MaxPendingOpens                     int   `json:"max_pending_opens"`
+	MaxPendingAuth                      int   `json:"max_pending_auth"`
+	MaxPendingTLSHandshakes             int   `json:"max_pending_tls_handshakes"`
+	MaxReplayEntriesPerSession          int   `json:"max_replay_entries_per_session"`
+	MaxControlFrameBytes                int   `json:"max_control_frame_bytes"`
+	MaxAuthFrameBytes                   int   `json:"max_auth_frame_bytes"`
+	MaxWorkFrameBytes                   int   `json:"max_work_frame_bytes"`
+	MaxHTTPHeaderBytes                  int   `json:"max_http_header_bytes"`
+	MaxHTTPBodyBytes                    int64 `json:"max_http_body_bytes"`
 }
 
 // Load 合并并校验一份 Server 配置。

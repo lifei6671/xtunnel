@@ -53,6 +53,14 @@ func TestBuildSnapshotBuildsCompleteJoinedViewAndProtectsImmutability(t *testing
 	if tcpRoute.ServiceID != testServiceID || tcpRoute.TunnelID != testTunnelID || tcpRoute.RequiredRevision != 3 {
 		t.Fatalf("TCP(8443) = %+v, want joined service/tunnel/revision", tcpRoute)
 	}
+	tcpRoutes := snapshot.TCPRoutes()
+	if len(tcpRoutes) != 1 || tcpRoutes[0] != tcpRoute {
+		t.Fatalf("TCPRoutes() = %+v, want [%+v]", tcpRoutes, tcpRoute)
+	}
+	tcpRoutes[0].ServiceID = "mutated"
+	if againTCP, _ := snapshot.TCP(8443); againTCP.ServiceID != testServiceID {
+		t.Fatalf("TCPRoutes() result mutated snapshot: %+v", againTCP)
+	}
 	tunnel, ok := snapshot.Tunnel(testTunnelID)
 	if !ok || tunnel.DesiredRevision != 4 {
 		t.Fatalf("Tunnel(%q) = %+v, %v, want desired_revision=4", testTunnelID, tunnel, ok)

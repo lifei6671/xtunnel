@@ -328,7 +328,8 @@
         "max_control_frame_bytes",
         "max_auth_frame_bytes",
         "max_work_frame_bytes",
-        "max_http_header_bytes"
+        "max_http_header_bytes",
+        "max_http_body_bytes"
       ],
       "properties": {
         "max_tunnels": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 1000, "x-secret": false, "x-reloadable": false},
@@ -355,7 +356,8 @@
         "max_control_frame_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576, "default": 1048576, "x-secret": false, "x-reloadable": false},
         "max_auth_frame_bytes": {"type": "integer", "minimum": 1, "maximum": 65536, "default": 65536, "x-secret": false, "x-reloadable": false},
         "max_work_frame_bytes": {"type": "integer", "minimum": 1, "maximum": 65536, "default": 65536, "x-secret": false, "x-reloadable": false},
-        "max_http_header_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536, "x-secret": false, "x-reloadable": false}
+        "max_http_header_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536, "x-secret": false, "x-reloadable": false},
+        "max_http_body_bytes": {"type": "integer", "minimum": 1, "maximum": 1099511627776, "default": 2147483648, "x-secret": false, "x-reloadable": false}
       }
     }
   }

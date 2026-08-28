@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -25,6 +28,7 @@ import (
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	"github.com/lifei6671/xtunnel/internal/server/sessionruntime"
 	"github.com/lifei6671/xtunnel/internal/server/snapshot"
+	servertcpingress "github.com/lifei6671/xtunnel/internal/server/tcpingress"
 	serverworkauth "github.com/lifei6671/xtunnel/internal/server/workauth"
 	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
@@ -40,8 +44,10 @@ const (
 	// OPEN 从首字节写出到完整 OpenResponse 提交共用一个 6 秒总预算；单次
 	// Read/Write 也取相同上限，避免分阶段时限叠加成 12 秒。
 	openHandshakeTimeout = 6 * time.Second
-	// SQLite 预算覆盖数据库、WAL/SHM 与迁移期间的短暂文件；Listener 预算覆盖
+	// SQLite 预算覆盖数据库、WAL/SHM 与迁移期间的短暂文件；固定 Listener 预算覆盖
 	// Admin Bootstrap、Backup Barrier、HTTP Ingress 与 Gateway 的启动重叠峰值。
+	// TCP 逻辑端口池按全部可用端口再加一个原子换口候选统一预留，后续新增 Route
+	// 不再依赖启动时数据库中恰好已有多少 Listener。
 	// Management/Metrics 独立列项，安全余量吸收日志、DNS 与运行时临时 FD，
 	// 避免把真实稳定 Listener 隐含塞入安全余量。
 	fdSQLiteReserve    = uint64(8)
@@ -58,25 +64,17 @@ func openGatewayLifecycle(
 	logger *slog.Logger,
 	reportRuntimeError func(error),
 	healthBudget *healthbudget.Manager,
-) (*gateway.Server, *sessionruntime.Manager, *tunnel.Proxy, error) {
+) (*gateway.Server, *sessionruntime.Manager, *tunnel.Proxy, *serverlimits.Manager, error) {
 	if healthBudget == nil {
-		return nil, nil, nil, errors.New("health target budget manager is required")
+		return nil, nil, nil, nil, errors.New("health target budget manager is required")
 	}
 	serverResources, ok := resources.(*serverStorage)
 	if !ok {
-		return nil, nil, nil, errors.New("unexpected server storage implementation")
+		return nil, nil, nil, nil, errors.New("unexpected server storage implementation")
 	}
-	if err := serverlimits.CheckFDBudget(serverlimits.FDBudget{
-		WorkConnections:         uint64(config.Limits.MaxWorkConnections),
-		PublicActiveConnections: uint64(config.Limits.MaxActiveConnections),
-		PendingOpenConnections:  uint64(config.Limits.MaxPendingOpens),
-		ConnectorControls:       uint64(config.Limits.MaxConnectors),
-		PendingTLSHandshakes:    uint64(config.Limits.MaxPendingTLSHandshakes),
-		PendingAuth:             uint64(config.Limits.MaxPendingAuth),
-		Listeners:               fdListenerReserve, SQLite: fdSQLiteReserve,
-		Management: 1, Metrics: 1, SafetyMargin: fdSafetyMargin,
-	}); err != nil {
-		return nil, nil, nil, fmt.Errorf("validate startup file descriptor budget: %w", err)
+	tcpListenerReserve := tcpListenerFDReserve(config.TCPIngress)
+	if err := checkServerFDBudget(config, tcpListenerReserve); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("validate startup file descriptor budget: %w", err)
 	}
 	limitManager, err := serverlimits.New(serverlimits.Options{
 		MaxConnectors:                uint64(config.Limits.MaxConnectors),
@@ -89,9 +87,14 @@ func openGatewayLifecycle(
 		MaxConnectionsPerTunnel:      uint64(config.Limits.MaxConnectionsPerTunnel),
 		MaxConnectionsPerService:     uint64(config.Limits.MaxConnectionsPerService),
 		MaxConnectionsPerSourceIP:    uint64(config.Limits.MaxConnectionsPerSourceIP),
+		MaxOpenRatePerSourceIP:       uint64(config.Limits.MaxOpenRatePerSourceIP),
+		MaxOpenBurstPerSourceIP:      uint64(config.Limits.MaxOpenBurstPerSourceIP),
+		MaxHTTPRequestsPerSourceIPPerSecond: uint64(
+			config.Limits.MaxHTTPRequestsPerSourceIPPerSecond,
+		),
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("construct server resource limit manager: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("construct server resource limit manager: %w", err)
 	}
 	var (
 		identity    gateway.Identity
@@ -108,14 +111,14 @@ func openGatewayLifecycle(
 	case gateway.PublicMode:
 		identity, identityErr = gateway.LoadPublicIdentity(config.AgentGateway.TLS.CertFile, config.AgentGateway.TLS.KeyFile)
 	default:
-		return nil, nil, nil, fmt.Errorf("unsupported gateway TLS mode %q", config.AgentGateway.TLS.Mode)
+		return nil, nil, nil, nil, fmt.Errorf("unsupported gateway TLS mode %q", config.AgentGateway.TLS.Mode)
 	}
 	if identityErr != nil {
-		return nil, nil, nil, fmt.Errorf("load gateway TLS identity: %w", identityErr)
+		return nil, nil, nil, nil, fmt.Errorf("load gateway TLS identity: %w", identityErr)
 	}
 	protector, err := application.NewAES256GCMTokenProtector(serverResources.tokenMasterKey[:])
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("construct Tunnel Token protector for gateway authentication: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("construct Tunnel Token protector for gateway authentication: %w", err)
 	}
 	tokenService := application.NewConnectionTokenService(serverResources.database, protector)
 	snapshotBuilder, err := snapshot.New(snapshot.Config{
@@ -125,11 +128,11 @@ func openGatewayLifecycle(
 		MaxControlFrameBytes: config.Limits.MaxControlFrameBytes,
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("construct gateway Snapshot builder: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("construct gateway Snapshot builder: %w", err)
 	}
 	snapshotSource, err := snapshot.NewSource(serverResources.database, snapshotBuilder)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("construct gateway Snapshot source: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("construct gateway Snapshot source: %w", err)
 	}
 	registry := serverruntime.NewRegistryWithLimitsAndHealthBudget(limitManager, healthBudget)
 	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
@@ -150,7 +153,7 @@ func openGatewayLifecycle(
 		ReportRuntimeError:   reportRuntimeError,
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("construct gateway Session runtime: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("construct gateway Session runtime: %w", err)
 	}
 	controlAuthenticator, err := servercontrolauth.New(tokenService, registry, servercontrolauth.Options{
 		AuthenticationRecorder: serverResources.database,
@@ -160,14 +163,14 @@ func openGatewayLifecycle(
 		MaxFrameBytes:     uint64(config.Limits.MaxAuthFrameBytes),
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("construct gateway Control authenticator: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("construct gateway Control authenticator: %w", err)
 	}
 	workAuthenticator, err := serverworkauth.NewHandler(sessions, serverworkauth.HandlerOptions{
 		ReadTimeout: workAuthReadTimeout, WriteTimeout: workAuthWriteTimeout,
 		MaxFrameBytes: uint64(config.Limits.MaxWorkFrameBytes),
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("construct gateway Work authenticator: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("construct gateway Work authenticator: %w", err)
 	}
 	openHandler, err := serveropen.NewHandler(serveropen.Options{
 		HandshakeTimeout: openHandshakeTimeout,
@@ -176,7 +179,7 @@ func openGatewayLifecycle(
 		MaxFrameBytes:    uint64(config.Limits.MaxWorkFrameBytes),
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("construct gateway OPEN handler: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("construct gateway OPEN handler: %w", err)
 	}
 	tunnelProxy, err := tunnel.NewProxy(tunnel.Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler,
@@ -184,7 +187,7 @@ func openGatewayLifecycle(
 		LimitManager:   limitManager,
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("construct Tunnel data-plane proxy: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("construct Tunnel data-plane proxy: %w", err)
 	}
 	protocolHandler := &gatewayProtocolHandler{
 		controlAuthenticator: controlAuthenticator,
@@ -207,9 +210,9 @@ func openGatewayLifecycle(
 		},
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("construct agent gateway: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("construct agent gateway: %w", err)
 	}
-	return server, sessions, tunnelProxy, nil
+	return server, sessions, tunnelProxy, limitManager, nil
 }
 
 // gatewayProtocolHandler 是 TLS/ALPN 之后唯一的生产协议分发点。
@@ -299,6 +302,7 @@ type gatewayBootstrapCloser struct {
 	gateway       *gateway.Server
 	httpIngress   *serverhttpingress.Server
 	httpHandler   *serverhttpingress.Handler
+	tcpIngress    *servertcpingress.Manager
 	sessions      *sessionruntime.Manager
 	routes        *serverroute.Manager
 	cancelRoutes  context.CancelFunc
@@ -308,8 +312,9 @@ type gatewayBootstrapCloser struct {
 	result        error
 }
 
-// Close 以幂等方式执行冻结的关闭顺序：先停止维护入口和新连接，再限时排空
-// Session，最后关闭 Gateway 中残留的连接 goroutine。
+// Close 以幂等方式执行冻结的关闭顺序：先停止维护入口和 TCP/HTTP/Gateway
+// 新连接，再让 Session、TCP 与 HTTP 的已准入工作共用绝对 Deadline 排空；
+// 到期由各 owner 主动关闭残留连接，最后关闭 Gateway 中的连接 goroutine。
 func (closer *gatewayBootstrapCloser) Close() error {
 	closer.once.Do(func() {
 		var backupErr error
@@ -322,8 +327,12 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		if closer.bootstrap != nil {
 			bootstrapErr = closer.bootstrap.Close()
 		}
-		// 同时关闭两类公网入口后才开始排空。HTTP Listener 先停可避免新的
-		// RoundTrip 继续申请 WorkConn；Gateway 随后停止接受新的 Control/Work。
+		// 同时关闭三类公网入口后才开始排空。TCP/HTTP Listener 先停可避免新的
+		// OPEN/RoundTrip 继续申请 WorkConn；Gateway 随后停止新的 Control/Work。
+		var tcpStopErr error
+		if closer.tcpIngress != nil {
+			tcpStopErr = closer.tcpIngress.StopAccepting()
+		}
 		var httpStopErr error
 		if closer.httpIngress != nil {
 			httpStopErr = closer.httpIngress.StopAccepting()
@@ -335,8 +344,9 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		}
 		drainContext, cancelDrain := context.WithTimeout(context.Background(), timeout)
 		// 先关闭当前 idle Transport，避免没有请求的池化 WorkConn 占满排空窗口。
-		// Session 与 HTTP 使用同一个绝对 Deadline 并行排空：Session 立即建立禁止
-		// 新 OPEN 的 fence，HTTP 则允许已经进入 Handler 的请求自然完成。
+		// Session、TCP 与 HTTP 使用同一个绝对 Deadline 并行排空：Session 立即建立
+		// 禁止新 OPEN 的 fence，TCP 连接和 HTTP 请求则允许已准入工作自然完成；
+		// Deadline 到期后，各 owner 主动关闭残留连接以解阻 IO。
 		if closer.httpHandler != nil {
 			closer.httpHandler.CloseIdleConnections()
 		}
@@ -346,6 +356,16 @@ func (closer *gatewayBootstrapCloser) Close() error {
 			nil,
 			func() { sessionResult <- closer.sessions.Shutdown(drainContext) },
 		)
+		tcpResult := make(chan error, 1)
+		if closer.tcpIngress != nil {
+			safego.Go(
+				func(err error) { tcpResult <- err },
+				nil,
+				func() { tcpResult <- closer.tcpIngress.Shutdown(drainContext) },
+			)
+		} else {
+			tcpResult <- nil
+		}
 		var httpDrainErr error
 		if closer.httpIngress != nil {
 			httpDrainErr = closer.httpIngress.Shutdown(drainContext)
@@ -356,10 +376,15 @@ func (closer *gatewayBootstrapCloser) Close() error {
 			closer.httpHandler.CloseIdleConnections()
 		}
 		drainErr := <-sessionResult
+		tcpDrainErr := <-tcpResult
 		cancelDrain()
 		var httpCloseErr error
 		if closer.httpIngress != nil {
 			httpCloseErr = closer.httpIngress.Close()
+		}
+		var tcpCloseErr error
+		if closer.tcpIngress != nil {
+			tcpCloseErr = closer.tcpIngress.Close()
 		}
 		gatewayErr := closer.gateway.Close()
 		// Route owner 必须晚于全部 Listener/Session 停止、早于 SQLite 关闭。
@@ -371,8 +396,8 @@ func (closer *gatewayBootstrapCloser) Close() error {
 			closer.routes.Wait()
 		}
 		closer.result = errors.Join(
-			backupErr, bootstrapErr, httpStopErr, stopErr,
-			httpDrainErr, drainErr, httpCloseErr, gatewayErr,
+			backupErr, bootstrapErr, tcpStopErr, httpStopErr, stopErr,
+			tcpDrainErr, httpDrainErr, drainErr, tcpCloseErr, httpCloseErr, gatewayErr,
 		)
 	})
 	return closer.result
@@ -449,7 +474,7 @@ func openGatewayAndBootstrapWith(
 		default:
 		}
 	}
-	gatewayServer, sessions, tunnelProxy, err := openGatewayLifecycle(
+	gatewayServer, sessions, tunnelProxy, limitManager, err := openGatewayLifecycle(
 		config, resources, logger, reportRuntimeError, healthBudget,
 	)
 	if err != nil {
@@ -468,11 +493,26 @@ func openGatewayAndBootstrapWith(
 		routes.Wait()
 		return nil, errors.Join(fmt.Errorf("load immutable route snapshot before listener startup: %w", err), gatewayServer.Close())
 	}
-	httpHandler, err := serverhttpingress.NewHandler(routes, tunnelProxy)
+	tcpIngress, err := newTCPIngressManager(
+		config, routes, tunnelProxy, limitManager, logger, reportRuntimeError,
+	)
 	if err != nil {
 		cancelRoutes()
 		routes.Wait()
-		return nil, errors.Join(fmt.Errorf("construct HTTP ingress handler: %w", err), gatewayServer.Close())
+		return nil, errors.Join(fmt.Errorf("construct TCP ingress listener manager: %w", err), gatewayServer.Close())
+	}
+	httpHandler, err := serverhttpingress.NewHandler(serverhttpingress.HandlerOptions{
+		Routes: routes, Dialer: tunnelProxy, TrustedProxies: config.HTTPIngress.TrustedProxies,
+		Limits: limitManager, MaxBodyBytes: config.Limits.MaxHTTPBodyBytes,
+	})
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("construct HTTP ingress handler: %w", err),
+			tcpIngress.Close(),
+			gatewayServer.Close(),
+		)
 	}
 	httpIngress, err := serverhttpingress.NewServer(serverhttpingress.ServerOptions{
 		Listen: config.HTTPIngress.Listen, Handler: httpHandler,
@@ -482,22 +522,35 @@ func openGatewayAndBootstrapWith(
 	if err != nil {
 		cancelRoutes()
 		routes.Wait()
-		return nil, errors.Join(fmt.Errorf("construct HTTP ingress listener: %w", err), gatewayServer.Close())
+		return nil, errors.Join(fmt.Errorf("construct HTTP ingress listener: %w", err), tcpIngress.Close(), gatewayServer.Close())
 	}
 	cleanupBeforeOwnershipTransfer := func() error {
 		httpHandler.CloseIdleConnections()
 		httpErr := httpIngress.Close()
+		tcpErr := tcpIngress.Close()
 		cancelRoutes()
 		routes.Wait()
-		return errors.Join(httpErr, gatewayServer.Close())
+		return errors.Join(tcpErr, httpErr, gatewayServer.Close())
 	}
 	startGateway := func() error {
-		// 冻结启动顺序是 Route Snapshot → HTTP Ingress → Gateway → Runtime
-		// Reconciler。进程取消只触发外层关闭 owner，不能直接杀死在途请求或 Session。
+		// 冻结启动顺序是 Route Snapshot → TCP Listener Restore → HTTP Ingress →
+		// Gateway → Runtime Reconciler。TCP Handler 按准入时 Route 建立精确
+		// Revision Tunnel；进程取消只触发外层关闭 owner，不能直接杀死
+		// 已经准入的请求或 Session。
 		lifecycleContext := context.WithoutCancel(ctx)
+		if err := tcpIngress.Start(lifecycleContext); err != nil {
+			startErr := errors.Join(
+				fmt.Errorf("start TCP ingress after admin bootstrap: %w", err),
+				tcpIngress.Close(),
+				gatewayServer.Close(),
+			)
+			reportRuntimeError(startErr)
+			return startErr
+		}
 		if err := httpIngress.Start(lifecycleContext); err != nil {
 			startErr := errors.Join(
 				fmt.Errorf("start HTTP ingress after admin bootstrap: %w", err),
+				tcpIngress.Close(),
 				httpIngress.Close(),
 				gatewayServer.Close(),
 			)
@@ -508,6 +561,7 @@ func openGatewayAndBootstrapWith(
 			httpHandler.CloseIdleConnections()
 			startErr := errors.Join(
 				fmt.Errorf("start agent gateway after HTTP ingress: %w", err),
+				tcpIngress.Close(),
 				httpIngress.Close(),
 				gatewayServer.Close(),
 			)
@@ -518,16 +572,21 @@ func openGatewayAndBootstrapWith(
 		// 不查询 SQLite 热路径，也不回落到本地或旧配置。
 		if err := sessions.Start(lifecycleContext); err != nil {
 			drainContext, cancelDrain := context.WithTimeout(context.Background(), serverDrainTimeout)
+			tcpStopErr := tcpIngress.StopAccepting()
 			httpStopErr := httpIngress.StopAccepting()
 			stopErr := gatewayServer.StopAccepting()
 			httpHandler.CloseIdleConnections()
 			shutdownErr := sessions.Shutdown(drainContext)
+			tcpShutdownErr := tcpIngress.Shutdown(drainContext)
 			cancelDrain()
 			startErr := errors.Join(
 				fmt.Errorf("start server Snapshot reconciler: %w", err),
+				tcpStopErr,
 				httpStopErr,
 				stopErr,
 				httpIngress.Close(),
+				tcpShutdownErr,
+				tcpIngress.Close(),
 				shutdownErr,
 				gatewayServer.Close(),
 			)
@@ -545,7 +604,7 @@ func openGatewayAndBootstrapWith(
 			return nil, errors.Join(err, cleanupBeforeOwnershipTransfer())
 		}
 		return &gatewayBootstrapCloser{
-			gateway: gatewayServer, httpIngress: httpIngress, httpHandler: httpHandler,
+			gateway: gatewayServer, httpIngress: httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
 			sessions: sessions, routes: routes, cancelRoutes: cancelRoutes,
 			runtimeErrors: runtimeErrors,
 		}, nil
@@ -555,8 +614,100 @@ func openGatewayAndBootstrapWith(
 		return nil, errors.Join(err, cleanupBeforeOwnershipTransfer())
 	}
 	return &gatewayBootstrapCloser{
-		bootstrap: socket, gateway: gatewayServer, httpIngress: httpIngress, httpHandler: httpHandler,
+		bootstrap: socket, gateway: gatewayServer, httpIngress: httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
 		sessions: sessions, routes: routes, cancelRoutes: cancelRoutes,
 		runtimeErrors: runtimeErrors,
+	}, nil
+}
+
+func newTCPIngressManager(
+	config serverconfig.Config,
+	routes *serverroute.Manager,
+	tunnelDialer tcpTunnelProxy,
+	limitManager *serverlimits.Manager,
+	logger *slog.Logger,
+	reportRuntimeError func(error),
+) (*servertcpingress.Manager, error) {
+	if limitManager == nil {
+		return nil, errors.New("TCP ingress source limit manager is required")
+	}
+	bind, err := netip.ParseAddr(config.TCPIngress.Bind)
+	if err != nil {
+		return nil, fmt.Errorf("parse tcp_ingress.bind: %w", err)
+	}
+	reserved, err := reservedTCPPorts(config)
+	if err != nil {
+		return nil, err
+	}
+	handler, err := newTCPIngressHandler(tunnelDialer, logger)
+	if err != nil {
+		return nil, fmt.Errorf("construct TCP ingress data-plane handler: %w", err)
+	}
+	manager, err := servertcpingress.NewManager(servertcpingress.Options{
+		Bind: bind, MinPort: config.TCPIngress.MinPort, MaxPort: config.TCPIngress.MaxPort,
+		Reserved: reserved, Routes: routes, SourceLimiter: limitManager,
+		Handler: handler, ReportRuntimeError: reportRuntimeError,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := routes.ObservePublished(manager.MarkDirty); err != nil {
+		return nil, fmt.Errorf("observe published Route Snapshot for TCP ingress: %w", err)
+	}
+	return manager, nil
+}
+
+func reservedTCPPorts(config serverconfig.Config) ([]uint16, error) {
+	reserved := []uint16{80, 443}
+	for name, address := range map[string]string{
+		"management.listen":    config.Management.Listen,
+		"http_ingress.listen":  config.HTTPIngress.Listen,
+		"agent_gateway.listen": config.AgentGateway.Listen,
+	} {
+		_, portText, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("parse reserved %s: %w", name, err)
+		}
+		port, err := strconv.ParseUint(portText, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("parse reserved %s port", name)
+		}
+		// 测试和显式动态绑定可以使用 :0；它不会落入合法 TCP Route 端口池，
+		// 因此没有需要保留的具体端口。生产 Schema 仍禁止这些入口配置为 0。
+		if port == 0 {
+			continue
+		}
+		reserved = append(reserved, uint16(port))
+	}
+	return reserved, nil
+}
+
+func checkServerFDBudget(config serverconfig.Config, tcpListeners int) error {
+	budget, err := serverFDBudget(config, tcpListeners)
+	if err != nil {
+		return err
+	}
+	return serverlimits.CheckFDBudget(budget)
+}
+
+// tcpListenerFDReserve 按包含两端的逻辑池容量，再加一个 A→B 原子换口候选。
+// 该值只参与启动 FD Gate；实际启动仍只监听 Desired Route 中的具体端口。
+func tcpListenerFDReserve(config serverconfig.TCPIngress) int {
+	return config.MaxPort - config.MinPort + 2
+}
+
+func serverFDBudget(config serverconfig.Config, tcpListeners int) (serverlimits.FDBudget, error) {
+	if tcpListeners < 0 {
+		return serverlimits.FDBudget{}, errors.New("TCP listener count must not be negative")
+	}
+	return serverlimits.FDBudget{
+		WorkConnections:         uint64(config.Limits.MaxWorkConnections),
+		PublicActiveConnections: uint64(config.Limits.MaxActiveConnections),
+		PendingOpenConnections:  uint64(config.Limits.MaxPendingOpens),
+		ConnectorControls:       uint64(config.Limits.MaxConnectors),
+		PendingTLSHandshakes:    uint64(config.Limits.MaxPendingTLSHandshakes),
+		PendingAuth:             uint64(config.Limits.MaxPendingAuth),
+		Listeners:               fdListenerReserve + uint64(tcpListeners),
+		SQLite:                  fdSQLiteReserve, Management: 1, Metrics: 1, SafetyMargin: fdSafetyMargin,
 	}, nil
 }

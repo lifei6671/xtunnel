@@ -20,6 +20,7 @@ import (
 	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	serverworkpool "github.com/lifei6671/xtunnel/internal/server/workpool"
+	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
 
 func TestHandlerAppliesFrozenOriginHostPriority(t *testing.T) {
@@ -157,7 +158,7 @@ func TestHandlerChunkedPolicy(t *testing.T) {
 		state.Services[0].ProxyOptions = explicitHTTPProxyOptions(true)
 		manager, _ := startRouteManager(t, state)
 		var dialCount atomic.Int32
-		dialer := dialerFunc(func(context.Context, string, string, uint64, protocolv1.IngressType, string) (net.Conn, error) {
+		dialer := dialerFunc(func(context.Context, tunnel.DialRequest) (net.Conn, error) {
 			dialCount.Add(1)
 			return nil, errors.New("Dial must not run for rejected chunked request")
 		})
@@ -182,7 +183,7 @@ func TestHandlerChunkedPolicy(t *testing.T) {
 		state.Services[0].ProxyOptions = explicitHTTPProxyOptions(true)
 		manager, _ := startRouteManager(t, state)
 		var dialCount atomic.Int32
-		dialer := dialerFunc(func(context.Context, string, string, uint64, protocolv1.IngressType, string) (net.Conn, error) {
+		dialer := dialerFunc(func(context.Context, tunnel.DialRequest) (net.Conn, error) {
 			dialCount.Add(1)
 			return nil, errors.New("Dial must not run for implicit chunked request")
 		})
@@ -225,10 +226,10 @@ func TestHandlerChunkedPolicy(t *testing.T) {
 	})
 }
 
-func TestHandlerRejectsUpgradeBeforeTunnelDial(t *testing.T) {
+func TestHandlerRejectsUnsupportedUpgradeBeforeTunnelDial(t *testing.T) {
 	manager, _ := startRouteManager(t, baseHTTPRouteState(1))
 	var dialCount atomic.Int32
-	dialer := dialerFunc(func(context.Context, string, string, uint64, protocolv1.IngressType, string) (net.Conn, error) {
+	dialer := dialerFunc(func(context.Context, tunnel.DialRequest) (net.Conn, error) {
 		dialCount.Add(1)
 		return nil, errors.New("Dial must not run for unsupported Upgrade")
 	})
@@ -236,7 +237,7 @@ func TestHandlerRejectsUpgradeBeforeTunnelDial(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/websocket", nil)
 	request.Host = "public.example.com"
 	request.Header.Set("Connection", "keep-alive, UpGrAdE")
-	request.Header.Set("Upgrade", "websocket")
+	request.Header.Set("Upgrade", "h2c")
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
@@ -249,12 +250,61 @@ func TestHandlerRejectsUpgradeBeforeTunnelDial(t *testing.T) {
 	}
 }
 
+func TestHandlerRejectsMalformedWebSocketHandshakeBeforeTunnelDial(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{name: "HTTP 2", mutate: func(request *http.Request) {
+			request.Proto = "HTTP/2.0"
+			request.ProtoMajor = 2
+			request.ProtoMinor = 0
+		}},
+		{name: "non GET", mutate: func(request *http.Request) { request.Method = http.MethodPost }},
+		{name: "missing Connection token", mutate: func(request *http.Request) {
+			request.Header.Set("Connection", "keep-alive")
+		}},
+		{name: "ambiguous Upgrade", mutate: func(request *http.Request) {
+			request.Header.Set("Upgrade", "websocket, h2c")
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, _ := startRouteManager(t, baseHTTPRouteState(1))
+			var dialCount atomic.Int32
+			dialer := dialerFunc(func(context.Context, tunnel.DialRequest) (net.Conn, error) {
+				dialCount.Add(1)
+				return nil, errors.New("Dial must not run for malformed WebSocket handshake")
+			})
+			handler := newTestHandler(t, manager, dialer)
+			request := httptest.NewRequest(http.MethodGet, "/websocket", nil)
+			request.Host = "public.example.com"
+			request.Header.Set("Connection", "keep-alive, Upgrade")
+			request.Header.Set("Upgrade", "websocket")
+			request.Header.Set("Sec-WebSocket-Version", "13")
+			request.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+			test.mutate(request)
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotImplemented || strings.TrimSpace(response.Body.String()) != "UPGRADE_NOT_SUPPORTED" {
+				t.Fatalf("response = (%d, %q), want (501, UPGRADE_NOT_SUPPORTED)", response.Code, response.Body.String())
+			}
+			if got := dialCount.Load(); got != 0 {
+				t.Fatalf("Dial count = %d, want 0", got)
+			}
+		})
+	}
+}
+
 func TestHandlerCancellationPropagatesToDialAndRoundTrip(t *testing.T) {
 	t.Run("cancel unblocks Dial", func(t *testing.T) {
 		manager, _ := startRouteManager(t, baseHTTPRouteState(1))
 		dialStarted := make(chan struct{})
 		dialResult := make(chan error, 1)
-		dialer := dialerFunc(func(ctx context.Context, _ string, _ string, _ uint64, _ protocolv1.IngressType, _ string) (net.Conn, error) {
+		dialer := dialerFunc(func(ctx context.Context, _ tunnel.DialRequest) (net.Conn, error) {
 			close(dialStarted)
 			<-ctx.Done()
 			dialResult <- ctx.Err()
@@ -297,7 +347,7 @@ func TestHandlerCancellationPropagatesToDialAndRoundTrip(t *testing.T) {
 		requestArrived := make(chan struct{})
 		peerDone := make(chan error, 1)
 		var peer net.Conn
-		dialer := dialerFunc(func(ctx context.Context, _ string, _ string, _ uint64, _ protocolv1.IngressType, _ string) (net.Conn, error) {
+		dialer := dialerFunc(func(ctx context.Context, _ tunnel.DialRequest) (net.Conn, error) {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
@@ -370,7 +420,7 @@ func TestHandlerDoesNotExposeDialErrors(t *testing.T) {
 	state := baseHTTPRouteState(1)
 	state.Services[0].OriginHost = "private-origin.internal"
 	manager, _ := startRouteManager(t, state)
-	dialer := dialerFunc(func(context.Context, string, string, uint64, protocolv1.IngressType, string) (net.Conn, error) {
+	dialer := dialerFunc(func(context.Context, tunnel.DialRequest) (net.Conn, error) {
 		return nil, errors.New("dial private-origin.internal:8080 with token super-secret failed")
 	})
 	handler := newTestHandler(t, manager, dialer)
@@ -432,11 +482,7 @@ type observingErrorDialer struct {
 
 func (dialer *observingErrorDialer) Dial(
 	context.Context,
-	string,
-	string,
-	uint64,
-	protocolv1.IngressType,
-	string,
+	tunnel.DialRequest,
 ) (net.Conn, error) {
 	return nil, dialer.err
 }

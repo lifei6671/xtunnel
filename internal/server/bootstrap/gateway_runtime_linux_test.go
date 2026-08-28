@@ -133,6 +133,9 @@ func TestFirstAdminCreationStartsGateway(t *testing.T) {
 	if address := gatewayCloser.gateway.Addr(); address != nil {
 		t.Fatalf("gateway address before first admin = %v, want nil", address)
 	}
+	if actual := gatewayCloser.tcpIngress.Actual(); len(actual) != 0 {
+		t.Fatalf("TCP listeners before first admin = %v, want none", actual)
+	}
 	if gatewayCloser.routes == nil || gatewayCloser.routes.Current() == nil {
 		t.Fatal("immutable route snapshot was not loaded before first admin bootstrap")
 	}
@@ -155,6 +158,131 @@ func TestFirstAdminCreationStartsGateway(t *testing.T) {
 	}
 	if err := connection.Close(); err != nil {
 		t.Fatalf("close gateway test connection error = %v", err)
+	}
+}
+
+// TestTCPIngressWaitsForFirstAdminAndRestoresAfterRestart 从真实 SQLite Desired State
+// 穿过 Bootstrap Gate 和生产 Listener 接线，证明 SETUP_REQUIRED 不会提前占用端口，
+// 首个 Admin 提交后开始监听，完整关闭并重开后又能从同一持久化 Route 恢复。
+func TestTCPIngressWaitsForFirstAdminAndRestoresAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	runtimeDir := newRuntimeDirectory(t)
+	dataDir := t.TempDir()
+
+	portProbe, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve TCP Route port error = %v", err)
+	}
+	publicPort := uint16(portProbe.Addr().(*net.TCPAddr).Port)
+	publicAddress := portProbe.Addr().String()
+	if err := portProbe.Close(); err != nil {
+		t.Fatalf("release TCP Route port error = %v", err)
+	}
+
+	config := gatewayLifecycleTestConfig(dataDir, "127.0.0.1:0")
+	config.TCPIngress.MinPort = int(publicPort)
+	config.TCPIngress.MaxPort = int(publicPort)
+
+	resources, err := openServerStorage(ctx, dataDir, runtimeDir)
+	if err != nil {
+		t.Fatalf("openServerStorage() error = %v", err)
+	}
+	serverResources := resources
+	const tunnelID = "tun_01J00000000000000000000050"
+	const serviceID = "svc_01J00000000000000000000050"
+	if err := serverResources.database.WithTx(ctx, func(transaction repository.TxStore) error {
+		if err := transaction.Tunnels().Create(ctx, repository.Tunnel{
+			ID: tunnelID, Name: "tcp bootstrap", Version: 1, DesiredRevision: 1,
+			CreatedAt: 1, UpdatedAt: 1,
+		}); err != nil {
+			return err
+		}
+		if err := transaction.Services().Create(ctx, repository.Service{
+			ID: serviceID, TunnelID: tunnelID, Name: "tcp origin", RequiredRevision: 1,
+			OriginScheme: repository.OriginSchemeTCP, OriginHost: "127.0.0.1", OriginPort: 22,
+			ConnectTimeoutMS: 5_000, Enabled: true, Version: 1, CreatedAt: 1, UpdatedAt: 1,
+		}); err != nil {
+			return err
+		}
+		if err := transaction.Routes().CreateTCP(ctx, repository.TCPRoute{
+			ID: "tcp-bootstrap", ServiceID: serviceID, PublicPort: publicPort,
+			Enabled: true, CreatedAt: 1, UpdatedAt: 1,
+		}); err != nil {
+			return err
+		}
+		_, err := transaction.Routes().AdvanceGeneration(ctx, 0)
+		return err
+	}); err != nil {
+		_ = resources.Close()
+		t.Fatalf("seed Bootstrap TCP Desired State error = %v", err)
+	}
+
+	closer, err := openGatewayAndBootstrapWith(
+		ctx, config, resources, slog.Default(), runtimeDir,
+		func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
+			return openAdminBootstrapSocketWithRuntime(ctx, runtimeDir, targetHash, store, func(*net.UnixConn) error { return nil }, afterCreate, reportRuntimeError)
+		},
+	)
+	if err != nil {
+		_ = resources.Close()
+		t.Fatalf("openGatewayAndBootstrapWith() before first Admin error = %v", err)
+	}
+	firstRuntime := closer.(*gatewayBootstrapCloser)
+	if actual := firstRuntime.tcpIngress.Actual(); len(actual) != 0 {
+		t.Fatalf("TCP listeners before first Admin = %+v, want none", actual)
+	}
+	available, err := net.Listen("tcp4", publicAddress)
+	if err != nil {
+		t.Fatalf("TCP Route port was occupied during SETUP_REQUIRED: %v", err)
+	}
+	if err := available.Close(); err != nil {
+		t.Fatalf("close SETUP_REQUIRED port probe error = %v", err)
+	}
+	if handled, err := requestAdminBootstrap(ctx, filepath.Join(runtimeDir, adminBootstrapSocketName), serverResources.targetHash, "admin", "tcp bootstrap password"); !handled || err != nil {
+		t.Fatalf("requestAdminBootstrap() = handled %t, error %v", handled, err)
+	}
+	if actual := firstRuntime.tcpIngress.Actual(); len(actual) != 1 || actual[0].Route.ID != "tcp-bootstrap" || actual[0].Address != publicAddress {
+		t.Fatalf("TCP listeners after first Admin = %+v", actual)
+	}
+	if conflict, err := net.Listen("tcp4", publicAddress); err == nil {
+		_ = conflict.Close()
+		t.Fatal("TCP Route port remained bindable after first Admin")
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatalf("close first Bootstrap runtime error = %v", err)
+	}
+	if err := resources.Close(); err != nil {
+		t.Fatalf("close first Server storage error = %v", err)
+	}
+
+	restartedResources, err := openServerStorage(ctx, dataDir, runtimeDir)
+	if err != nil {
+		t.Fatalf("reopen Server storage error = %v", err)
+	}
+	bootstrapOpened := false
+	restartedCloser, err := openGatewayAndBootstrapWith(
+		ctx, config, restartedResources, slog.Default(), runtimeDir,
+		func(context.Context, string, string, *sqlite.Store, func() error, func(error)) (io.Closer, error) {
+			bootstrapOpened = true
+			return nil, nil
+		},
+	)
+	if err != nil {
+		_ = restartedResources.Close()
+		t.Fatalf("openGatewayAndBootstrapWith() after restart error = %v", err)
+	}
+	if bootstrapOpened {
+		t.Fatal("existing Admin restart reopened first-admin Bootstrap Socket")
+	}
+	restartedRuntime := restartedCloser.(*gatewayBootstrapCloser)
+	if actual := restartedRuntime.tcpIngress.Actual(); len(actual) != 1 || actual[0].Route.ID != "tcp-bootstrap" || actual[0].Address != publicAddress {
+		t.Fatalf("restored TCP listeners = %+v", actual)
+	}
+	if err := restartedCloser.Close(); err != nil {
+		t.Fatalf("close restarted Bootstrap runtime error = %v", err)
+	}
+	if err := restartedResources.Close(); err != nil {
+		t.Fatalf("close restarted Server storage error = %v", err)
 	}
 }
 
@@ -273,12 +401,18 @@ func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
 
 func gatewayLifecycleTestConfig(dataDir, listen string) serverconfig.Config {
 	return serverconfig.Config{
-		Server: serverconfig.Server{DataDir: dataDir},
+		Server:      serverconfig.Server{DataDir: dataDir},
+		Management:  serverconfig.Management{Listen: "127.0.0.1:0"},
+		HTTPIngress: serverconfig.HTTPIngress{Listen: "127.0.0.1:0"},
 		AgentGateway: serverconfig.AgentGateway{
 			Listen:         listen,
 			PublicHostname: "gateway.example.test",
 			TLS:            serverconfig.AgentGatewayTLS{Mode: gateway.PinnedMode},
 		},
+		TCPIngress: serverconfig.TCPIngress{Bind: "127.0.0.1", MinPort: 10000, MaxPort: 60000},
+		Transport: serverconfig.Transport{TCP: serverconfig.TransportTCP{
+			WorkAcquireTimeout: baseconfig.Duration{Duration: 2 * time.Second},
+		}},
 		Control: serverconfig.Control{
 			HighPriorityQueue: 8, NormalQueue: 8,
 			WriteTimeout: baseconfig.Duration{Duration: time.Second},
@@ -288,24 +422,29 @@ func gatewayLifecycleTestConfig(dataDir, listen string) serverconfig.Config {
 			HeartbeatTimeout:  baseconfig.Duration{Duration: 3 * time.Second},
 		},
 		Limits: serverconfig.Limits{
-			MaxConnectors:                8,
-			MaxConnectorsPerTunnel:       4,
-			MaxHealthTargetsPerTunnel:    2_000,
-			MaxHealthTargetsGlobal:       50_000,
-			MaxServicesPerTunnel:         1_000,
-			MaxTunnelSnapshotBytes:       768 << 10,
-			MaxPendingTLSHandshakes:      1,
-			MaxPendingAuth:               2,
-			MaxReplayEntriesPerSession:   32,
-			MaxWorkConnections:           64,
-			MaxIdleWorkConnections:       32,
-			MaxConnectingWorkConnections: 16,
-			MaxPendingOpens:              16,
-			MaxActiveConnections:         32,
-			MaxConnectionsPerTunnel:      16,
-			MaxConnectionsPerService:     16,
-			MaxConnectionsPerSourceIP:    8,
-			MaxControlFrameBytes:         1 << 20,
+			MaxConnectors:                       8,
+			MaxConnectorsPerTunnel:              4,
+			MaxHealthTargetsPerTunnel:           2_000,
+			MaxHealthTargetsGlobal:              50_000,
+			MaxServicesPerTunnel:                1_000,
+			MaxTunnelSnapshotBytes:              768 << 10,
+			MaxPendingTLSHandshakes:             1,
+			MaxPendingAuth:                      2,
+			MaxReplayEntriesPerSession:          32,
+			MaxWorkConnections:                  64,
+			MaxIdleWorkConnections:              32,
+			MaxConnectingWorkConnections:        16,
+			MaxPendingOpens:                     16,
+			MaxActiveConnections:                32,
+			MaxConnectionsPerTunnel:             16,
+			MaxConnectionsPerService:            16,
+			MaxConnectionsPerSourceIP:           8,
+			MaxOpenRatePerSourceIP:              50,
+			MaxOpenBurstPerSourceIP:             100,
+			MaxHTTPRequestsPerSourceIPPerSecond: 100,
+			MaxControlFrameBytes:                1 << 20,
+			MaxHTTPHeaderBytes:                  64 << 10,
+			MaxHTTPBodyBytes:                    2 << 30,
 		},
 	}
 }

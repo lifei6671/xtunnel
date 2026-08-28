@@ -179,6 +179,95 @@ func TestOpenLeaseActivationChecksEveryActiveDimension(t *testing.T) {
 	}
 }
 
+func TestActiveLeaseChecksEveryDimensionAndReleasesExactlyOnce(t *testing.T) {
+	tests := []struct {
+		name    string
+		options Options
+		second  ConnectionKey
+	}{
+		{
+			name: "global", options: openOptions(1, 2, 2, 2),
+			second: ConnectionKey{TunnelID: "tun_01J00000000000000000000001", ServiceID: "svc_01J00000000000000000000001", SourceIP: netip.MustParseAddr("192.0.2.11")},
+		},
+		{
+			name: "tunnel", options: openOptions(2, 1, 2, 2),
+			second: ConnectionKey{TunnelID: testTunnelID, ServiceID: "svc_01J00000000000000000000001", SourceIP: netip.MustParseAddr("192.0.2.11")},
+		},
+		{
+			name: "service", options: openOptions(2, 2, 1, 2),
+			second: ConnectionKey{TunnelID: testTunnelID, ServiceID: testServiceID, SourceIP: netip.MustParseAddr("192.0.2.11")},
+		},
+		{
+			name: "source", options: openOptions(2, 2, 2, 1),
+			second: ConnectionKey{TunnelID: "tun_01J00000000000000000000001", ServiceID: "svc_01J00000000000000000000001", SourceIP: testSourceIP},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := newTestManager(t, test.options)
+			first, err := manager.AcquireActive(testConnectionKey())
+			if err != nil {
+				t.Fatalf("AcquireActive(first) error = %v", err)
+			}
+			if _, err := manager.AcquireActive(test.second); !errors.Is(err, ErrActiveConnectionCapacity) {
+				t.Fatalf("AcquireActive(second) error = %v, want ErrActiveConnectionCapacity", err)
+			}
+			if got := manager.Snapshot(); got.ActiveTotal != 1 || got.PendingOpens != 0 {
+				t.Fatalf("Snapshot() = %#v, want one active and no pending OPEN", got)
+			}
+			first.Release()
+			first.Release()
+			assertEmpty(t, manager.Snapshot())
+		})
+	}
+}
+
+func TestActiveLeaseConcurrentReleaseReturnsCapacityOnce(t *testing.T) {
+	manager := newTestManager(t, openOptions(1, 1, 1, 1))
+	lease, err := manager.AcquireActive(testConnectionKey())
+	if err != nil {
+		t.Fatalf("AcquireActive() error = %v", err)
+	}
+	var wait sync.WaitGroup
+	for range 32 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			lease.Release()
+		}()
+	}
+	wait.Wait()
+	assertEmpty(t, manager.Snapshot())
+
+	next, err := manager.AcquireActive(testConnectionKey())
+	if err != nil {
+		t.Fatalf("AcquireActive() after release error = %v", err)
+	}
+	next.Release()
+	assertEmpty(t, manager.Snapshot())
+}
+
+func TestNewRejectsMissingRateLimits(t *testing.T) {
+	options := openOptions(1, 1, 1, 1)
+	tests := []struct {
+		name   string
+		mutate func(*Options)
+	}{
+		{name: "open rate", mutate: func(options *Options) { options.MaxOpenRatePerSourceIP = 0 }},
+		{name: "open burst", mutate: func(options *Options) { options.MaxOpenBurstPerSourceIP = 0 }},
+		{name: "HTTP request rate", mutate: func(options *Options) { options.MaxHTTPRequestsPerSourceIPPerSecond = 0 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := options
+			test.mutate(&invalid)
+			if _, err := New(invalid); !errors.Is(err, ErrInvalidOptions) {
+				t.Fatalf("New() error = %v, want ErrInvalidOptions", err)
+			}
+		})
+	}
+}
+
 func TestConcurrentWorkAcquireNeverExceedsHardLimit(t *testing.T) {
 	manager := newTestManager(t, Options{
 		MaxConnectors: 2, MaxConnectorsPerTunnel: 2,
@@ -282,6 +371,8 @@ func openOptions(global, tunnel, service, source uint64) Options {
 		MaxWorkConnections: 1, MaxIdleWorkConnections: 1, MaxConnectingWorkConnections: 1,
 		MaxPendingOpens: 2, MaxActiveConnections: global, MaxConnectionsPerTunnel: tunnel,
 		MaxConnectionsPerService: service, MaxConnectionsPerSourceIP: source,
+		MaxOpenRatePerSourceIP: 2, MaxOpenBurstPerSourceIP: 2,
+		MaxHTTPRequestsPerSourceIPPerSecond: 2,
 	}
 }
 
@@ -291,6 +382,15 @@ func testConnectionKey() ConnectionKey {
 
 func newTestManager(t *testing.T, options Options) *Manager {
 	t.Helper()
+	if options.MaxOpenRatePerSourceIP == 0 {
+		options.MaxOpenRatePerSourceIP = 10
+	}
+	if options.MaxOpenBurstPerSourceIP == 0 {
+		options.MaxOpenBurstPerSourceIP = 10
+	}
+	if options.MaxHTTPRequestsPerSourceIPPerSecond == 0 {
+		options.MaxHTTPRequestsPerSourceIPPerSecond = 10
+	}
 	manager, err := New(options)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

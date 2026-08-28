@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-08-27
+> **进度基线日期**：2026-08-28
 >
-> **当前阶段**：M4 Product Data Plane · IN_PROGRESS（M4-01 Immutable Route Snapshot、M4-02 HTTP Host/Path Router 与 M4-03 Streaming Reverse Proxy 本地实现、验收和独立复审已进入 `REVIEW`）
+> **当前阶段**：M4 Product Data Plane · IN_PROGRESS（M4-01 至 M4-09 保持 `REVIEW`，下一项为 M4-10 Gate）
 >
-> **当前结论**：M4-01 已完成 Immutable Route Snapshot；M4-02 已完成严格 HTTP Host/Path Matcher；M4-03 已完成生产 HTTP Ingress、流式 Reverse Proxy、Tunnel-aware HTTP/1.1 KeepAlive、稳定错误映射及有界停机。本地全量 Test/Race/Vet、显式 1GiB 双向流、Linux 双架构交叉构建与独立复审均通过，三项保持 `REVIEW`；当前工作树尚无 Commit SHA 与对应 CI Run，因此不能标记 `DONE`。M3-01 至 M3-13 仍保持 `REVIEW`，M3 Gate 继续缺少隔离 Linux 主机的 systemd 原生 Smoke，既有缺口未因进入 M4 而被覆盖。
+> **当前结论**：M4-01 至 M4-09 已完成 Immutable Route Snapshot、严格 HTTP 路由、流式 Reverse Proxy、可信代理边界、WebSocket、TCP 逻辑端口池与 Listener Reconcile、Raw TCP/SSH 生产转发、Caddy/Nginx HTTPS/WSS 前置代理集成，以及真实入口的 Global/Tunnel/Service/Source IP、HTTP Rate/Body/Header 与 TCP Accept/Open/Active 限额，均保持 `REVIEW`。M4-09 的有界 LRU + TTL、HTTP KeepAlive 跨来源 ACTIVE 生命周期和 TCP 单次 OPEN 扣减已经本地 Test/Race/Vet 与独立复审验证；仍缺少最终 Commit、对应原生 CI 和完整启动装配后的公网黑盒 E2E。M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`。
 
 ---
 
@@ -310,12 +310,12 @@ M1 的静态 Service 只能由 Integration Test Harness 注入，不得为过渡
 | M4-01 | Immutable Route Snapshot | M3-02、M3-11 | `internal/server/route` | SQLite Desired State 是唯一权威；Single Reconcile Loop 全量构建 Immutable Route Snapshot；多个 dirty wakeup 合并，Build 期间 generation 前进则丢弃旧结果并立即按最新 generation 重建；Atomic Swap，读路径无 SQLite，不完整 Snapshot 不发布；不提前增加 `coalesce_window` 配置 | `REVIEW` |
 | M4-02 | HTTP Host/Path Router | M4-01 | HTTP Matcher | Host 规范化、IDNA、端口与路径段边界；非根 Route Prefix 移除全部尾部 `/`，`/foo` 与 `/foo/` 构成重复语义 Route；公网请求不使用通用 `path.Clean`，RawPath 为空是正常输入，非法 percent 编码、Path/RawPath/RequestURI 不一致、encoded slash/backslash、明文或编码 dot-segment、控制字符、非法 UTF-8、多重危险编码或 Router/Origin 无法保证一致解释时返回 `400 INVALID_PATH`；请求与转发保留 `/foo`、`/foo/`、`/foo//bar` 原始语义 | `REVIEW` |
 | M4-03 | Streaming Reverse Proxy | M4-02、M1-11 | HTTP Ingress Proxy + Tunnel-aware Transport | 不缓冲整请求/响应；1GB upload/download；Context Cancel；Host 严格按 `origin_http_host > preserve_host > origin host` 决定；HTTP/HTTPS 实现 disable chunked、90s idle timeout、100 max idle 默认值，禁用 Chunked 且长度不可安全确定时显式拒绝而不整体缓存；HTTP/HTTPS Origin 同样遵守 disable Happy Eyeballs=false、TCP KeepAlive=30s/0 禁用与 DNS/TCP/TLS 共享 connect timeout；连接池至少以 TunnelID+ServiceID+配置版本隔离，新建 WorkConn 的 Connector Service RequiredRevision 必须与 Route 精确相等，且受全局 WorkConn/FD 硬预算限制；一个 WorkConn 对应一条 HTTP/1.1 TCP Connection 而非一个 Request，验证同隔离键连续请求复用且跨键绝不复用；M4-05 前 Upgrade 必须在 Reverse Proxy 前显式拒绝 | `REVIEW` |
-| M4-04 | Forwarded/Trusted Proxy 边界 | M4-03 | Header Sanitizer + Peer Normalizer | 删除外部伪造 Forwarded Header；仅信任配置 CIDR | `NOT_STARTED` |
-| M4-05 | WebSocket Upgrade | M4-03、M4-04 | WebSocket Proxy | Upgrade、双向流、Half-Close/断连、长连接 Timeout | `NOT_STARTED` |
-| M4-06 | TCP Listener Manager | M3-02、M4-01 | Listener Reconciler | 数据库唯一性/端口范围/保留端口冲突在事务前拒绝；OS `Listen(port)` 失败不回滚 Desired State，只标记对应 Service `APPLY_FAILED` 并周期重试；其他 Listener 继续；新旧 Listener 原子交接；重启恢复 | `NOT_STARTED` |
-| M4-07 | Raw TCP/SSH Data Plane | M4-06、M1-11、M2-02 | TCP Ingress | SSH/Raw TCP 逐字节转发；无协议特判；`connect_timeout` 继续统一约束 DNS/TCP/TLS 总预算；disable Happy Eyeballs 默认 `false`，启用时不延长总预算；Origin TCP KeepAlive 默认 30s、`0` 禁用；错误映射稳定 | `NOT_STARTED` |
-| M4-08 | Caddy/Nginx HTTPS 集成 | M4-03、M4-05 | Deploy Example + E2E | HTTPS 在前置代理终止；Host/Origin/Forwarded 语义正确 | `NOT_STARTED` |
-| M4-09 | Public Ingress Limits | M4-03、M4-06 | Per-source/Service/Tunnel/Global Limits | LRU 有界 + TTL；HTTP Rate/Body/Header；TCP Accept/Open/Active 上限 | `NOT_STARTED` |
+| M4-04 | Forwarded/Trusted Proxy 边界 | M4-03 | Header Sanitizer + Peer Normalizer | 仅信任配置 CIDR 中的实际 TCP Peer；单个 XFF Header 最多 32 跳并从右向左验证；重复/空/非法可信代理元数据返回 `400 INVALID_FORWARDED_HEADER`；未受信 Peer 不解析伪造值；删除全部外部 Forwarded/X-Real-IP/未知 X-Forwarded-*，只重建权威 For/Proto/Host | `REVIEW` |
+| M4-05 | WebSocket Upgrade | M4-03、M4-04 | WebSocket Proxy | 无 Request Body 的 Upgrade、双向流、Half-Close/断连、长连接 Timeout；已知超限 Body 返回 413，其余带 Body/Transfer-Encoding 的握手返回 501，均在 Tunnel Dial 前拒绝并关闭客户端复用 | `REVIEW` |
+| M4-06 | TCP Listener Manager | M3-02、M4-01 | Listener Reconciler | `min_port..max_port` 是逻辑预留池，不预监听全范围；Route 可显式选端口或在事务内自动选择，具体端口持久化且全局唯一；端口范围/保留端口冲突在事务前拒绝，事务内重验并同步推进 Service Version/RequiredRevision、Tunnel DesiredRevision 与全局 Route Generation；OS `Listen(port)` 失败不回滚 Desired State，只标记对应 Service `LISTEN_FAILED` 并由 dirty wakeup + 周期扫描重试，其他 Listener 继续；同端口原子更新准入快照，换端口先监听新端口再释放旧端口；删除/禁用收口、重启恢复、有限 Drain/Close 与 FD 峰值预算 | `REVIEW` |
+| M4-07 | Raw TCP/SSH Data Plane | M4-06、M1-11、M2-02 | TCP Ingress | SSH/Raw TCP 逐字节转发；无协议特判；`connect_timeout` 继续统一约束 DNS/TCP/TLS 总预算；disable Happy Eyeballs 默认 `false`，启用时不延长总预算；Origin TCP KeepAlive 默认 30s、`0` 禁用；错误映射稳定 | `REVIEW` |
+| M4-08 | Caddy/Nginx HTTPS 集成 | M4-03、M4-05 | Deploy Example + E2E | HTTPS 在前置代理终止；Host/Origin/Forwarded 语义正确；Caddy 使用有限刷新并传播客户端取消；固定多架构镜像摘要，原生 amd64/arm64 CI 分别运行真实 HTTPS/WSS/断开收敛 E2E | `REVIEW` |
+| M4-09 | Public Ingress Limits | M4-03、M4-06 | Per-source/Service/Tunnel/Global Limits | LRU 有界 + TTL；HTTP Rate/Body/Header，Body 上限只由 Server Schema 裁决；TCP Accept/Open/Active 上限 | `REVIEW` |
 | M4-10 | M4 Gate | M4-01至 M4-09 | Product Data Plane E2E | HTTP/HTTPS/WebSocket/SSH/Raw TCP 全部通过 | `NOT_STARTED` |
 
 ## 10.2 M4 Gate Checklist
@@ -426,25 +426,27 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14` 已完成。M2-01 至 M2-08 已完成本地实现、提交、验收与用户阶段 Review，但仍等待对应 CI 证据；M3-01 至 M3-13 已完成本地实现与独立复审。M4 已开始推进，当前待办为：
 
-1. `M4-01` 至 `M4-03` — Immutable Route Snapshot、严格 HTTP Router、生产 HTTP Ingress、流式 Reverse Proxy、按 Tunnel/Service/Revision 隔离且 generation 单调的 HTTP/1.1 KeepAlive、6 秒总 OPEN 预算、60 秒 Request Body 滑动空闲窗、稳定错误映射与有界停机均已完成并独立复审，保持 `REVIEW`；仍需最终 Commit SHA 与对应 CI Run 才能转为 `DONE`。下一项为 `M4-04` Forwarded/Trusted Proxy 边界，等待用户阶段 Review 后推进。
-2. `M3-13` — 本地 Gate 自动化证据、独立复审、提交 `a3213e4` 对应 CI 与 OCI amd64/arm64 Runtime Smoke 已完成，保持 `REVIEW`；仍需隔离 Linux amd64/arm64 上的 systemd 原生安装/启动 Smoke，才能勾选 Checklist 或转为 `DONE`。本地失败的 WSL/Docker 构建尝试不计为通过证据。
-3. `M3-12` — Linux root Backup/Restore、在线/离线互斥、Manifest、Token Key/密文一致性、Restore Journal Recovery、Stable Parent/data leaf 部署接线已完成并独立复审，保持 `REVIEW`；不提供旧布局迁移兼容层。
-4. `M3-11` — 状态优先级、首次认证耐久事实、Control Auth 提交、已发布 Runtime 联合快照与生产输入组装已完成并独立复审，保持 `REVIEW`。
-5. `M3-10` — 两级 Health Target Budget、配置事务 Reservation、启动重建、Control Auth 容量拒绝与 Runtime generation fencing 已完成并独立复审，保持 `REVIEW`。
-6. `M3-09` — Health Pending/Batch、Control Session generation、ConfigAck+全量 Health 原子提交、Server revision/freshness fencing 与服务级 Eligible Selection 已完成并独立复审，保持 `REVIEW`。
-7. `M3-08` — 中心 Heap Scheduler、固定并发/Rate Budget、Jitter、TCP/HTTP Check、三态阈值、Stale/Budget fail-closed 与 Snapshot fencing 已完成并独立复审，保持 `REVIEW`。
-8. `M3-07` — 当前已 Ack Snapshot 的 HTTP/HTTPS/TCP Origin Resolver、原子 Gate、DNS/IP、TLS 与受信管理面 SSRF 边界已完成并独立复审，保持 `REVIEW`。
-9. `M3-06` — Single Reconcile Loop、post-COMMIT dirty 合并、generation fencing、outstanding/pending Ack 串行和 Agent revision/digest 语义已完成并独立复审，保持 `REVIEW`。
-10. `M3-05` — Token-only 启动/重连、完整 Snapshot、ConfigAck 与 Connector config-ready 门禁已完成并独立复审，保持 `REVIEW`。
-11. `M3-04` — 独立 Config Runtime 内核、并发资源生命周期、ConfigAck 入队门闩与失败清理已完成并独立复审，保持 `REVIEW`。
-12. `M3-03` — Transaction Gate 与 Startup Gate 均已完成并独立复审，保持 `REVIEW`；未来 M4 的 Management/HTTP/TCP Listener 必须继续位于 Startup Gate 下游。
-13. `M3-02` — 单事务 Application Service 与真实 Builder 容量回滚链已完成并独立复审，保持 `REVIEW`。
-14. `M3-01` — 本地实现与独立复审完成，未来 Origin 持久化预留约束也已复核，保持 `REVIEW`。
-15. `M2-01` 至 `M2-08` — 用户阶段 Review 已通过，本地提交 `4447602` 尚未推送；待对应 CI 证据后才能从 `REVIEW` 转为 `DONE`。
-16. `M0-09` — 正式 Dockerfile 双架构与 Windows SCM 已在 CI #11/#12 通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
-17. `M0-02` — Token-only Bootstrap 等待用户复审。
+1. `M4-10` — 汇总 M4 Product Data Plane E2E，补完整启动装配后的 HTTP Rate/Body/Header、TCP Accept/Open/Active 黑盒证据，并覆盖 HTTP/HTTPS/WebSocket/SSH/Raw TCP 与全部真实入口上限；不得用包级测试替代 Gate。
+2. `M4-09` — Public Ingress Limits 的 Per-source/Service/Tunnel/Global 配额、有界 LRU + TTL、HTTP Rate/Body/Header 与 TCP Accept/Open/Active 已完成并独立复审，保持 `REVIEW`；仍需最终 Commit、原生 amd64/arm64 CI 和完整启动装配后的公网黑盒 E2E。
+3. `M4-08` — Caddy/Nginx 前置 HTTPS/WSS 示例、固定镜像摘要、Linux amd64 真实 E2E 与原生 amd64/arm64 CI 接线已完成，保持 `REVIEW`；仍需最终 Commit SHA 和对应 CI Run 后才能转为 `DONE` 或勾选 M4 Gate 条目。
+4. `M3-13` — 本地 Gate 自动化证据、独立复审、提交 `a3213e4` 对应 CI 与 OCI amd64/arm64 Runtime Smoke 已完成，保持 `REVIEW`；仍需隔离 Linux amd64/arm64 上的 systemd 原生安装/启动 Smoke，才能勾选 Checklist 或转为 `DONE`。本地失败的 WSL/Docker 构建尝试不计为通过证据。
+5. `M3-12` — Linux root Backup/Restore、在线/离线互斥、Manifest、Token Key/密文一致性、Restore Journal Recovery、Stable Parent/data leaf 部署接线已完成并独立复审，保持 `REVIEW`；不提供旧布局迁移兼容层。
+6. `M3-11` — 状态优先级、首次认证耐久事实、Control Auth 提交、已发布 Runtime 联合快照与生产输入组装已完成并独立复审，保持 `REVIEW`。
+7. `M3-10` — 两级 Health Target Budget、配置事务 Reservation、启动重建、Control Auth 容量拒绝与 Runtime generation fencing 已完成并独立复审，保持 `REVIEW`。
+8. `M3-09` — Health Pending/Batch、Control Session generation、ConfigAck+全量 Health 原子提交、Server revision/freshness fencing 与服务级 Eligible Selection 已完成并独立复审，保持 `REVIEW`。
+9. `M3-08` — 中心 Heap Scheduler、固定并发/Rate Budget、Jitter、TCP/HTTP Check、三态阈值、Stale/Budget fail-closed 与 Snapshot fencing 已完成并独立复审，保持 `REVIEW`。
+10. `M3-07` — 当前已 Ack Snapshot 的 HTTP/HTTPS/TCP Origin Resolver、原子 Gate、DNS/IP、TLS 与受信管理面 SSRF 边界已完成并独立复审，保持 `REVIEW`。
+11. `M3-06` — Single Reconcile Loop、post-COMMIT dirty 合并、generation fencing、outstanding/pending Ack 串行和 Agent revision/digest 语义已完成并独立复审，保持 `REVIEW`。
+12. `M3-05` — Token-only 启动/重连、完整 Snapshot、ConfigAck 与 Connector config-ready 门禁已完成并独立复审，保持 `REVIEW`。
+13. `M3-04` — 独立 Config Runtime 内核、并发资源生命周期、ConfigAck 入队门闩与失败清理已完成并独立复审，保持 `REVIEW`。
+14. `M3-03` — Transaction Gate 与 Startup Gate 均已完成并独立复审，保持 `REVIEW`；未来 M4 的 Management/HTTP/TCP Listener 必须继续位于 Startup Gate 下游。
+15. `M3-02` — 单事务 Application Service 与真实 Builder 容量回滚链已完成并独立复审，保持 `REVIEW`。
+16. `M3-01` — 本地实现与独立复审完成，未来 Origin 持久化预留约束也已复核，保持 `REVIEW`。
+17. `M2-01` 至 `M2-08` — 用户阶段 Review 已通过，本地提交 `4447602` 尚未推送；待对应 CI 证据后才能从 `REVIEW` 转为 `DONE`。
+18. `M0-09` — 正式 Dockerfile 双架构与 Windows SCM 已在 CI #11/#12 通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
+19. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M4-01 至 M4-03 当前均为 `REVIEW`，M4-04 保持 `NOT_STARTED`；M3-01 至 M3-13 仍均为 `REVIEW`，取得最终提交 CI 与隔离部署 Runtime Smoke 后，才能完成 M3 Gate。
+`M0-12` 仍是 Alpha 前 Gate。M4-01 至 M4-09 当前均为 `REVIEW`，M4-10 保持 `NOT_STARTED`；M3-01 至 M3-13 仍均为 `REVIEW`，取得最终提交 CI 与隔离部署 Runtime Smoke 后，才能完成 M3 Gate。
 
 推进规则：
 
@@ -1154,3 +1156,66 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - Upgrade 生命周期：M4-05 尚未实现，M4-03 Handler 现在同时识别 `Connection` 的大小写无关 `upgrade` token 和非空 `Upgrade` Header，在创建 Transport/ReverseProxy 前返回 `501 UPGRADE_NOT_SUPPORTED`。因此当前阶段不会让 `httputil.ReverseProxy` Hijack 一条脱离 HTTP Server Shutdown/Drain 所有权的连接，也没有提前实现 WebSocket。
 - 回归与本地证据：补充 Transport rev1/rev2 传递、Runtime Service 精确 Revision、旧 Route 不消耗新版 Connector IDLE Work，以及 Upgrade 零 Dial 的确定性测试。Windows `go1.27.0`、`GOTOOLCHAIN=local` 下，`./tools/check-go-version.ps1`、定向三包普通测试、定向三包 Race 5 轮、`go test -count=1 -timeout 240s ./...`、`go test -race -count=1 -timeout 300s ./...`、`go vet ./...` 与 `go mod verify` 通过；未重复执行 1GiB Gate、Linux 原生生命周期/部署 Smoke 或 CI。
 - 文档与状态边界：总技术方案和 README 已同步 Route Revision 选择不变量与当前 Upgrade 限制；开发计划 M4-03 验收要点补齐这两项。Proto、OpenAPI、Server Schema、Migration、V1.0 与 `AGENTS.md` 均无需更新，因为 Wire/API/配置/持久化、未来 WebSocket 目标和协作规则没有变化。M4-03 继续保持 `REVIEW`，M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`；当前工作树无 Commit SHA 和 CI Run，本次未勾选任何产品任务或 Gate。
+
+## 2026-08-28 · M4-04 Forwarded/Trusted Proxy 边界 · REVIEW
+
+- 范围与配置权威：生产 HTTP Handler 接入既有 `http_ingress.trusted_proxies`，启动时把 CIDR 编译为只读 Prefix 集合；未新增 Server Schema 字段、默认值、热加载路径、Proto、OpenAPI、Migration、第三方依赖或日志字段。未提前实现 M4-05 WebSocket、M4-08 Caddy/Nginx E2E 或 M4-09 公网限流。
+- Peer 与代理链：实际 TCP Peer 不受信时完全不消费外部 Forwarded 元数据，统一从 Peer IP、直连 Scheme 和原始 Host 重建。Peer 受信时只接受单个 `X-Forwarded-For` Header 行，使用有界扫描解析最多 32 个纯 IP，从右向左剥离受信代理并在首个不受信地址停止；更左侧伪造值忽略。Peer、CIDR 与链地址统一处理 IPv4-mapped IPv6，传给 Source Limit 与 `OpenRequest.client_addr` 的是规范化裸 IP。
+- Header 清洗与失败语义：可信 `X-Forwarded-Proto` 只接受 `http/https` 单值，`X-Forwarded-Host` 使用严格 HTTP authority 规则并拒绝 bare IPv6。重复 Header、多值、空值、非法 IP/Host/Proto 和第 33 跳在 Tunnel Dial 前返回 `400 INVALID_FORWARDED_HEADER`。Reverse Proxy 转发前删除 `Forwarded`、`X-Real-IP` 和所有 `X-Forwarded-*`，只写入一组权威 `For/Proto/Host`。
+- 生产限流接线：独立复审发现 normalized bare IP 最初与 Tunnel Proxy 只接受 `IP:port` 的 Source 解析不兼容，会让启用 LimitManager 的真实 HTTP OPEN 全部失败。修复后 Source parser 同时接受规范化 IP 与直接 TCP 的 `IP:port`，OpenRequest 保留原始输入形态；真实 LimitManager、Connector、OPEN 和计数释放回归已锁定该路径。
+- 复审修复：三路只读复审还发现两个问题：完整 `strings.Split` 会在 32 跳拒绝前按超长 Header 放大 Slice，持久化 Host parser 会接受非法 bare IPv6 authority。分别改为 `strings.Cut` 有界扫描和严格 authority Gate，并补 IPv4-mapped IPv6、32/33 跳、真实重复 Wire Header、bracketed/bare IPv6、未知 Header 清洗与零 Dial 失败测试。最终复审结论 `APPROVED`，无剩余 P0/P1/P2/P3。
+- 本地验证：Windows `go1.27.0`、`GOTOOLCHAIN=local`。`./tools/check-go-version.ps1`、HTTP Ingress/Tunnel/Bootstrap/Config 定向普通测试、HTTP Ingress Race 10 轮、Tunnel/Bootstrap Race 5 轮、`go test -count=1 -timeout 240s ./...`、`go test -race -count=1 -timeout 300s ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff` 与 `git diff --check` 均通过。
+- 证据与状态边界：当前是基于本地提交 `c7b16e6` 的 unstaged/untracked 工作树，没有包含 M4-04 的 Commit SHA、push、对应 CI Run 或真实 Caddy/Nginx E2E；因此 M4-04 只进入 `REVIEW`，M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`，本次未勾选任何产品任务或 M4 Gate。下一项 M4-05 保持 `NOT_STARTED`，等待用户阶段 Review。
+- 文档同步：总技术方案澄清单行 XFF 内最多 32 跳、未受信 Peer 不解析、全受信链/缺失 XFF、Proto/Host 单值和 IPv6 authority 规则；README 同步已实现的可信代理边界。Server Schema 既有字段与默认值保持不变；Proto、OpenAPI、Migration、V1.0、CI/CD、部署文档与 `AGENTS.md` 无需更新。
+
+## 2026-08-28 · M4-05 WebSocket Upgrade · REVIEW
+
+- 范围与协议边界：HTTP Ingress 只把无 Request Body/Transfer-Encoding 的 HTTP/1.1 `GET`、`Connection: upgrade` 与单值 `Upgrade: websocket` 识别为 WebSocket；已知长度超过通用 Body 上限的握手返回 `413 REQUEST_BODY_TOO_LARGE`，其余带 Body 的握手返回 `501 UPGRADE_NOT_SUPPORTED`，两者都在 ACTIVE Lease/Tunnel Dial 前拒绝并关闭客户端连接复用，避免标准库请求体 writeLoop 与 101 后双向复制竞争同一 WorkConn。`Sec-WebSocket-*` 透明交给 Origin/Client 裁决，h2c、HTTP/2 与其他 Upgrade 继续在 Tunnel Dial 前返回 501。未新增 Tunnel Protocol、IngressType、Proto、OpenAPI、Server Schema、Migration、第三方依赖或日志字段。
+- Transport 与数据面：每次 Upgrade 创建 fresh、禁用 KeepAlive 的 HTTP/1.1 Transport，沿用同一 Route、RequiredRevision、Host 和 M4-04 Forwarded 权威，不进入普通连接池，也不会在握手字节发出后跨 WorkConn 重试。Origin 响应头使用冻结的 10 秒阶段预算；成功 101 后由标准库 ReverseProxy 逐字节双向复制，Text、Ping/Pong 等帧不在应用层解析。
+- Timeout、Half-Close 与生命周期：101 后 Client/Tunnel backend 共用固定 1 小时 sliding idle window，任一方向真实字节进展同时推进两端 Deadline；该窗口由 XTunnel 独立拥有，前置代理不得用相同或更短的方向性 read/write timeout 覆盖它。Caddy 不设置方向性 upstream timeout；标准 Nginx 无法表达共享 idle，部署模板使用 `1y` ceiling，严格单向连续流超过一年时需要反向 heartbeat 或改用 Caddy。该窗口不构成统一总生命周期时限。单边 EOF 保留 TCP Half-Close；Client、Origin/Agent 断连、idle 到期、Context Cancel 或 Hard Deadline 主动关闭两端。Hijack Handler 继续由 request tracker 所有，Graceful Shutdown 等待自然结束，到期后取消 BaseContext 并等待 Handler 归零；`Server.Close` 同样有界强关。
+- 回归覆盖：真实 HTTP Server 与原始 TCP 覆盖 Upgrade、双向 Text、Ping/Pong、权威 Forwarded、fresh Dial、握手失败不重试、Client/Origin 断连、真实 TCP Half-Close、共享 idle 双向续期及静默到期、自然 Shutdown、Deadline 强关和活跃连接直接 `Server.Close`；额外覆盖已知长度、未知 chunked 与已知超限三类带 Body 握手的零 Dial、零 ACTIVE 和连接关闭。提供 `XTUNNEL_RUN_WEBSOCKET_SOAK=1` 的显式 `>=1h` soak 入口，每分钟以 Ping 验证持续进展；本轮未运行该长时用例，不能把默认 skip 记作通过。
+- 本地验证：Windows `go1.27.0`、`GOTOOLCHAIN=local`。最终 HTTP Ingress 普通测试 5 轮与 Race 5 轮通过；本轮带 Body 握手回归普通 50 轮、Race 10 轮及包级普通/Race/Vet 通过。`./tools/check-go-version.ps1`、`go test -count=1 -timeout 240s ./...`、`go test -race -count=1 -timeout 300s ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff`、`git diff --check` 与 `git diff --cached --check` 通过。`CGO_ENABLED=0` 下 linux/amd64、linux/arm64 `go build ./...` 通过，未把交叉构建冒充 Linux 原生 Runtime Smoke。
+- 独立复审：三路只读复审先发现 Hijack Shutdown 所有权、旧 generation 101 Body 能力丢失、握手跨 WorkConn 重试、ACTIVE idle 缺失、代理层过度裁决 `Sec-WebSocket-*`、Deadline 并发回退和单向续期证据不足；逐项改为 request owner 排空、fresh Transport、透明 Sec Header、1 小时共享 sliding idle 与单 applier/version 重放，并补确定性交错和真实连接回归。后续 mixed Index 复审又发现带 Body 的 Upgrade 可让请求 writer 与 WebSocket copier 同时写 WorkConn；本轮已在 Dial 前拒绝，并补已知长度 `Expect: 100-continue`、未知 chunked Body 与已知超限 Body 的错误优先级回归。
+- 证据与状态边界：当前是基于本地提交 `c7b16e6` 的混合 staged/unstaged 工作树；`websocket.go` 与 `websocket_test.go` 同时存在 staged/unstaged 差异，提交前必须重新暂存最终版本并从 staged snapshot 复验。本轮没有 Commit SHA、push、对应 CI Run、真实 Caddy/Nginx E2E 或已完成的 1 小时 soak，因此 M4-05 只进入 `REVIEW`，M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`，未勾选任何产品任务或 M4 Gate。M4-06 保持 `NOT_STARTED`，等待用户阶段 Review。
+
+## 2026-08-28 · M4-06 TCP Listener Manager · REVIEW
+
+- 范围与端口模型：`tcp_ingress.min_port..max_port` 冻结为包含两端的逻辑预留池，不在启动时预监听整个范围。TCP Route 创建既可显式选择池内端口，也可省略并由 Server 确定性选择；Normalize 后 SQLite 始终持久化非零具体端口，禁用 Route 继续占用逻辑端口，删除才释放。未新增 Server Schema 字段、Migration、Proto、OpenAPI、第三方依赖、日志字段或本地第二配置源，也未提前实现 M4-07 Raw TCP/SSH 转发。
+- 事务与 fencing：可预测的范围、保留、占用和池耗尽错误在事务前拒绝，`BEGIN IMMEDIATE` 内再以最新 Desired State 重验；成功写入在同一事务推进 Service Version/RequiredRevision、所属 Tunnel DesiredRevision 与全局 Route Generation，Gate 失败或并发冲突整笔回滚且不发 dirty。全局 Generation 只用于 Server Reconcile fencing，不作为客户端 ExpectedGeneration；不同 Tunnel 并发自动分配仍取得不同端口和连续代次。
+- Listener Reconcile：唯一 owner 只对当前完整 Snapshot 中启用 Route 的具体端口执行 `Listen`。Route Snapshot 原子发布后通过非阻塞 observer 唤醒 TCP owner，并保留 5 秒周期重试；单端口绑定或 Accept 异常只发布稳定 `LISTEN_FAILED`，其他 Listener 继续。A→B 先成功监听并发布 B 再释放 A，B 失败时 A 保留且同步当前非端口 Route 字段；同端口变更复用 Socket 并在 admission fence 内原子更新准入值。连接登记前以当前 Route Snapshot generation 读取作为准入线性化点，删除、禁用或更新后的旧 Listener 即使尚未 reconcile 也不再接纳新连接，旧 generation 候选不会污染新状态。
+- 生命周期与资源：Listener、Accept goroutine 与连接 Handler 均有明确 owner、停止条件和 Wait 路径；Stop 先建立准入 fence，再关闭 Listener 解阻塞 Accept，持续 Listener Close 失败时保留 residual ownership 并用 TCP Deadline 收敛阻塞，Shutdown Deadline 后取消 Handler Context、关闭残留连接。普通客户端连接的 Close 错误只由 Manager Close 聚合，不调用进程 `ReportRuntimeError`；Handler panic 仍为 fatal，并与同次 Close 错误合并。M4-07 前 Handler 保持 fail closed。启动顺序冻结为 Route Snapshot → TCP Listener Restore → HTTP Ingress → Gateway → Runtime Reconciler；首次 Admin 前即使 SQLite 已有 TCP Route 也不占用端口，完整关闭 SQLite/Bootstrap 后会从持久化 Route 恢复监听。
+- FD 预算：启动 Gate 按逻辑池全部 `50001` 个端口加一个原子换口候选计算 TCP 峰值，固定 Listener 合计为 `50006`，默认 Server FD 总预算由 `87188` 提升到 `137192`；这只是容量上界，不改变按需绑定语义。单元测试直接锁定 `50002 / 50006 / 137192`，README 同步当前能力、启动/停机顺序和 OCI/systemd `nofile` 要求。
+- 本地验证：Windows `go1.27.0`、`GOTOOLCHAIN=local`。`tcpport/tcpingress` 普通测试 20 轮，`application/sqlite/route/bootstrap` 普通测试 10 轮，Bootstrap 普通 5 轮与 Race 3 轮，TCP Ingress Race 100 轮通过；此前 Handler panic 两项回归普通 50 轮、Race 10 轮及包级普通/Race/Vet 通过。本次 generation 准入、连接 Close 非 fatal 与 panic 合并回归在 Race 下 20 轮通过；随后执行 `go test -count=1 -timeout 300s ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff`、GoFmt、`git diff --check` 与 `git diff --cached --check` 全部通过。Linux amd64/arm64 `go build ./...`、Bootstrap test compile 与历史全仓 Race 属于此前证据；本次没有重跑 Linux Runtime 或全仓 Race，不能将定向 Race 冒充完整 Gate。
+- 复审与状态边界：三路只读复审先后发现 admission fence、候选取消泄漏、Accept 异常假 ACTIVE、持续 Close 阻塞、Route publish dirty 接线、Bootstrap/FD 证据及测试 happens-before 问题；修复并高轮复验后通过。后续 mixed Index 复审又发现 Handler panic 会跳过连接 Close、却先释放 Manager ownership；本轮已把 Close 注册为先于 ownership 删除执行的 defer，并让 panic 与同时发生的 Close 错误合并为一次 Runtime Error。最终未提交变更复审继续发现 Snapshot 发布到 TCP reconcile 之间旧 Listener 仍可准入，以及普通连接 Close 错误误入 Fatal Runtime Channel；现已增加当前 generation 准入线性化点，并把连接级清理错误与 owner/panic fatal 分离，补充直接回归。当前仍是 mixed staged/unstaged 工作树，没有包含 M4-06 最终状态的 Commit SHA、push、对应 CI Run 或隔离 Linux 主机部署/Listener 生命周期证据，因此 M4-06 只进入 `REVIEW`，M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`，未勾选任何产品任务或 M4 Gate。提交前必须重新暂存最终版本并从 staged snapshot 复验。
+- 文档同步：总技术方案同步逻辑池、具体端口持久化、事务 fencing、按需监听、`LISTEN_FAILED`、原子换口、准入与关闭不变量；README 同步用户可见行为和 FD 预算；开发计划同步 M4-06 验收、当前队列与本记录。Server Schema、Migration、Proto、OpenAPI、V1.0、CI/CD、部署文件与 `AGENTS.md` 均无需更新。
+
+## 2026-08-28 · M4-07 Raw TCP/SSH Data Plane · REVIEW
+
+- 范围与生产接线：新增 Tunnel owner 值传递 `DialRequest`，HTTP `TunnelDialer.Dial` 与 TCP `tcpTunnelProxy.Serve` 均使用同一路由输入，不复用 Wire `OpenRequest` 也不新建泛化 common package。M4-06 TCP Listener 在准入时捕获不可变 `TCPRoute`，生产 Handler 把 TunnelID、ServiceID、精确 RequiredRevision、`INGRESS_TYPE_TCP` 和真实 Public Peer 交给 Tunnel Proxy；Serve 忽略调用方 ClientAddr，只使用已 Accept Peer 的真实地址。未新增 Proto、OpenAPI、Server Schema、Migration、第三方依赖或本地业务配置源。
+- 超时与 Origin 选项：Public TCP Pre-OPEN 的 10 秒唯一 owner 下沉到 Tunnel Proxy，只约束 Work Acquire 与 OPEN；OPEN_OK 后立即取消 Timer，ACTIVE 使用原 Listener Manager Context，因此 RAW 长连接不会在 10 秒后被误杀。HTTP Dial 则继续在 OPEN 后脱离单请求取消，由 Transport 池与 ActiveWork 收敛。Agent 既有 Origin Resolver 继续让 DNS/IPv4/IPv6/TCP/可选 TLS 共用 Service `connect_timeout`，disable Happy Eyeballs 不扩展该预算，TCP KeepAlive 默认 30 秒且 `0` 映射为禁用。
+- RAW、Half-Close 与关闭：OPEN_OK 后统一双向代理不解析 SSH、TLS、数据库或其他业务协议，不注入 PROXY Header，只逐字节转发。单边 EOF 只 `CloseWrite` 对端，反方向继续；取消或致命错误对两端设立 Deadline 并 Close，等待两个 copy goroutine 退出。Manager 保持公网连接 owner/Wait，Handler 返回后再保底 Close；StopAccepting 不杀死在途连接，Shutdown Deadline 才强制收敛。
+- 错误语义：TCP 失败不写入任何带内错误文本，只关闭公网连接。Server 优先保留 Agent Proto 稳定码，本地容量/Acquire 失败映射 `WORK_POOL_EXHAUSTED`，未观察 Revision 映射 `SERVICE_CONFIG_NOT_OBSERVED`，已观察但无 Connector 映射 `TUNNEL_OFFLINE`，协议错误映射 `PROTOCOL_ERROR`，其余统一 `INTERNAL_ERROR`。Warn 日志只包含 `error_code`、Tunnel/Service 和 Public Port，不记录 Origin、Token 或底层错误文本；正常进程排空取消不记为单连接失败，普通连接错误不进入进程 Fatal Runtime Channel。
+- 回归与本地证据：新增真实 `*net.TCPConn` 双连接回归，锁定精确 Revision（含合法 Revision 0）、真实 Peer Address 覆盖伪造 ClientAddr、Pre-OPEN 超时释放、OPEN_OK 后跨过该窗口 RAW 仍存活，以及 Revoke 对 Public Peer/WorkConn/ActiveWork/Lease/配额的有界收敛。Revoke 回归刻意让 WorkConn Close 返回 EOF，并同时断言 Serve 保留 `context.Canceled` 与 EOF，防止正常 Half-Close 掩盖外部取消。SSH identification 加任意二进制字节继续按字节相等，稳定码表和敏感文本不泄露均有断言。Windows `go1.27.0`、`GOTOOLCHAIN=local` 下，新增 Serve 生命周期回归 20 轮、定向 Race、`go test ./...`、`go test -race ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff` 和 `git diff --check` 通过；`CGO_ENABLED=0` 的 linux/amd64、linux/arm64 `go build ./...` 通过。
+- 复审、状态与证据边界：前轮 P1 已按用户确认收敛。Tunnel Proxy 的 Serve 在 OPEN 成功后把真实 Public Peer 注册到 ActiveWork，RAW 代理只关闭底层 WorkConn，随后快照 lifecycle 取消原因再通过同一 Finish 收敛；因此正常双 EOF 不会误报取消，Revoke/Drain 也不会遗留公网半连接。只读契约复审与高轮/Race 验证后无剩余 P0/P1，M4-07 进入 `REVIEW`；M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`，本轮未勾选任何 M4 Gate。当前仍是 mixed staged/unstaged 工作树，没有包含本轮最终状态的 Commit SHA、CI Run 或隔离 Linux 部署证据，因此不得标记 `DONE`。
+- 文档同步：README 已更新 Raw TCP/SSH 生产行为与 `REVIEW` 边界；总技术方案补充 `DialRequest`、双 Context、Public Peer 注册与 exactly-once Finish 契约。Proto、OpenAPI、Server Schema、Migration、V1.0、CI/CD、部署文档与 `AGENTS.md` 均无需更新。
+
+## 2026-08-28 · M4-08 Caddy/Nginx HTTPS/WSS 集成 · REVIEW
+
+- 部署边界：新增 `deploy/reverse-proxy/Caddyfile`、`nginx.conf.template` 与同目录 README。前置代理监听公网 HTTPS/WSS，证书和私钥只由部署环境挂载；代理到同主机 XTunnel HTTP Ingress 的 upstream 固定为 loopback 明文 HTTP/1.1。未修改既有 Compose、Server Schema、Proto、OpenAPI、Migration、数据库、权限模型、日志契约或第三方 Go 依赖，也未提前实现 M4-09 公网限额。
+- Header、流式与 WebSocket：Caddy/Nginx 都保留完整 Client Host authority，Origin 不改写，覆盖客户端伪造的 `X-Forwarded-For/Proto/Host` 后交给 XTunnel 可信 loopback 边界再次规范化。公网 Header Read 统一为 `10s`。Nginx 使用 `$http_host` 保留显式端口，显式传递 Upgrade/Connection 并关闭请求/响应 buffering，使用 `large_client_header_buffers 4 1m` 避免默认单 Header 8 KiB 上限先于 Server Schema 拒绝；`client_max_body_size 0` 不在 Server Schema 前独立裁决 Body 大小。Caddy 固定 HTTP/1.1 upstream、原生 Upgrade 与 `100ms` 有限刷新间隔，保留客户端断开向 upstream 的取消传播且不设置方向性读写 timeout。Nginx 标准 HTTP Proxy 无法精确表达共享 idle，模板使用 `1y` 方向性 ceiling；严格单向连续流超过一年时需要反向 heartbeat 或改用 Caddy。
+- 自动化与供应链：新增显式 `XTUNNEL_RUN_FRONT_PROXY_E2E=1` Gate，测试从仓库同一部署配置启动真实 host-network Caddy/Nginx；临时 CA 与叶证书只写入测试目录，私钥权限 `0600`，客户端使用 RootCAs 与 ServerName 真校验。HTTPS/WSS 分别断言 Host/path/query、单值 Origin 逐字透明、恶意 Forwarded 覆盖、精确 RequiredRevision、真实 `101` 与双向帧；客户端断开场景断言未结束的 upstream 连接在有界时间内关闭。默认运行的静态契约测试同时锁定 `10s` Header Read、Caddy 非负 `100ms` 刷新且无方向性 timeout、Nginx `4 × 1 MiB` 大 Header、`1y` ceiling 与禁用独立 Body 限制。Caddy `2.11.4-alpine` 和 Nginx `1.30.4-alpine` 固定官方多架构 index digest；测试只允许 `--pull=never`，CI 在原生 amd64/arm64 Runner 显式拉取同一摘要并核对镜像架构。
+- 本地验证：Windows `go1.27.0`、`GOTOOLCHAIN=local` 下，工具链检查、HTTP Ingress 普通与 Race、全量普通与 Race、`go vet ./...`、`go mod verify`、`go mod tidy -diff`、`git diff --check` 与 `git diff --cached --check` 曾通过。使用同一 Go 工具链交叉编译 linux/amd64 测试二进制后，在 WSL Ubuntu 22.04 的原生 linux/amd64 Docker daemon 中预拉固定摘要，Caddy/Nginx 真实 HTTPS/WSS E2E 连续 3 轮通过；该结果不冒充 arm64 Runtime 或 GitHub CI 证据。本次 Header/timeout/buffer 策略修复重新通过 HTTP Ingress 包普通/Race、静态策略 Race 20 轮、全仓普通测试、Vet、Module Verify/Tidy Diff 与双 Diff Check；当前环境无 Docker、Caddy 或 Nginx，未执行新配置的真实语法与 E2E，也未重跑全仓 Race，不能沿用历史 Runtime 结果作为本次通过证据。
+- 独立复审：首次只读复审发现 Origin 未进入请求/断言的 P1，以及 Docker 清理忽略错误和部分命令缺少有界 Context 的 P2。修复后 HTTPS/WSS 使用不同 Origin 值精确断言单值透明传递；image inspect、stop、force remove 与删除确认均使用独立有界 Context，清理失败显式报告。后续未提交变更复审先发现 Caddy 负刷新会阻断客户端取消传播、Nginx 固定 2 GiB 会覆盖 Server Body 契约，最终又发现双方 `1h` 方向性 timeout 会提前终止仍有单向流量的 WebSocket、公网 Header 默认 60 秒，以及 Nginx 默认 8 KiB 单 Header 缓冲小于 Schema 最大值；现已逐项修复并补静态策略回归，仍待 Docker/CI 复验与最终独立复审。
+- 状态与证据边界：当前仍是基于 `c7b16e6` 的 mixed staged/unstaged 工作树，没有包含 M4-08 最终状态的 Commit SHA、push 或对应 CI Run；原生 arm64 E2E 仅已接入 CI，本次新增客户端断开场景也尚未取得 Docker Runtime 证据。因此 M4-08 只保持 `REVIEW`，M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`，本轮不勾选 M4 Gate Checklist。下一项仍为 M4-10 Gate。
+- 文档同步：README 已链接可执行部署示例并同步 M4-08 `REVIEW` 边界；总技术方案的 Caddy/Nginx 概念配置补充公网监听、loopback upstream、完整 authority 与单源 Forwarded 规则；开发计划同步任务状态、执行队列、验收证据与剩余 Gate。部署 README 不维护第二套镜像版本权威，固定摘要以测试与 CI 为准。
+
+## 2026-08-28 · M4-09 Public Ingress Limits · REVIEW
+
+- 授权与契约：用户明确确认新增 Server 配置字段并允许修改内部导出签名。`configs/server.schema.json` 新增唯一机器权威 `limits.max_http_body_bytes`，范围 1 byte 至 1 TiB、默认 2 GiB；Go 配置使用 `int64`，Schema/Struct 契约测试同步支持该整数类型。Nginx 前置模板使用 `client_max_body_size 0`，不再以固定 2 GiB 覆盖合法的更大 Server 配置；`large_client_header_buffers 4 1m` 允许单 Header 达到既有 `max_http_header_bytes` Schema 最大值，聚合裁决仍由 Go Server 执行。`httpingress.NewHandler` 改为单一 `HandlerOptions`，TCP Listener Options 增加来源 limiter；未修改 Proto、OpenAPI、Migration、第三方依赖、锁文件、日志字段、暂存区或提交历史。
+- 有界来源状态：共享 `LimitManager` 接入既有 open rate、open burst 与 HTTP RPS 配置，实现最多 32 分片的 Token Bucket。每类状态总容量由 `max_active_connections + max_pending_opens` 派生，每个分片在容量压力下淘汰最久未访问来源；OPEN TTL 为完整 Burst 回填所需的向上取整秒数且至少 1 秒，HTTP Burst 等于一秒 RPS、TTL 为 1 秒，Server 重启清空状态。Token 一经入口消费，不因路由竞争、Work 获取或下游 OPEN 失败退还。
+- HTTP 真实入口：可信代理归一化成功后逐请求消费 HTTP Token；只有 `http.Transport` 确实新建 Tunnel WorkConn 时才消费 OPEN Token，KeepAlive 复用不重复扣减。独立 `ActiveLease` 按在途 Request 或完整 WebSocket Handler 生命周期计入 Global/Tunnel/Service/Source IP 四级配额，池化 WorkConn 不再继承首个请求的来源归属。已知 Body 超限在 Tunnel Dial 前返回 `413 REQUEST_BODY_TOO_LARGE`，未知长度继续流式读取并在超限后返回同码、关闭客户端复用；速率超限返回 `429 RATE_LIMITED` 与 `Retry-After: 1`。Go HTTP Server 的 `MaxHeaderBytes` 在 Handler 前返回标准 431。
+- TCP 与 Lease 生命周期：Raw TCP 在 OS `Accept` 后、准入登记、WaitGroup 和 Handler goroutine 创建前按真实 Peer IP 消费一次 OPEN Token；解析失败或限流拒绝只关闭 Socket，不进入 Tunnel，也不写带内错误。Tunnel Proxy 对 TCP 不重复扣减，继续使用原 `PendingOpen -> ACTIVE -> connection close` Lease；HTTP OPEN_OK 只结束 Pending，ACTIVE 由 Handler 独立持有。四级 ACTIVE 提交与释放复用同一 Manager 锁，独立 ActiveLease 并发重复释放只归还一次。
+- 回归与复审：新增 Token 补充、TTL、LRU 淘汰、分片容量、非法 Options、四级 ACTIVE 与并发 exactly-once 测试；HTTP 覆盖可信代理来源 Rate、已知/流式 Body 413、同来源 ACTIVE 拒绝、释放后跨来源复用同一 KeepAlive、OPEN Rate 429 和真实 Socket Header 431；TCP/Tunnel 覆盖非法/拒绝/允许 Accept、TCP 不双扣、HTTP 下游失败仍扣 Token、HTTP WorkConn 不持有公网 ACTIVE。后续复审发现 Nginx 固定 2 GiB Body 和默认 8 KiB 单 Header 都会在 Server Schema 之前拒绝合法输入；本轮关闭独立 Body 裁决并把单 Header 缓冲提升到 1 MiB，用默认运行的静态配置测试锁定边界。
+- 本地验证：Windows `go1.27.0`、`GOTOOLCHAIN=local`。定向配置与十个相关包普通测试通过；HTTP Ingress 普通测试 10 轮、Race 3 轮通过；此前全仓普通/Race、Vet、Module Verify 与双 Diff Check 通过。本次 Nginx Header buffer 修复重新通过 HTTP Ingress 包普通/Race、静态策略 Race 20 轮、全仓普通测试、Vet、Module Verify/Tidy Diff、GoFmt 与双 Diff Check；未重跑全仓 Race 或真实 Nginx Runtime。
+- 证据边界：当前仍是 M4 多阶段 mixed staged/unstaged 工作树，没有包含 M4-09 最终状态的 Commit SHA、push、对应 CI Run、高基数来源长时间 LRU/TTL 压测或完整 Server 启动装配后的公网黑盒限流 E2E。本轮前置代理策略修复仍需 Docker Runtime 与原生 CI 重跑。因此 M4-09 只保持 `REVIEW`，M4 `DONE` 仍为 `0/10`、全局仍为 `33/95`，不勾选任何 M4 Gate Checklist；M4-10 保持 `NOT_STARTED`。
+- 文档同步：总技术方案第 156 节同步机器默认值镜像、Token Bucket 容量/TTL、HTTP/TCP 扣减点、ACTIVE 所有权与公开 413/429/431 行为；README 同步已实现的用户可见限额和 `REVIEW` 边界；开发计划同步任务表、当前队列与本记录。Proto、OpenAPI、Migration、CI/CD 和 `AGENTS.md` 无需更新；部署配置按既有 Schema Header/Body 上限同步，不产生第二套机器权威。

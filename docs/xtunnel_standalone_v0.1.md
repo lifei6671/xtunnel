@@ -3350,6 +3350,15 @@ INSERT INTO route_config_state(id, generation) VALUES (1, 0);
 `http_routes`、`tcp_routes` 与该单行 generation 必须在同一个
 `BEGIN IMMEDIATE` 事务中提交；运行时只消费提交后的完整状态。
 
+TCP Route 创建输入未指定 `public_port` 时，ConfigWriteCoordinator 在
+Normalize/Validate 阶段从 `tcp_ingress.min_port..max_port` 逻辑池分配具体端口；
+事务内基于最新完整 Desired State 再次裁决，并把该端口、所属 Service 新版本、
+Tunnel 新 `desired_revision` 和全局 Route Generation 一次提交。当前快照已经可以
+确定的池耗尽或显式端口范围/保留/占用冲突必须在事务前拒绝；事务内重验发现并发
+冲突时整笔回滚。两类失败都不得推进任何版本或 dirty 状态。全局 Route Generation
+只是 Server Reconcile fencing，不是客户端 ETag；互不相关 Route 写入不得因它推进
+而相互报版本冲突。
+
 ```text
 API Write
  ↓
@@ -3384,6 +3393,11 @@ TCP `Listen` 等无法与 SQLite 原子提交的外部副作用使用 Desired/Ac
 desired = ENABLED
 actual = APPLYING | ACTIVE | APPLY_FAILED
 ```
+
+Actual 只包含当前完整 Snapshot 中启用且合法的 Route。逻辑端口池不会在启动时预先
+`Listen` 整段范围；未分配、禁用和已删除 Route 都不持有 Socket 或 Listener FD。
+Server 启动 FD Gate 仍按整个逻辑池容量并额外包含一个原子换口候选预留上界，使
+后续新增 Route 不依赖启动时数据库中已有 Listener 数量。
 
 API 返回 Desired State 写入结果；Service Status 明确展示 Runtime Apply Error，不得返回“失败”但暗中保留已提交配置。
 
@@ -3551,6 +3565,12 @@ Peer IP
 第一个不受信地址 = original client
 ```
 
+`X-Forwarded-For` 只接受一个 Header 行，该行内部允许 1 至 32 个逗号分隔的纯 IP
+地址。实际 Peer 是代理链的可信锚点；从最靠近 XTunnel 的右侧地址开始剥离可信代理，
+遇到第一个不受信地址后停止，更左侧值视为该 Client 可伪造输入并忽略。受信 Peer 未提供
+`X-Forwarded-For` 时使用 Peer IP；链中全部地址都属于 `trusted_proxies` 时使用最左侧、
+也就是最远端的受信地址。
+
 只有最靠近 XTunnel 的受信代理提供的协议和 Host 元数据可以作为：
 
 ```text
@@ -3558,6 +3578,10 @@ X-Forwarded-Proto
 
 X-Forwarded-Host
 ```
+
+`X-Forwarded-Proto` 只接受单值 `http` 或 `https`；`X-Forwarded-Host` 必须通过与
+公网 Host 相同的严格 HTTP authority 校验，尤其 IPv6 必须使用方括号。两者缺失时分别
+使用直连请求 Scheme 和原始 Host。
 
 客户端位于最外层的不可信 X-Forwarded-For 值不得直接成为 original client。
 
@@ -3569,7 +3593,10 @@ X-Forwarded-Host
 使用 Peer IP 重新生成
 ```
 
-多 Header、多值、空值、非法 IP、超长代理链一律返回 `400 INVALID_FORWARDED_HEADER`。代理链最多保留 32 跳。
+未受信 Peer 提供的 Forwarded Header 不解析其内容，直接删除后重建。受信 Peer 路径中，
+重复 Header 行、`X-Forwarded-Proto`/`X-Forwarded-Host` 逗号多值、空值、非法 IP 或
+超过 32 跳的代理链一律返回 `400 INVALID_FORWARDED_HEADER`；不得在歧义输入中选择
+第一个值或降级猜测。
 
 ---
 
@@ -3665,6 +3692,25 @@ Agent
 Origin
 ```
 
+入口只把 HTTP/1.1 `GET`、`Connection` 含 `upgrade` token、单值
+`Upgrade: websocket` 且没有 Request Body/Transfer-Encoding 的请求识别为 WebSocket；
+`Sec-WebSocket-*` 继续透明转发并由 Origin/Client 按 WebSocket 协议裁决。已知长度超过
+Server Body 上限的握手先按通用入口边界返回 `413 REQUEST_BODY_TOO_LARGE`；其余带 Body
+的 WebSocket 握手、h2c、HTTP/2 或其他 Upgrade 都在 Tunnel Dial 前返回
+`501 UPGRADE_NOT_SUPPORTED`。带 Body 的两种拒绝都关闭客户端连接复用，避免请求体写入
+与 101 后的双向复制竞争同一 WorkConn。
+
+每次 WebSocket Upgrade 使用一条 fresh HTTP/1.1 Transport/WorkConn，不进入普通
+KeepAlive 池，也不在握手字节已经写出后跨 WorkConn 重试。Origin 响应头受 10 秒
+阶段预算约束；101 后 Client 与 Tunnel backend 共用 1 小时 sliding idle window，
+任一方向成功读写真实字节都会同时推进两端 Deadline。该窗口只限制双方完全无字节
+进展，不是 WebSocket 总生命周期时限；Ping/Pong 与业务帧都属于进展。
+
+Client 或 Origin 单边 EOF 继续遵守 TCP Half-Close，允许反方向完成；完整断连、idle
+到期、Context Cancel 或 Shutdown Hard Deadline 必须主动关闭两端。Hijack 后的
+Handler 仍由 HTTP request owner 计数，Graceful Shutdown 先等待自然结束，到期后
+取消基础 Context 并等待 Client、WorkConn 和 Handler 全部归零。
+
 需要测试：
 
 ```text
@@ -3732,6 +3778,10 @@ CREATE TABLE tcp_routes (
 );
 ```
 
+“未指定端口”只存在于未来 Management Create 请求的输入层；Normalize/Validate
+必须在提交前把它解析为具体端口。持久化层继续以 `public_port NOT NULL UNIQUE` 为
+唯一权威，不允许用 `NULL`、`0` 或额外 allocator 表表达尚未分配状态。
+
 ---
 
 # 95. TCP Listener Manager
@@ -3764,7 +3814,34 @@ Stop Accept
 
 直到自然关闭。
 
-单个 `Listen(port)` 在启动或 Reconcile 中失败时，只把对应 TCP Service 标记为 `APPLY_FAILED`，记录稳定 Error Code、端口和最近失败时间；Management、Agent Gateway、HTTP Ingress 及其他成功 Listener 继续启动。Periodic Reconcile 重试该 Desired Route。只有全局 Listener 配置无效、必需基础端口失败或数据库/身份初始化失败，才阻止 Server READY。
+单个 `Listen(port)` 在启动或 Reconcile 中失败时，只把对应 TCP Service 标记为
+`APPLY_FAILED`，记录稳定错误码 `LISTEN_FAILED`、Route、端口、当前 Route Generation
+和最近失败时间；同一 Service 任一当前 Route 失败即可使该 Service 进入
+`APPLY_FAILED`。Management、Agent Gateway、HTTP Ingress 及其他成功 Listener
+继续启动。Route Config Write 的 dirty 通知立即触发 Reconcile，Periodic Reconcile
+继续重试仍失败的 Desired Route。只有全局 Listener 配置无效、必需基础端口失败或
+数据库/身份初始化失败，才阻止 Server READY；原始 OS 错误文本不属于稳定 API 契约。
+
+端口 A→B 时必须先成功绑定并发布 B，再停止 A；B 失败时 A 继续服务，并同步使用
+当前 Service/Tunnel/RequiredRevision 等非端口 Route 值。Route 删除、
+禁用、Service 禁用或 Tunnel 撤销则立即停止旧入口，不等待替代 Listener。同端口只
+更新 Route 内容时复用既有 Socket 并原子替换 Route 指针。连接登记和 WaitGroup 增加前
+必须重读当前 Route Snapshot，并要求其 Generation 与 Listener 已发布 Generation 精确
+相等；该读取是准入线性化点。已经可见的新代次拒绝旧 Listener 准入；若新代次在读取
+之后发布，本次连接视为发布前已准入，继续使用当时捕获的旧 Route 值。
+
+Listener、Accept owner 和连接 Handler 都有唯一 owner、取消路径与同步 Wait。Listener
+或 Accept owner 无法收敛的 Close 失败必须保留 residual ownership 并向 Runtime owner
+报告，不得静默遗失 FD。普通客户端连接在准入拒绝或 Handler 正常返回后的 Close 错误
+只由 Manager 最终 Close 聚合，不进入进程 Fatal Runtime Channel；Handler panic 仍为
+fatal，并与同次连接 Close 错误合并上报。
+
+TCP Listener 在 Accept 时把不可变 Route 值复制为 `DialRequest`，并将真实
+Public Peer 一并交给 Tunnel Proxy。Proxy 内部 10 秒 Pre-OPEN Context 只约束
+Work Acquire 与 OPEN；OPEN_OK 后 ACTIVE 回到 Listener Manager Context，不受该 Timer
+限制。ActiveWork 同时注册 WorkConn、Public Peer 与取消句柄，使 Tunnel
+Revoke、Drain 和 Shutdown 都能在锁外主动解阻两端 IO；正常双 EOF 则继续
+通过同一 exactly-once Finish 路径释放 Lease、连接和配额。
 
 ---
 
@@ -3779,6 +3856,13 @@ tcp_ingress:
   min_port: 10000
   max_port: 60000
 ```
+
+`min_port..max_port` 是包含两端的逻辑预留池，不是启动时预监听的物理 Socket 集合。
+创建 TCP Route 时既可显式指定池内端口，也可省略端口并由 Server 确定性选择一个
+未被任意 Desired Route 占用且不在保留集合中的端口；提交后数据库始终保存非零具体
+端口。禁用 Route 继续占用其逻辑端口，删除 Route 才释放；数据库唯一约束是最终并发
+兜底。分配阶段不试绑 OS Socket，外部进程占用等系统冲突在 Listener Reconcile 中
+进入 `APPLY_FAILED` 并周期重试，不回滚 Desired State。
 
 禁止：
 
@@ -4069,8 +4153,9 @@ Revision 规则：
 切换 Service 所属 Tunnel
 → V0.1 禁止；必须在目标 Tunnel 新建 Service，再显式删除旧 Service
 
-只修改 HTTP Host / Path 或 TCP Public Port
-→ 不修改 Tunnel Revision，只重建 Server Route Snapshot
+创建、修改或删除 HTTP/TCP Route（包括只修改 Host / Path / Public Port）
+→ 在同一事务递增 Service Version、所属 Tunnel Revision 与 Route Generation；
+  Agent Snapshot 和 Server Route Snapshot 分别由各自 dirty 通知收敛
 
 删除 Service
 → 递增所属 Tunnel Revision，使全部 Connector 删除本地 Service
@@ -5489,6 +5574,16 @@ admin.example.com {
 
 TLS 和 wildcard certificate 配置由实际部署环境负责。
 
+可执行的 Caddy 配置位于 `deploy/reverse-proxy/Caddyfile`。前置代理监听公网
+HTTPS/WSS，XTunnel HTTP Ingress 只监听同一主机网络命名空间中的 loopback；
+代理到 XTunnel 固定使用明文 HTTP/1.1。Caddy 必须保留完整 Host authority 与
+Origin，并覆盖客户端提供的 `X-Forwarded-For/Proto/Host`，不能把不可信前缀
+追加到权威代理链。公网 Header Read 固定为 `10s`；响应刷新使用与 XTunnel
+ReverseProxy 对齐的有限 `100ms` 间隔，禁止使用负 `flush_interval`；负值低延迟
+模式会在客户端断开后继续执行 upstream 请求，延迟 WorkConn 与 ACTIVE Lease
+归还。Caddy upstream 不设置方向独立的读写 timeout，WebSocket 的双向共享 `1h`
+idle 继续只由 XTunnel 裁决。
+
 ---
 
 # 141. Nginx 示例
@@ -5504,10 +5599,10 @@ server {
     server_name admin.example.com;
 
     location / {
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
 
         proxy_pass http://127.0.0.1:8080;
     }
@@ -5521,18 +5616,20 @@ server {
     listen 443 ssl;
     server_name *.tunnel.example.com;
 
-    client_max_body_size 2g;
+    client_header_timeout 10s;
+    large_client_header_buffers 4 1m;
+    client_max_body_size 0;
 
     location / {
         proxy_http_version 1.1;
 
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
 
         # 覆盖客户端自带 XFF，禁止把不可信前缀透传给 XTunnel。
         proxy_set_header X-Forwarded-For $remote_addr;
 
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
 
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
@@ -5540,15 +5637,29 @@ server {
         proxy_request_buffering off;
         proxy_buffering off;
 
-        proxy_read_timeout 1h;
-        proxy_send_timeout 1h;
+        proxy_read_timeout 1y;
+        proxy_send_timeout 1y;
 
         proxy_pass http://127.0.0.1:8081;
     }
 }
 ```
 
-以上示例满足 WebSocket、1GB Upload/Download 和 streaming 的第一阶段验收下限。生产环境仍需根据业务调整 body size、长连接 timeout 和带宽限制，但不得重新启用整请求缓冲。
+以上示例满足 WebSocket、1GB Upload/Download 和 streaming 的第一阶段验收下限。
+公网 Header Read 固定为 `10s`；`large_client_header_buffers 4 1m` 避免默认单字段
+8 KiB 上限先于 XTunnel 拒绝合法 Header，聚合上限仍由 Server Schema 裁决。Nginx
+使用 `client_max_body_size 0` 关闭前置代理自身的 Body 大小裁决；请求体唯一上限由
+`configs/server.schema.json` 的 `limits.max_http_body_bytes` 定义，并由 XTunnel 返回
+稳定 413。标准 Nginx HTTP Proxy 不能表达“任一方向进展同时续期”的共享 idle，
+`1y` 只是远高于 XTunnel `1h` 业务窗口的方向性 ceiling；严格单向连续流超过一年时
+必须增加反向 heartbeat 或使用 Caddy。不得在前置代理另设更小固定 Body/Header
+阈值，也不得重新启用整请求缓冲。
+
+可执行的 Nginx 主配置模板位于 `deploy/reverse-proxy/nginx.conf.template`；必须只
+替换 `XTUNNEL_*` 部署变量，保留 `$http_host`、`$remote_addr`、`$scheme` 与
+`$http_upgrade` 等 Nginx 运行时变量。`$http_host` 用于保留非默认端口，不能用
+可能丢失原始 authority 端口的 `$host` 代替。证书与私钥只由部署环境挂载，不能
+写入仓库或镜像层。
 
 ---
 
@@ -6169,13 +6280,19 @@ limits:
   max_work_frame_bytes: 65536
 
   max_http_header_bytes: 65536
+
+  max_http_body_bytes: 2147483648
 ```
 
 WorkConn 全局预算包含 Connecting、Idle、Opening 和 Active。每个 Connector 的 `target_idle` 是 best effort，只能通过 Server 发放的 WorkDemand Budget Lease 补池；达到全局 Idle/FD 预算后不得继续建连。Budget Manager 必须同时实施 per-tunnel 和 per-connector 公平份额，并为有真实 Pending OPEN 的 Tunnel 保留最小可用额度，禁止某个拥有大量 Connector 的 Tunnel 抢占全部 Idle。
 
 `configs/server.schema.json` 是所有 Server 硬限制的唯一机器权威和默认值来源。第 156 节只是由 Schema 生成或经 CI 反向校验的人类可读镜像，不得独立修改。`max_connectors_per_tunnel` 在 Control Auth Commit 前执行；Health 两级 Target Budget 在 Management Candidate 校验和新 Connector Auth Commit 前执行。各 Limit 自其所属里程碑起必须进入真实分配/状态转换路径，不能只解析配置或只上报 Metric：Data Plane/Frame/Queue/FD Limit 从 M1 生效，Health Target Budget 从 M3 生效，HTTP 入口限制从 M4 生效。M7 允许根据 Benchmark 调整默认值，但不能第一次实现这些上限。
 
-公网公平性限制分两层：Active Connection 上限和 Accept/Open Rate Token Bucket。Raw TCP 使用实际 Peer IP；HTTP 使用第 91 节 Trusted Proxy 规则得到的 normalized client IP。HTTP 还执行可配置的请求速率限制，不能只限制底层长连接。所有 per-source 状态使用有容量上限和过期时间的分片 LRU；运维可按 NAT 场景调整数值，但不能绕过 Agent/Tunnel/Global 上限。
+公网公平性限制分两层：Active Connection 上限和 Accept/Open Rate Token Bucket。Raw TCP 使用实际 Peer IP；HTTP 使用第 91 节 Trusted Proxy 规则得到的 normalized client IP。HTTP 还执行可配置的请求速率限制，不能只限制底层长连接。所有 per-source 状态使用最多 32 个分片的有界 LRU；总状态容量由 `max_active_connections + max_pending_opens` 派生，容量压力淘汰各分片最久未访问项。OPEN 条目的 TTL 是 `max(ceil(max_open_burst_per_source_ip / max_open_rate_per_source_ip), 1s)`，HTTP Request 条目的 Burst 与 Rate 相同且 TTL 为 1 秒；Server 重启后状态清空。运维可按 NAT 场景调整数值，但不能绕过 Agent/Tunnel/Global 上限。
+
+Raw TCP 在 OS `Accept` 成功后、连接登记和 Handler goroutine 创建前消费一个来源 OPEN Token；后续 Tunnel OPEN 不重复扣减。HTTP 在可信代理规范化成功后为每个请求消费一个 Request Token，只在 Transport 确实需要新建 Tunnel WorkConn 时再消费 OPEN Token，KeepAlive 复用不额外扣减；任何下游失败都不退还已经消费的 Token。HTTP ACTIVE 额度覆盖一次在途 Request 或完整 WebSocket Handler 生命周期，不能绑定到可跨请求、跨来源复用的 HTTP WorkConn；Raw TCP ACTIVE 仍覆盖完整公网连接生命周期。Pending 到 ACTIVE 的四级 Global/Tunnel/Service/Source IP 迁移与所有 Lease 释放必须线性化且 exactly-once。
+
+HTTP Request Body 使用 `max_http_body_bytes` 做流式上限，不允许为判定大小而整体缓存；该 Schema 字段是完整受支持链路的唯一 Body 大小裁决，Caddy/Nginx 前置代理不得另设更小固定阈值。已知 `Content-Length` 超限必须在 Tunnel Dial 前返回 `413 REQUEST_BODY_TOO_LARGE`，流式读取中超限同样返回该稳定码并禁止复用客户端连接。HTTP Request Rate 或新建 WorkConn OPEN Rate 超限返回 `429 RATE_LIMITED` 与 `Retry-After: 1`。`max_http_header_bytes` 继续直接作用于 Go HTTP Server，超限在 Handler 前使用标准 `431 Request Header Fields Too Large`，不另造 JSON 错误契约；前置代理的单字段缓冲必须至少容纳 Schema 允许的最大 `1 MiB` Header，不得以默认值提前拒绝。TCP 限流拒绝不向公网连接写入带内错误文本，只关闭 Socket。
 
 Server 启动时根据 `RLIMIT_NOFILE` 校验配置：
 
@@ -6229,6 +6346,9 @@ HTTP Header Read
 
 HTTP Request Body Idle
 60s sliding
+
+WebSocket Active Idle
+1h sliding（任一方向字节进展同时续期两端）
 
 Public TCP Pre-OPEN Idle
 10s

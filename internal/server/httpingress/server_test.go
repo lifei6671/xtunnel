@@ -1,14 +1,60 @@
 package httpingress
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestServerRejectsOversizeHeadersBeforeHandler(t *testing.T) {
+	called := make(chan struct{}, 1)
+	server, err := NewServer(ServerOptions{
+		Listen: "127.0.0.1:0",
+		Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			called <- struct{}{}
+		}),
+		MaxHeaderBytes: 128,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	connection, err := net.DialTimeout("tcp", server.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("dial HTTP ingress: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	if err := connection.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set HTTP ingress deadline: %v", err)
+	}
+	request := "GET / HTTP/1.1\r\nHost: example.test\r\nX-Oversize: " + strings.Repeat("x", 8192) + "\r\n\r\n"
+	if _, err := io.WriteString(connection, request); err != nil {
+		t.Fatalf("write oversize request headers: %v", err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read oversize header response: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("response status = %d, want 431", response.StatusCode)
+	}
+	select {
+	case <-called:
+		t.Fatal("oversize request reached Handler")
+	default:
+	}
+}
 
 func TestServerStopAcceptingPreservesActiveRequestUntilShutdown(t *testing.T) {
 	entered := make(chan struct{})

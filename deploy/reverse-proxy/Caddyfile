@@ -1,0 +1,33 @@
+# XTunnel HTTP Ingress 的 HTTPS/WSS 前置代理。
+# 变量由部署环境提供；证书和私钥必须位于仓库外。
+{
+	servers {
+		timeouts {
+			read_header 10s
+		}
+	}
+}
+
+https://{$XTUNNEL_PUBLIC_HOST}:{$XTUNNEL_HTTPS_PORT} {
+	tls {$XTUNNEL_TLS_CERT_FILE} {$XTUNNEL_TLS_KEY_FILE}
+
+	reverse_proxy {$XTUNNEL_HTTP_INGRESS} {
+		# 保留客户端发送的完整 authority（包括非默认端口），并覆盖所有可伪造的
+		# Forwarded 元数据；XTunnel 再以受信 loopback Peer 校验这些值。
+		header_up Host {hostport}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {hostport}
+
+		# V0.1 的前置代理到 XTunnel 只使用 HTTP/1.1。WebSocket Upgrade 由
+		# Caddy reverse_proxy 原生处理；不设置方向独立的 upstream 读写超时，
+		# 双向共享空闲裁决统一交给 XTunnel。
+		transport http {
+			versions 1.1
+		}
+
+		# 使用有限刷新间隔兼顾低延迟与客户端取消传播；禁止使用 -1 低延迟
+		# 模式，因为该模式会在客户端断开后继续执行 upstream 请求。
+		flush_interval 100ms
+	}
+}

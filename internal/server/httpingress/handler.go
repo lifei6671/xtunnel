@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
+
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
@@ -20,7 +22,7 @@ import (
 	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	serverworkpool "github.com/lifei6671/xtunnel/internal/server/workpool"
-	"golang.org/x/net/http/httpguts"
+	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
 
 const flushInterval = 100 * time.Millisecond
@@ -38,13 +40,7 @@ type RouteSource interface {
 // TunnelDialer 把 http.Transport 的一条 HTTP/1.1 连接映射为一条 ACTIVE WorkConn。
 // 成功返回后，连接生命周期由 Transport 接管，不能继续绑定到触发 Dial 的单个请求。
 type TunnelDialer interface {
-	Dial(
-		ctx context.Context,
-		tunnelID, serviceID string,
-		requiredRevision uint64,
-		ingress protocolv1.IngressType,
-		clientAddr string,
-	) (net.Conn, error)
+	Dial(ctx context.Context, request tunnel.DialRequest) (net.Conn, error)
 }
 
 // ServiceConfigObserver 只在 Tunnel Dial 失败后区分“新配置尚未观察”与普通服务
@@ -53,30 +49,77 @@ type ServiceConfigObserver interface {
 	ServiceConfigObserved(tunnelID, serviceID string, requiredRevision int64) bool
 }
 
+// HandlerOptions 固定 HTTP Ingress 的 Route、Tunnel 与公网入口限额依赖。
+type HandlerOptions struct {
+	Routes         RouteSource
+	Dialer         TunnelDialer
+	TrustedProxies []string
+	Limits         *serverlimits.Manager
+	MaxBodyBytes   int64
+}
+
 // Handler 为每个请求执行一次严格 Route Match，再把原始 HTTP 字节流交给按
 // Tunnel、Service 与 RequiredRevision 隔离的 Transport。它不读取完整 Body，
 // Request/Response 的背压与取消由 net/http 和 Tunnel 连接共同传播。
 type Handler struct {
-	routes   RouteSource
-	pools    *transportPool
-	observer ServiceConfigObserver
+	routes               RouteSource
+	pools                *transportPool
+	observer             ServiceConfigObserver
+	trustedProxies       trustedProxySet
+	limits               *serverlimits.Manager
+	maxBodyBytes         int64
+	webSocketIdleTimeout time.Duration
 }
 
 // NewHandler 创建尚未绑定 Listener 的 HTTP Ingress Handler。
-func NewHandler(routes RouteSource, dialer TunnelDialer) (*Handler, error) {
-	if routes == nil || dialer == nil {
+func NewHandler(options HandlerOptions) (*Handler, error) {
+	if options.Routes == nil || options.Dialer == nil || options.Limits == nil || options.MaxBodyBytes <= 0 {
 		return nil, ErrInvalidOptions
 	}
-	observer, _ := dialer.(ServiceConfigObserver)
-	return &Handler{routes: routes, pools: newTransportPool(dialer), observer: observer}, nil
+	proxySet, err := newTrustedProxySet(options.TrustedProxies)
+	if err != nil {
+		return nil, errors.Join(ErrInvalidOptions, err)
+	}
+	observer, _ := options.Dialer.(ServiceConfigObserver)
+	return &Handler{
+		routes: options.Routes, pools: newTransportPool(options.Dialer), observer: observer,
+		trustedProxies: proxySet, limits: options.Limits, maxBodyBytes: options.MaxBodyBytes,
+		webSocketIdleTimeout: webSocketIdleTimeout,
+	}, nil
 }
 
 // ServeHTTP 只使用入口时取得的同一份 Snapshot，避免一次请求跨代读取 Route 与
 // Transport 参数。新 Snapshot 会作用于后续请求，已经进入 Origin 的请求继续排空。
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if handler == nil || handler.routes == nil || handler.pools == nil || request == nil {
+	if handler == nil || handler.routes == nil || handler.pools == nil || handler.limits == nil ||
+		handler.maxBodyBytes <= 0 || request == nil {
 		writeError(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE")
 		return
+	}
+	forwarded, err := handler.trustedProxies.normalizeForwarded(request)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_FORWARDED_HEADER")
+		return
+	}
+	if err := handler.limits.AllowHTTPRequest(forwarded.clientIP); err != nil {
+		if errors.Is(err, serverlimits.ErrHTTPRequestRateExceeded) {
+			writeRateLimited(writer)
+			return
+		}
+		writeError(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE")
+		return
+	}
+	// 已知超限是所有 HTTP 请求共享的入口边界，优先于 Route 与 Upgrade 分类；
+	// 因此超大 WebSocket 握手同样稳定返回 413，而不是后续的 501。
+	if request.ContentLength > handler.maxBodyBytes {
+		writeBodyTooLarge(writer, request)
+		return
+	}
+	if request.Body != nil && request.Body != http.NoBody {
+		// MaxBytesReader 只在 Origin/Transport 实际拉取 Body 时计数，既不缓冲完整上传，
+		// 也不会破坏既有背压与取消链。超限后必须关闭客户端复用，避免剩余字节被
+		// 当成同一连接上的下一条请求。
+		request.Body = http.MaxBytesReader(writer, request.Body, handler.maxBodyBytes)
 	}
 	snapshot := handler.routes.Current()
 	match, found, err := snapshot.MatchHTTP(request)
@@ -88,10 +131,21 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusNotFound, "ROUTE_NOT_FOUND")
 		return
 	}
-	if httpguts.HeaderValuesContainsToken(request.Header.Values("Connection"), "upgrade") ||
-		strings.TrimSpace(request.Header.Get("Upgrade")) != "" {
-		// M4-05 接管 Upgrade 的双向流生命周期前必须快速失败，不能让 ReverseProxy
-		// Hijack 一条不受当前 HTTP Server Shutdown/Drain 所有权约束的连接。
+	webSocket := isWebSocketUpgrade(request)
+	if webSocket && (request.ContentLength != 0 ||
+		(request.Body != nil && request.Body != http.NoBody) || len(request.TransferEncoding) != 0) {
+		// WebSocket 握手没有 Request Body。若 Origin 在上传完成前返回 101，
+		// http.Transport 的 Body writer 可能与升级后的双向复制同时写同一 WorkConn。
+		// 因此必须在取得 ACTIVE Lease 和 Tunnel Dial 前拒绝这类请求，并关闭客户端
+		// 复用，避免 net/http 为复用连接继续排空这个不受 ACTIVE Lease 保护的 Body。
+		writer.Header().Set("Connection", "close")
+		request.Close = true
+		writeError(writer, http.StatusNotImplemented, "UPGRADE_NOT_SUPPORTED")
+		return
+	}
+	if hasUpgradeSignal(request) && !webSocket {
+		// V0.1 只开放 HTTP/1.1 WebSocket。h2c 或含糊的 Upgrade 仍沿用 M4-03
+		// 已冻结的公开失败，不进入 Tunnel Dial，也不发明新的错误码。
 		writeError(writer, http.StatusNotImplemented, "UPGRADE_NOT_SUPPORTED")
 		return
 	}
@@ -101,9 +155,34 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusBadRequest, "CONTENT_LENGTH_REQUIRED")
 		return
 	}
+	activeLease, err := handler.limits.AcquireActive(serverlimits.ConnectionKey{
+		TunnelID: match.Route.TunnelID, ServiceID: match.Route.ServiceID, SourceIP: forwarded.clientIP,
+	})
+	if err != nil {
+		if errors.Is(err, serverlimits.ErrActiveConnectionCapacity) {
+			writeError(writer, http.StatusServiceUnavailable, "WORK_POOL_EXHAUSTED")
+			return
+		}
+		writeError(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE")
+		return
+	}
+	// 普通 HTTP 的 ACTIVE 是一次在途请求；WebSocket 的 Handler 在升级连接关闭前
+	// 不会返回，因此同一个 Lease 也覆盖完整双向会话。KeepAlive WorkConn 可被下一
+	// 个来源复用，但上一请求的 Source 配额会在这里及时归还。
+	defer activeLease.Release()
 
-	transport := handler.pools.transport(snapshot.Generation(), match.Route)
-	requestContext := context.WithValue(request.Context(), clientAddressKey{}, request.RemoteAddr)
+	var transport http.RoundTripper
+	proxyWriter := writer
+	if webSocket {
+		// Upgrade 使用 fresh、不可重试的单请求 Transport；普通请求继续使用按
+		// Tunnel/Service/Revision 隔离的 HTTP/1.1 KeepAlive 池。
+		idle := newWebSocketIdleOwner(handler.webSocketIdleTimeout)
+		transport = handler.pools.webSocketTransport(match.Route, idle)
+		proxyWriter = &webSocketResponseWriter{ResponseWriter: writer, idle: idle}
+	} else {
+		transport = handler.pools.transport(snapshot.Generation(), match.Route)
+	}
+	requestContext := context.WithValue(request.Context(), clientAddressKey{}, forwarded.clientIP.String())
 	// net/http.Transport 允许请求取消后继续完成一条可能供后续请求复用的 Dial。
 	// Tunnel OPEN 会占用 WorkConn/限额，不能沿用该默认；把原始请求 Context 作为
 	// 不透明值传到 DialContext，使获取/OPEN 始终随触发它的请求取消。
@@ -127,6 +206,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			outbound.URL.RawQuery = inbound.URL.RawQuery
 			outbound.URL.ForceQuery = inbound.URL.ForceQuery
 			outbound.Host = originHost(match.Route, inbound.Host)
+			rewriteForwardedHeaders(outbound.Header, forwarded)
 			if match.Route.ProxyOptions.DisableChunkedEncoding {
 				outbound.TransferEncoding = nil
 				if inbound.Body == nil || inbound.Body == http.NoBody {
@@ -134,15 +214,42 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 					outbound.ContentLength = 0
 				}
 			}
-			// Rewrite 会先删除外部 Forwarded/X-Forwarded Header。本阶段故意不调用
-			// SetXForwarded；M4-04 将在可信代理解析完成后从受信元数据重新生成。
 		},
 		ErrorHandler: func(writer http.ResponseWriter, request *http.Request, err error) {
+			var maxBytesError *http.MaxBytesError
+			if errors.As(err, &maxBytesError) {
+				writeBodyTooLarge(writer, request)
+				return
+			}
+			if errors.Is(err, serverlimits.ErrOpenRateExceeded) ||
+				errors.Is(err, serverlimits.ErrHTTPRequestRateExceeded) {
+				writeRateLimited(writer)
+				return
+			}
 			status, code := handler.proxyError(match.Route, err)
 			writeError(writer, status, code)
 		},
 	}
-	proxy.ServeHTTP(writer, request)
+	proxy.ServeHTTP(proxyWriter, request)
+}
+
+func hasUpgradeSignal(request *http.Request) bool {
+	if httpguts.HeaderValuesContainsToken(request.Header.Values("Connection"), "upgrade") {
+		return true
+	}
+	_, present, err := singleHeaderValue(request.Header, "Upgrade")
+	return present || err != nil
+}
+
+func isWebSocketUpgrade(request *http.Request) bool {
+	if request.ProtoMajor != 1 || request.ProtoMinor != 1 || request.Method != http.MethodGet {
+		return false
+	}
+	if !httpguts.HeaderValuesContainsToken(request.Header.Values("Connection"), "upgrade") {
+		return false
+	}
+	upgrade, present, err := singleHeaderValue(request.Header, "Upgrade")
+	return err == nil && present && !strings.Contains(upgrade, ",") && strings.EqualFold(upgrade, "websocket")
 }
 
 // CloseIdleConnections 在停止入口或切换完整 Snapshot 时释放所有空闲 WorkConn。
@@ -243,4 +350,25 @@ func writeError(writer http.ResponseWriter, status int, code string) {
 		return
 	}
 	http.Error(writer, code, status)
+}
+
+func writeRateLimited(writer http.ResponseWriter) {
+	if writer == nil {
+		return
+	}
+	writer.Header().Set("Retry-After", "1")
+	writeError(writer, http.StatusTooManyRequests, "RATE_LIMITED")
+}
+
+func writeBodyTooLarge(writer http.ResponseWriter, request *http.Request) {
+	if writer == nil {
+		return
+	}
+	// 已知长度可在 Dial 前拒绝；未知长度则可能已向 Origin 发送前缀。两条路径都
+	// 禁止复用客户端连接，以便 net/http 在响应后丢弃尚未消费的请求体字节。
+	writer.Header().Set("Connection", "close")
+	if request != nil {
+		request.Close = true
+	}
+	writeError(writer, http.StatusRequestEntityTooLarge, "REQUEST_BODY_TOO_LARGE")
 }

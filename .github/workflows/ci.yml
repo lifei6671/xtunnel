@@ -99,6 +99,21 @@ jobs:
           go vet ./...
           go build ./cmd/server ./cmd/agent
 
+      - name: Run native Caddy and Nginx HTTPS ingress E2E
+        shell: bash
+        env:
+          XTUNNEL_RUN_FRONT_PROXY_E2E: '1'
+        run: |
+          set -euo pipefail
+          caddy_image='caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648'
+          nginx_image='nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
+          docker pull "$caddy_image"
+          docker pull "$nginx_image"
+          test "$(docker image inspect --format '{{.Architecture}}' "$caddy_image")" = '${{ matrix.arch }}'
+          test "$(docker image inspect --format '{{.Architecture}}' "$nginx_image")" = '${{ matrix.arch }}'
+          go test -count=1 -timeout 180s ./internal/server/httpingress \
+            -run '^TestFrontProxyHTTPSAndWebSocketE2E$'
+
       - name: Run native OCI smoke tests
         shell: bash
         run: |

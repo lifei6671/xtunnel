@@ -14,6 +14,7 @@ import (
 	"time"
 
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
+	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
 
 func TestHandlerStreamsRequestBodyBeforeReadingItAll(t *testing.T) {
@@ -23,11 +24,11 @@ func TestHandlerStreamsRequestBodyBeforeReadingItAll(t *testing.T) {
 	originReadFirst := make(chan struct{})
 	originResult := make(chan string, 1)
 	originErrors := make(chan error, 1)
-	dialer := dialerFunc(func(ctx context.Context, _ string, _ string, _ uint64, ingress protocolv1.IngressType, _ string) (net.Conn, error) {
+	dialer := dialerFunc(func(ctx context.Context, request tunnel.DialRequest) (net.Conn, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if ingress != protocolv1.IngressType_INGRESS_TYPE_HTTP {
+		if request.Ingress != protocolv1.IngressType_INGRESS_TYPE_HTTP {
 			return nil, errors.New("unexpected ingress type")
 		}
 		server, origin := net.Pipe()
@@ -112,7 +113,7 @@ func TestHandlerStreamsResponseBodyBeforeOriginFinishes(t *testing.T) {
 	originWroteFirst := make(chan struct{})
 	originRelease := make(chan struct{})
 	originDone := make(chan error, 1)
-	dialer := dialerFunc(func(ctx context.Context, _ string, _ string, _ uint64, _ protocolv1.IngressType, _ string) (net.Conn, error) {
+	dialer := dialerFunc(func(ctx context.Context, _ tunnel.DialRequest) (net.Conn, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

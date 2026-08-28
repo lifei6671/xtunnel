@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
+	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
 
 const oneGiB int64 = 1 << 30
@@ -28,11 +28,7 @@ func TestHandlerTransfersOneGiBInEachDirection(t *testing.T) {
 	originResult := make(chan error, 1)
 	dialer := dialerFunc(func(
 		ctx context.Context,
-		tunnelID string,
-		serviceID string,
-		_requiredRevision uint64,
-		ingress protocolv1.IngressType,
-		clientAddr string,
+		request tunnel.DialRequest,
 	) (net.Conn, error) {
 		server, peer := net.Pipe()
 		go func() {

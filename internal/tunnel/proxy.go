@@ -29,6 +29,8 @@ var (
 	ErrSessionPoolUnavailable = errors.New("selected connector session pool is unavailable")
 )
 
+const defaultPublicTCPPreOpenTimeout = 10 * time.Second
+
 // Options 固定 Tunnel 数据面依赖与等待 IDLE WorkConn 的上限。
 type Options struct {
 	Registry       *serverruntime.Registry
@@ -40,6 +42,17 @@ type Options struct {
 	LimitManager *serverlimits.Manager
 }
 
+// DialRequest 完整描述一次 Tunnel OPEN 的值传递路由输入。
+// 它只包含 Server 已解析的标识与公开 Peer，不得携带 Origin 地址。
+// Serve 忽略调用方的 ClientAddr，并始终从已 Accept 的 peer 派生真实地址。
+type DialRequest struct {
+	TunnelID         string
+	ServiceID        string
+	RequiredRevision uint64
+	Ingress          protocolv1.IngressType
+	ClientAddr       string
+}
+
 // Proxy 使用 Route 已解析出的 Tunnel/Service 身份，把一个公网连接交给默认负载选择的
 // Connector，并在 OPEN_OK 后逐字节双向转发。
 type Proxy struct {
@@ -48,7 +61,10 @@ type Proxy struct {
 	pendingMu        sync.Mutex
 	pendingGroups    map[string]*pendingGroup
 	pendingBySession map[serverruntime.Session]uint32
-	newConnectionID  func() (string, error)
+	// publicTCPPreOpenTimeout 只约束 Serve 的 Work Acquire 与 OPEN；
+	// 成功进入 RAW 后立即释放 Timer，ACTIVE 回到公网 Listener 生命周期。
+	publicTCPPreOpenTimeout time.Duration
+	newConnectionID         func() (string, error)
 	// afterAlternateAcquire 仅为同 package 的确定性竞态测试提供提交前同步点。
 	afterAlternateAcquire func(serverruntime.Session)
 }
@@ -68,24 +84,17 @@ type pendingMembership struct {
 	err      error
 }
 
-// serviceRevisionConstraint 贯穿一次 OPEN 的初选、Pending、提交复核与重选。
-// exact=false 仅用于没有 Route Revision 输入的 TCP/Raw Serve；HTTP Dial 始终
-// exact=true，包括合法的 Revision 0。
-type serviceRevisionConstraint struct {
-	exact    bool
-	revision uint64
-}
-
 // NewProxy 创建与具体 TCP/HTTP Listener 无关的数据面。
 func NewProxy(options Options) (*Proxy, error) {
 	if options.Registry == nil || options.Sessions == nil || options.OpenHandler == nil || options.AcquireTimeout <= 0 {
 		return nil, ErrInvalidOptions
 	}
 	return &Proxy{
-		options:          options,
-		pendingGroups:    make(map[string]*pendingGroup),
-		pendingBySession: make(map[serverruntime.Session]uint32),
-		newConnectionID:  identity.NewConnectionID,
+		options:                 options,
+		pendingGroups:           make(map[string]*pendingGroup),
+		pendingBySession:        make(map[serverruntime.Session]uint32),
+		publicTCPPreOpenTimeout: defaultPublicTCPPreOpenTimeout,
+		newConnectionID:         identity.NewConnectionID,
 	}, nil
 }
 
@@ -93,14 +102,21 @@ func NewProxy(options Options) (*Proxy, error) {
 // 必须从该 Tunnel 当前已应用的 Service Snapshot 解析 Origin。
 func (tunnelProxy *Proxy) Serve(
 	ctx context.Context,
-	tunnelID, serviceID string,
-	ingress protocolv1.IngressType,
+	request DialRequest,
 	peer net.Conn,
 ) (resultErr error) {
-	if peer == nil || !validDialInput(tunnelProxy, ctx, tunnelID, serviceID, ingress, "public-peer") {
+	if peer == nil || peer.RemoteAddr() == nil || tunnelProxy == nil ||
+		tunnelProxy.publicTCPPreOpenTimeout <= 0 || request.Ingress != protocolv1.IngressType_INGRESS_TYPE_TCP {
 		if peer != nil {
 			_ = peer.Close()
 		}
+		return ErrInvalidOptions
+	}
+	// Raw TCP 的 client_addr 只允许来自已 Accept 的真实 Peer，调用方
+	// 不能通过 Request 注入伪造地址。
+	request.ClientAddr = peer.RemoteAddr().String()
+	if !validDialInput(tunnelProxy, ctx, request) {
+		_ = peer.Close()
 		return ErrInvalidOptions
 	}
 	defer func() {
@@ -108,39 +124,48 @@ func (tunnelProxy *Proxy) Serve(
 			resultErr = errors.Join(resultErr, fmt.Errorf("close public peer: %w", err))
 		}
 	}()
+	openContext, cancelOpen := context.WithTimeout(ctx, tunnelProxy.publicTCPPreOpenTimeout)
 	connection, err := tunnelProxy.openConnection(
-		ctx, tunnelID, serviceID, serviceRevisionConstraint{},
-		ingress, peer.RemoteAddr().String(), peer.RemoteAddr(), peer,
+		openContext, ctx, request,
+		request.RequiredRevision,
+		peer.RemoteAddr(), peer,
 	)
+	cancelOpen()
 	if err != nil {
 		return err
 	}
-	proxyErr := proxy.ProxyBidirectional(connection.lifecycleContext, peer, connection)
-	return errors.Join(proxyErr, connection.Close())
+	// RAW 代理只关闭底层 WorkConn，不直接调用 managedConnection.Close。
+	// 否则正常双 EOF 的最终清理也会先 Finish ActiveWork 并取消
+	// lifecycle，从而与 Revoke/Drain 的外部取消无法区分。
+	proxyErr := proxy.ProxyBidirectional(connection.lifecycleContext, peer, connection.Conn)
+	// Revoke/Drain 先取消 lifecycle 再关闭两端。Copy 可能因 Close 仅返回
+	// EOF，所以在本地 Close 触发 Finish 前快照取消原因；正常双 EOF 不会被误报。
+	lifecycleErr := connection.lifecycleContext.Err()
+	return errors.Join(proxyErr, lifecycleErr, connection.Close())
 }
 
 // Dial 在 ctx 的等待窗口内取得 IDLE WorkConn 并完成 OPEN，返回可交给
 // http.Transport 连接池复用的数据连接。
 //
-// ctx 只约束 acquire/OPEN。成功发布 ACTIVE 后，连接不再绑定单个 HTTP Request；
-// 它只由返回连接 Close、Tunnel Revoke、Registry Drain 或进程关闭收敛。clientAddr
-// 原样进入 OpenRequest；启用公网限制时必须是可解析的 IP:port，作为 Source 维度键。
+// ctx 只约束 acquire/OPEN。成功发布 Work ACTIVE 后，连接不再绑定单个 HTTP Request；
+// 它只由返回连接 Close、Tunnel Revoke、Registry Drain 或进程关闭收敛。公网 HTTP
+// ACTIVE 配额由 Ingress Handler 按请求/WebSocket 生命周期持有，不能跟随可跨来源复用
+// 的 Transport WorkConn。clientAddr
+// 原样进入 OpenRequest；HTTP Trusted Proxy 传规范化 IP，直接 TCP 入口可传 IP:port，
+// 启用公网限制时两种形态都只提取 IP 作为 Source 维度键。
 // requiredRevision 在初选、等待与跨 Connector 重选中始终精确匹配；Revision 0
 // 也是合法 Route Revision，不会退化为“接受当前版本”。
 func (tunnelProxy *Proxy) Dial(
 	ctx context.Context,
-	tunnelID, serviceID string,
-	requiredRevision uint64,
-	ingress protocolv1.IngressType,
-	clientAddr string,
+	request DialRequest,
 ) (net.Conn, error) {
-	if !validDialInput(tunnelProxy, ctx, tunnelID, serviceID, ingress, clientAddr) {
+	if !validDialInput(tunnelProxy, ctx, request) {
 		return nil, ErrInvalidOptions
 	}
 	connection, err := tunnelProxy.openConnection(
-		ctx, tunnelID, serviceID,
-		serviceRevisionConstraint{exact: true, revision: requiredRevision},
-		ingress, clientAddr, nil, nil,
+		ctx, context.WithoutCancel(ctx), request,
+		request.RequiredRevision,
+		nil, nil,
 	)
 	if err != nil {
 		return nil, err
@@ -148,7 +173,7 @@ func (tunnelProxy *Proxy) Dial(
 	return connection, nil
 }
 
-// ServiceConfigObserved 只暴露 HTTP 错误映射需要的配置可见性，不把 Health、容量或
+// ServiceConfigObserved 只暴露 Ingress 错误映射需要的配置可见性，不把 Health、容量或
 // Connector 内部状态泄漏给 Ingress。普通不可用与未观察到新 Revision 必须使用
 // 不同稳定错误码，但两者都不能绕过 Dial 内的完整 Eligible 门禁。
 func (tunnelProxy *Proxy) ServiceConfigObserved(tunnelID, serviceID string, requiredRevision int64) bool {
@@ -161,15 +186,15 @@ func (tunnelProxy *Proxy) ServiceConfigObserved(tunnelID, serviceID string, requ
 }
 
 // openConnection 是 Serve 与 Dial 共用的唯一 OPEN 提交路径。函数返回前，Work、
-// Pending/Active 限额和 Connector Lease 仍由本栈帧持有；只有 ActiveWork 注册成功
-// 才把三者原子地交给 pooledConnection 与 Runtime。任一步失败都会逆序关闭 Work 并
-// 释放 Lease，禁止把 OPENING/ACTIVE 资源遗留在 Pool。
+// Pending 限额和 Connector Lease 仍由本栈帧持有；TCP 在 OPEN_OK 后把公网 ACTIVE
+// Lease 一并交给 pooledConnection，HTTP 则只结束 Pending，公网 ACTIVE 由 Handler
+// 独立拥有。任一步失败都会逆序关闭 Work 并释放 Lease，禁止把 OPENING/ACTIVE
+// 资源遗留在 Pool。
 func (tunnelProxy *Proxy) openConnection(
-	ctx context.Context,
-	tunnelID, serviceID string,
-	revision serviceRevisionConstraint,
-	ingress protocolv1.IngressType,
-	clientAddr string,
+	openContext context.Context,
+	lifecycleParent context.Context,
+	request DialRequest,
+	requiredRevision uint64,
 	clientNetworkAddr net.Addr,
 	peer net.Conn,
 ) (_ *managedConnection, resultErr error) {
@@ -188,13 +213,21 @@ func (tunnelProxy *Proxy) openConnection(
 		if clientNetworkAddr != nil {
 			sourceIP, err = sourceAddress(clientNetworkAddr)
 		} else {
-			sourceIP, err = sourceAddressString(clientAddr)
+			sourceIP, err = sourceAddressString(request.ClientAddr)
 		}
 		if err != nil {
 			return nil, err
 		}
+		// Raw TCP 已在真实 Listener Accept 后消费一次 OPEN token；这里不得重复。
+		// HTTP Dial 只在 Transport 确实需要新 WorkConn 时到达本路径，因此 KeepAlive
+		// 复用不会额外计数。下游失败不退还已经消费的来源 token。
+		if request.Ingress == protocolv1.IngressType_INGRESS_TYPE_HTTP {
+			if err := tunnelProxy.options.LimitManager.AllowOpen(sourceIP); err != nil {
+				return nil, err
+			}
+		}
 		openLease, err = tunnelProxy.options.LimitManager.AcquirePendingOpen(serverlimits.ConnectionKey{
-			TunnelID: tunnelID, ServiceID: serviceID, SourceIP: sourceIP,
+			TunnelID: request.TunnelID, ServiceID: request.ServiceID, SourceIP: sourceIP,
 		})
 		if err != nil {
 			return nil, err
@@ -209,7 +242,7 @@ func (tunnelProxy *Proxy) openConnection(
 	}
 
 	connectorLease, session, pool, selectedWork, err := tunnelProxy.acquireWork(
-		ctx, tunnelID, serviceID, revision,
+		openContext, request.TunnelID, request.ServiceID, requiredRevision,
 	)
 	if err != nil {
 		return nil, err
@@ -226,7 +259,7 @@ func (tunnelProxy *Proxy) openConnection(
 			resultErr = errors.Join(resultErr, selectedWork.Close())
 		}
 	}()
-	tunnelRuntime, err := tunnelProxy.options.Registry.Tunnel(tunnelID)
+	tunnelRuntime, err := tunnelProxy.options.Registry.Tunnel(request.TunnelID)
 	if err != nil {
 		return nil, err
 	}
@@ -236,12 +269,12 @@ func (tunnelProxy *Proxy) openConnection(
 			TunnelID: selectedSession.TunnelID, ConnectorID: selectedSession.ConnectorID,
 			SessionID: selectedSession.SessionID, WorkID: work.ID(), State: protocolState,
 		}
-		request := &protocolv1.OpenRequest{
-			ProtocolVersion: 1, ConnectionId: connectionID, ServiceId: serviceID,
-			ClientAddr: clientAddr, TimestampMs: uint64(time.Now().UnixMilli()),
-			IngressType: ingress,
+		openRequest := &protocolv1.OpenRequest{
+			ProtocolVersion: 1, ConnectionId: connectionID, ServiceId: request.ServiceID,
+			ClientAddr: request.ClientAddr, TimestampMs: uint64(time.Now().UnixMilli()),
+			IngressType: request.Ingress,
 		}
-		active, openErr := tunnelProxy.options.OpenHandler.Handle(ctx, work.Conn(), idle, request)
+		active, openErr := tunnelProxy.options.OpenHandler.Handle(openContext, work.Conn(), idle, openRequest)
 		if openErr != nil {
 			return nil, openErr
 		}
@@ -258,13 +291,13 @@ func (tunnelProxy *Proxy) openConnection(
 	)
 	for attempt := 0; attempt < 2; attempt++ {
 		if attempt > 0 {
-			if contextErr := ctx.Err(); contextErr != nil {
+			if contextErr := openContext.Err(); contextErr != nil {
 				return nil, errors.Join(openErr, contextErr)
 			}
 			var acquired bool
 			selectedWork, acquired, err = pool.TryAcquire()
 			if err != nil || !acquired {
-				if contextErr := ctx.Err(); contextErr != nil {
+				if contextErr := openContext.Err(); contextErr != nil {
 					return nil, errors.Join(openErr, err, contextErr)
 				}
 				if err != nil && !errors.Is(err, serverworkpool.ErrPoolClosed) &&
@@ -288,7 +321,7 @@ func (tunnelProxy *Proxy) openConnection(
 		}
 		// 只有 RAW 前 Transport 失败可在首 Connector 的同一 Pool 内重试一次。
 		// Protocol、普通 OPEN_ERROR、Context Cancel、RawCommitted 和本地提交失败均直接结束。
-		if contextErr := ctx.Err(); contextErr != nil {
+		if contextErr := openContext.Err(); contextErr != nil {
 			return nil, errors.Join(openErr, contextErr)
 		}
 		if !errors.Is(openErr, serveropen.ErrPreRAWTransport) {
@@ -299,7 +332,7 @@ func (tunnelProxy *Proxy) openConnection(
 		}
 	}
 	if crossConnector {
-		if contextErr := ctx.Err(); contextErr != nil {
+		if contextErr := openContext.Err(); contextErr != nil {
 			return nil, errors.Join(openErr, contextErr)
 		}
 		failedConnectorID := session.ConnectorID
@@ -308,12 +341,12 @@ func (tunnelProxy *Proxy) openConnection(
 		}
 		connectorLease = nil
 		connectorLease, session, pool, selectedWork, err = tunnelProxy.tryAcquireAlternateWork(
-			ctx, tunnelID, serviceID, revision, failedConnectorID,
+			openContext, request.TunnelID, request.ServiceID, requiredRevision, failedConnectorID,
 		)
 		if err != nil {
 			return nil, errors.Join(openErr, err)
 		}
-		if contextErr := ctx.Err(); contextErr != nil {
+		if contextErr := openContext.Err(); contextErr != nil {
 			_ = selectedWork.Close()
 			selectedWork = nil
 			return nil, errors.Join(openErr, contextErr)
@@ -328,22 +361,24 @@ func (tunnelProxy *Proxy) openConnection(
 	if active == nil || selectedWork == nil {
 		return nil, errors.New("OPEN completed without an ACTIVE WorkConn")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := openContext.Err(); err != nil {
 		return nil, err
 	}
-	// OPEN_OK 已把 Work 协议切入 RAW，但在全局/Tunnel/Service/Source 配额提交
-	// 之前仍不能发布成业务 ACTIVE；超限时直接关闭该 Work，不做跨 Connector 重选。
+	// OPEN_OK 已把 Work 协议切入 RAW。TCP 必须先提交公网 ACTIVE 多维配额再发布；
+	// HTTP 的请求级 ACTIVE 已由 Handler 持有，这里只结束新建 WorkConn 的 Pending，
+	// 避免池化连接把首个来源的 Source 配额错误延续给后续请求。
 	if openLease != nil {
-		if err := openLease.Activate(); err != nil {
-			return nil, err
+		if request.Ingress == protocolv1.IngressType_INGRESS_TYPE_TCP {
+			if err := openLease.Activate(); err != nil {
+				return nil, err
+			}
+		} else {
+			openLease.Release()
+			openLease = nil
 		}
 	}
-	// OPEN 已受调用 ctx 约束。Serve 继续继承公网连接 ctx；Dial 没有独立 Public
-	// Peer，发布后切换为独立生命周期，避免一次 HTTP Request 的取消误杀连接池。
-	lifecycleParent := ctx
-	if peer == nil {
-		lifecycleParent = context.WithoutCancel(ctx)
-	}
+	// OPEN 与 ACTIVE 使用分离的 Context：TCP Serve 在 OPEN 后恢复
+	// Listener 生命周期，HTTP Dial 则使用脱离单请求取消的池化生命周期。
 	lifecycleContext, cancelWork := context.WithCancel(lifecycleParent)
 	pooled := &pooledConnection{Conn: active.Connection, work: selectedWork, openLease: openLease}
 	activeWork, err := tunnelRuntime.RegisterActiveWork(serverruntime.ActiveWorkSpec{
@@ -360,15 +395,15 @@ func (tunnelProxy *Proxy) openConnection(
 	connection := &managedConnection{
 		Conn: pooled, activeWork: activeWork, lifecycleContext: lifecycleContext,
 	}
-	if err := ctx.Err(); err != nil {
+	if err := openContext.Err(); err != nil {
 		return nil, errors.Join(err, connection.Close())
 	}
 	return connection, nil
 }
 
-// pooledConnection 是 WorkPool ACTIVE Work 与公网 Active 限额的共同 owner。
-// ActiveWork 无论由自然 Close、Revoke 还是 Drain 终止，都会调用这里的 Close；
-// sync.Once 保证 Work.Close 和 OpenLease.Release 只执行一次。
+// pooledConnection 是 WorkPool ACTIVE Work 的 owner，并只为 TCP 同时持有公网
+// ACTIVE Lease。HTTP 池化连接不会持有请求级额度；ActiveWork 无论由自然 Close、
+// Revoke 还是 Drain 终止都会调用这里的 Close，sync.Once 保证清理只执行一次。
 type pooledConnection struct {
 	net.Conn
 	work      *serverworkpool.Work
@@ -425,58 +460,46 @@ func (connection *managedConnection) CloseRead() error {
 func validDialInput(
 	tunnelProxy *Proxy,
 	ctx context.Context,
-	tunnelID, serviceID string,
-	ingress protocolv1.IngressType,
-	clientAddr string,
+	request DialRequest,
 ) bool {
-	return tunnelProxy != nil && ctx != nil && clientAddr != "" &&
-		identity.ValidateTunnelID(tunnelID) == nil && validate.ValidateID(serviceID, "svc_") == nil &&
-		ingress != protocolv1.IngressType_INGRESS_TYPE_UNSPECIFIED
+	return tunnelProxy != nil && ctx != nil && request.ClientAddr != "" &&
+		identity.ValidateTunnelID(request.TunnelID) == nil &&
+		validate.ValidateID(request.ServiceID, "svc_") == nil &&
+		request.Ingress != protocolv1.IngressType_INGRESS_TYPE_UNSPECIFIED
 }
 
-// 以下三个入口集中翻译一次 OPEN 的 Revision 模式，保证初选、Pending Watch、
-// Work 提交复核与跨 Connector 重选不会在中途丢失 exact 语义。
+// 以下三个入口集中传递精确 Revision，保证初选、Pending Watch、
+// Work 提交复核与跨 Connector 重选不会在中途退化为“任意当前版本”。
 func (tunnelProxy *Proxy) connectorEligible(
 	session serverruntime.Session,
 	serviceID string,
-	revision serviceRevisionConstraint,
+	requiredRevision uint64,
 ) bool {
-	if revision.exact {
-		return tunnelProxy.options.Registry.EligibleAtRevision(session, serviceID, revision.revision)
-	}
-	return tunnelProxy.options.Registry.Eligible(session, serviceID)
+	return tunnelProxy.options.Registry.EligibleAtRevision(session, serviceID, requiredRevision)
 }
 
 func (tunnelProxy *Proxy) watchConnectorEligibility(
 	session serverruntime.Session,
 	serviceID string,
-	revision serviceRevisionConstraint,
+	requiredRevision uint64,
 ) (serverruntime.EligibilityWatch, bool) {
-	if revision.exact {
-		return tunnelProxy.options.Registry.WatchEligibilityAtRevision(session, serviceID, revision.revision)
-	}
-	return tunnelProxy.options.Registry.WatchEligibility(session, serviceID)
+	return tunnelProxy.options.Registry.WatchEligibilityAtRevision(session, serviceID, requiredRevision)
 }
 
 func (tunnelProxy *Proxy) acquireEligibleConnectorWhere(
 	tunnelID, serviceID string,
-	revision serviceRevisionConstraint,
+	requiredRevision uint64,
 	predicate func(serverruntime.Session) bool,
 ) (*serverruntime.ConnectorLease, error) {
-	if revision.exact {
-		return tunnelProxy.options.Registry.AcquireEligibleConnectorAtRevisionWhere(
-			tunnelID, serviceID, revision.revision, predicate,
-		)
-	}
-	return tunnelProxy.options.Registry.AcquireEligibleConnectorWhere(
-		tunnelID, serviceID, predicate,
+	return tunnelProxy.options.Registry.AcquireEligibleConnectorAtRevisionWhere(
+		tunnelID, serviceID, requiredRevision, predicate,
 	)
 }
 
 func (tunnelProxy *Proxy) tryAcquireAlternateWork(
 	ctx context.Context,
 	tunnelID, serviceID string,
-	revision serviceRevisionConstraint,
+	requiredRevision uint64,
 	excludedConnectorID string,
 ) (*serverruntime.ConnectorLease, serverruntime.Session, *serverworkpool.Pool, *serverworkpool.Work, error) {
 	attempted := map[string]struct{}{excludedConnectorID: {}}
@@ -486,7 +509,7 @@ func (tunnelProxy *Proxy) tryAcquireAlternateWork(
 			return nil, serverruntime.Session{}, nil, nil, errors.Join(attemptErr, err)
 		}
 		pools := tunnelProxy.options.Sessions.Pools()
-		connectorLease, err := tunnelProxy.acquireEligibleConnectorWhere(tunnelID, serviceID, revision, func(session serverruntime.Session) bool {
+		connectorLease, err := tunnelProxy.acquireEligibleConnectorWhere(tunnelID, serviceID, requiredRevision, func(session serverruntime.Session) bool {
 			if _, exists := attempted[session.ConnectorID]; exists {
 				return false
 			}
@@ -534,7 +557,7 @@ func (tunnelProxy *Proxy) tryAcquireAlternateWork(
 			connectorLease.Release()
 			return nil, serverruntime.Session{}, nil, nil, errors.Join(attemptErr, err)
 		}
-		if !tunnelProxy.connectorEligible(session, serviceID, revision) {
+		if !tunnelProxy.connectorEligible(session, serviceID, requiredRevision) {
 			_ = work.Close()
 			connectorLease.Release()
 			attemptErr = errors.Join(attemptErr, ErrSessionPoolUnavailable)
@@ -552,7 +575,7 @@ func isOpenDraining(err error) bool {
 func (tunnelProxy *Proxy) acquireWork(
 	ctx context.Context,
 	tunnelID, serviceID string,
-	revision serviceRevisionConstraint,
+	requiredRevision uint64,
 ) (*serverruntime.ConnectorLease, serverruntime.Session, *serverworkpool.Pool, *serverworkpool.Work, error) {
 	waitContext, cancelWait := context.WithTimeout(ctx, tunnelProxy.options.AcquireTimeout)
 	defer cancelWait()
@@ -564,7 +587,7 @@ func (tunnelProxy *Proxy) acquireWork(
 			return nil, serverruntime.Session{}, nil, nil, err
 		}
 		connectorLease, session, pool, membership, err := tunnelProxy.selectConnector(
-			waitContext, tunnelID, serviceID, revision,
+			waitContext, tunnelID, serviceID, requiredRevision,
 		)
 		if err != nil {
 			if errors.Is(err, ErrSessionPoolUnavailable) {
@@ -587,7 +610,7 @@ func (tunnelProxy *Proxy) acquireWork(
 			}
 		} else {
 			work, acquireErr = tunnelProxy.acquirePendingWork(
-				waitContext, session, serviceID, revision, pool,
+				waitContext, session, serviceID, requiredRevision, pool,
 			)
 		}
 		var releaseErr error
@@ -595,7 +618,7 @@ func (tunnelProxy *Proxy) acquireWork(
 			releaseErr = membership.Release()
 		}
 		if acquireErr == nil && releaseErr == nil {
-			if !tunnelProxy.connectorEligible(session, serviceID, revision) {
+			if !tunnelProxy.connectorEligible(session, serviceID, requiredRevision) {
 				_ = work.Close()
 				connectorLease.Release()
 				continue
@@ -633,7 +656,7 @@ func (tunnelProxy *Proxy) acquirePendingWork(
 	waitContext context.Context,
 	session serverruntime.Session,
 	serviceID string,
-	revision serviceRevisionConstraint,
+	requiredRevision uint64,
 	pool *serverworkpool.Pool,
 ) (*serverworkpool.Work, error) {
 	acquireContext, cancelAcquire := context.WithCancel(waitContext)
@@ -647,7 +670,7 @@ func (tunnelProxy *Proxy) acquirePendingWork(
 	})
 
 	for {
-		watch, eligible := tunnelProxy.watchConnectorEligibility(session, serviceID, revision)
+		watch, eligible := tunnelProxy.watchConnectorEligibility(session, serviceID, requiredRevision)
 		if !eligible {
 			cancelAcquire()
 			acquired := <-result
@@ -689,10 +712,10 @@ func stopPendingTimer(timer *time.Timer) {
 func (tunnelProxy *Proxy) selectConnector(
 	ctx context.Context,
 	tunnelID, serviceID string,
-	revision serviceRevisionConstraint,
+	requiredRevision uint64,
 ) (*serverruntime.ConnectorLease, serverruntime.Session, *serverworkpool.Pool, *pendingMembership, error) {
 	pools := tunnelProxy.options.Sessions.Pools()
-	connectorLease, err := tunnelProxy.acquireEligibleConnectorWhere(tunnelID, serviceID, revision, func(session serverruntime.Session) bool {
+	connectorLease, err := tunnelProxy.acquireEligibleConnectorWhere(tunnelID, serviceID, requiredRevision, func(session serverruntime.Session) bool {
 		pool, exists := pools[session]
 		if !exists {
 			return false
@@ -713,12 +736,12 @@ func (tunnelProxy *Proxy) selectConnector(
 		return nil, serverruntime.Session{}, nil, nil, err
 	}
 
-	membership, err := tunnelProxy.joinPendingGroup(ctx, tunnelID, serviceID, revision)
+	membership, err := tunnelProxy.joinPendingGroup(ctx, tunnelID, serviceID, requiredRevision)
 	if err != nil {
 		return nil, serverruntime.Session{}, nil, nil, err
 	}
 	group := membership.group
-	connectorLease, err = tunnelProxy.acquireEligibleConnectorWhere(tunnelID, serviceID, revision, func(session serverruntime.Session) bool {
+	connectorLease, err = tunnelProxy.acquireEligibleConnectorWhere(tunnelID, serviceID, requiredRevision, func(session serverruntime.Session) bool {
 		return session == group.session
 	})
 	if err != nil {
@@ -736,7 +759,7 @@ func (tunnelProxy *Proxy) selectConnector(
 func (tunnelProxy *Proxy) joinPendingGroup(
 	ctx context.Context,
 	tunnelID, serviceID string,
-	revision serviceRevisionConstraint,
+	requiredRevision uint64,
 ) (*pendingMembership, error) {
 	for {
 		if err := ctx.Err(); err != nil {
@@ -754,7 +777,7 @@ func (tunnelProxy *Proxy) joinPendingGroup(
 			pool, exists := pools[group.session]
 			counts := group.pool.Snapshot()
 			if !exists || pool != group.pool || counts.Closed || counts.Draining ||
-				!tunnelProxy.connectorEligible(group.session, serviceID, revision) {
+				!tunnelProxy.connectorEligible(group.session, serviceID, requiredRevision) {
 				// 冻结契约只允许每个 Tunnel 存在一个投机 Demand。当前组不再适合
 				// 新 Service 时，等待已有 membership exactly-once 离场后再重选，
 				// 不能并行创建第二个 Service 级组。
@@ -770,7 +793,7 @@ func (tunnelProxy *Proxy) joinPendingGroup(
 		}
 		if group == nil {
 			pools := tunnelProxy.options.Sessions.Pools()
-			selector, err := tunnelProxy.acquireEligibleConnectorWhere(tunnelID, serviceID, revision, func(session serverruntime.Session) bool {
+			selector, err := tunnelProxy.acquireEligibleConnectorWhere(tunnelID, serviceID, requiredRevision, func(session serverruntime.Session) bool {
 				pool, exists := pools[session]
 				if !exists {
 					return false
@@ -866,6 +889,9 @@ func sourceAddress(address net.Addr) (netip.Addr, error) {
 }
 
 func sourceAddressString(address string) (netip.Addr, error) {
+	if source, err := netip.ParseAddr(address); err == nil {
+		return source.Unmap().WithZone(""), nil
+	}
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("parse public client address: %w", err)

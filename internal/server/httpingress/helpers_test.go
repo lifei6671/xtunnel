@@ -16,7 +16,9 @@ import (
 
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository"
+	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 	"github.com/lifei6671/xtunnel/internal/server/route"
+	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
 
 const (
@@ -129,17 +131,10 @@ type tunnelDialCall struct {
 	Client           string
 }
 
-type dialerFunc func(context.Context, string, string, uint64, protocolv1.IngressType, string) (net.Conn, error)
+type dialerFunc func(context.Context, tunnel.DialRequest) (net.Conn, error)
 
-func (dial dialerFunc) Dial(
-	ctx context.Context,
-	tunnelID string,
-	serviceID string,
-	requiredRevision uint64,
-	ingress protocolv1.IngressType,
-	clientAddr string,
-) (net.Conn, error) {
-	return dial(ctx, tunnelID, serviceID, requiredRevision, ingress, clientAddr)
+func (dial dialerFunc) Dial(ctx context.Context, request tunnel.DialRequest) (net.Conn, error) {
+	return dial(ctx, request)
 }
 
 type observedOriginRequest struct {
@@ -153,6 +148,7 @@ type observedOriginRequest struct {
 	ContentLength    int64
 	TransferEncoding []string
 	Body             string
+	Header           http.Header
 }
 
 // loopOriginDialer 在每次 Tunnel Dial 后启动一个真实 HTTP/1.1 peer，并让连接持续服务到
@@ -176,11 +172,7 @@ func newLoopOriginDialer(t *testing.T) *loopOriginDialer {
 
 func (dialer *loopOriginDialer) Dial(
 	ctx context.Context,
-	tunnelID string,
-	serviceID string,
-	requiredRevision uint64,
-	ingress protocolv1.IngressType,
-	clientAddr string,
+	request tunnel.DialRequest,
 ) (net.Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -189,8 +181,9 @@ func (dialer *loopOriginDialer) Dial(
 	dialer.mu.Lock()
 	index := len(dialer.calls) + 1
 	dialer.calls = append(dialer.calls, tunnelDialCall{
-		TunnelID: tunnelID, ServiceID: serviceID, RequiredRevision: requiredRevision,
-		Ingress: ingress, Client: clientAddr,
+		TunnelID: request.TunnelID, ServiceID: request.ServiceID,
+		RequiredRevision: request.RequiredRevision,
+		Ingress:          request.Ingress, Client: request.ClientAddr,
 	})
 	dialer.servers = append(dialer.servers, server)
 	dialer.peers = append(dialer.peers, peer)
@@ -219,6 +212,7 @@ func (dialer *loopOriginDialer) Dial(
 				ContentLength:    request.ContentLength,
 				TransferEncoding: append([]string(nil), request.TransferEncoding...),
 				Body:             string(body),
+				Header:           request.Header.Clone(),
 			}
 			responseBody := fmt.Sprintf("connection-%d", index)
 			response := &http.Response{
@@ -277,14 +271,47 @@ func waitOriginRequest(t *testing.T, dialer *loopOriginDialer) observedOriginReq
 }
 
 func newTestHandler(t *testing.T, manager *route.Manager, dialer any) *Handler {
+	return newTestHandlerWithTrustedProxies(t, manager, dialer, []string{"127.0.0.1/32", "::1/128"})
+}
+
+func newTestHandlerWithTrustedProxies(
+	t *testing.T,
+	manager *route.Manager,
+	dialer any,
+	trustedProxies []string,
+) *Handler {
 	t.Helper()
 	tunnelDialer, ok := dialer.(interface {
-		Dial(context.Context, string, string, uint64, protocolv1.IngressType, string) (net.Conn, error)
+		Dial(context.Context, tunnel.DialRequest) (net.Conn, error)
 	})
 	if !ok {
 		t.Fatal("test dialer does not implement the expected Tunnel Dial contract")
 	}
-	handler, err := NewHandler(manager, tunnelDialer)
+	limitManager := newTestLimitManager(t, serverlimits.Options{
+		MaxConnectors: 1_024, MaxConnectorsPerTunnel: 1_024,
+		MaxWorkConnections: 1_024, MaxIdleWorkConnections: 1_024,
+		MaxConnectingWorkConnections: 1_024, MaxPendingOpens: 1_024,
+		MaxActiveConnections: 1_024, MaxConnectionsPerTunnel: 1_024,
+		MaxConnectionsPerService: 1_024, MaxConnectionsPerSourceIP: 1_024,
+		MaxOpenRatePerSourceIP: 100_000, MaxOpenBurstPerSourceIP: 100_000,
+		MaxHTTPRequestsPerSourceIPPerSecond: 100_000,
+	})
+	return newTestHandlerWithLimits(t, manager, tunnelDialer, trustedProxies, limitManager, 2<<30)
+}
+
+func newTestHandlerWithLimits(
+	t *testing.T,
+	manager *route.Manager,
+	dialer TunnelDialer,
+	trustedProxies []string,
+	limitManager *serverlimits.Manager,
+	maxBodyBytes int64,
+) *Handler {
+	t.Helper()
+	handler, err := NewHandler(HandlerOptions{
+		Routes: manager, Dialer: dialer, TrustedProxies: trustedProxies,
+		Limits: limitManager, MaxBodyBytes: maxBodyBytes,
+	})
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -297,4 +324,13 @@ func newTestHandler(t *testing.T, manager *route.Manager, dialer any) *Handler {
 		closer.CloseIdleConnections()
 	})
 	return handler
+}
+
+func newTestLimitManager(t *testing.T, options serverlimits.Options) *serverlimits.Manager {
+	t.Helper()
+	manager, err := serverlimits.New(options)
+	if err != nil {
+		t.Fatalf("limits.New() error = %v", err)
+	}
+	return manager
 }

@@ -2,6 +2,7 @@ package httpingress
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
+	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
 
 const transportAuthority = "xtunnel.invalid"
@@ -88,11 +90,13 @@ func (pool *transportPool) newTransport(route serverroute.HTTPRoute) *http.Trans
 				dialContext = requestContext
 			}
 			clientAddr, _ := dialContext.Value(clientAddressKey{}).(string)
-			return pool.dialer.Dial(
-				dialContext, route.TunnelID, route.ServiceID,
-				uint64(route.RequiredRevision),
-				protocolv1.IngressType_INGRESS_TYPE_HTTP, clientAddr,
-			)
+			return pool.dialer.Dial(dialContext, tunnel.DialRequest{
+				TunnelID:         route.TunnelID,
+				ServiceID:        route.ServiceID,
+				RequiredRevision: uint64(route.RequiredRevision),
+				Ingress:          protocolv1.IngressType_INGRESS_TYPE_HTTP,
+				ClientAddr:       clientAddr,
+			})
 		},
 		// Origin TLS 在 Agent 端完成，且每个隔离键只有一个虚拟 authority；禁用
 		// 自动解压，避免 Reverse Proxy 在客户端未声明 Accept-Encoding 时改写响应。
@@ -102,6 +106,31 @@ func (pool *transportPool) newTransport(route serverroute.HTTPRoute) *http.Trans
 		MaxIdleConnsPerHost: int(route.ProxyOptions.MaxIdleConnections),
 		IdleConnTimeout:     time.Duration(route.ProxyOptions.IdleConnectionTimeoutMS) * time.Millisecond,
 	}
+}
+
+// webSocketTransport 为一次 Upgrade 创建 fresh Transport。WebSocket 握手一旦写入
+// WorkConn 就不能在另一条连接上静默重放；101 后该连接也已经脱离普通 KeepAlive
+// 池，因此每次只允许一次请求，并用冻结的 Header 预算限制 Origin 握手等待。
+func (pool *transportPool) webSocketTransport(
+	route serverroute.HTTPRoute,
+	idle *webSocketIdleOwner,
+) http.RoundTripper {
+	transport := pool.newTransport(route)
+	dialContext := transport.DialContext
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := dialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		wrapped := &webSocketActivityConn{Conn: connection, idle: idle}
+		if err := idle.bindBackend(wrapped); err != nil {
+			return nil, errors.Join(err, connection.Close())
+		}
+		return wrapped, nil
+	}
+	transport.DisableKeepAlives = true
+	transport.ResponseHeaderTimeout = readHeaderTimeout
+	return transport
 }
 
 func (pool *transportPool) closeIdleConnections() {

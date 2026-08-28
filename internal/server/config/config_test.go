@@ -58,8 +58,34 @@ logging:
 	if result.Limits.MaxServicesPerTunnel != 1000 {
 		t.Fatalf("Limits.MaxServicesPerTunnel = %d, want 1000", result.Limits.MaxServicesPerTunnel)
 	}
+	if result.Limits.MaxHTTPBodyBytes != 2*1024*1024*1024 {
+		t.Fatalf("Limits.MaxHTTPBodyBytes = %d, want 2 GiB", result.Limits.MaxHTTPBodyBytes)
+	}
 	if result.Transport.TCP.WorkAcquireTimeout.String() != "2s" {
 		t.Fatalf("WorkAcquireTimeout = %s, want 2s", result.Transport.TCP.WorkAcquireTimeout)
+	}
+}
+
+func TestLoadMaxHTTPBodyBytesBounds(t *testing.T) {
+	baseYAML := "management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: tunnel.example.com\n"
+
+	result, err := Load(baseconfig.Options{
+		YAML: []byte(baseYAML + "limits:\n  max_http_body_bytes: 1099511627776\n"),
+		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+	})
+	if err != nil {
+		t.Fatalf("Load() at maximum error = %v", err)
+	}
+	if result.Limits.MaxHTTPBodyBytes != 1099511627776 {
+		t.Fatalf("Limits.MaxHTTPBodyBytes = %d, want 1 TiB", result.Limits.MaxHTTPBodyBytes)
+	}
+
+	_, err = Load(baseconfig.Options{
+		YAML: []byte(baseYAML + "limits:\n  max_http_body_bytes: 1099511627777\n"),
+		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "max_http_body_bytes") {
+		t.Fatalf("Load() above maximum error = %v, want max_http_body_bytes", err)
 	}
 }
 

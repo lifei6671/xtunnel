@@ -274,6 +274,107 @@ func TestRouteRepositoryFailsWhenGenerationRowIsMissing(t *testing.T) {
 	}
 }
 
+func TestTCPRouteRepositoryCRUDGenerationAndReadOnlyBoundary(t *testing.T) {
+	store := openRouteTestStore(t)
+	seedRouteTestService(t, store)
+	ctx := context.Background()
+	route := repository.TCPRoute{
+		ID: "tcp-main", ServiceID: repositoryRouteTestServiceID, PublicPort: 8443,
+		Enabled: true, CreatedAt: 1, UpdatedAt: 1,
+	}
+	if err := store.Read(ctx, func(view repository.RepositoryView) error {
+		if err := view.Routes().CreateTCP(ctx, route); !errors.Is(err, errRepositoryWriteOutsideTransaction) {
+			t.Fatalf("CreateTCP(read view) error = %v", err)
+		}
+		if err := view.Routes().UpdateTCP(ctx, route); !errors.Is(err, errRepositoryWriteOutsideTransaction) {
+			t.Fatalf("UpdateTCP(read view) error = %v", err)
+		}
+		if err := view.Routes().DeleteTCP(ctx, route.ID); !errors.Is(err, errRepositoryWriteOutsideTransaction) {
+			t.Fatalf("DeleteTCP(read view) error = %v", err)
+		}
+		if _, err := view.Routes().AdvanceGeneration(ctx, 0); !errors.Is(err, errRepositoryWriteOutsideTransaction) {
+			t.Fatalf("AdvanceGeneration(read view) error = %v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
+		if err := transaction.Routes().CreateTCP(ctx, route); err != nil {
+			return err
+		}
+		generation, err := transaction.Routes().AdvanceGeneration(ctx, 0)
+		if err != nil {
+			return err
+		}
+		if generation != 1 {
+			t.Fatalf("created generation = %d, want 1", generation)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("create Route transaction error = %v", err)
+	}
+
+	stale := route
+	stale.PublicPort = 9443
+	stale.UpdatedAt = 2
+	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
+		if err := transaction.Routes().UpdateTCP(ctx, stale); err != nil {
+			return err
+		}
+		_, err := transaction.Routes().AdvanceGeneration(ctx, 0)
+		return err
+	}); !errors.Is(err, repository.ErrVersionConflict) {
+		t.Fatalf("stale generation transaction error = %v, want ErrVersionConflict", err)
+	}
+	if err := store.Read(ctx, func(view repository.RepositoryView) error {
+		got, err := view.Routes().GetTCP(ctx, route.ID)
+		if err != nil {
+			return err
+		}
+		if got != route {
+			t.Fatalf("rolled-back Route = %+v, want %+v", got, route)
+		}
+		listed, err := view.Routes().ListTCP(ctx)
+		if err != nil {
+			return err
+		}
+		if len(listed) != 1 || listed[0] != route {
+			t.Fatalf("ListTCP() = %+v, want one original Route", listed)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read rolled-back Route error = %v", err)
+	}
+
+	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
+		if err := transaction.Routes().UpdateTCP(ctx, stale); err != nil {
+			return err
+		}
+		_, err := transaction.Routes().AdvanceGeneration(ctx, 1)
+		return err
+	}); err != nil {
+		t.Fatalf("update Route transaction error = %v", err)
+	}
+	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
+		if err := transaction.Routes().DeleteTCP(ctx, route.ID); err != nil {
+			return err
+		}
+		_, err := transaction.Routes().AdvanceGeneration(ctx, 2)
+		return err
+	}); err != nil {
+		t.Fatalf("delete Route transaction error = %v", err)
+	}
+	state, err := store.LoadRouteDesiredState(ctx)
+	if err != nil {
+		t.Fatalf("LoadRouteDesiredState() error = %v", err)
+	}
+	if state.Generation != 3 || len(state.TCPRoutes) != 0 {
+		t.Fatalf("final Route state = %+v, want generation 3 without TCP Routes", state)
+	}
+}
+
 func openRouteTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(context.Background(), t.TempDir())

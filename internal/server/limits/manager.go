@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/lifei6671/xtunnel/internal/identity"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
@@ -25,24 +26,31 @@ var (
 	ErrPendingOpenCapacity = errors.New("server pending OPEN capacity is exhausted")
 	// ErrActiveConnectionCapacity 表示 ACTIVE 连接命中了全局或某一维度硬上限。
 	ErrActiveConnectionCapacity = errors.New("server active connection capacity is exhausted")
+	// ErrOpenRateExceeded 表示来源 IP 的新建 Tunnel WorkConn 速率已耗尽。
+	ErrOpenRateExceeded = errors.New("server source OPEN rate limit is exceeded")
+	// ErrHTTPRequestRateExceeded 表示来源 IP 的 HTTP 请求速率已耗尽。
+	ErrHTTPRequestRateExceeded = errors.New("server source HTTP request rate limit is exceeded")
 	// ErrConnectorCapacity 表示 Connector 身份命中了全局或 Tunnel 硬上限。
 	ErrConnectorCapacity = errors.New("server connector capacity is exhausted")
 	// ErrInvalidTransition 表示 Lease 的状态转换不符合冻结生命周期。
 	ErrInvalidTransition = errors.New("server limit lease transition is invalid")
 )
 
-// Options 固定 Server 进程级 WorkConn、OPEN 与 ACTIVE 硬上限。
+// Options 固定 Server 进程级 WorkConn、OPEN、ACTIVE 与来源 IP 速率上限。
 type Options struct {
-	MaxConnectors                uint64
-	MaxConnectorsPerTunnel       uint64
-	MaxWorkConnections           uint64
-	MaxIdleWorkConnections       uint64
-	MaxConnectingWorkConnections uint64
-	MaxPendingOpens              uint64
-	MaxActiveConnections         uint64
-	MaxConnectionsPerTunnel      uint64
-	MaxConnectionsPerService     uint64
-	MaxConnectionsPerSourceIP    uint64
+	MaxConnectors                       uint64
+	MaxConnectorsPerTunnel              uint64
+	MaxWorkConnections                  uint64
+	MaxIdleWorkConnections              uint64
+	MaxConnectingWorkConnections        uint64
+	MaxPendingOpens                     uint64
+	MaxActiveConnections                uint64
+	MaxConnectionsPerTunnel             uint64
+	MaxConnectionsPerService            uint64
+	MaxConnectionsPerSourceIP           uint64
+	MaxOpenRatePerSourceIP              uint64
+	MaxOpenBurstPerSourceIP             uint64
+	MaxHTTPRequestsPerSourceIPPerSecond uint64
 }
 
 // ConnectionKey 是 ACTIVE 配额使用的三个公平性维度。
@@ -98,6 +106,8 @@ type Manager struct {
 	activeByTunnel  map[string]uint64
 	activeByService map[serviceKey]uint64
 	activeBySource  map[netip.Addr]uint64
+	openRate        *sourceRateLimiter
+	httpRequestRate *sourceRateLimiter
 }
 
 type connectorKey struct {
@@ -107,16 +117,30 @@ type connectorKey struct {
 
 // New 创建一个空的进程级资源管理器。
 func New(options Options) (*Manager, error) {
+	const maxDurationSeconds = uint64((1<<63 - 1) / 1_000_000_000)
+	if options.MaxActiveConnections > ^uint64(0)-options.MaxPendingOpens {
+		return nil, ErrInvalidOptions
+	}
+	var openRefillSeconds uint64
+	if options.MaxOpenRatePerSourceIP != 0 {
+		openRefillSeconds = options.MaxOpenBurstPerSourceIP / options.MaxOpenRatePerSourceIP
+		if options.MaxOpenBurstPerSourceIP%options.MaxOpenRatePerSourceIP != 0 {
+			openRefillSeconds++
+		}
+	}
 	if options.MaxConnectors == 0 || options.MaxConnectorsPerTunnel == 0 ||
 		options.MaxConnectorsPerTunnel > options.MaxConnectors ||
 		options.MaxWorkConnections == 0 || options.MaxIdleWorkConnections == 0 ||
 		options.MaxConnectingWorkConnections == 0 || options.MaxPendingOpens == 0 ||
 		options.MaxActiveConnections == 0 || options.MaxConnectionsPerTunnel == 0 ||
 		options.MaxConnectionsPerService == 0 || options.MaxConnectionsPerSourceIP == 0 ||
+		options.MaxOpenRatePerSourceIP == 0 || options.MaxOpenBurstPerSourceIP == 0 ||
+		options.MaxHTTPRequestsPerSourceIPPerSecond == 0 || openRefillSeconds > maxDurationSeconds ||
 		options.MaxIdleWorkConnections > options.MaxWorkConnections ||
 		options.MaxConnectingWorkConnections > options.MaxWorkConnections {
 		return nil, ErrInvalidOptions
 	}
+	sourceCapacity := options.MaxActiveConnections + options.MaxPendingOpens
 	return &Manager{
 		options:            options,
 		connectorRefs:      make(map[connectorKey]uint64),
@@ -124,6 +148,18 @@ func New(options Options) (*Manager, error) {
 		activeByTunnel:     make(map[string]uint64),
 		activeByService:    make(map[serviceKey]uint64),
 		activeBySource:     make(map[netip.Addr]uint64),
+		openRate: newSourceRateLimiter(
+			options.MaxOpenRatePerSourceIP,
+			options.MaxOpenBurstPerSourceIP,
+			sourceCapacity,
+			time.Now,
+		),
+		httpRequestRate: newSourceRateLimiter(
+			options.MaxHTTPRequestsPerSourceIPPerSecond,
+			options.MaxHTTPRequestsPerSourceIPPerSecond,
+			sourceCapacity,
+			time.Now,
+		),
 	}, nil
 }
 
@@ -310,13 +346,53 @@ type OpenLease struct {
 	state   openState // 仅由 manager.mu 保护。
 }
 
+// ActiveLease 表示不经过 Pending OPEN 的独立 ACTIVE 生命周期。HTTP 请求与
+// WebSocket Handler 用它计量请求处理时段，不把可复用的 Tunnel WorkConn 错算成
+// 首个来源 IP 的长期占用。
+type ActiveLease struct {
+	manager  *Manager
+	key      ConnectionKey
+	released bool // 仅由 manager.mu 保护。
+}
+
+// AllowOpen 消耗来源 IP 的一个新建 Tunnel WorkConn Token。Token 一经消费不会因
+// 后续 OPEN 失败而退还，避免失败流量绕开入口速率上限。
+func (manager *Manager) AllowOpen(sourceIP netip.Addr) error {
+	if manager == nil {
+		return ErrInvalidOptions
+	}
+	if !sourceIP.IsValid() {
+		return ErrInvalidConnectionKey
+	}
+	if !manager.openRate.allow(sourceIP) {
+		return ErrOpenRateExceeded
+	}
+	return nil
+}
+
+// AllowHTTPRequest 消耗来源 IP 的一个 HTTP 请求 Token。
+func (manager *Manager) AllowHTTPRequest(sourceIP netip.Addr) error {
+	if manager == nil {
+		return ErrInvalidOptions
+	}
+	if !sourceIP.IsValid() {
+		return ErrInvalidConnectionKey
+	}
+	if !manager.httpRequestRate.allow(sourceIP) {
+		return ErrHTTPRequestRateExceeded
+	}
+	return nil
+}
+
 // AcquirePendingOpen 为一条已接受、尚未完成 OPEN 的公网连接预留全局槽位。
 func (manager *Manager) AcquirePendingOpen(key ConnectionKey) (*OpenLease, error) {
-	if manager == nil || identity.ValidateTunnelID(key.TunnelID) != nil ||
-		validate.ValidateID(key.ServiceID, "svc_") != nil || !key.SourceIP.IsValid() {
+	if manager == nil {
 		return nil, ErrInvalidConnectionKey
 	}
-	key.SourceIP = key.SourceIP.Unmap()
+	key, valid := normalizeConnectionKey(key)
+	if !valid {
+		return nil, ErrInvalidConnectionKey
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	if manager.pendingOpens >= manager.options.MaxPendingOpens {
@@ -324,6 +400,25 @@ func (manager *Manager) AcquirePendingOpen(key ConnectionKey) (*OpenLease, error
 	}
 	manager.pendingOpens++
 	return &OpenLease{manager: manager, key: key, state: openPending}, nil
+}
+
+// AcquireActive 原子校验并占用全局、Tunnel、Service 与来源 IP 四级 ACTIVE
+// 配额。它不占用 Pending OPEN，供已经在 HTTP Handler 生命周期中完成路由解析的
+// 请求使用。
+func (manager *Manager) AcquireActive(key ConnectionKey) (*ActiveLease, error) {
+	if manager == nil {
+		return nil, ErrInvalidConnectionKey
+	}
+	key, valid := normalizeConnectionKey(key)
+	if !valid {
+		return nil, ErrInvalidConnectionKey
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if !manager.acquireActiveLocked(key) {
+		return nil, ErrActiveConnectionCapacity
+	}
+	return &ActiveLease{manager: manager, key: key}, nil
 }
 
 // Activate 原子执行 PendingOpen -> Active，并同时校验全局、Tunnel、Service 与来源 IP。
@@ -337,18 +432,10 @@ func (lease *OpenLease) Activate() error {
 	if lease.state != openPending {
 		return ErrInvalidTransition
 	}
-	service := serviceKey{tunnelID: lease.key.TunnelID, serviceID: lease.key.ServiceID}
-	if manager.activeTotal >= manager.options.MaxActiveConnections ||
-		manager.activeByTunnel[lease.key.TunnelID] >= manager.options.MaxConnectionsPerTunnel ||
-		manager.activeByService[service] >= manager.options.MaxConnectionsPerService ||
-		manager.activeBySource[lease.key.SourceIP] >= manager.options.MaxConnectionsPerSourceIP {
+	if !manager.acquireActiveLocked(lease.key) {
 		return ErrActiveConnectionCapacity
 	}
 	manager.pendingOpens--
-	manager.activeTotal++
-	manager.activeByTunnel[lease.key.TunnelID]++
-	manager.activeByService[service]++
-	manager.activeBySource[lease.key.SourceIP]++
 	lease.state = openActive
 	return nil
 }
@@ -365,17 +452,60 @@ func (lease *OpenLease) Release() {
 	case openPending:
 		manager.pendingOpens--
 	case openActive:
-		service := serviceKey{tunnelID: lease.key.TunnelID, serviceID: lease.key.ServiceID}
-		manager.activeTotal--
-		decrementMap(manager.activeByTunnel, lease.key.TunnelID)
-		decrementMap(manager.activeByService, service)
-		decrementMap(manager.activeBySource, lease.key.SourceIP)
+		manager.releaseActiveLocked(lease.key)
 	case openReleased:
 		return
 	default:
 		return
 	}
 	lease.state = openReleased
+}
+
+// Release 归还四级 ACTIVE 配额；并发重复调用只释放一次。
+func (lease *ActiveLease) Release() {
+	if lease == nil || lease.manager == nil {
+		return
+	}
+	manager := lease.manager
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if lease.released {
+		return
+	}
+	manager.releaseActiveLocked(lease.key)
+	lease.released = true
+}
+
+func normalizeConnectionKey(key ConnectionKey) (ConnectionKey, bool) {
+	if identity.ValidateTunnelID(key.TunnelID) != nil ||
+		validate.ValidateID(key.ServiceID, "svc_") != nil || !key.SourceIP.IsValid() {
+		return ConnectionKey{}, false
+	}
+	key.SourceIP = key.SourceIP.Unmap()
+	return key, true
+}
+
+func (manager *Manager) acquireActiveLocked(key ConnectionKey) bool {
+	service := serviceKey{tunnelID: key.TunnelID, serviceID: key.ServiceID}
+	if manager.activeTotal >= manager.options.MaxActiveConnections ||
+		manager.activeByTunnel[key.TunnelID] >= manager.options.MaxConnectionsPerTunnel ||
+		manager.activeByService[service] >= manager.options.MaxConnectionsPerService ||
+		manager.activeBySource[key.SourceIP] >= manager.options.MaxConnectionsPerSourceIP {
+		return false
+	}
+	manager.activeTotal++
+	manager.activeByTunnel[key.TunnelID]++
+	manager.activeByService[service]++
+	manager.activeBySource[key.SourceIP]++
+	return true
+}
+
+func (manager *Manager) releaseActiveLocked(key ConnectionKey) {
+	service := serviceKey{tunnelID: key.TunnelID, serviceID: key.ServiceID}
+	manager.activeTotal--
+	decrementMap(manager.activeByTunnel, key.TunnelID)
+	decrementMap(manager.activeByService, service)
+	decrementMap(manager.activeBySource, key.SourceIP)
 }
 
 // Snapshot 返回计数与各 ACTIVE 维度 Map 的深拷贝。

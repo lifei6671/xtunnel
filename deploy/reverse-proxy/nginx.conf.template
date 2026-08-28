@@ -1,0 +1,56 @@
+worker_processes auto;
+
+events {}
+
+http {
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    server {
+        listen ${XTUNNEL_HTTPS_PORT} ssl;
+        server_name ${XTUNNEL_PUBLIC_HOST};
+
+        ssl_certificate     ${XTUNNEL_TLS_CERT_FILE};
+        ssl_certificate_key ${XTUNNEL_TLS_KEY_FILE};
+
+        # 公网 TLS 入口必须在 10 秒内读完请求头，和 XTunnel HTTP Ingress
+        # 的 Slowloris 边界一致。单个 Header 最多允许 1 MiB；聚合上限仍由
+        # XTunnel limits.max_http_header_bytes 统一裁决。
+        client_header_timeout 10s;
+        large_client_header_buffers 4 1m;
+
+        # 前置代理不独立裁决请求体大小；唯一上限来自 XTunnel Server Schema
+        # 的 limits.max_http_body_bytes，并由 HTTP Ingress 返回稳定 413。
+        client_max_body_size 0;
+
+        location / {
+            # V0.1 的前置代理到 XTunnel 固定使用 HTTP/1.1；Upgrade/Connection
+            # 必须显式传递，才能建立 WebSocket 双向隧道。
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+
+            # $http_host 保留客户端发送的完整 authority（包括非默认端口）。
+            # 其余 Forwarded 元数据全部覆盖，禁止透传客户端伪造前缀。
+            proxy_set_header Host $http_host;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Host $http_host;
+
+            # 请求与响应都边读边转发，禁止整包或落盘缓冲。
+            proxy_request_buffering off;
+            proxy_buffering off;
+
+            # 标准 Nginx 只能配置方向独立的 upstream 超时，无法表达 XTunnel
+            # 的双向共享空闲时钟。把代理侧 ceiling 拉长到 1 年，使正常的
+            # 1 小时双向空闲先由 XTunnel 裁决；严格单向超长流的约束见 README。
+            proxy_read_timeout 1y;
+            proxy_send_timeout 1y;
+
+            # 不附加 URI，保留客户端原始 path/query 语义。
+            proxy_pass http://${XTUNNEL_HTTP_INGRESS};
+        }
+    }
+}

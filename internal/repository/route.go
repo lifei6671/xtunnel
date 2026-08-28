@@ -79,9 +79,16 @@ type RouteDesiredState struct {
 	TCPRoutes  []TCPRoute
 }
 
-// RouteRepository 定义 Route Snapshot 构建需要的只读持久化边界。
-// Repository 实现不得自行开启事务；完整读取必须由 Store 的一致性读边界包裹。
+// RouteRepository 定义 Route Desired State 的读写持久化边界。
+// Repository 实现不得自行开启事务；完整读取必须由 Store 的一致性读边界包裹，
+// Mutation 必须从 Store.WithTx 进入并在同一事务推进全局 Generation。
 type RouteRepository interface {
 	LoadDesiredState(context.Context) (RouteDesiredState, error)
 	CurrentGeneration(context.Context) (uint64, error)
+	GetTCP(context.Context, string) (TCPRoute, error)
+	ListTCP(context.Context) ([]TCPRoute, error)
+	CreateTCP(context.Context, TCPRoute) error
+	UpdateTCP(context.Context, TCPRoute) error
+	DeleteTCP(context.Context, string) error
+	AdvanceGeneration(context.Context, uint64) (uint64, error)
 }

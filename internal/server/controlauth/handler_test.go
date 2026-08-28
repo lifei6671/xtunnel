@@ -127,6 +127,8 @@ func TestHandleConnectorCapacityRejectsBeforeSuccessAndAllowsReplacement(t *test
 		MaxWorkConnections: 1, MaxIdleWorkConnections: 1, MaxConnectingWorkConnections: 1,
 		MaxPendingOpens: 1, MaxActiveConnections: 1, MaxConnectionsPerTunnel: 1,
 		MaxConnectionsPerService: 1, MaxConnectionsPerSourceIP: 1,
+		MaxOpenRatePerSourceIP: 1, MaxOpenBurstPerSourceIP: 1,
+		MaxHTTPRequestsPerSourceIPPerSecond: 1,
 	})
 	if err != nil {
 		t.Fatalf("limits.New() error = %v", err)

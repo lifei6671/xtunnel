@@ -2,7 +2,10 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -57,10 +60,12 @@ type tcpRouteRecord struct {
 // TableName 把 TCP Route 映射固定到机器契约定义的表。
 func (tcpRouteRecord) TableName() string { return TCPRouteTable }
 
-// routeRepository 绑定当前只读视图或事务连接。它只读取 Desired State，写入仍须
-// 由后续 ConfigWriteCoordinator 在 BEGIN IMMEDIATE 中统一提交并推进 Generation。
+// routeRepository 绑定当前只读视图或事务连接。写入只能由 ConfigWriteCoordinator
+// 在 BEGIN IMMEDIATE 中统一提交；Application 层负责把所属 Service/Tunnel 版本与
+// 全局 Route Generation 一并推进。
 type routeRepository struct {
 	database *gorm.DB
+	readOnly bool
 }
 
 var _ repository.RouteRepository = routeRepository{}
@@ -150,6 +155,106 @@ func (store routeRepository) CurrentGeneration(ctx context.Context) (uint64, err
 	return uint64(record.Generation), nil
 }
 
+// GetTCP 按稳定 Route ID 读取单条 TCP Desired Route。
+func (store routeRepository) GetTCP(ctx context.Context, id string) (repository.TCPRoute, error) {
+	if strings.TrimSpace(id) == "" {
+		return repository.TCPRoute{}, repository.ErrInvalidRoute
+	}
+	var record tcpRouteRecord
+	if err := store.database.WithContext(ctx).Where("id = ?", id).Take(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return repository.TCPRoute{}, repository.ErrNotFound
+		}
+		return repository.TCPRoute{}, fmt.Errorf("get TCP route: %w", err)
+	}
+	return tcpRouteDomain(record)
+}
+
+// ListTCP 返回全部 TCP Desired Route。禁用 Route 仍占用公网端口，因此不能过滤。
+func (store routeRepository) ListTCP(ctx context.Context) ([]repository.TCPRoute, error) {
+	return store.loadTCPRoutes(ctx)
+}
+
+// CreateTCP 在当前写事务中插入经过领域校验的 TCP Route。
+func (store routeRepository) CreateTCP(ctx context.Context, route repository.TCPRoute) error {
+	if store.readOnly {
+		return errRepositoryWriteOutsideTransaction
+	}
+	if err := route.Validate(); err != nil {
+		return err
+	}
+	if err := store.database.WithContext(ctx).Create(tcpRouteRecordFromDomain(route)).Error; err != nil {
+		return fmt.Errorf("create TCP route: %w", err)
+	}
+	return nil
+}
+
+// UpdateTCP 以全量替换方式更新可变字段；调用方在同一事务内推进全局 Generation。
+func (store routeRepository) UpdateTCP(ctx context.Context, route repository.TCPRoute) error {
+	if store.readOnly {
+		return errRepositoryWriteOutsideTransaction
+	}
+	if err := route.Validate(); err != nil {
+		return err
+	}
+	result := store.database.WithContext(ctx).Model(&tcpRouteRecord{}).
+		Where("id = ?", route.ID).
+		Updates(map[string]any{
+			"service_id":  route.ServiceID,
+			"public_port": route.PublicPort,
+			"enabled":     route.Enabled,
+			"updated_at":  route.UpdatedAt,
+		})
+	if result.Error != nil {
+		return fmt.Errorf("update TCP route: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		if _, err := store.GetTCP(ctx, route.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteTCP 删除指定 TCP Desired Route；调用方负责在同一事务推进 Generation。
+func (store routeRepository) DeleteTCP(ctx context.Context, id string) error {
+	if store.readOnly {
+		return errRepositoryWriteOutsideTransaction
+	}
+	if strings.TrimSpace(id) == "" {
+		return repository.ErrInvalidRoute
+	}
+	result := store.database.WithContext(ctx).Where("id = ?", id).Delete(&tcpRouteRecord{})
+	if result.Error != nil {
+		return fmt.Errorf("delete TCP route: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
+}
+
+// AdvanceGeneration 使用当前 Generation 作为乐观锁，只允许一次单调递增。
+func (store routeRepository) AdvanceGeneration(ctx context.Context, expected uint64) (uint64, error) {
+	if store.readOnly {
+		return 0, errRepositoryWriteOutsideTransaction
+	}
+	if expected >= math.MaxInt64 {
+		return 0, repository.ErrVersionConflict
+	}
+	next := expected + 1
+	result := store.database.WithContext(ctx).Model(&routeConfigStateRecord{}).
+		Where("id = ? AND generation = ?", singletonRouteConfigStateID, expected).
+		Update("generation", next)
+	if result.Error != nil {
+		return 0, fmt.Errorf("advance route config generation: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return 0, repository.ErrVersionConflict
+	}
+	return next, nil
+}
+
 // loadServices 从当前事务读取全部 Service，并在持久化边界重新验证每一行。
 func (store routeRepository) loadServices(ctx context.Context) ([]repository.Service, error) {
 	var records []serviceRecord
@@ -206,14 +311,29 @@ func (store routeRepository) loadTCPRoutes(ctx context.Context) ([]repository.TC
 	}
 	routes := make([]repository.TCPRoute, 0, len(records))
 	for _, record := range records {
-		route := repository.TCPRoute{
-			ID: record.ID, ServiceID: record.ServiceID, PublicPort: record.PublicPort,
-			Enabled: record.Enabled, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
-		}
-		if err := route.Validate(); err != nil {
+		route, err := tcpRouteDomain(record)
+		if err != nil {
 			return nil, fmt.Errorf("stored TCP route %q is invalid: %w", record.ID, err)
 		}
 		routes = append(routes, route)
 	}
 	return routes, nil
+}
+
+func tcpRouteRecordFromDomain(route repository.TCPRoute) tcpRouteRecord {
+	return tcpRouteRecord{
+		ID: route.ID, ServiceID: route.ServiceID, PublicPort: route.PublicPort,
+		Enabled: route.Enabled, CreatedAt: route.CreatedAt, UpdatedAt: route.UpdatedAt,
+	}
+}
+
+func tcpRouteDomain(record tcpRouteRecord) (repository.TCPRoute, error) {
+	route := repository.TCPRoute{
+		ID: record.ID, ServiceID: record.ServiceID, PublicPort: record.PublicPort,
+		Enabled: record.Enabled, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+	}
+	if err := route.Validate(); err != nil {
+		return repository.TCPRoute{}, err
+	}
+	return route, nil
 }

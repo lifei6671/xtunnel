@@ -156,8 +156,23 @@ func (server *Server) Shutdown(ctx context.Context) error {
 			server.shutdownErr = stopErr
 			return
 		}
-		drainErr := httpServer.Shutdown(ctx)
+		// StopAccepting 已先关闭同一个 Listener；Windows 上 Shutdown 再次收敛
+		// Listener 时可能返回 net.ErrClosed 的包装，不能把正常关闭误判成强关条件。
+		drainErr := normalizeClosedError(httpServer.Shutdown(ctx))
+		if drainErr == nil {
+			// net/http 不拥有已经 Hijack 的 WebSocket，但 requestTracker 继续拥有
+			// Handler。正常排空等待其自然结束；Deadline 到期后再进入强关路径。
+			drainErr = server.requests.waitContext(ctx)
+		}
 		if drainErr != nil {
+			server.mu.Lock()
+			cancel := server.cancel
+			server.mu.Unlock()
+			if cancel != nil {
+				// ReverseProxy 观察 Request Context 取消后先关闭 Tunnel backend，
+				// 双向复制随即退出并 defer 关闭 Hijacked client socket。
+				cancel()
+			}
 			drainErr = errors.Join(drainErr, normalizeClosedError(httpServer.Close()))
 		}
 		server.wait.Wait()
@@ -282,6 +297,20 @@ func (tracker *requestTracker) stopAccepting() {
 
 func (tracker *requestTracker) wait() {
 	<-tracker.drained
+}
+
+func (tracker *requestTracker) waitContext(ctx context.Context) error {
+	select {
+	case <-tracker.drained:
+		return nil
+	default:
+	}
+	select {
+	case <-tracker.drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // idleRequestBody 只在调用方实际读取 Body 时设置 ReadDeadline；一次 Read 返回后

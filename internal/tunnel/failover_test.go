@@ -34,8 +34,7 @@ func TestProxyConnectionIDFailureDoesNotAcquireConnectorOrWork(t *testing.T) {
 
 	serverPeer, publicClient := tcpPair(t)
 	defer publicClient.Close()
-	err := fixture.proxy.Serve(context.Background(), testTunnelID, testServiceID,
-		protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+	err := fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Proxy.Serve() error = %v, want injected connection ID failure", err)
 	}
@@ -77,8 +76,7 @@ func TestProxyReselectsAlternateConnectorWhenOnlyWorkFailsPreRaw(t *testing.T) {
 	defer publicClient.Close()
 	proxyResult := make(chan error, 1)
 	go func() {
-		proxyResult <- fixture.proxy.Serve(context.Background(), testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		proxyResult <- fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 	}()
 	payload := []byte("single-work-pre-raw-failover")
 	if _, err := publicClient.Write(payload); err != nil {
@@ -163,8 +161,7 @@ func TestProxyTriesNextAlternateAfterFirstAlternateLosesIdleRace(t *testing.T) {
 	defer publicClient.Close()
 	proxyResult := make(chan error, 1)
 	go func() {
-		proxyResult <- fixture.proxy.Serve(context.Background(), testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		proxyResult <- fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 	}()
 	payload := []byte("next-alternate-after-contention")
 	if _, err := publicClient.Write(payload); err != nil {
@@ -238,8 +235,7 @@ func TestProxyReselectsAlternateConnectorAfterTwoPreRawTransportFailures(t *test
 	defer publicClient.Close()
 	proxyResult := make(chan error, 1)
 	go func() {
-		proxyResult <- fixture.proxy.Serve(context.Background(), testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		proxyResult <- fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 	}()
 	payload := bytes.Repeat([]byte("pre-raw-failover-"), 64)
 	if _, err := publicClient.Write(payload); err != nil {
@@ -337,8 +333,7 @@ func TestProxyReselectsAlternateConnectorImmediatelyOnOpenDraining(t *testing.T)
 	defer publicClient.Close()
 	proxyResult := make(chan error, 1)
 	go func() {
-		proxyResult <- fixture.proxy.Serve(context.Background(), testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		proxyResult <- fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 	}()
 	payload := []byte("open-draining-failover")
 	if _, err := publicClient.Write(payload); err != nil {
@@ -399,8 +394,7 @@ func TestProxyReturnsAfterPreRawFailuresWhenNoAlternateIdleExists(t *testing.T) 
 	defer publicClient.Close()
 	result := make(chan error, 1)
 	go func() {
-		result <- fixture.proxy.Serve(context.Background(), testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		result <- fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 	}()
 	select {
 	case err := <-result:
@@ -488,8 +482,7 @@ func TestProxyDoesNotReselectAfterNonRetryableOpenFailure(t *testing.T) {
 			defer publicClient.Close()
 			result := make(chan error, 1)
 			go func() {
-				result <- fixture.proxy.Serve(context.Background(), testTunnelID, testServiceID,
-					protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+				result <- fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 			}()
 			select {
 			case err := <-result:
@@ -535,8 +528,7 @@ func TestProxyDoesNotReselectAfterContextCancellation(t *testing.T) {
 	defer publicClient.Close()
 	result := make(chan error, 1)
 	go func() {
-		result <- fixture.proxy.Serve(ctx, testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		result <- fixture.proxy.Serve(ctx, testTCPDialRequest(), serverPeer)
 	}()
 	select {
 	case <-requestRead:
@@ -585,8 +577,7 @@ func TestProxyStopsAlternateReselectWhenContextCanceledAfterLease(t *testing.T) 
 	defer publicClient.Close()
 	result := make(chan error, 1)
 	go func() {
-		result <- fixture.proxy.Serve(ctx, testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		result <- fixture.proxy.Serve(ctx, testTCPDialRequest(), serverPeer)
 	}()
 	select {
 	case err := <-result:
@@ -622,8 +613,7 @@ func TestProxyUsesRemainingConnectorAfterControlCrash(t *testing.T) {
 	defer publicClient.Close()
 	proxyResult := make(chan error, 1)
 	go func() {
-		proxyResult <- fixture.proxy.Serve(context.Background(), testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		proxyResult <- fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 	}()
 	payload := []byte("new-public-connection-after-control-crash")
 	if _, err := publicClient.Write(payload); err != nil {
@@ -696,8 +686,7 @@ func TestProxyDoesNotReplayAfterRawBusinessBytes(t *testing.T) {
 	defer publicClient.Close()
 	proxyResult := make(chan error, 1)
 	go func() {
-		proxyResult <- fixture.proxy.Serve(context.Background(), testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		proxyResult <- fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 	}()
 	if _, err := publicClient.Write(payload); err != nil {
 		t.Fatalf("write public payload: %v", err)
@@ -741,7 +730,15 @@ type failoverFixture struct {
 
 func newFailoverFixture(t *testing.T, connectorIDs ...string) *failoverFixture {
 	t.Helper()
-	limits := newLimitManager(t, 16)
+	return newFailoverFixtureWithLimits(t, newLimitManager(t, 16), connectorIDs...)
+}
+
+func newFailoverFixtureWithLimits(
+	t *testing.T,
+	limits *serverlimits.Manager,
+	connectorIDs ...string,
+) *failoverFixture {
+	t.Helper()
 	registry := serverruntime.NewRegistryWithLimits(limits)
 	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
 		HighPriorityCapacity: 16, NormalCapacity: 32, InboundCapacity: 16,

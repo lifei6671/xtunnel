@@ -19,6 +19,86 @@ import (
 
 const testDialClientAddr = "192.0.2.10:54321"
 
+func testHTTPDialRequest(revision uint64, clientAddr string) DialRequest {
+	return DialRequest{
+		TunnelID: testTunnelID, ServiceID: testServiceID,
+		RequiredRevision: revision,
+		Ingress:          protocolv1.IngressType_INGRESS_TYPE_HTTP,
+		ClientAddr:       clientAddr,
+	}
+}
+
+func TestProxyDialAcceptsNormalizedHTTPClientIPWithLimits(t *testing.T) {
+	fixture := newFailoverFixture(t, testConnectorID)
+	defer cleanupDialFixture(t, fixture)
+	agent := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], nil)
+	requests := make(chan *protocolv1.OpenRequest, 1)
+	agentResult := make(chan error, 1)
+	go func() { agentResult <- runDialEchoConnector(agent, requests) }()
+
+	const normalizedClientIP = "198.51.100.20"
+	connection, err := fixture.proxy.Dial(
+		context.Background(), testHTTPDialRequest(0, normalizedClientIP),
+	)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	if snapshot := fixture.limits.Snapshot(); snapshot.PendingOpens != 0 || snapshot.ActiveTotal != 0 {
+		t.Fatalf(
+			"HTTP WorkConn limits after Dial = pending:%d active:%d, want request-owned ACTIVE outside Tunnel Proxy",
+			snapshot.PendingOpens, snapshot.ActiveTotal,
+		)
+	}
+	request := <-requests
+	if request.GetClientAddr() != normalizedClientIP {
+		t.Fatalf("OpenRequest client_addr = %q, want %q", request.GetClientAddr(), normalizedClientIP)
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	waitDialAgent(t, agentResult)
+	waitForSnapshot(t, fixture.limits, func(snapshot serverlimits.Snapshot) bool {
+		return snapshot.ActiveTotal == 0 && snapshot.PendingOpens == 0
+	})
+}
+
+func TestProxyDialConsumesHTTPSourceOpenTokenBeforeDownstreamSelection(t *testing.T) {
+	limits, err := serverlimits.New(serverlimits.Options{
+		MaxConnectors: 8, MaxConnectorsPerTunnel: 8,
+		MaxWorkConnections: 64, MaxIdleWorkConnections: 64, MaxConnectingWorkConnections: 64,
+		MaxPendingOpens: 16, MaxActiveConnections: 64,
+		MaxConnectionsPerTunnel: 64, MaxConnectionsPerService: 64, MaxConnectionsPerSourceIP: 64,
+		MaxOpenRatePerSourceIP: 1, MaxOpenBurstPerSourceIP: 1,
+		MaxHTTPRequestsPerSourceIPPerSecond: 100,
+	})
+	if err != nil {
+		t.Fatalf("limits.New() error = %v", err)
+	}
+	fixture := newFailoverFixtureWithLimits(t, limits, testConnectorID)
+	defer cleanupDialFixture(t, fixture)
+	request := testHTTPDialRequest(999, "198.51.100.40")
+
+	connection, err := fixture.proxy.Dial(context.Background(), request)
+	if connection != nil {
+		_ = connection.Close()
+		t.Fatal("first Dial() unexpectedly returned a connection")
+	}
+	if !errors.Is(err, serverruntime.ErrNoAvailableConnector) {
+		t.Fatalf("first Dial() error = %v, want downstream selection failure", err)
+	}
+	connection, err = fixture.proxy.Dial(context.Background(), request)
+	if connection != nil {
+		_ = connection.Close()
+		t.Fatal("second Dial() unexpectedly returned a connection")
+	}
+	if !errors.Is(err, serverlimits.ErrOpenRateExceeded) {
+		t.Fatalf("second Dial() error = %v, want ErrOpenRateExceeded", err)
+	}
+	if snapshot := limits.Snapshot(); snapshot.PendingOpens != 0 || snapshot.ActiveTotal != 0 {
+		t.Fatalf("rejected HTTP Dial limits = pending:%d active:%d", snapshot.PendingOpens, snapshot.ActiveTotal)
+	}
+}
+
 func TestProxyDialPinsConnectorServiceRevision(t *testing.T) {
 	fixture := newFailoverFixture(t, testConnectorID)
 	defer cleanupDialFixture(t, fixture)
@@ -34,8 +114,7 @@ func TestProxyDialPinsConnectorServiceRevision(t *testing.T) {
 	agent := fixture.registerWork(t, session, nil)
 
 	connection, err := fixture.proxy.Dial(
-		context.Background(), testTunnelID, testServiceID, 7,
-		protocolv1.IngressType_INGRESS_TYPE_HTTP, testDialClientAddr,
+		context.Background(), testHTTPDialRequest(7, testDialClientAddr),
 	)
 	if connection != nil {
 		_ = connection.Close()
@@ -52,8 +131,7 @@ func TestProxyDialPinsConnectorServiceRevision(t *testing.T) {
 	agentResult := make(chan error, 1)
 	go func() { agentResult <- runDialEchoConnector(agent, nil) }()
 	connection, err = fixture.proxy.Dial(
-		context.Background(), testTunnelID, testServiceID, 8,
-		protocolv1.IngressType_INGRESS_TYPE_HTTP, testDialClientAddr,
+		context.Background(), testHTTPDialRequest(8, testDialClientAddr),
 	)
 	if err != nil {
 		t.Fatalf("Dial(revision 8) error = %v", err)
@@ -79,8 +157,7 @@ func TestProxyDialPinsZeroConnectorServiceRevision(t *testing.T) {
 	agent := fixture.registerWork(t, session, nil)
 
 	connection, err := fixture.proxy.Dial(
-		context.Background(), testTunnelID, testServiceID, 0,
-		protocolv1.IngressType_INGRESS_TYPE_HTTP, testDialClientAddr,
+		context.Background(), testHTTPDialRequest(0, testDialClientAddr),
 	)
 	if connection != nil {
 		_ = connection.Close()
@@ -97,8 +174,7 @@ func TestProxyDialPinsZeroConnectorServiceRevision(t *testing.T) {
 	agentResult := make(chan error, 1)
 	go func() { agentResult <- runDialEchoConnector(agent, nil) }()
 	connection, err = fixture.proxy.Dial(
-		context.Background(), testTunnelID, testServiceID, 1,
-		protocolv1.IngressType_INGRESS_TYPE_HTTP, testDialClientAddr,
+		context.Background(), testHTTPDialRequest(1, testDialClientAddr),
 	)
 	if err != nil {
 		t.Fatalf("Dial(revision 1) error = %v", err)
@@ -119,9 +195,7 @@ func TestProxyDialSucceedsAndRequestCancellationDoesNotPoisonConnection(t *testi
 
 	requestContext, cancelRequest := context.WithCancel(context.Background())
 	connection, err := fixture.proxy.Dial(
-		requestContext, testTunnelID, testServiceID,
-		0,
-		protocolv1.IngressType_INGRESS_TYPE_HTTP, testDialClientAddr,
+		requestContext, testHTTPDialRequest(0, testDialClientAddr),
 	)
 	if err != nil {
 		t.Fatalf("Dial() error = %v", err)
@@ -175,9 +249,7 @@ func TestProxyDialCancellationDuringOpenClosesWorkAndReleasesLimits(t *testing.T
 	dialResult := make(chan error, 1)
 	go func() {
 		connection, err := fixture.proxy.Dial(
-			dialContext, testTunnelID, testServiceID,
-			0,
-			protocolv1.IngressType_INGRESS_TYPE_HTTP, testDialClientAddr,
+			dialContext, testHTTPDialRequest(0, testDialClientAddr),
 		)
 		if connection != nil {
 			_ = connection.Close()
@@ -215,9 +287,7 @@ func TestProxyDialCloseFinishesResourcesExactlyOnce(t *testing.T) {
 	go func() { agentResult <- runDialEchoConnector(agent, nil) }()
 
 	connection, err := fixture.proxy.Dial(
-		context.Background(), testTunnelID, testServiceID,
-		0,
-		protocolv1.IngressType_INGRESS_TYPE_HTTP, testDialClientAddr,
+		context.Background(), testHTTPDialRequest(0, testDialClientAddr),
 	)
 	if err != nil {
 		t.Fatalf("Dial() error = %v", err)
@@ -258,9 +328,7 @@ func TestProxyDialRegistryRevokeClosesConnectionAndWork(t *testing.T) {
 	go func() { agentResult <- runDialEchoConnector(agent, nil) }()
 
 	connection, err := fixture.proxy.Dial(
-		context.Background(), testTunnelID, testServiceID,
-		0,
-		protocolv1.IngressType_INGRESS_TYPE_HTTP, testDialClientAddr,
+		context.Background(), testHTTPDialRequest(0, testDialClientAddr),
 	)
 	if err != nil {
 		t.Fatalf("Dial() error = %v", err)
@@ -294,9 +362,7 @@ func TestProxyDialRegistryDrainClosesConnectionAndWork(t *testing.T) {
 	go func() { agentResult <- runDialEchoConnector(agent, nil) }()
 
 	connection, err := fixture.proxy.Dial(
-		context.Background(), testTunnelID, testServiceID,
-		0,
-		protocolv1.IngressType_INGRESS_TYPE_HTTP, testDialClientAddr,
+		context.Background(), testHTTPDialRequest(0, testDialClientAddr),
 	)
 	if err != nil {
 		t.Fatalf("Dial() error = %v", err)

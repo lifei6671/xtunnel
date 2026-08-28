@@ -118,6 +118,25 @@ func (snapshot *Snapshot) TCP(publicPort uint16) (TCPRoute, bool) {
 	return route, ok
 }
 
+// TCPRoutes 返回全部已启用 TCP Route 的稳定值副本，供 Listener Reconciler 构造
+// 完整 Desired 集合。调用方不能取得或修改快照内部 map。
+func (snapshot *Snapshot) TCPRoutes() []TCPRoute {
+	if snapshot == nil {
+		return nil
+	}
+	routes := make([]TCPRoute, 0, len(snapshot.tcp))
+	for _, route := range snapshot.tcp {
+		routes = append(routes, route)
+	}
+	sort.Slice(routes, func(left, right int) bool {
+		if routes[left].PublicPort != routes[right].PublicPort {
+			return routes[left].PublicPort < routes[right].PublicPort
+		}
+		return routes[left].ID < routes[right].ID
+	})
+	return routes
+}
+
 // Tunnel 返回 tunnel_id 对应的运行时值副本。
 func (snapshot *Snapshot) Tunnel(tunnelID string) (TunnelRuntime, bool) {
 	if snapshot == nil {

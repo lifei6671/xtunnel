@@ -90,7 +90,7 @@ func goTypeName(current reflect.Type) (string, bool) {
 		return "", true
 	case reflect.String:
 		return "string", false
-	case reflect.Int:
+	case reflect.Int, reflect.Int64:
 		return "integer", false
 	case reflect.Float64:
 		return "number", false

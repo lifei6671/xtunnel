@@ -66,6 +66,8 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		MaxWorkConnections: 32, MaxIdleWorkConnections: 24, MaxConnectingWorkConnections: 16,
 		MaxPendingOpens: 16, MaxActiveConnections: 16, MaxConnectionsPerTunnel: 16,
 		MaxConnectionsPerService: 16, MaxConnectionsPerSourceIP: 8,
+		MaxOpenRatePerSourceIP: 128, MaxOpenBurstPerSourceIP: 128,
+		MaxHTTPRequestsPerSourceIPPerSecond: 128,
 	})
 	if err != nil {
 		t.Fatalf("create Limit manager: %v", err)
@@ -176,7 +178,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	}
 
 	firstPayload := []byte("xtunnel-m3-origin-one\x00with-binary\xff")
-	if err := tunnelEchoRoundTrip(ctx, tunnelProxy, firstPayload); err != nil {
+	if err := tunnelEchoRoundTrip(ctx, tunnelProxy, 1, firstPayload); err != nil {
 		t.Fatalf("first Tunnel Echo: %v", err)
 	}
 	waitForEchoOrigin(t, firstOriginDone, "first")
@@ -202,7 +204,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	}
 
 	secondPayload := []byte("xtunnel-m3-origin-two\x00without-agent-restart\xfe")
-	waitForTunnelEcho(t, ctx, tunnelProxy, secondPayload)
+	waitForTunnelEcho(t, ctx, tunnelProxy, 2, secondPayload)
 	waitForEchoOrigin(t, secondOriginDone, "second")
 	if snapshot := limitManager.Snapshot(); snapshot.PendingOpens != 0 || snapshot.ActiveTotal != 0 {
 		t.Fatalf("Limit snapshot after Origin switch = %#v, want no PendingOpen or Active leak", snapshot)
@@ -222,7 +224,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 			t.Fatal("closed Server left the old Session eligible")
 		}
 		assertConnectorRemainsUnavailable(t, registry, sessions, agentConfig.Connector.ID(), 150*time.Millisecond)
-		if err := tunnelEchoRoundTrip(ctx, tunnelProxy, []byte("must-not-use-local-config")); err == nil {
+		if err := tunnelEchoRoundTrip(ctx, tunnelProxy, 2, []byte("must-not-use-local-config")); err == nil {
 			t.Fatal("Tunnel data plane stayed available while the Server was unreachable")
 		}
 
@@ -279,7 +281,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create blocked-state Tunnel proxy: %v", err)
 		}
-		if err := tunnelEchoRoundTrip(ctx, blockedProxy, []byte("must-wait-for-fresh-snapshot")); err == nil {
+		if err := tunnelEchoRoundTrip(ctx, blockedProxy, 3, []byte("must-wait-for-fresh-snapshot")); err == nil {
 			t.Fatal("reconnected data plane used the process-local old Snapshot before ConfigAck")
 		}
 
@@ -299,7 +301,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		}
 
 		payload := []byte("xtunnel-m3-origin-three-after-reconnect\x00\xfd")
-		waitForTunnelEcho(t, ctx, tunnelProxy, payload)
+		waitForTunnelEcho(t, ctx, tunnelProxy, 3, payload)
 		waitForEchoOrigin(t, thirdOriginDone, "third")
 	})
 
@@ -443,7 +445,7 @@ func currentRuntimeStatus(
 	return serverruntime.SessionStatusSnapshot{}
 }
 
-func tunnelEchoRoundTrip(ctx context.Context, proxy *tunnel.Proxy, payload []byte) error {
+func tunnelEchoRoundTrip(ctx context.Context, proxy *tunnel.Proxy, requiredRevision uint64, payload []byte) error {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("listen public TCP: %w", err)
@@ -457,7 +459,10 @@ func tunnelEchoRoundTrip(ctx context.Context, proxy *tunnel.Proxy, payload []byt
 			serveDone <- acceptErr
 			return
 		}
-		serveDone <- proxy.Serve(ctx, testTunnelID, testServiceID, protocolv1.IngressType_INGRESS_TYPE_TCP, peer)
+		serveDone <- proxy.Serve(ctx, tunnel.DialRequest{
+			TunnelID: testTunnelID, ServiceID: testServiceID, RequiredRevision: requiredRevision,
+			Ingress: protocolv1.IngressType_INGRESS_TYPE_TCP,
+		}, peer)
 	}()
 
 	clientConnection, err := net.DialTimeout("tcp", listener.Addr().String(), 2*time.Second)
@@ -495,12 +500,12 @@ func tunnelEchoRoundTrip(ctx context.Context, proxy *tunnel.Proxy, payload []byt
 	return nil
 }
 
-func waitForTunnelEcho(t *testing.T, ctx context.Context, proxy *tunnel.Proxy, payload []byte) {
+func waitForTunnelEcho(t *testing.T, ctx context.Context, proxy *tunnel.Proxy, requiredRevision uint64, payload []byte) {
 	t.Helper()
 	deadline := time.Now().Add(8 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := tunnelEchoRoundTrip(ctx, proxy, payload); err == nil {
+		if err := tunnelEchoRoundTrip(ctx, proxy, requiredRevision, payload); err == nil {
 			return
 		} else {
 			lastErr = err

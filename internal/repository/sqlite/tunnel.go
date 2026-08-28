@@ -255,7 +255,7 @@ func (store *transactionStore) Services() repository.ServiceRepository {
 // Routes 返回当前只读视图或事务作用域的 Route Repository。
 // Route Repository 本身不启动事务；完整状态读取必须由 Store.ReadConsistent 包裹。
 func (store *transactionStore) Routes() repository.RouteRepository {
-	return routeRepository{database: store.database}
+	return routeRepository{database: store.database, readOnly: store.readOnly}
 }
 
 // tunnelRepository 绑定一个 RepositoryView；readOnly 防止读取回调绕过写事务。

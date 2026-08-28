@@ -2,6 +2,7 @@ package httpingress
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
+	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
 
 func TestHandlerReusesKeepAliveOnlyWithinTunnelServiceRevisionPool(t *testing.T) {
@@ -207,6 +208,32 @@ func TestTransportPoolGenerationFenceRejectsLateOldWriteback(t *testing.T) {
 	}
 }
 
+func TestWebSocketTransportIsFreshAndHandshakeBounded(t *testing.T) {
+	manager, _ := startRouteManager(t, baseHTTPRouteState(1))
+	route := matchedHTTPRoute(t, manager.Current())
+	pool := newTransportPool(dialerFunc(func(
+		context.Context, tunnel.DialRequest,
+	) (net.Conn, error) {
+		return nil, errors.New("Dial must not run while inspecting Transport options")
+	}))
+
+	first, ok := pool.webSocketTransport(route, newWebSocketIdleOwner(webSocketIdleTimeout)).(*http.Transport)
+	if !ok {
+		t.Fatalf("first WebSocket transport type = %T, want *http.Transport", first)
+	}
+	second, ok := pool.webSocketTransport(route, newWebSocketIdleOwner(webSocketIdleTimeout)).(*http.Transport)
+	if !ok {
+		t.Fatalf("second WebSocket transport type = %T, want *http.Transport", second)
+	}
+	if first == second {
+		t.Fatal("WebSocket Transport was reused, want one fresh Transport per Upgrade")
+	}
+	if !first.DisableKeepAlives || first.ForceAttemptHTTP2 || first.ResponseHeaderTimeout != readHeaderTimeout {
+		t.Fatalf("WebSocket Transport = disable_keepalives=%v force_http2=%v response_header_timeout=%s",
+			first.DisableKeepAlives, first.ForceAttemptHTTP2, first.ResponseHeaderTimeout)
+	}
+}
+
 func serveAndReadBody(t *testing.T, handler http.Handler, host, path string) string {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodGet, path, nil)
@@ -275,15 +302,9 @@ type closeTrackingDialer struct {
 
 func (dialer *closeTrackingDialer) Dial(
 	ctx context.Context,
-	tunnelID string,
-	serviceID string,
-	requiredRevision uint64,
-	ingress protocolv1.IngressType,
-	clientAddr string,
+	request tunnel.DialRequest,
 ) (net.Conn, error) {
-	connection, err := dialer.base.Dial(
-		ctx, tunnelID, serviceID, requiredRevision, ingress, clientAddr,
-	)
+	connection, err := dialer.base.Dial(ctx, request)
 	if err != nil {
 		return nil, err
 	}

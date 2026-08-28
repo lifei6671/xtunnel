@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +33,13 @@ const (
 	testWorkID       = "work_01J00000000000000000000000"
 	testTimeout      = 3 * time.Second
 )
+
+func testTCPDialRequest() DialRequest {
+	return DialRequest{
+		TunnelID: testTunnelID, ServiceID: testServiceID, RequiredRevision: 0,
+		Ingress: protocolv1.IngressType_INGRESS_TYPE_TCP,
+	}
+}
 
 type tunnelSnapshotProvider struct{}
 
@@ -116,8 +124,7 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	defer publicClient.Close()
 	proxyResult := make(chan error, 1)
 	go func() {
-		proxyResult <- tunnelProxy.Serve(context.Background(), testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		proxyResult <- tunnelProxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 	}()
 
 	payload := bytes.Repeat([]byte("xtunnel-echo-"), 1024)
@@ -156,6 +163,256 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	case <-controlResult:
 	case <-time.After(testTimeout):
 		t.Fatal("Control Session did not finish")
+	}
+}
+
+func TestProxyServeDoesNotConsumeSecondTCPSourceOpenToken(t *testing.T) {
+	limits, err := serverlimits.New(serverlimits.Options{
+		MaxConnectors: 8, MaxConnectorsPerTunnel: 8,
+		MaxWorkConnections: 64, MaxIdleWorkConnections: 64, MaxConnectingWorkConnections: 64,
+		MaxPendingOpens: 16, MaxActiveConnections: 64,
+		MaxConnectionsPerTunnel: 64, MaxConnectionsPerService: 64, MaxConnectionsPerSourceIP: 64,
+		MaxOpenRatePerSourceIP: 1, MaxOpenBurstPerSourceIP: 1,
+		MaxHTTPRequestsPerSourceIPPerSecond: 100,
+	})
+	if err != nil {
+		t.Fatalf("limits.New() error = %v", err)
+	}
+	fixture := newFailoverFixtureWithLimits(t, limits, testConnectorID)
+	defer fixture.close(t)
+	agent := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], nil)
+	agentTCP, ok := agent.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("registered agent WorkConn = %T, want *net.TCPConn", agent)
+	}
+	agentResult := make(chan error, 1)
+	go func() { agentResult <- runEchoConnector(agentTCP) }()
+
+	serverPeer, publicClient := tcpPair(t)
+	defer publicClient.Close()
+	sourceIP, err := sourceAddress(serverPeer.RemoteAddr())
+	if err != nil {
+		t.Fatalf("sourceAddress() error = %v", err)
+	}
+	// 模拟真实 TCP Listener 已完成的一次 Accept 计数。Proxy.Serve 必须直接进入
+	// Pending/ACTIVE 生命周期；若重复消费，本次唯一 burst 会在这里把业务连接拒绝。
+	if err := limits.AllowOpen(sourceIP); err != nil {
+		t.Fatalf("listener AllowOpen() error = %v", err)
+	}
+	proxyResult := make(chan error, 1)
+	go func() { proxyResult <- fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer) }()
+	payload := []byte("single-tcp-open-token")
+	if _, err := publicClient.Write(payload); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := publicClient.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite() error = %v", err)
+	}
+	if echoed, err := io.ReadAll(publicClient); err != nil || !bytes.Equal(echoed, payload) {
+		t.Fatalf("echo = %q, %v, want %q", echoed, err, payload)
+	}
+	select {
+	case err := <-proxyResult:
+		if err != nil {
+			t.Fatalf("Proxy.Serve() error = %v", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("Proxy.Serve() did not finish")
+	}
+	waitDialAgent(t, agentResult)
+	waitForSnapshot(t, limits, func(snapshot serverlimits.Snapshot) bool {
+		return snapshot.PendingOpens == 0 && snapshot.ActiveTotal == 0
+	})
+}
+
+func TestProxyServeRevokeClosesPublicPeerAndReturnsLifecycleCancellation(t *testing.T) {
+	fixture := newFailoverFixture(t, testConnectorID)
+	defer fixture.close(t)
+
+	closeCount := &atomic.Int32{}
+	agent := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], func(connection net.Conn) net.Conn {
+		tcpConnection, ok := connection.(*net.TCPConn)
+		if !ok {
+			t.Fatalf("registered WorkConn type = %T, want *net.TCPConn", connection)
+		}
+		return &eofCloseTCPConnection{TCPConn: tcpConnection, closeCount: closeCount}
+	})
+	openCompleted := make(chan struct{})
+	agentResult := make(chan error, 1)
+	go func() {
+		defer agent.Close()
+		request := &protocolv1.OpenRequest{}
+		if err := frame.ReadWork(agent, request); err != nil {
+			agentResult <- err
+			return
+		}
+		if err := frame.WriteWork(agent, &protocolv1.OpenResponse{
+			ConnectionId: request.GetConnectionId(), Status: protocolv1.OpenStatus_OPEN_STATUS_OK,
+			ErrorCode: protocolv1.ErrorCode_ERROR_CODE_OK,
+		}); err != nil {
+			agentResult <- err
+			return
+		}
+		close(openCompleted)
+		buffer := make([]byte, 1)
+		_, err := agent.Read(buffer)
+		agentResult <- err
+	}()
+
+	serverPeer, publicClient := tcpPair(t)
+	defer publicClient.Close()
+	serveResult := make(chan error, 1)
+	go func() {
+		serveResult <- fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
+	}()
+	select {
+	case <-openCompleted:
+	case <-time.After(testTimeout):
+		t.Fatal("Proxy.Serve() did not complete OPEN")
+	}
+	waitForSnapshot(t, fixture.limits, func(snapshot serverlimits.Snapshot) bool {
+		return snapshot.ActiveTotal == 1 && snapshot.PendingOpens == 0
+	})
+
+	revokeErr := fixture.registry.RevokeTunnel(testTunnelID)
+	if !errors.Is(revokeErr, io.EOF) {
+		t.Fatalf("RevokeTunnel() error = %v, want wrapped io.EOF from WorkConn close", revokeErr)
+	}
+	select {
+	case err := <-serveResult:
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, io.EOF) {
+			t.Fatalf("Proxy.Serve() error = %v, want context.Canceled and io.EOF", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("Proxy.Serve() did not return after Tunnel Revoke")
+	}
+	select {
+	case <-agentResult:
+	case <-time.After(testTimeout):
+		t.Fatal("Agent WorkConn did not unblock after Tunnel Revoke")
+	}
+	if err := publicClient.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set public peer read deadline: %v", err)
+	}
+	if _, err := publicClient.Read(make([]byte, 1)); err == nil {
+		t.Fatal("public peer remained readable after Tunnel Revoke")
+	}
+	if got := closeCount.Load(); got != 1 {
+		t.Fatalf("WorkConn Close count = %d, want 1", got)
+	}
+	waitForSnapshot(t, fixture.limits, func(snapshot serverlimits.Snapshot) bool {
+		return snapshot.PendingOpens == 0 && snapshot.ActiveTotal == 0 && snapshot.WorkTotal == 0
+	})
+}
+
+func TestProxyServePreOpenTimeoutDoesNotBoundRawLifecycle(t *testing.T) {
+	fixture := newFailoverFixture(t, testConnectorID)
+	defer fixture.close(t)
+	fixture.proxy.publicTCPPreOpenTimeout = 100 * time.Millisecond
+
+	requests := make(chan *protocolv1.OpenRequest, 1)
+	payloads := make(chan []byte, 1)
+	agent := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], nil)
+	agentResult := make(chan error, 1)
+	go func() { agentResult <- runRecordingEchoConnector(agent, requests, payloads) }()
+
+	serverPeer, publicClient := tcpPair(t)
+	defer publicClient.Close()
+	serveResult := make(chan error, 1)
+	request := testTCPDialRequest()
+	request.ClientAddr = "forged.example:65535"
+	go func() { serveResult <- fixture.proxy.Serve(context.Background(), request, serverPeer) }()
+
+	openRequest := <-requests
+	if openRequest.GetClientAddr() != serverPeer.RemoteAddr().String() {
+		t.Fatalf("OpenRequest client_addr = %q, want accepted peer %q", openRequest.GetClientAddr(), serverPeer.RemoteAddr())
+	}
+	waitForSnapshot(t, fixture.limits, func(snapshot serverlimits.Snapshot) bool {
+		return snapshot.ActiveTotal == 1 && snapshot.PendingOpens == 0
+	})
+	time.Sleep(150 * time.Millisecond)
+
+	payload := []byte("RAW-survives-Pre-OPEN-deadline")
+	if _, err := publicClient.Write(payload); err != nil {
+		t.Fatalf("public Write() after Pre-OPEN timeout window: %v", err)
+	}
+	if err := publicClient.CloseWrite(); err != nil {
+		t.Fatalf("public CloseWrite(): %v", err)
+	}
+	echoed, err := io.ReadAll(publicClient)
+	if err != nil || !bytes.Equal(echoed, payload) {
+		t.Fatalf("RAW echo after Pre-OPEN window = %q, %v, want %q", echoed, err, payload)
+	}
+	if got := <-payloads; !bytes.Equal(got, payload) {
+		t.Fatalf("Agent RAW payload = %q, want %q", got, payload)
+	}
+	select {
+	case err := <-serveResult:
+		if err != nil {
+			t.Fatalf("Proxy.Serve() error = %v", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("Proxy.Serve() did not finish after RAW echo")
+	}
+	select {
+	case err := <-agentResult:
+		if err != nil {
+			t.Fatalf("Agent error = %v", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("Agent did not finish RAW echo")
+	}
+}
+
+func TestProxyServeBoundsPreOpenWithoutIdleWork(t *testing.T) {
+	fixture := newFailoverFixture(t, testConnectorID)
+	defer fixture.close(t)
+	fixture.proxy.publicTCPPreOpenTimeout = 30 * time.Millisecond
+
+	serverPeer, publicClient := tcpPair(t)
+	defer publicClient.Close()
+	started := time.Now()
+	err := fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Proxy.Serve() error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed < 20*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("Proxy.Serve() Pre-OPEN elapsed = %v, want bounded near 30ms", elapsed)
+	}
+	if err := publicClient.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set public peer read deadline: %v", err)
+	}
+	if _, err := publicClient.Read(make([]byte, 1)); err == nil {
+		t.Fatal("public peer remained open after Pre-OPEN timeout")
+	}
+	waitForSnapshot(t, fixture.limits, func(snapshot serverlimits.Snapshot) bool {
+		return snapshot.PendingOpens == 0 && snapshot.ActiveTotal == 0 && snapshot.WorkTotal == 0
+	})
+}
+
+func TestProxyServeTreatsRevisionZeroAsExact(t *testing.T) {
+	fixture := newFailoverFixture(t, testConnectorID)
+	defer fixture.close(t)
+	session := fixture.sessionsByConnector[testConnectorID]
+	if !fixture.registry.PublishEligibility(session, serverruntime.SessionEligibility{
+		ConfigReady: true, HasObserved: true, ObservedRevision: 1,
+		Services: map[string]serverruntime.ServiceEligibility{testServiceID: {
+			RequiredRevision: 1, Enabled: true, HealthDisabled: true,
+		}},
+	}) {
+		t.Fatal("PublishEligibility() rejected current Session")
+	}
+	fixture.registerWork(t, session, nil)
+
+	serverPeer, publicClient := tcpPair(t)
+	defer publicClient.Close()
+	err := fixture.proxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
+	if !errors.Is(err, serverruntime.ErrNoAvailableConnector) {
+		t.Fatalf("Proxy.Serve(revision 0) error = %v, want ErrNoAvailableConnector", err)
+	}
+	pool := fixture.sessions.Pools()[session]
+	if counts := pool.Snapshot(); counts.Idle != 1 {
+		t.Fatalf("pool after rejected revision 0 Serve = %+v, want IDLE Work untouched", counts)
 	}
 }
 
@@ -214,8 +471,7 @@ func TestProxyAggregatesConcurrentPendingOpensAndRefillsBeyondInitialDemand(t *t
 		result := make(chan error, 1)
 		proxyResults = append(proxyResults, result)
 		go func() {
-			result <- tunnelProxy.Serve(context.Background(), testTunnelID, testServiceID,
-				protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+			result <- tunnelProxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 		}()
 	}
 	waitForSnapshot(t, limits, func(snapshot serverlimits.Snapshot) bool { return snapshot.PendingOpens == pendingCount })
@@ -353,7 +609,7 @@ func TestProxySelectsOnlyConnectorHealthyForService(t *testing.T) {
 		t.Fatal(err)
 	}
 	lease, selected, _, membership, err := tunnelProxy.selectConnector(
-		context.Background(), testTunnelID, testServiceID, serviceRevisionConstraint{},
+		context.Background(), testTunnelID, testServiceID, 0,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -441,7 +697,7 @@ func TestAcquireWorkReselectsWhenPendingSessionBecomesUnhealthy(t *testing.T) {
 	result := make(chan acquireResult, 1)
 	go func() {
 		lease, session, _, work, acquireErr := tunnelProxy.acquireWork(
-			context.Background(), testTunnelID, testServiceID, serviceRevisionConstraint{},
+			context.Background(), testTunnelID, testServiceID, 0,
 		)
 		result <- acquireResult{lease: lease, session: session, work: work, err: acquireErr}
 	}()
@@ -576,7 +832,7 @@ func TestAcquirePendingWorkReselectsAfterHealthTTLExpires(t *testing.T) {
 	acquired := make(chan acquireResult, 1)
 	go func() {
 		lease, session, _, work, acquireErr := tunnelProxy.acquireWork(
-			ctx, testTunnelID, testServiceID, serviceRevisionConstraint{},
+			ctx, testTunnelID, testServiceID, 0,
 		)
 		acquired <- acquireResult{lease: lease, session: session, work: work, err: acquireErr}
 	}()
@@ -670,13 +926,13 @@ func TestPendingGroupsAggregateCountsAcrossServicesPerSession(t *testing.T) {
 	}
 
 	first, err := tunnelProxy.joinPendingGroup(
-		context.Background(), testTunnelID, testServiceID, serviceRevisionConstraint{},
+		context.Background(), testTunnelID, testServiceID, 0,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	second, err := tunnelProxy.joinPendingGroup(
-		context.Background(), testTunnelID, testServiceTwo, serviceRevisionConstraint{},
+		context.Background(), testTunnelID, testServiceTwo, 0,
 	)
 	if err != nil {
 		_ = first.Release()
@@ -772,7 +1028,7 @@ func TestPendingGroupSerializesServicesWithDisjointEligibleConnectors(t *testing
 		t.Fatal(err)
 	}
 	first, err := tunnelProxy.joinPendingGroup(
-		context.Background(), testTunnelID, testServiceID, serviceRevisionConstraint{},
+		context.Background(), testTunnelID, testServiceID, 0,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -784,7 +1040,7 @@ func TestPendingGroupSerializesServicesWithDisjointEligibleConnectors(t *testing
 	waitContext, cancelWait := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancelWait()
 	if second, err := tunnelProxy.joinPendingGroup(
-		waitContext, testTunnelID, testServiceTwo, serviceRevisionConstraint{},
+		waitContext, testTunnelID, testServiceTwo, 0,
 	); second != nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("second Service join while Tunnel group active = (%#v, %v), want deadline", second, err)
 	}
@@ -799,7 +1055,7 @@ func TestPendingGroupSerializesServicesWithDisjointEligibleConnectors(t *testing
 		t.Fatal(err)
 	}
 	second, err := tunnelProxy.joinPendingGroup(
-		context.Background(), testTunnelID, testServiceTwo, serviceRevisionConstraint{},
+		context.Background(), testTunnelID, testServiceTwo, 0,
 	)
 	if err != nil {
 		t.Fatalf("second Service join after prior Tunnel group drained: %v", err)
@@ -875,8 +1131,7 @@ func TestProxyPendingOpenTimeoutAndCancelReleaseQuota(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			result := make(chan error, 1)
 			go func() {
-				result <- tunnelProxy.Serve(ctx, testTunnelID, testServiceID,
-					protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+				result <- tunnelProxy.Serve(ctx, testTCPDialRequest(), serverPeer)
 			}()
 			waitForSnapshot(t, limits, func(snapshot serverlimits.Snapshot) bool { return snapshot.PendingOpens == 1 })
 			if test.cancel {
@@ -959,8 +1214,7 @@ func TestProxyPendingGroupReselectsWhenSelectedSessionDrains(t *testing.T) {
 	defer publicClient.Close()
 	proxyResult := make(chan error, 1)
 	go func() {
-		proxyResult <- tunnelProxy.Serve(context.Background(), testTunnelID, testServiceID,
-			protocolv1.IngressType_INGRESS_TYPE_TCP, serverPeer)
+		proxyResult <- tunnelProxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
 	}()
 	var first serverruntime.Session
 	waitFor(t, func() bool {
@@ -1113,7 +1367,7 @@ func TestAcquireWorkRetriesStalePendingSessionAfterGenerationReplacement(t *test
 	result := make(chan acquireResult, 1)
 	go func() {
 		lease, session, pool, work, acquireErr := tunnelProxy.acquireWork(
-			context.Background(), testTunnelID, testServiceID, serviceRevisionConstraint{},
+			context.Background(), testTunnelID, testServiceID, 0,
 		)
 		result <- acquireResult{lease: lease, session: session, pool: pool, work: work, err: acquireErr}
 	}()
@@ -1363,6 +1617,8 @@ func newLimitManager(t *testing.T, maxPending uint64) *serverlimits.Manager {
 		MaxWorkConnections: 64, MaxIdleWorkConnections: 64, MaxConnectingWorkConnections: 64,
 		MaxPendingOpens: maxPending, MaxActiveConnections: 64,
 		MaxConnectionsPerTunnel: 64, MaxConnectionsPerService: 64, MaxConnectionsPerSourceIP: 64,
+		MaxOpenRatePerSourceIP: 1_000, MaxOpenBurstPerSourceIP: 1_000,
+		MaxHTTPRequestsPerSourceIPPerSecond: 1_000,
 	})
 	if err != nil {
 		t.Fatalf("limits.New() error = %v", err)
@@ -1425,4 +1681,24 @@ func tcpPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
 		t.Fatalf("DialTCP: %v", peer.err)
 	}
 	return accepted, peer.connection
+}
+
+// eofCloseTCPConnection 保留 TCP Half-Close 方法集，同时让 Revoke 回归可确定地
+// 观察 WorkConn Close 错误。Close 必须先真正关闭 FD，再返回 EOF。
+type eofCloseTCPConnection struct {
+	*net.TCPConn
+	closeCount *atomic.Int32
+}
+
+func (connection *eofCloseTCPConnection) Close() error {
+	connection.closeCount.Add(1)
+	return errors.Join(connection.TCPConn.Close(), io.EOF)
+}
+
+func (connection *eofCloseTCPConnection) CloseWrite() error {
+	return connection.TCPConn.CloseWrite()
+}
+
+func (connection *eofCloseTCPConnection) CloseRead() error {
+	return connection.TCPConn.CloseRead()
 }
