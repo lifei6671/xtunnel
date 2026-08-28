@@ -44,10 +44,10 @@ http {
             proxy_buffering off;
 
             # 标准 Nginx 只能配置方向独立的 upstream 超时，无法表达 XTunnel
-            # 的双向共享空闲时钟。把代理侧 ceiling 拉长到 1 年，使正常的
+            # 的双向共享空闲时钟。把代理侧 ceiling 拉长到 Nginx 支持的 24 天，使正常的
             # 1 小时双向空闲先由 XTunnel 裁决；严格单向超长流的约束见 README。
-            proxy_read_timeout 1y;
-            proxy_send_timeout 1y;
+            proxy_read_timeout 24d;
+            proxy_send_timeout 24d;
 
             # 不附加 URI，保留客户端原始 path/query 语义。
             proxy_pass http://${XTUNNEL_HTTP_INGRESS};

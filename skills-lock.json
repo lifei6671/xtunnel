@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "task-continuity": {
+      "source": "lifei6671/task-continuity-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "59daee2c9e5434a7a9725a290e70525c010a2604313e7696f5063326b440219b"
+    }
+  }
+}

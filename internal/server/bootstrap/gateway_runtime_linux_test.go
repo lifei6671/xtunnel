@@ -352,7 +352,7 @@ func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
 	}
 	select {
 	case runErr := <-runDone:
-		if runErr == nil || !strings.Contains(runErr.Error(), "start agent gateway after admin bootstrap") {
+		if runErr == nil || !strings.Contains(runErr.Error(), "start agent gateway after HTTP ingress") {
 			t.Fatalf("runWithStorageAndBootstrap() error = %v, want gateway startup failure", runErr)
 		}
 	case <-time.After(2 * time.Second):

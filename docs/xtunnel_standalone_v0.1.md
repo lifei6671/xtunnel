@@ -5637,8 +5637,8 @@ server {
         proxy_request_buffering off;
         proxy_buffering off;
 
-        proxy_read_timeout 1y;
-        proxy_send_timeout 1y;
+        proxy_read_timeout 24d;
+        proxy_send_timeout 24d;
 
         proxy_pass http://127.0.0.1:8081;
     }
@@ -5651,7 +5651,7 @@ server {
 使用 `client_max_body_size 0` 关闭前置代理自身的 Body 大小裁决；请求体唯一上限由
 `configs/server.schema.json` 的 `limits.max_http_body_bytes` 定义，并由 XTunnel 返回
 稳定 413。标准 Nginx HTTP Proxy 不能表达“任一方向进展同时续期”的共享 idle，
-`1y` 只是远高于 XTunnel `1h` 业务窗口的方向性 ceiling；严格单向连续流超过一年时
+`24d` 是 Nginx 支持上限内、远高于 XTunnel `1h` 业务窗口的方向性 ceiling；严格单向连续流超过 24 天时
 必须增加反向 heartbeat 或使用 Caddy。不得在前置代理另设更小固定 Body/Header
 阈值，也不得重新启用整请求缓冲。
 

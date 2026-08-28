@@ -95,9 +95,36 @@ jobs:
             go build -mod=readonly ./...
           )
           go test ./...
-          go test -race ./internal/server/bootstrap ./internal/agent/bootstrap ./internal/server/config ./internal/agent/service
+          go test -race -count=1 -timeout 300s \
+            ./internal/server/bootstrap \
+            ./internal/agent/bootstrap \
+            ./internal/server/config \
+            ./internal/agent/service \
+            ./internal/server/route \
+            ./internal/server/httpingress \
+            ./internal/server/tcpingress \
+            ./internal/tunnel \
+            ./tests/integration
           go vet ./...
           go build ./cmd/server ./cmd/agent
+
+      - name: Run native M4 product data plane E2E
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          go test -count=1 -timeout 180s ./internal/server/bootstrap \
+            -run '^TestProductDataPlaneEndToEnd$'
+
+      - name: Run native M4 1 GiB streaming gate
+        shell: bash
+        timeout-minutes: 3
+        env:
+          XTUNNEL_RUN_LARGE_STREAM_TEST: '1'
+        run: |
+          set -euo pipefail
+          go test -count=1 -timeout 120s ./internal/server/httpingress \
+            -run '^TestHandlerTransfersOneGiBInEachDirection$'
 
       - name: Run native Caddy and Nginx HTTPS ingress E2E
         shell: bash

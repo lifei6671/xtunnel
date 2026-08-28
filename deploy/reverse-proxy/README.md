@@ -102,9 +102,9 @@ HTTP Ingress 返回稳定的 `413 REQUEST_BODY_TOO_LARGE`；不要在前置代�
 
 标准 Nginx HTTP Proxy 只能分别设置 upstream 读、写超时，不能精确表达 XTunnel
 “任一方向有字节进展就同时刷新”的共享空闲时钟。模板因此把两个代理侧 ceiling
-设为 `1y`：正常双向静默会先被 XTunnel 的 `1h` 空闲时钟关闭，而不会被前置代理
-提前截断。若业务允许持续超过一年的严格单向 WebSocket 流，必须让对端周期性发送
-反向 heartbeat，或者使用上面的 Caddy 示例；不要把 `1y` 解释成 XTunnel 的业务
+设为 `24d`：正常双向静默会先被 XTunnel 的 `1h` 空闲时钟关闭，而不会被前置代理
+提前截断。若业务允许持续超过 24 天的严格单向 WebSocket 流，必须让对端周期性发送
+反向 heartbeat，或者使用上面的 Caddy 示例；不要把 `24d` 解释成 XTunnel 的业务
 空闲策略。
 
 ## 验证下限
@@ -121,5 +121,5 @@ HTTP Ingress 返回稳定的 `413 REQUEST_BODY_TOO_LARGE`；不要在前置代�
 
 Caddy 的 `flush_interval 100ms` 是有限刷新间隔，不得改为负值；负值低延迟模式会在
 客户端提前断开时继续执行 upstream 请求，可能延迟 XTunnel WorkConn 与 ACTIVE Lease
-归还。Caddy 不设置 upstream 读写 ceiling；Nginx 的 `1y` 只是其方向独立超时模型下
+归还。Caddy 不设置 upstream 读写 ceiling；Nginx 的 `24d` 只是其方向独立超时模型下
 的外部安全上限。两者都不得替代 XTunnel 的双向共享 `1h` 空闲裁决。

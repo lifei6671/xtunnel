@@ -80,10 +80,12 @@ func TestFrontProxyDeployConfigurationPolicy(t *testing.T) {
 		"client_header_timeout 10s;",
 		"large_client_header_buffers 4 1m;",
 		"client_max_body_size 0;",
-		"proxy_read_timeout 1y;",
-		"proxy_send_timeout 1y;",
+		"proxy_read_timeout 24d;",
+		"proxy_send_timeout 24d;",
 	}, []string{
 		"client_max_body_size 2g;",
+		"proxy_read_timeout 1y;",
+		"proxy_send_timeout 1y;",
 		"proxy_read_timeout 1h;",
 		"proxy_send_timeout 1h;",
 	})
