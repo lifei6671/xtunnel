@@ -1,13 +1,14 @@
 #!/bin/sh
 set -eu
 
-# 开发机和 CI 共用此入口，只校验唯一的 OpenAPI 机器契约。
+# 开发机和 CI 共用此入口，校验唯一的 OpenAPI 机器契约及不可变初始基线。
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 repo_root=$(CDPATH= cd "$script_dir/.." && pwd)
 versions_file="$script_dir/versions.env"
 vacuum_bin="$repo_root/.tools/bin/vacuum"
 openapi_dir="$repo_root/api/openapi"
 openapi_file="$openapi_dir/openapi.yaml"
+baseline_file="$openapi_dir/openapi.v0.1.baseline.yaml"
 ruleset_file="$openapi_dir/ruleset.yaml"
 
 fail() {
@@ -16,12 +17,19 @@ fail() {
 }
 
 usage() {
-    printf 'Usage: %s validate\n' "$0" >&2
+    printf 'Usage: %s {validate|breaking}\n' "$0" >&2
     exit 2
 }
 
 [ "$#" -eq 1 ] || usage
-[ "$1" = validate ] || usage
+case "$1" in
+    validate|breaking)
+        command_name=$1
+        ;;
+    *)
+        usage
+        ;;
+esac
 
 [ -r "$versions_file" ] || fail "missing $versions_file"
 . "$versions_file"
@@ -68,13 +76,34 @@ validate_tool
 cd "$repo_root"
 # Vacuum 会区分解析错误和规则失败；Wrapper 对外统一为“契约校验失败=1”，
 # 从而与自身的命令用法错误（退出码 2）保持清晰边界。
-if ! VACUUM_NO_UPDATE_CHECK=true "$vacuum_bin" lint \
-    --no-update-check \
-    --no-style \
-    --fail-severity error \
-    --remote=false \
-    --base "$openapi_dir" \
-    --ruleset "$ruleset_file" \
-    "$openapi_file"; then
-    fail 'OpenAPI validation failed'
-fi
+case "$command_name" in
+    validate)
+        if ! VACUUM_NO_UPDATE_CHECK=true "$vacuum_bin" lint \
+            --no-update-check \
+            --no-style \
+            --fail-severity error \
+            --remote=false \
+            --base "$openapi_dir" \
+            --ruleset "$ruleset_file" \
+            "$openapi_file"; then
+            fail 'OpenAPI validation failed'
+        fi
+        ;;
+    breaking)
+        # 首个完整 REST Contract 没有历史前代；该独立文件是后续变更的固定比较起点。
+        # 禁止把当前 Schema 路径传给 --original，否则会用自比较伪造 Breaking 通过。
+        [ -r "$baseline_file" ] || fail "missing immutable OpenAPI baseline: $baseline_file"
+        if ! VACUUM_NO_UPDATE_CHECK=true "$vacuum_bin" lint \
+            --no-update-check \
+            --no-style \
+            --fail-severity error \
+            --remote=false \
+            --base "$openapi_dir" \
+            --ruleset "$ruleset_file" \
+            --original "$baseline_file" \
+            --error-on-breaking \
+            "$openapi_file"; then
+            fail 'OpenAPI breaking-change check failed'
+        fi
+        ;;
+esac

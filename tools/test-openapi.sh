@@ -50,6 +50,7 @@ test_root=$(mktemp -d "$repo_root/.tools/openapi-test.XXXXXX") || \
 
 expect_status 0 canonical-from-other-cwd \
     sh -c 'cd "$1" && exec sh "$2" validate' sh "$test_root" "$script_dir/openapi.sh"
+expect_status 0 canonical-breaking sh "$script_dir/openapi.sh" breaking
 expect_status 2 missing-command sh "$script_dir/openapi.sh"
 expect_status 2 unknown-command sh "$script_dir/openapi.sh" unknown
 expect_status 2 extra-argument sh "$script_dir/openapi.sh" validate extra
@@ -60,6 +61,7 @@ isolated_openapi="$isolated_root/api/openapi"
 isolated_bin="$isolated_root/.tools/bin"
 isolated_wrapper="$isolated_tools/openapi.sh"
 isolated_spec="$isolated_openapi/openapi.yaml"
+isolated_baseline="$isolated_openapi/openapi.v0.1.baseline.yaml"
 
 mkdir -p "$isolated_tools" "$isolated_openapi" "$isolated_bin"
 cp "$script_dir/bootstrap-openapi.sh" "$script_dir/openapi.sh" \
@@ -72,6 +74,42 @@ expect_status 2 unknown-command-without-tool sh "$isolated_wrapper" unknown
 
 cp "$managed_vacuum" "$isolated_bin/vacuum"
 chmod 0755 "$isolated_bin/vacuum"
+
+cat >"$isolated_baseline" <<'EOF'
+openapi: 3.1.0
+info:
+  title: Breaking baseline fixture
+  version: 0.1.0
+  description: Contract used to prove that Vacuum detects a removed operation.
+servers:
+  - url: /api/v1
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      responses:
+        "204":
+          description: Healthy
+EOF
+cp "$isolated_baseline" "$isolated_spec"
+expect_status 0 unchanged-contract sh "$isolated_wrapper" breaking
+
+cat >"$isolated_spec" <<'EOF'
+openapi: 3.1.0
+info:
+  title: Breaking baseline fixture
+  version: 0.1.0
+  description: Contract used to prove that Vacuum detects a removed operation.
+servers:
+  - url: /api/v1
+paths: {}
+EOF
+expect_status 1 removed-operation-is-breaking sh "$isolated_wrapper" breaking
+grep -F 'breaking-change' "$test_root/removed-operation-is-breaking.out" >/dev/null || \
+    fail 'removed operation failed without a Vacuum breaking-change violation'
+
+rm -f -- "$isolated_baseline"
+expect_status 1 missing-breaking-baseline sh "$isolated_wrapper" breaking
 
 cat >"$isolated_spec" <<'EOF'
 openapi: 3.1.0

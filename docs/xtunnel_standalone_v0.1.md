@@ -4100,7 +4100,7 @@ tcp
   },
 
   "health": {
-    "type": "http",
+    "type": "HTTP",
     "path": "/health",
     "interval_ms": 10000,
     "timeout_ms": 2000,
@@ -4127,6 +4127,14 @@ POST/PATCH Service DTO 与 `ServiceConfig` 使用同名 Health 字段。边界�
 ```
 
 未提供 Health 时显式落库为 Disabled；提供部分 Health 字段时由 Application Service 补全默认值后再持久化，API GET 必须返回完整有效值，保证往返一致。
+
+`exposure` 是 Service 内嵌的封闭联合类型，Wire discriminator 固定为小写
+`http|tcp`，不公开内部 Route ID。Create 必须提供一个 Exposure；PATCH 中 omitted
+表示不修改、`null` 表示移除公网 Exposure、对象表示按最终 `type` 校验并替换。
+HTTP 返回 canonical `hostname`、`path_prefix` 与 `preserve_host`；TCP 返回
+`public_port`。HTTP `preserve_host` 默认 `true`；TCP Create 省略 `public_port` 时由
+Config Write Coordinator 从配置端口池原子分配。删除 Service 必须在同一事务先清理其
+Exposure，不能留下 Route 引用。
 
 Server Transaction：
 
@@ -4163,7 +4171,11 @@ Revision 规则：
 
 PATCH、enable、disable、delete 必须复用同一 Application Service 事务规则，禁止各 Handler 自行决定是否递增 Revision。
 
-这些 Service Mutation 必须同时校验 Service ETag 与所属 Tunnel 当前版本，并只按对应 Aggregate 的语义递增。ETag Version 用于管理员并发写保护，Tunnel Revision 用于向 Connector 分发配置，两者语义独立。
+这些 Service Mutation 必须同时校验 Service ETag 与所属 Tunnel 当前版本，并只按对应 Aggregate 的语义递增。Service 的强 ETag 是同时绑定 `service.version` 与所属
+`tunnel.version` 的 opaque composite token；客户端不得解析或构造，Handler 负责还原为
+Application Service 已有的双版本 CAS 输入。Create Service 的 `If-Match` 使用父 Tunnel
+强 ETag。ETag Version 用于管理员并发写保护，Tunnel Revision 用于向 Connector 分发配置，
+两者语义独立。
 
 ---
 
@@ -4591,6 +4603,8 @@ Local Administrator
 Cookie：
 
 ```text
+Name=xtunnel_admin_session
+
 HttpOnly
 
 Secure
@@ -4626,13 +4640,16 @@ DELETE
 CSRF Token
 ```
 
-CSRF Token 为绑定 Admin Session 的独立随机值，通过响应 Body 获取，并使用自定义 Header：
+CSRF Token 为绑定 Admin Session 的独立 32-byte 随机值，Wire 使用 43 字符、无 padding
+base64url，通过响应 Body 获取，并使用自定义 Header：
 
 ```text
 X-XTunnel-CSRF
 ```
 
 Server 必须同时校验 Token、`Origin` 和目标 Management Host。CSRF Token 不写 Cookie、不进入 URL、不记录日志。
+Login 与 `/auth/me` 因在 Body 返回 CSRF Token，响应同样必须带 `Cache-Control: no-store`
+和 `Pragma: no-cache`。
 
 唯一例外是尚未建立 Session 的 `POST /api/v1/auth/login`：它不要求 Session-bound CSRF Token，但必须同时满足 `Origin` 与规范化 Management Host 同源、`Content-Type: application/json`，并拒绝表单、`text/plain`、缺失 Origin 的请求和跨站重定向来源。非浏览器客户端也必须显式发送正确 Origin。登录仍受第 115 节限流约束。除 Login 外，Logout 和所有其他状态变更请求都必须通过 Session CSRF 校验。
 
@@ -5335,6 +5352,9 @@ POST /auth/logout
 GET  /auth/me
 ```
 
+尚无 Admin 时，`POST /auth/login` 固定返回 `409 SETUP_REQUIRED`，引导管理员使用受支持的
+本机 Bootstrap 路径创建首个 Admin；不得把该状态伪装为密码错误或 500。
+
 所有 List API 统一使用不透明 Cursor：
 
 ```http
@@ -5348,7 +5368,7 @@ GET /api/v1/services?page_size=50&page_token=...
 }
 ```
 
-`page_size` 默认 `50`、最大 `200`；无下一页时 `next_page_token` 为空或省略，具体表现必须在 OpenAPI 中固定。Token 对客户端完全 opaque，Server 不信任其中任何可解码内容，并至少校验 Resource Type、排序字段、最后一条记录和 Filter Hash；客户端不得解析或构造。非法、过期或与当前 Filter 不匹配的 Token 返回 `400 INVALID_PAGE_TOKEN`。
+`page_size` 默认 `50`、最大 `200`；无下一页时省略 `next_page_token`。Token 对客户端完全 opaque，Server 不信任其中任何可解码内容，并至少校验 Resource Type、排序字段、最后一条记录和 Filter Hash；客户端不得解析或构造。非法、过期或与当前 Filter 不匹配的 Token 返回 `400 INVALID_PAGE_TOKEN`。
 
 PATCH 统一要求 `Content-Type: application/merge-patch+json`，并使用 JSON Merge 语义的显式 DTO：
 
@@ -5360,13 +5380,17 @@ value   → 修改为该值
 
 未知字段返回 `400 INVALID_REQUEST`。非 Nullable 字段传 `null` 返回 `422 VALIDATION_FAILED`。嵌套对象的 omitted/null/value 语义必须逐字段生成测试，禁止用 Go 零值猜测“未提供”。
 
-Tunnel 和 Service 都是 Aggregate Root，`tunnels.version` 与 `services.version` 是各自并发版本。单个 Resource 的 GET、POST Create 和 PATCH 成功响应返回强 ETag；List Response 不返回 Aggregate ETag：
+Tunnel 和 Service 都是 Aggregate Root，`tunnels.version` 与 `services.version` 是各自并发版本。单个 Resource 的 GET、POST Create 和 PATCH 成功响应返回强 ETag；List Response 不返回 Aggregate ETag。Tunnel ETag 使用带引号的十进制 Version：
 
 ```http
 ETag: "7"
 ```
 
 PATCH、DELETE、Rotate、Revoke、Enable 和 Disable 必须携带单个精确 `If-Match`，不接受 `*`。缺失返回 `428 PRECONDITION_REQUIRED`，语法错误或多值返回 `400 INVALID_IF_MATCH`。Application Service 在同一事务中执行：
+
+Service Create 的 `If-Match` 是父 Tunnel ETag；Service 后续 Mutation 使用绑定
+Service Version 与 Tunnel Version 的强 opaque composite ETag。客户端只回传完整值，
+不得依赖其内部编码。
 
 ```text
 UPDATE aggregate
@@ -5424,12 +5448,14 @@ GET /tunnels/{id}/token
 
 POST /tunnels/{id}/token/rotate
 
+POST /tunnels/{id}/token/revoke
+
 POST /tunnels/{id}/revoke
 
 DELETE /tunnels/{id}
 ```
 
-管理端“添加 Connector”只生成使用当前 Tunnel Token 的部署指引，不创建 Connector 持久化记录，也不签发新 Token。`GET /tunnels/{id}/token` 每次返回当前 ACTIVE Token 的同一完整值；只有显式 Rotate 才创建新 Token Version。
+管理端“添加 Connector”只生成使用当前 Tunnel Token 的部署指引，不创建 Connector 持久化记录，也不签发新 Token。`GET /tunnels/{id}/token` 每次通过审计化 Credential Lifecycle `Reveal` 返回当前 ACTIVE Token 的同一完整值；只有显式 Rotate 才创建新 Token Version。Token Revoke 只拒绝当前 Token 的新认证，不关闭既有 Session，也不把 Tunnel 标记为 Revoked；Tunnel Revoke 才撤销整个 Tunnel 并收敛全部 generation。Reveal、Rotate 和 Create Tunnel 等返回 Secret 的响应都必须使用 `no-store`。
 
 `DELETE /tunnels/{id}` 只允许删除没有任何 Service 的 Tunnel。存在引用时返回：
 
@@ -5462,6 +5488,11 @@ POST /services/{id}/enable
 
 POST /services/{id}/disable
 ```
+
+Service 的 `origin`、`health`、`exposure` 都使用 OpenAPI 中的封闭类型；内部 Route ID
+不进入 REST。Create Service 的 `If-Match` 校验父 Tunnel，后续 PATCH/DELETE/enable/disable
+使用 Service composite ETag。Exposure 的创建、切换、移除以及 Service 删除必须复用同一
+Application 事务，只推进一次 Service Version、Tunnel Revision 与 Route Generation。
 
 创建或修改 Service 在提交前触发 Tunnel Snapshot 预算检查。超限统一返回：
 
@@ -5522,6 +5553,23 @@ GET /system/config
 不得返回 Private Key
 ```
 
+`GET /system/health` 与其他 System API 一样要求 Admin Session。`GET /system/config`
+不得直接序列化内部 `Config`，只允许返回 Management Public URL、Agent Gateway Public
+Hostname/TLS Mode、TCP Ingress Port Range、Logging Level，以及 OpenAPI 明列的产品限额；
+路径、Listen Address、Trusted Proxy、Certificate/Key Path 和内部 Frame/Queue 预算均不返回。
+当前这些字段全部标记 `changes_require_restart=true`。
+
+## Security Audit Query
+
+```text
+GET /security-audit-events
+```
+
+该资源只提供 GET，不提供 POST/PUT/PATCH/DELETE。结果固定按
+`occurred_at DESC, event_id DESC`，允许按 Action、Result、Resource Type、Resource ID 和
+UTC 时间范围过滤；opaque Cursor 必须绑定全部 Filter。REST 将 32-byte Digest 编码为
+64 字符小写 hex，所有时间统一返回 RFC3339 UTC。
+
 ---
 
 # 139. API Error
@@ -5539,6 +5587,15 @@ GET /system/config
 ```
 
 HTTP Status 和业务 Error Code 分离。
+
+业务 `error.code` 使用 OpenAPI 冻结的封闭枚举；Handler 只能把内部错误映射到该列表，
+不得以符合大写命名规则为由临时发明新码。新增或重命名 Error Code 必须走显式
+Contract Change Review。
+
+可选 `error.details` 不是任意对象，而是以 `type` 判别的封闭联合类型：
+`FIELD_VIOLATIONS`、`TUNNEL_IN_USE`、`SNAPSHOT_LIMIT` 或
+`RESOURCE_VERSION_CONFLICT`。每种 Details 的字段、Required/Nullable 与上限只由 OpenAPI
+定义；不得在 Handler 中临时增加 Metadata 或泄露 composite ETag 的内部版本编码。
 
 ---
 
@@ -7830,13 +7887,17 @@ Tunnel CRUD
 
 Connector View
 
-Token Rotate
+Token Reveal / Rotate / Revoke
 
 Service CRUD
 
 Service Status
 
 Settings
+
+Security Audit Read-only Query
+
+Service Composite ETag / Nested Exposure
 ```
 
 验收：

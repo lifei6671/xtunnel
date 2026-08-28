@@ -1,6 +1,15 @@
 extends: [[vacuum:oas, recommended]]
 
 rules:
+  # XTunnel 的 JSON Wire 契约有意使用 snake_case；示例与组件说明属于风格项，
+  # 不得用它们稀释 Schema、状态码、Header 和 Breaking 的机器校验结果。
+  camel-case-properties: off
+  component-description: off
+  oas3-missing-example: off
+  oas3-parameter-description: off
+  operation-description: off
+  description-duplication: off
+
   xtunnel-openapi-version:
     description: XTunnel V0.1 must use the frozen OpenAPI dialect.
     severity: error
@@ -30,3 +39,29 @@ rules:
                 const: /api/v1
             not:
               required: [variables]
+
+  xtunnel-complete-path-set:
+    description: M5 contract freeze must contain real management operations, not the M0 skeleton.
+    severity: error
+    given: $.paths
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          type: object
+          minProperties: 15
+
+  xtunnel-audit-query-only:
+    description: Security Audit Event is append-only evidence and only exposes a read operation.
+    severity: error
+    given: $.paths["/security-audit-events"]
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          type: object
+          required: [get]
+          additionalProperties: false
+          properties:
+            get:
+              type: object

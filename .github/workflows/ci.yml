@@ -74,6 +74,7 @@ jobs:
           set -euo pipefail
           ./tools/bootstrap-openapi.sh
           ./tools/openapi.sh validate
+          ./tools/openapi.sh breaking
           ./tools/test-openapi.sh
 
       - name: Build the embedded web assets
