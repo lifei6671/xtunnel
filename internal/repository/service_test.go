@@ -171,6 +171,71 @@ func TestServiceValidateHealth(t *testing.T) {
 	}
 }
 
+func TestServiceProxyOptionsWithDefaultsUsesWholeStructPresence(t *testing.T) {
+	defaults := (ServiceProxyOptions{}).WithDefaults()
+	if defaults.DisableChunkedEncoding || defaults.DisableHappyEyeballs ||
+		defaults.HTTPIdleConnectionTimeoutMS != 90_000 || defaults.HTTPMaxIdleConnections != 100 ||
+		defaults.TCPKeepAliveIntervalMS != 30_000 {
+		t.Fatalf("ServiceProxyOptions.WithDefaults() = %#v", defaults)
+	}
+
+	explicitKeepaliveDisabled := ServiceProxyOptions{
+		HTTPIdleConnectionTimeoutMS: defaults.HTTPIdleConnectionTimeoutMS,
+		HTTPMaxIdleConnections:      defaults.HTTPMaxIdleConnections,
+		TCPKeepAliveIntervalMS:      0,
+	}
+	if got := explicitKeepaliveDisabled.WithDefaults(); got != explicitKeepaliveDisabled {
+		t.Fatalf("explicit keepalive disable became %#v, want %#v", got, explicitKeepaliveDisabled)
+	}
+}
+
+func TestServiceValidateProxyOptionsProtocolApplicability(t *testing.T) {
+	defaults := (ServiceProxyOptions{}).WithDefaults()
+	tests := []struct {
+		name    string
+		service Service
+		wantErr bool
+	}{
+		{name: "HTTP 接受冻结默认值", service: validHTTPService()},
+		{name: "HTTP 接受显式关闭 Keepalive", service: func() Service {
+			service := validHTTPService()
+			service.ProxyOptions = defaults
+			service.ProxyOptions.TCPKeepAliveIntervalMS = 0
+			return service
+		}()},
+		{name: "TCP 接受全零未指定态", service: validTCPService()},
+		{name: "TCP 禁止 Chunked 参数", service: func() Service {
+			service := validTCPService()
+			service.ProxyOptions = defaults
+			service.ProxyOptions.DisableChunkedEncoding = true
+			return service
+		}(), wantErr: true},
+		{name: "TCP 禁止非默认 HTTP Timeout", service: func() Service {
+			service := validTCPService()
+			service.ProxyOptions = defaults
+			service.ProxyOptions.HTTPIdleConnectionTimeoutMS--
+			return service
+		}(), wantErr: true},
+		{name: "HTTP 显式结构禁止零连接数", service: func() Service {
+			service := validHTTPService()
+			service.ProxyOptions.HTTPIdleConnectionTimeoutMS = defaults.HTTPIdleConnectionTimeoutMS
+			return service
+		}(), wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.service.Validate()
+			if test.wantErr && !errors.Is(err, ErrInvalidService) {
+				t.Fatalf("Service.Validate() error = %v, want ErrInvalidService", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("Service.Validate() error = %v", err)
+			}
+		})
+	}
+}
+
 func validHTTPService() Service {
 	return Service{
 		ID: testServiceID, TunnelID: testTunnelID, Name: "office web", RequiredRevision: 1,

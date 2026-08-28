@@ -428,6 +428,10 @@ func (view snapshotStartupView) Services() repository.ServiceRepository {
 	return view.services
 }
 
+func (snapshotStartupView) Routes() repository.RouteRepository {
+	return nil
+}
+
 type snapshotStartupTunnelRepository struct {
 	repository.TunnelRepository
 	tunnels   []repository.Tunnel

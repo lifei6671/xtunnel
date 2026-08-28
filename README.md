@@ -1,6 +1,6 @@
 # XTunnel
 
-XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面已通过阶段 Review 与全绿 CI；M2 Credential Lifecycle & Failover Hardening 已通过用户阶段 Review，仍等待覆盖本地提交的 CI 证据；M3-01 至 M3-10 已完成本地实现与独立复审，当前保持 `REVIEW`。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot Reconcile、按 Service Health/Revision 过滤的 Connector 选择，以及两级 Health Target 硬预算；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。Tunnel/Connector/Service Status、Management REST、生产 Public Listener 和 `/metrics` 导出仍由后续里程碑实现。
+XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面已通过阶段 Review 与全绿 CI；M2 Credential Lifecycle & Failover Hardening 已通过用户阶段 Review，仍等待覆盖本地提交的 CI 证据；M3-01 至 M3-13 已完成本地实现与独立复审，当前保持 `REVIEW`。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算，以及首个 Admin 完成后启动的生产 HTTP Ingress；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。Tunnel/Connector/Service Status、Management REST、TCP Public Listener 和 `/metrics` 导出仍由后续里程碑实现。
 
 ## 开发运行
 
@@ -86,6 +86,8 @@ Resolve Stable Data Target
 → Run Forward-only Migration
 → Load/Create independent Tunnel Token Master Key
 → Validate stored Snapshots and rebuild Health Target Budget
+→ Load immutable Route Snapshot
+→ After first Admin: HTTP Ingress → Agent Gateway → Runtime Reconciler
 ```
 
 `server.data_dir` 必须是绝对路径，父目录和正式数据目录都需预先存在；Server 不会自动创建数据目录。生产默认 Stable Parent 为 `/var/lib/xtunnel`，正式 Data Target 为 `/var/lib/xtunnel/data`；systemd StateDirectory 与 OCI Volume 必须挂载父目录，不能把可被 Restore rename 的 `data` leaf 直接用作挂载点。项目仍在开发中，不自动迁移旧 `/var/lib/xtunnel/xtunnel.db` 布局，systemd 安装器发现旧布局会在覆盖包装产物前拒绝。Linux 运行环境还需预先创建归 Runtime UID 所有、权限为 `0700` 的 `/run/xtunnel`。数据库固定为 `<server.data_dir>/xtunnel.db`，连接使用 WAL、Foreign Keys、5 秒 Busy Timeout 和 Normal Synchronous。完整 Tunnel Token 只以 AES-256-GCM 密文写入数据库，独立 32 字节主密钥位于 `<server.data_dir>/credentials/tunnel-token.key`；只要数据库已有 Token 密文，密钥缺失、损坏或权限不安全就会阻止启动。
@@ -99,7 +101,9 @@ xtunnel-server backup restore --input /secure/backup/xtunnel-backup.tar
 
 运行中的 Server 通过 `/run/xtunnel/backup-<target-hash>.sock` 提供在线 Create Barrier；Socket 不存在时 Create 获取同一 External Lock 后离线执行，Socket 存在但连接或认证失败时不会静默回退。在线 Lease 断线会立即取消归档，只有完整落盘并收到 release ACK 的输出才会发布。Restore 始终要求 Server 已停止并独占 External Lock。CLI 以 `openat2` 固定 SQLite 源 inode，同一 FD 完成 Schema 检查和包含 WAL 可见状态的 Backup；原路径在操作期间被 symlink/rename 替换会 fail closed 并删除候选，不会切换源或遗漏原名 WAL。Archive 为权限 `0600` 的 canonical USTAR，包含 SQLite 自包含备份、32 字节 Tunnel Token Master Key，以及 pinned 模式下最终 Gateway key/certificate；Public TLS 外部证书不进入 Archive。存在未完成 Gateway Rotation Journal/临时文件时 Create 会拒绝，需先完成正常启动或维护 Reconciliation。Restore 会先在 sibling staging 中校验 Manifest/Hash、SQLite 完整性与实际 Schema、Token Key 对全部 Token 密文的解密和身份/Secret Hash 一致性、Pinned Identity，再以 rollback + Journal 原子切换；下次启动会在打开 SQLite 前自动完成或回滚中断的 Restore。该能力已进入本地 `REVIEW`，正式发布仍需 CI、M3 Gate 和后续 Filesystem Failpoint/Release Matrix 证据。
 
-收到 `SIGINT` 或 `SIGTERM` 后，Server 先让 Session 退出选路并执行 Drain，Agent 停止补充 WorkConn、等待 ACTIVE 连接自然结束，超过固定 Deadline 才强制关闭；随后 Server 关闭 SQLite 并释放 External Lock。XTunnel V0.1 Server 的生产运行边界仍为 Linux amd64/arm64，不提供 Windows Server External Lock；Agent 支持 Linux amd64/arm64 与 Windows amd64/arm64。Registry 已按 Tunnel 对 Current Connector Session 先执行未排空、Pool Idle 与容量过滤，再用 Least Active + 稳定 Round Robin 取得原子连接租约，并保留旧 generation ActiveWork tombstone。M2 的 Token Rotate/Revoke、跨 Connector 故障切换策略和在线生命周期可观测性已通过用户阶段 Review，仍待覆盖本地提交的全绿 CI 证据，因此不能标记为 `DONE`；这些实现不重复 M1 已有的默认负载选择。
+生产 HTTP Ingress 使用严格 Host/Path Route、Streaming Reverse Proxy 和 Tunnel-aware HTTP/1.1 Transport。每条池化连接对应一条 ACTIVE WorkConn，并按 Tunnel、Service 与 Required Revision 隔离；建立新 WorkConn 时只选择 Service Required Revision 与匹配 Route 精确相等的 Connector，同键顺序请求可 KeepAlive 复用，跨键不会复用，旧 Route generation 也不会覆盖新池。Origin Host 按 `origin_http_host > preserve_host > origin host[:port]` 选择；禁用 Chunked 且请求长度无法在不读取 Body 的前提下确定时返回显式错误。入口采用 10 秒 Header Read、60 秒 Request Body 滑动空闲窗，OPEN 使用 6 秒总预算；Tunnel Offline、Origin Refused/Timeout、容量耗尽、配置未观察和 Service Disabled 返回稳定公开错误码，不暴露内部拨号文本。Forwarded/Trusted Proxy、WebSocket、TCP Listener 与公网限流仍属于后续 M4 任务；M4-05 完成前，HTTP Upgrade 会在进入 Reverse Proxy 前返回 `501 UPGRADE_NOT_SUPPORTED`，当前不能把 HTTP Ingress 视为完整 Product Data Plane Gate。
+
+收到 `SIGINT` 或 `SIGTERM` 后，Server 先停止 HTTP/Gateway 新入口并关闭 idle HTTP WorkConn，再在同一个固定 Deadline 内并行排空 HTTP 请求与 Session ACTIVE；到期后主动关闭残留 Socket，随后关闭 Gateway、Route Owner、SQLite 并释放 External Lock。XTunnel V0.1 Server 的生产运行边界仍为 Linux amd64/arm64，不提供 Windows Server External Lock；Agent 支持 Linux amd64/arm64 与 Windows amd64/arm64。Registry 已按 Tunnel 对 Current Connector Session 先执行未排空、Pool Idle 与容量过滤，再用 Least Active + 稳定 Round Robin 取得原子连接租约，并保留旧 generation ActiveWork tombstone。M2 的 Token Rotate/Revoke、跨 Connector 故障切换策略和在线生命周期可观测性已通过用户阶段 Review，仍待覆盖本地提交的全绿 CI 证据，因此不能标记为 `DONE`；这些实现不重复 M1 已有的默认负载选择。
 
 ## OCI 与 Agent Service Self-install
 

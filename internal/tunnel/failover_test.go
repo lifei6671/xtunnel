@@ -775,7 +775,7 @@ func newFailoverFixture(t *testing.T, connectorIDs ...string) *failoverFixture {
 		go func() { result <- sessions.Serve(context.Background(), controlServer, &established) }()
 		readDemand(t, controlAgent)
 	}
-	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("open.NewHandler() error = %v", err)
 	}

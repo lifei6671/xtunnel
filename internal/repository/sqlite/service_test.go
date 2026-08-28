@@ -61,6 +61,11 @@ func TestServiceRepositoryCRUDAndStableOrdering(t *testing.T) {
 	first.TLSVerify = true
 	first.TLSServerName = "origin.example.test"
 	first.OriginHTTPHost = "app.example.test"
+	first.ProxyOptions = repository.ServiceProxyOptions{
+		DisableChunkedEncoding: true, DisableHappyEyeballs: true,
+		HTTPIdleConnectionTimeoutMS: 30_000, HTTPMaxIdleConnections: 20,
+		TCPKeepAliveIntervalMS: 0,
+	}
 	first.Health = &repository.HealthCheck{
 		Type: repository.HealthTypeHTTP, Path: "/ready", IntervalMS: 10_000, TimeoutMS: 2_000,
 		ExpectedStatusMin: 200, ExpectedStatusMax: 399, FailureThreshold: 3, SuccessThreshold: 2,
@@ -262,6 +267,7 @@ func testService(serviceID, tunnelID string) repository.Service {
 	return repository.Service{
 		ID: serviceID, TunnelID: tunnelID, Name: serviceID, RequiredRevision: 1,
 		OriginScheme: repository.OriginSchemeHTTP, OriginHost: "127.0.0.1", OriginPort: 8080,
-		ConnectTimeoutMS: 5_000, Enabled: true, Version: 1, CreatedAt: 1, UpdatedAt: 1,
+		ConnectTimeoutMS: 5_000, ProxyOptions: (repository.ServiceProxyOptions{}).WithDefaults(),
+		Enabled: true, Version: 1, CreatedAt: 1, UpdatedAt: 1,
 	}
 }

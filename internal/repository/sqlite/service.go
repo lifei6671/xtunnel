@@ -17,81 +17,96 @@ const ServiceTable = "services"
 
 // ServiceColumns 集中定义 services 的列名，避免 CRUD 条件和更新字段漂移。
 var ServiceColumns = struct {
-	ID                      string
-	TunnelID                string
-	Name                    string
-	RequiredRevision        string
-	OriginScheme            string
-	OriginHost              string
-	OriginPort              string
-	TLSVerify               string
-	TLSServerName           string
-	OriginHTTPHost          string
-	ConnectTimeoutMS        string
-	HealthType              string
-	HealthPath              string
-	HealthIntervalMS        string
-	HealthTimeoutMS         string
-	HealthExpectedStatusMin string
-	HealthExpectedStatusMax string
-	HealthFailureThreshold  string
-	HealthSuccessThreshold  string
-	Enabled                 string
-	Version                 string
-	CreatedAt               string
-	UpdatedAt               string
+	ID                          string
+	TunnelID                    string
+	Name                        string
+	RequiredRevision            string
+	OriginScheme                string
+	OriginHost                  string
+	OriginPort                  string
+	TLSVerify                   string
+	TLSServerName               string
+	OriginHTTPHost              string
+	ConnectTimeoutMS            string
+	DisableChunkedEncoding      string
+	DisableHappyEyeballs        string
+	HTTPIdleConnectionTimeoutMS string
+	HTTPMaxIdleConnections      string
+	TCPKeepAliveIntervalMS      string
+	HealthType                  string
+	HealthPath                  string
+	HealthIntervalMS            string
+	HealthTimeoutMS             string
+	HealthExpectedStatusMin     string
+	HealthExpectedStatusMax     string
+	HealthFailureThreshold      string
+	HealthSuccessThreshold      string
+	Enabled                     string
+	Version                     string
+	CreatedAt                   string
+	UpdatedAt                   string
 }{
-	ID:                      "id",
-	TunnelID:                "tunnel_id",
-	Name:                    "name",
-	RequiredRevision:        "required_revision",
-	OriginScheme:            "origin_scheme",
-	OriginHost:              "origin_host",
-	OriginPort:              "origin_port",
-	TLSVerify:               "tls_verify",
-	TLSServerName:           "tls_server_name",
-	OriginHTTPHost:          "origin_http_host",
-	ConnectTimeoutMS:        "connect_timeout_ms",
-	HealthType:              "health_type",
-	HealthPath:              "health_path",
-	HealthIntervalMS:        "health_interval_ms",
-	HealthTimeoutMS:         "health_timeout_ms",
-	HealthExpectedStatusMin: "health_expected_status_min",
-	HealthExpectedStatusMax: "health_expected_status_max",
-	HealthFailureThreshold:  "health_failure_threshold",
-	HealthSuccessThreshold:  "health_success_threshold",
-	Enabled:                 "enabled",
-	Version:                 "version",
-	CreatedAt:               "created_at",
-	UpdatedAt:               "updated_at",
+	ID:                          "id",
+	TunnelID:                    "tunnel_id",
+	Name:                        "name",
+	RequiredRevision:            "required_revision",
+	OriginScheme:                "origin_scheme",
+	OriginHost:                  "origin_host",
+	OriginPort:                  "origin_port",
+	TLSVerify:                   "tls_verify",
+	TLSServerName:               "tls_server_name",
+	OriginHTTPHost:              "origin_http_host",
+	ConnectTimeoutMS:            "connect_timeout_ms",
+	DisableChunkedEncoding:      "disable_chunked_encoding",
+	DisableHappyEyeballs:        "disable_happy_eyeballs",
+	HTTPIdleConnectionTimeoutMS: "http_idle_connection_timeout_ms",
+	HTTPMaxIdleConnections:      "http_max_idle_connections",
+	TCPKeepAliveIntervalMS:      "tcp_keepalive_interval_ms",
+	HealthType:                  "health_type",
+	HealthPath:                  "health_path",
+	HealthIntervalMS:            "health_interval_ms",
+	HealthTimeoutMS:             "health_timeout_ms",
+	HealthExpectedStatusMin:     "health_expected_status_min",
+	HealthExpectedStatusMax:     "health_expected_status_max",
+	HealthFailureThreshold:      "health_failure_threshold",
+	HealthSuccessThreshold:      "health_success_threshold",
+	Enabled:                     "enabled",
+	Version:                     "version",
+	CreatedAt:                   "created_at",
+	UpdatedAt:                   "updated_at",
 }
 
 // serviceRecord 是 Service 聚合的 SQLite 存储形状；可选字符串和端口用指针保持
 // SQL NULL 与领域零值之间的明确映射。
 type serviceRecord struct {
-	ID                      string  `gorm:"column:id;primaryKey"`
-	TunnelID                string  `gorm:"column:tunnel_id"`
-	Name                    string  `gorm:"column:name"`
-	RequiredRevision        int64   `gorm:"column:required_revision"`
-	OriginScheme            string  `gorm:"column:origin_scheme"`
-	OriginHost              string  `gorm:"column:origin_host"`
-	OriginPort              uint32  `gorm:"column:origin_port"`
-	TLSVerify               bool    `gorm:"column:tls_verify"`
-	TLSServerName           *string `gorm:"column:tls_server_name"`
-	OriginHTTPHost          *string `gorm:"column:origin_http_host"`
-	ConnectTimeoutMS        uint32  `gorm:"column:connect_timeout_ms"`
-	HealthType              *string `gorm:"column:health_type"`
-	HealthPath              *string `gorm:"column:health_path"`
-	HealthIntervalMS        *uint32 `gorm:"column:health_interval_ms"`
-	HealthTimeoutMS         *uint32 `gorm:"column:health_timeout_ms"`
-	HealthExpectedStatusMin *uint32 `gorm:"column:health_expected_status_min"`
-	HealthExpectedStatusMax *uint32 `gorm:"column:health_expected_status_max"`
-	HealthFailureThreshold  *uint32 `gorm:"column:health_failure_threshold"`
-	HealthSuccessThreshold  *uint32 `gorm:"column:health_success_threshold"`
-	Enabled                 bool    `gorm:"column:enabled"`
-	Version                 int64   `gorm:"column:version"`
-	CreatedAt               int64   `gorm:"column:created_at"`
-	UpdatedAt               int64   `gorm:"column:updated_at"`
+	ID                          string  `gorm:"column:id;primaryKey"`
+	TunnelID                    string  `gorm:"column:tunnel_id"`
+	Name                        string  `gorm:"column:name"`
+	RequiredRevision            int64   `gorm:"column:required_revision"`
+	OriginScheme                string  `gorm:"column:origin_scheme"`
+	OriginHost                  string  `gorm:"column:origin_host"`
+	OriginPort                  uint32  `gorm:"column:origin_port"`
+	TLSVerify                   bool    `gorm:"column:tls_verify"`
+	TLSServerName               *string `gorm:"column:tls_server_name"`
+	OriginHTTPHost              *string `gorm:"column:origin_http_host"`
+	ConnectTimeoutMS            uint32  `gorm:"column:connect_timeout_ms"`
+	DisableChunkedEncoding      bool    `gorm:"column:disable_chunked_encoding"`
+	DisableHappyEyeballs        bool    `gorm:"column:disable_happy_eyeballs"`
+	HTTPIdleConnectionTimeoutMS uint32  `gorm:"column:http_idle_connection_timeout_ms"`
+	HTTPMaxIdleConnections      uint32  `gorm:"column:http_max_idle_connections"`
+	TCPKeepAliveIntervalMS      uint32  `gorm:"column:tcp_keepalive_interval_ms"`
+	HealthType                  *string `gorm:"column:health_type"`
+	HealthPath                  *string `gorm:"column:health_path"`
+	HealthIntervalMS            *uint32 `gorm:"column:health_interval_ms"`
+	HealthTimeoutMS             *uint32 `gorm:"column:health_timeout_ms"`
+	HealthExpectedStatusMin     *uint32 `gorm:"column:health_expected_status_min"`
+	HealthExpectedStatusMax     *uint32 `gorm:"column:health_expected_status_max"`
+	HealthFailureThreshold      *uint32 `gorm:"column:health_failure_threshold"`
+	HealthSuccessThreshold      *uint32 `gorm:"column:health_success_threshold"`
+	Enabled                     bool    `gorm:"column:enabled"`
+	Version                     int64   `gorm:"column:version"`
+	CreatedAt                   int64   `gorm:"column:created_at"`
+	UpdatedAt                   int64   `gorm:"column:updated_at"`
 }
 
 // TableName 把 GORM 模型固定到机器契约定义的 services 表。
@@ -229,13 +244,22 @@ func (store serviceRepository) Delete(ctx context.Context, tunnelID, serviceID s
 }
 
 // serviceRecordFromDomain 复制领域值到持久化形状，不保留调用方可变对象的别名。
+// ProxyOptions 只在整个结构全零时补冻结默认值；部分显式输入中的 keepalive=0 必须
+// 原样写入，不能逐字段补默认而破坏调用方的禁用意图。
 func serviceRecordFromDomain(service repository.Service) serviceRecord {
+	proxyOptions := service.ProxyOptions.WithDefaults()
 	record := serviceRecord{
 		ID: service.ID, TunnelID: service.TunnelID, Name: service.Name,
 		RequiredRevision: service.RequiredRevision, OriginScheme: string(service.OriginScheme),
 		OriginHost: service.OriginHost, OriginPort: service.OriginPort, TLSVerify: service.TLSVerify,
 		TLSServerName: optionalString(service.TLSServerName), OriginHTTPHost: optionalString(service.OriginHTTPHost),
-		ConnectTimeoutMS: service.ConnectTimeoutMS, Enabled: service.Enabled, Version: service.Version,
+		ConnectTimeoutMS:            service.ConnectTimeoutMS,
+		DisableChunkedEncoding:      proxyOptions.DisableChunkedEncoding,
+		DisableHappyEyeballs:        proxyOptions.DisableHappyEyeballs,
+		HTTPIdleConnectionTimeoutMS: proxyOptions.HTTPIdleConnectionTimeoutMS,
+		HTTPMaxIdleConnections:      proxyOptions.HTTPMaxIdleConnections,
+		TCPKeepAliveIntervalMS:      proxyOptions.TCPKeepAliveIntervalMS,
+		Enabled:                     service.Enabled, Version: service.Version,
 		CreatedAt: service.CreatedAt, UpdatedAt: service.UpdatedAt,
 	}
 	if service.Health == nil {
@@ -263,6 +287,13 @@ func serviceDomainFromRecord(record serviceRecord) (repository.Service, error) {
 		OriginHost: record.OriginHost, OriginPort: record.OriginPort, TLSVerify: record.TLSVerify,
 		TLSServerName: stringValue(record.TLSServerName), OriginHTTPHost: stringValue(record.OriginHTTPHost),
 		ConnectTimeoutMS: record.ConnectTimeoutMS, Enabled: record.Enabled, Version: record.Version,
+		ProxyOptions: repository.ServiceProxyOptions{
+			DisableChunkedEncoding:      record.DisableChunkedEncoding,
+			DisableHappyEyeballs:        record.DisableHappyEyeballs,
+			HTTPIdleConnectionTimeoutMS: record.HTTPIdleConnectionTimeoutMS,
+			HTTPMaxIdleConnections:      record.HTTPMaxIdleConnections,
+			TCPKeepAliveIntervalMS:      record.TCPKeepAliveIntervalMS,
+		},
 		CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
 	}
 	if record.HealthType != nil {
@@ -286,26 +317,31 @@ func serviceDomainFromRecord(record serviceRecord) (repository.Service, error) {
 // serviceUpdates 显式列出允许变更的业务列，并由调用方单独提供下一版本号。
 func serviceUpdates(record serviceRecord, nextVersion int64) map[string]any {
 	return map[string]any{
-		ServiceColumns.Name:                    record.Name,
-		ServiceColumns.RequiredRevision:        record.RequiredRevision,
-		ServiceColumns.OriginScheme:            record.OriginScheme,
-		ServiceColumns.OriginHost:              record.OriginHost,
-		ServiceColumns.OriginPort:              record.OriginPort,
-		ServiceColumns.TLSVerify:               record.TLSVerify,
-		ServiceColumns.TLSServerName:           record.TLSServerName,
-		ServiceColumns.OriginHTTPHost:          record.OriginHTTPHost,
-		ServiceColumns.ConnectTimeoutMS:        record.ConnectTimeoutMS,
-		ServiceColumns.HealthType:              record.HealthType,
-		ServiceColumns.HealthPath:              record.HealthPath,
-		ServiceColumns.HealthIntervalMS:        record.HealthIntervalMS,
-		ServiceColumns.HealthTimeoutMS:         record.HealthTimeoutMS,
-		ServiceColumns.HealthExpectedStatusMin: record.HealthExpectedStatusMin,
-		ServiceColumns.HealthExpectedStatusMax: record.HealthExpectedStatusMax,
-		ServiceColumns.HealthFailureThreshold:  record.HealthFailureThreshold,
-		ServiceColumns.HealthSuccessThreshold:  record.HealthSuccessThreshold,
-		ServiceColumns.Enabled:                 record.Enabled,
-		ServiceColumns.Version:                 nextVersion,
-		ServiceColumns.UpdatedAt:               record.UpdatedAt,
+		ServiceColumns.Name:                        record.Name,
+		ServiceColumns.RequiredRevision:            record.RequiredRevision,
+		ServiceColumns.OriginScheme:                record.OriginScheme,
+		ServiceColumns.OriginHost:                  record.OriginHost,
+		ServiceColumns.OriginPort:                  record.OriginPort,
+		ServiceColumns.TLSVerify:                   record.TLSVerify,
+		ServiceColumns.TLSServerName:               record.TLSServerName,
+		ServiceColumns.OriginHTTPHost:              record.OriginHTTPHost,
+		ServiceColumns.ConnectTimeoutMS:            record.ConnectTimeoutMS,
+		ServiceColumns.DisableChunkedEncoding:      record.DisableChunkedEncoding,
+		ServiceColumns.DisableHappyEyeballs:        record.DisableHappyEyeballs,
+		ServiceColumns.HTTPIdleConnectionTimeoutMS: record.HTTPIdleConnectionTimeoutMS,
+		ServiceColumns.HTTPMaxIdleConnections:      record.HTTPMaxIdleConnections,
+		ServiceColumns.TCPKeepAliveIntervalMS:      record.TCPKeepAliveIntervalMS,
+		ServiceColumns.HealthType:                  record.HealthType,
+		ServiceColumns.HealthPath:                  record.HealthPath,
+		ServiceColumns.HealthIntervalMS:            record.HealthIntervalMS,
+		ServiceColumns.HealthTimeoutMS:             record.HealthTimeoutMS,
+		ServiceColumns.HealthExpectedStatusMin:     record.HealthExpectedStatusMin,
+		ServiceColumns.HealthExpectedStatusMax:     record.HealthExpectedStatusMax,
+		ServiceColumns.HealthFailureThreshold:      record.HealthFailureThreshold,
+		ServiceColumns.HealthSuccessThreshold:      record.HealthSuccessThreshold,
+		ServiceColumns.Enabled:                     record.Enabled,
+		ServiceColumns.Version:                     nextVersion,
+		ServiceColumns.UpdatedAt:                   record.UpdatedAt,
 	}
 }
 

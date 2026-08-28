@@ -54,6 +54,18 @@ var productionMigrations = []migration{
 			migrations.TunnelFirstAuthentication,
 		},
 	},
+	{
+		version: 7,
+		statements: []string{
+			migrations.RouteDomain,
+		},
+	},
+	{
+		version: 8,
+		statements: []string{
+			migrations.ServiceProxyOptions,
+		},
+	},
 }
 
 // migrate 使用生产迁移集合把数据库推进到当前二进制支持的最新版本。

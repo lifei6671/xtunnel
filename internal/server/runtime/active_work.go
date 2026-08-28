@@ -44,7 +44,8 @@ type ActiveWorkSpec struct {
 	Cancel context.CancelFunc
 	// WorkConn 是连接 Connector 的数据面连接。
 	WorkConn net.Conn
-	// PeerConn 是 Public Listener 已接受的对端连接。
+	// PeerConn 是 Public Listener 已接受的对端连接。Tunnel Dial 返回由上层协议池
+	// 持有的连接时没有独立 Public Peer，此字段允许为 nil。
 	PeerConn net.Conn
 	// Lease 保存选择阶段增加的活跃计数，终止路径只释放一次。
 	Lease *ConnectorLease
@@ -85,13 +86,16 @@ func (work *ActiveWork) Identity() ActiveWorkIdentity {
 	return work.identity
 }
 
-// Finish 完成自然结束路径：先从 Tunnel Registry 线性化摘除，再在锁外解除 IO。
+// Finish 完成自然结束路径：先在 Runtime 锁外解除 IO 并释放 Lease，最后才从
+// activeWorks 摘除。activeWorks 因此同时表示“仍在传输”与“正在关闭”；Drain
+// 只有在 FD 和额度都完成收敛后才能观察到零。
 func (work *ActiveWork) Finish() error {
 	if work == nil || work.runtime == nil {
 		return ErrInvalidActiveWork
 	}
+	closeErr := work.closeOutsideLock()
 	work.runtime.detach(work)
-	return work.closeOutsideLock()
+	return closeErr
 }
 
 // Close 与 Finish 使用同一个 exactly-once 终止路径，使 ActiveWork 可由统一资源清理器关闭。
@@ -106,9 +110,15 @@ func (work *ActiveWork) closeOutsideLock() error {
 		work.cancel()
 		now := work.runtime.now()
 		workDeadlineErr := work.workConn.SetDeadline(now)
-		peerDeadlineErr := work.peerConn.SetDeadline(now)
+		var peerDeadlineErr error
+		if work.peerConn != nil {
+			peerDeadlineErr = work.peerConn.SetDeadline(now)
+		}
 		workCloseErr := work.workConn.Close()
-		peerCloseErr := work.peerConn.Close()
+		var peerCloseErr error
+		if work.peerConn != nil {
+			peerCloseErr = work.peerConn.Close()
+		}
 		var leaseErr error
 		if !work.lease.releaseFromActive() {
 			leaseErr = ErrActiveWorkLeaseReleased
@@ -254,14 +264,15 @@ func (registry *Registry) closeActive() error {
 	var closeErrors []error
 	for _, runtime := range registry.runtimeSnapshot() {
 		runtime.mu.Lock()
+		// 这里只冻结本轮强制关闭集合，不提前删除 Map。并发 Drain/Shutdown
+		// 仍必须把“正在 Close”的 Work 计入 ACTIVE，直到 Finish 完成全部清理。
 		works := make([]*ActiveWork, 0, len(runtime.activeWorks))
-		for connectionID, work := range runtime.activeWorks {
+		for _, work := range runtime.activeWorks {
 			works = append(works, work)
-			delete(runtime.activeWorks, connectionID)
 		}
 		runtime.mu.Unlock()
 		for _, work := range works {
-			if err := work.closeOutsideLock(); err != nil {
+			if err := work.Finish(); err != nil {
 				closeErrors = append(closeErrors, fmt.Errorf("close active work %s: %w", work.identity.ConnectionID, err))
 			}
 		}
@@ -279,7 +290,7 @@ func (registry *Registry) runtimeSnapshot() []*TunnelRuntime {
 	return runtimes
 }
 
-// ActiveCount 返回当前 Tunnel Registry 中尚未线性化终止的 ACTIVE 数。
+// ActiveCount 返回当前 Tunnel Registry 中尚未完成连接关闭与 Lease 释放的 ACTIVE 数。
 func (runtime *TunnelRuntime) ActiveCount() int {
 	if runtime == nil {
 		return 0
@@ -291,13 +302,25 @@ func (runtime *TunnelRuntime) ActiveCount() int {
 
 func (runtime *TunnelRuntime) detach(work *ActiveWork) bool {
 	runtime.mu.Lock()
-	defer runtime.mu.Unlock()
 	current, exists := runtime.activeWorks[work.identity.ConnectionID]
 	if !exists || current != work {
+		runtime.mu.Unlock()
 		return false
 	}
 	delete(runtime.activeWorks, work.identity.ConnectionID)
 	runtime.removeFinishedTombstoneLocked(work.identity.ConnectorID)
+	// 新终止顺序要求 Lease 先释放、Map 后摘除；若 Session 已被 replacement 或
+	// disconnect 放入 retired，最后一个 Map 引用也必须在此处完成释放。
+	releaseSessionID := runtime.releaseRetiredSessionIfUnusedLocked(Session{
+		TunnelID: work.identity.TunnelID, ConnectorID: work.identity.ConnectorID,
+		SessionID: work.identity.SessionID, Generation: work.identity.Generation,
+	})
+	runtime.mu.Unlock()
+	// 全局 Session ID 索引有独立锁；继续保持 TunnelRuntime.mu 与 Registry.mu
+	// 不嵌套，避免 Finish 与认证替换/撤销形成锁环。
+	if releaseSessionID != "" {
+		runtime.registry.releaseSessionID(releaseSessionID)
+	}
 	return true
 }
 
@@ -317,10 +340,11 @@ func (runtime *TunnelRuntime) revoke() ([]*ActiveWork, []*serverlimits.Connector
 		})
 	}
 
+	// revoked 是禁止新注册的线性化点；现有 Work 保留在 Map 中，供并发 Drain
+	// 观察，实际摘除统一交给锁外 Finish 完成。
 	works := make([]*ActiveWork, 0, len(runtime.activeWorks))
-	for connectionID, work := range runtime.activeWorks {
+	for _, work := range runtime.activeWorks {
 		works = append(works, work)
-		delete(runtime.activeWorks, connectionID)
 	}
 	connectorLimits := make([]*serverlimits.ConnectorLease, 0, len(runtime.currentConnectorLimits)+len(runtime.pendingConnectorLimits))
 	sessionIDs := make([]string, 0, len(runtime.current)+len(runtime.pending))
@@ -367,8 +391,9 @@ func NewTunnelRuntimeRegistry() *TunnelRuntimeRegistry {
 	return NewRegistry()
 }
 
-// RevokeTunnel 先在目标 Tunnel 锁内撤销并摘除所有 generation 的 ActiveWork，
-// 再在锁外逐一执行 Cancel、Deadline、Close 和 Lease Release。
+// RevokeTunnel 先在目标 Tunnel 锁内禁止新 ACTIVE 并冻结现有 Work 集合，再在锁外
+// 逐一执行 Cancel、Deadline、Close 和 Lease Release。Work 仅在关闭完成后摘除，
+// 因而并发 Drain 不会在 FD/额度仍占用时提前返回。
 func (registry *Registry) RevokeTunnel(tunnelID string) error {
 	_, err := registry.RevokeTunnelWithLifecycle(tunnelID)
 	return err
@@ -390,7 +415,7 @@ func (registry *Registry) RevokeTunnelWithLifecycle(tunnelID string) ([]Connecto
 	}
 	closeErrors := make([]error, 0, len(works))
 	for _, work := range works {
-		if err := work.closeOutsideLock(); err != nil {
+		if err := work.Finish(); err != nil {
 			closeErrors = append(closeErrors, fmt.Errorf("close active work %s: %w", work.identity.ConnectionID, err))
 		}
 	}
@@ -402,7 +427,7 @@ func validActiveWorkSpec(runtime *TunnelRuntime, spec ActiveWorkSpec) bool {
 		identity.ValidConnectorID(spec.Session.ConnectorID) && identity.ValidSessionID(spec.Session.SessionID) &&
 		spec.Session.Generation > 0 && validate.ValidID(spec.WorkID, "work_") &&
 		validate.ValidID(spec.ConnectionID, "conn_") && spec.Cancel != nil && spec.WorkConn != nil &&
-		spec.PeerConn != nil && spec.Lease != nil && spec.Lease.runtime == runtime &&
+		spec.Lease != nil && spec.Lease.runtime == runtime &&
 		spec.Lease.lifecycle != nil &&
 		spec.Lease.Session() == spec.Session
 }

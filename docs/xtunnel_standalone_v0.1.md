@@ -1998,6 +1998,16 @@ type Origin struct {
     TLSServerName string
 
     HTTPHostHeader string
+
+    DisableChunkedEncoding bool
+
+    DisableHappyEyeballs bool
+
+    HTTPIdleConnectionTimeout time.Duration
+
+    HTTPMaxIdleConnections uint32
+
+    TCPKeepAliveInterval time.Duration
 }
 ```
 
@@ -2081,6 +2091,22 @@ DNS + IPv4/IPv6 尝试 + TCP Connect + TLS Handshake
 Health Check 与真实业务连接必须复用同一个 Resolver、Dialer、TLS 和 Timeout Policy，禁止各自实现不同的 DNS 缓存或地址偏好。系统 Resolver 可以按其策略缓存，但 Snapshot Apply 不得把结果固化。
 
 HTTPS 的 SNI 与证书校验名称按以下顺序确定：显式 `tls_server_name` 优先；否则 DNS Hostname 使用 `origin_host`；IP Literal 使用 IP SAN 校验。`tls_verify=true` 且无法得到有效校验名称时必须失败，禁止自动关闭证书校验。
+
+V0.1 冻结以下 Service Proxy 选项；未显式填写时必须使用表中默认值，不得由
+Server、Agent 或 Web 各自推断第二套默认值：
+
+| 选项 | 默认值 | 适用范围 | V0.1 语义 |
+| --- | ---: | --- | --- |
+| `disable_chunked_encoding` | `false` | HTTP/HTTPS | 禁止向 Origin 发出 Chunked Request；不得为计算长度而整体缓存 Body |
+| `disable_happy_eyeballs` | `false` | HTTP/HTTPS/TCP | `false` 保留系统 Dialer 的 IPv4/IPv6 快速回退；`true` 按 Resolver 地址顺序建连，不并行竞速 |
+| `http_idle_connection_timeout_ms` | `90000` | HTTP/HTTPS | HTTP Transport 空闲 KeepAlive Connection 的最长保留时间 |
+| `http_max_idle_connections` | `100` | HTTP/HTTPS | 每个隔离池最多保留的空闲 HTTP Connection，仍受全局 WorkConn/FD 硬预算限制 |
+| `tcp_keepalive_interval_ms` | `30000` | HTTP/HTTPS/TCP | Origin TCP Socket KeepAlive 间隔；`0` 显式禁用 |
+
+`connect_timeout_ms` 的 V0.1 语义保持不变：它是从 DNS 解析开始，经 IPv4/IPv6
+尝试、TCP Connect 直到 HTTPS TLS Handshake 完成的同一总预算。V0.1 不再叠加独立
+TLS Timeout；`disable_happy_eyeballs` 也不得重置或延长该总预算。HTTP 专属字段出现在
+TCP Service 上必须在输入边界拒绝，不得静默忽略。
 
 ---
 
@@ -2291,6 +2317,19 @@ CREATE TABLE services (
     tls_server_name TEXT,
     origin_http_host TEXT,
     connect_timeout_ms INTEGER NOT NULL DEFAULT 5000,
+    disable_chunked_encoding INTEGER NOT NULL DEFAULT 0
+        CHECK (disable_chunked_encoding IN (0, 1))
+        CHECK (origin_scheme IN ('http', 'https') OR disable_chunked_encoding = 0),
+    disable_happy_eyeballs INTEGER NOT NULL DEFAULT 0
+        CHECK (disable_happy_eyeballs IN (0, 1)),
+    http_idle_connection_timeout_ms INTEGER NOT NULL DEFAULT 90000
+        CHECK (http_idle_connection_timeout_ms BETWEEN 1 AND 4294967295)
+        CHECK (origin_scheme IN ('http', 'https') OR http_idle_connection_timeout_ms = 90000),
+    http_max_idle_connections INTEGER NOT NULL DEFAULT 100
+        CHECK (http_max_idle_connections BETWEEN 1 AND 4294967295)
+        CHECK (origin_scheme IN ('http', 'https') OR http_max_idle_connections = 100),
+    tcp_keepalive_interval_ms INTEGER NOT NULL DEFAULT 30000
+        CHECK (tcp_keepalive_interval_ms BETWEEN 0 AND 4294967295),
     health_type TEXT,
     health_path TEXT,
     health_interval_ms INTEGER,
@@ -2331,6 +2370,10 @@ V0.1 Runtime 已支持这些 Scheme。字段组合必须满足：
 `000005_services.sql` 属于发布前初始建表基线。修改后的内容只作用于新数据库；开发期
 已记录 Migration Version 5 的数据库不会自动重放，必须删除并重建。若存在必须保留的
 已部署数据，则只能新增向前 Migration，禁止依赖修改后的 Version 5 原地升级。
+上述 Service Proxy 字段是 M4-03/M4-07 的 V0.1 目标形状；持久化实现必须由向前
+Migration 承载；当前落盘载体是 `migrations/000008_service_proxy_options.sql`。Wire 实现
+必须由 Proto 机器权威承载，后续 REST 入口再同步 OpenAPI。
+本节文档本身不是 Migration、Wire 发布或 REST 入口的通过证据。
 
 ---
 
@@ -2607,6 +2650,11 @@ message HealthCheckConfig {
     uint32 success_threshold = 8;
 }
 ```
+
+M4-03/M4-07 的 Wire 形状必须使用类型化的 `OriginConnectionOptions` 与
+`HTTPProxyOptions`：前者对所有 Service 必填，后者对 HTTP/HTTPS 必填、对 TCP 必须缺失。
+字段号只由 Proto 机器权威分配，总方案不维护第二份编号，也禁止使用通用
+JSON/Map 绕过 Wire Contract。
 
 V0.1 同时限制：
 
@@ -3161,7 +3209,7 @@ TLS 已经属于前置代理。
 匹配：
 
 ```text
-Exact Host
+Exact Canonical Host（请求端口移除后）
 +
 Longest Path Prefix
 ```
@@ -3220,8 +3268,10 @@ Canonical Path Prefix 规则：根路径只能存为 `/`；非根 Prefix 移除�
 Router 对公网请求不得使用 `path.Clean` 或文件系统路径规则自动改写。对重复斜杠、
 Trailing Slash 和保留字符不做隐式等价折叠；`/foo`、`/foo/`、`/foo//bar` 可以具有
 不同的 Origin 语义。Router 与转发给 Origin 的路径必须来自同一次 Parse/Validate 的
-结果。`RawPath` 为空是 Go HTTP 请求的正常输入；仅非法 percent-encoding，或非空
-`RawPath` 与 `URL.Path`/`RequestURI` 无法保持一致解释时返回 `400 INVALID_PATH`，不得
+结果。`RawPath` 为空是 Go HTTP 请求的正常输入；非法 percent-encoding、encoded
+slash/backslash、明文或编码 dot-segment、控制字符、非法 UTF-8、request-target 中明文
+fragment 分隔符、多重编码后会形成上述危险路径的输入，以及非空 `RawPath` 与
+`URL.Path`/`RequestURI` 无法保持一致解释时，统一返回 `400 INVALID_PATH`，不得
 normalize-and-hope。
 
 ---
@@ -3285,6 +3335,20 @@ atomic.Pointer[RouteSnapshot]
 ---
 
 # 85. Route 更新
+
+全局 Route Generation 持久化为 SQLite 单行权威，禁止为不同入口建立独立代次：
+
+```sql
+CREATE TABLE route_config_state (
+    id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0)
+);
+
+INSERT INTO route_config_state(id, generation) VALUES (1, 0);
+```
+
+`http_routes`、`tcp_routes` 与该单行 generation 必须在同一个
+`BEGIN IMMEDIATE` 事务中提交；运行时只消费提交后的完整状态。
 
 ```text
 API Write
@@ -3367,20 +3431,28 @@ DialContext：
 TunnelDialer
 ```
 
-HTTP Connection Pool 必须按 Tunnel 隔离。ReverseProxy 将 Request URL 的内部目标设置为：
+HTTP Connection Pool 必须按不可变 Service 配置隔离。隔离键至少包含：
 
 ```text
-http://<tunnel_id>.xtunnel.invalid
+TunnelID + ServiceID + ConfigVersion
 ```
 
-该内部 Host 只用于 `http.Transport` 的连接池 Key 和 DialContext 解析，不发送给 Origin。不得只把 Tunnel ID 放进 `context.Context`，因为 KeepAlive 复用连接时不会再次调用 DialContext。
+实现可将该 tuple 编码为只在进程内使用的 opaque Transport/Pool Key，但它不发送给
+Origin。不得只把 Tunnel ID 或 Service ID 放进 `context.Context`，因为 KeepAlive
+复用连接时不会再次调用 DialContext。新配置版本发布后不得把旧池 WorkConn 借给新版本。
+请求已经匹配到 Route 后，新建 WorkConn 只能选择该 Service `RequiredRevision` 与 Route
+配置版本精确相等的 Connector；Tunnel 的 `ObservedRevision` 可以因其他 Service 更新而
+更高，但不得据此把当前 Service 的其他 Revision 借给旧 Route。
 
 一个 WorkConn 对应一条 HTTP/1.1 TCP Connection，而不是一个 HTTP
-Request。同一 Tunnel 的顺序请求可以由 `http.Transport` KeepAlive 复用已经建立的
-WorkConn；V0.1 的限制是单条 HTTP/1.1 Connection 不支持并发 Multiplex。E2E
-必须验证连续请求复用，且任何情况下不得跨 Tunnel 复用连接。
+Request。同一 `TunnelID + ServiceID + ConfigVersion` 的顺序请求可以由
+`http.Transport` KeepAlive 复用已经建立的 WorkConn；V0.1 的限制是单条
+HTTP/1.1 Connection 不支持并发 Multiplex。E2E 必须验证同隔离键连续请求复用，
+且任何情况下不得跨 Tunnel、Service 或配置版本复用连接。
 
-请求的实际 `Host` Header 按 `preserve_host` 规则单独设置。任何情况下都禁止不同 Tunnel 共用同一个 Transport Pool Key。
+每个隔离池的空闲连接数受 Service `http_max_idle_connections` 限制，但所有池的 WorkConn、
+Idle Connection 与 FD 总量仍必须服从全局硬预算，不得以“每池未超限”绕过全局上限。
+请求的实际 `Host` Header 按第 90 节优先级单独设置，不参与连接池 Key。
 
 ReverseProxy 默认设置有限正间隔：
 
@@ -3516,21 +3588,22 @@ X-Forwarded-Host
 = original Host
 ```
 
-`preserve_host=true`：
+Host 的唯一优先级是：
 
 ```text
-Host
+1. Service.origin_http_host 非空
+   → Host = Service.origin_http_host
+
+2. 否则 preserve_host = true
+   → Host = 公网请求 Host
+
+3. 否则
+   → Host = 规范化 Origin host[:port]
 ```
 
-保持公网请求 Host。
-
-`preserve_host=false`：
-
-```text
-Host = Service.origin_http_host
-```
-
-HTTP/HTTPS Origin 在 `preserve_host=false` 时必须设置 `origin_http_host`；默认建议使用 Origin 的规范化 `host:port`。TCP Origin 禁止设置该字段。
+`origin_http_host` 是 HTTP/HTTPS Service 的显式覆盖，即使 `preserve_host=true` 也优先。
+未提供显式覆盖且 `preserve_host=false` 时不得留空 Host，必须使用规范化 Origin
+`host[:port]`。TCP Origin 禁止设置 `origin_http_host` 或 `preserve_host`。
 
 该值由 Server 组装 HTTP 请求 Header 使用，但不出现在 OpenRequest。Agent 只按
 `service_id` 从已原子应用的 Tunnel Snapshot 解析并连接对应 Origin。
@@ -3556,6 +3629,11 @@ HTTP/HTTPS Origin 在 `preserve_host=false` 时必须设置 `origin_http_host`�
 ```text
 streaming
 ```
+
+`disable_chunked_encoding=true` 只改变转发给 HTTP/HTTPS Origin 的 Request Framing，不改变
+“全链路 Streaming”的不变量。只有已有可信 `Content-Length` 或能在不读取 Body 的情况下
+安全确定长度时才可转发；长度无法安全确定时必须显式拒绝请求，禁止先整体缓存
+再计算长度。Chunked Origin Response 继续按流式读取，不得为删除 Transfer-Encoding 而整体缓存。
 
 必须通过：
 
@@ -4923,6 +5001,16 @@ Port
 Connect Timeout
 
 HTTP Host Header（HTTP/HTTPS 可选）
+
+Disable Chunked Encoding（HTTP/HTTPS）
+
+Disable Happy Eyeballs
+
+HTTP Idle Timeout（HTTP/HTTPS）
+
+HTTP Max Idle Connections（HTTP/HTTPS）
+
+TCP KeepAlive Interval（0 表示禁用）
 ```
 
 HTTPS：
@@ -4939,7 +5027,8 @@ TLS Server Name
 TLS Verify = true
 ```
 
-当 Public Access 的 `Preserve Host=false` 时，HTTP Host Header 为必填。
+HTTP Host Header 始终是显式覆盖，其优先级高于 Preserve Host；二者都未生效时回落到
+规范化 Origin `host[:port]`。HTTP 专属字段在 TCP Service 表单中不展示，接口边界也必须拒绝。
 
 ---
 
@@ -6159,6 +6248,12 @@ OPEN Handshake
 Origin Connect
 5s
 
+HTTP Origin Idle Connection
+90s
+
+Origin TCP KeepAlive
+30s（0 禁用）
+
 Control Frame Idle
 30s
 ```
@@ -6901,11 +6996,21 @@ Chunked Request
 
 Chunked Response
 
+Disable Chunked + Known Content-Length
+
+Disable Chunked + Unknown Length Explicit Rejection Without Whole-body Buffering
+
 Streaming
 
 Known-Length Low-rate Small-chunk Response Flush <= 100ms + Margin
 
 KeepAlive
+
+KeepAlive Pool Isolated By Tunnel + Service + Config Version
+
+HTTP Idle Timeout / Max Idle Connections + Global WorkConn/FD Budget
+
+Host Priority: origin_http_host > preserve_host > origin host
 
 Client Disconnect
 
@@ -6964,6 +7069,10 @@ Database TCP Protocol
 Half-Close
 
 TCP Origin Receives No Implicit PROXY Header
+
+Disable Happy Eyeballs Preserves Total Connect Timeout
+
+TCP KeepAlive 30s Default And 0 Disables
 ```
 
 ---

@@ -99,7 +99,9 @@ func TestHandleClassifiesMalformedFramesAsProtocol(t *testing.T) {
 }
 
 func TestHandleClassifiesOversizeOpenRequestAsProtocol(t *testing.T) {
-	handler, err := NewHandler(Options{WriteTimeout: time.Second, ReadTimeout: time.Second, MaxFrameBytes: 1})
+	handler, err := NewHandler(Options{
+		HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second, MaxFrameBytes: 1,
+	})
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}

@@ -282,6 +282,8 @@ type sourceTestView struct {
 func (view sourceTestView) Tunnels() repository.TunnelRepository   { return view.tunnels }
 func (view sourceTestView) Services() repository.ServiceRepository { return view.services }
 
+func (sourceTestView) Routes() repository.RouteRepository { return nil }
+
 type sourceTestTunnelRepository struct {
 	repository.TunnelRepository
 	get func(context.Context, string) (repository.Tunnel, error)
@@ -325,6 +327,8 @@ type sourcePausingView struct {
 }
 
 func (view sourcePausingView) Services() repository.ServiceRepository { return view.services }
+
+func (sourcePausingView) Routes() repository.RouteRepository { return nil }
 
 type sourcePausingServiceRepository struct {
 	repository.ServiceRepository

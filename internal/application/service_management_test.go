@@ -234,6 +234,13 @@ func TestServiceManagementCreateAppliesDefaultsAndGatesCandidate(t *testing.T) {
 		!created.TLSVerify || !created.Enabled || created.ConnectTimeoutMS != defaultServiceConnectTimeoutMS {
 		t.Fatalf("Create() Service metadata/defaults = %+v", nonSensitiveServiceState(created))
 	}
+	if created.ProxyOptions != (repository.ServiceProxyOptions{
+		HTTPIdleConnectionTimeoutMS: 90_000,
+		HTTPMaxIdleConnections:      100,
+		TCPKeepAliveIntervalMS:      30_000,
+	}) {
+		t.Fatalf("Create() Proxy defaults = %+v", created.ProxyOptions)
+	}
 	if created.Health == nil || created.Health.Type != repository.HealthTypeHTTP ||
 		created.Health.Path != defaultHealthPath || created.Health.IntervalMS != defaultHealthIntervalMS ||
 		created.Health.TimeoutMS != defaultHealthTimeoutMS ||
@@ -252,6 +259,86 @@ func TestServiceManagementCreateAppliesDefaultsAndGatesCandidate(t *testing.T) {
 		t.Fatalf("Snapshot Gate calls = %+v", gateCallStates(calls))
 	}
 	assertStoredService(t, store, created)
+}
+
+func TestServiceProxyOptionsAppliesDefaultsAndRejectsProtocolMixing(t *testing.T) {
+	disabled := false
+	enabled := true
+	zero := uint32(0)
+	idleTimeout := uint32(45_000)
+	maxIdle := uint32(8)
+
+	tests := []struct {
+		name    string
+		input   ServiceOriginInput
+		want    repository.ServiceProxyOptions
+		wantErr bool
+	}{
+		{
+			name:  "HTTP defaults",
+			input: ServiceOriginInput{Scheme: repository.OriginSchemeHTTP},
+			want: repository.ServiceProxyOptions{
+				HTTPIdleConnectionTimeoutMS: 90_000,
+				HTTPMaxIdleConnections:      100,
+				TCPKeepAliveIntervalMS:      30_000,
+			},
+		},
+		{
+			name: "HTTPS explicit values preserve disabled keepalive",
+			input: ServiceOriginInput{
+				Scheme: repository.OriginSchemeHTTPS,
+				Connection: &ServiceConnectionOptionsInput{
+					DisableHappyEyeballs: &enabled, TCPKeepAliveIntervalMS: &zero,
+				},
+				HTTPProxy: &ServiceHTTPProxyOptionsInput{
+					DisableChunkedEncoding: &enabled, IdleConnectionTimeoutMS: &idleTimeout,
+					MaxIdleConnections: &maxIdle,
+				},
+			},
+			want: repository.ServiceProxyOptions{
+				DisableChunkedEncoding: true, DisableHappyEyeballs: true,
+				HTTPIdleConnectionTimeoutMS: 45_000, HTTPMaxIdleConnections: 8,
+				TCPKeepAliveIntervalMS: 0,
+			},
+		},
+		{
+			name: "TCP connection values",
+			input: ServiceOriginInput{
+				Scheme: repository.OriginSchemeTCP,
+				Connection: &ServiceConnectionOptionsInput{
+					DisableHappyEyeballs: &disabled, TCPKeepAliveIntervalMS: &zero,
+				},
+			},
+			want: repository.ServiceProxyOptions{
+				HTTPIdleConnectionTimeoutMS: 90_000,
+				HTTPMaxIdleConnections:      100,
+				TCPKeepAliveIntervalMS:      0,
+			},
+		},
+		{
+			name: "TCP rejects HTTP options",
+			input: ServiceOriginInput{
+				Scheme:    repository.OriginSchemeTCP,
+				HTTPProxy: &ServiceHTTPProxyOptionsInput{},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := serviceProxyOptions(test.input)
+			if test.wantErr {
+				if !errors.Is(err, ErrServiceManagementInput) {
+					t.Fatalf("serviceProxyOptions() error = %v, want ErrServiceManagementInput", err)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("serviceProxyOptions() = (%+v, %v), want %+v", got, err, test.want)
+			}
+		})
+	}
 }
 
 func TestServiceManagementRejectsOriginThatAgentCannotCompileBeforeCommit(t *testing.T) {

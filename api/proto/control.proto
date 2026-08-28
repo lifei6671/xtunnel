@@ -151,6 +151,34 @@ message ServiceConfig {
   HealthCheckConfig health = 9;
   bool enabled = 10;
   uint64 required_revision = 11;
+
+  // origin_connection_options 对所有 Service 必填。connect_timeout_ms 仍是
+  // DNS、TCP 与可选 TLS 握手共享的总预算；本消息只控制 TCP 建连行为。
+  OriginConnectionOptions origin_connection_options = 12;
+
+  // http_proxy_options 对 HTTP/HTTPS Service 必填，对 TCP Service 必须缺失。
+  // Agent v0.1 只编译并保存本消息，后续 HTTP 数据面才会创建 HTTP Transport。
+  HTTPProxyOptions http_proxy_options = 13;
+}
+
+// OriginConnectionOptions 描述 Agent 每次连接 Origin 时采用的 TCP 建连参数。
+message OriginConnectionOptions {
+  // disable_happy_eyeballs 为 true 时禁用标准库 Fast Fallback。
+  bool disable_happy_eyeballs = 1;
+
+  // tcp_keepalive_interval_ms 为 0 时明确禁用 TCP keepalive；否则是探测间隔。
+  uint32 tcp_keepalive_interval_ms = 2;
+}
+
+// HTTPProxyOptions 描述后续 HTTP/HTTPS 数据面使用的不可变代理参数。
+message HTTPProxyOptions {
+  bool disable_chunked_encoding = 1;
+
+  // idle_connection_timeout_ms 必须大于 0。
+  uint32 idle_connection_timeout_ms = 2;
+
+  // max_idle_connections 必须大于 0。
+  uint32 max_idle_connections = 3;
 }
 
 // HealthCheckConfig 描述单个 Service 的 Origin 健康检查策略。

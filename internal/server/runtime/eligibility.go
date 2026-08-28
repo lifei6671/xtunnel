@@ -36,6 +36,13 @@ type EligibilityWatch struct {
 	HasExpiry    bool
 }
 
+// serviceRevisionConstraint 显式区分“接受 Session 当前 Service Revision”与
+// “精确匹配 Route Revision”。Revision 0 是合法值，不能承担模式哨兵职责。
+type serviceRevisionConstraint struct {
+	exact    bool
+	revision uint64
+}
+
 var closedEligibilitySignal = func() <-chan struct{} {
 	closed := make(chan struct{})
 	close(closed)
@@ -69,9 +76,25 @@ func (registry *Registry) PublishEligibility(session Session, state SessionEligi
 	return true
 }
 
-// Eligible 在 TunnelRuntime.mu 下按 Current、Revision、Health 与 Stale TTL
-// 一次性裁决，不获取 Session Manager 或 configMu。
+// Eligible 在 TunnelRuntime.mu 下按 Session 当前 Service Revision、Health 与
+// Stale TTL 一次性裁决，不获取 Session Manager 或 configMu。
 func (registry *Registry) Eligible(session Session, serviceID string) bool {
+	return registry.eligible(session, serviceID, serviceRevisionConstraint{})
+}
+
+// EligibleAtRevision 在 Eligible 的基础上要求 Service 精确匹配调用方持有的
+// Route Revision；Revision 0 也执行精确匹配。
+func (registry *Registry) EligibleAtRevision(session Session, serviceID string, requiredRevision uint64) bool {
+	return registry.eligible(session, serviceID, serviceRevisionConstraint{
+		exact: true, revision: requiredRevision,
+	})
+}
+
+func (registry *Registry) eligible(
+	session Session,
+	serviceID string,
+	revision serviceRevisionConstraint,
+) bool {
 	if registry == nil || !validEligibilitySession(session) || identity.ValidateServiceID(serviceID) != nil {
 		return false
 	}
@@ -81,12 +104,64 @@ func (registry *Registry) Eligible(session Session, serviceID string) bool {
 	}
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	return runtime.sessionEligibleLocked(session, serviceID, runtime.now())
+	return runtime.sessionEligibleLocked(session, serviceID, revision, runtime.now())
+}
+
+// ServiceConfigObserved 判断当前 Tunnel 是否至少有一个 Current Connector 已完整
+// 应用指定 Service Revision。它只回答配置可见性，不要求 Health Healthy 或 Work
+// Capacity，因此调用方可把“配置尚未观察”与普通暂时不可用区分开。
+func (registry *Registry) ServiceConfigObserved(tunnelID, serviceID string, requiredRevision uint64) bool {
+	if registry == nil || identity.ValidateTunnelID(tunnelID) != nil || identity.ValidateServiceID(serviceID) != nil {
+		return false
+	}
+	runtime := registry.tunnel(tunnelID, false)
+	if runtime == nil {
+		return false
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.revoked {
+		return false
+	}
+	for _, session := range runtime.current {
+		state, exists := runtime.eligibility[session]
+		if !exists || !state.ConfigReady || !state.HasObserved || state.ObservedRevision < requiredRevision {
+			continue
+		}
+		service, exists := state.Services[serviceID]
+		if exists && service.RequiredRevision == requiredRevision {
+			return true
+		}
+	}
+	return false
 }
 
 // WatchEligibility 返回当前 Eligible Session 的变更广播与健康过期剩余时间。
 // 返回 false 时 Changed 已关闭，调用方应立即释放旧选择并重新进入 Tunnel 级选择。
-func (registry *Registry) WatchEligibility(session Session, serviceID string) (EligibilityWatch, bool) {
+func (registry *Registry) WatchEligibility(
+	session Session,
+	serviceID string,
+) (EligibilityWatch, bool) {
+	return registry.watchEligibility(session, serviceID, serviceRevisionConstraint{})
+}
+
+// WatchEligibilityAtRevision 返回精确匹配 Route Revision 的 Eligibility Watch；
+// Revision 0 也不会退化成当前版本查询。
+func (registry *Registry) WatchEligibilityAtRevision(
+	session Session,
+	serviceID string,
+	requiredRevision uint64,
+) (EligibilityWatch, bool) {
+	return registry.watchEligibility(session, serviceID, serviceRevisionConstraint{
+		exact: true, revision: requiredRevision,
+	})
+}
+
+func (registry *Registry) watchEligibility(
+	session Session,
+	serviceID string,
+	revision serviceRevisionConstraint,
+) (EligibilityWatch, bool) {
 	if registry == nil || !validEligibilitySession(session) || identity.ValidateServiceID(serviceID) != nil {
 		return EligibilityWatch{Changed: closedEligibilitySignal}, false
 	}
@@ -97,7 +172,7 @@ func (registry *Registry) WatchEligibility(session Session, serviceID string) (E
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	now := runtime.now()
-	if !runtime.sessionEligibleLocked(session, serviceID, now) {
+	if !runtime.sessionEligibleLocked(session, serviceID, revision, now) {
 		return EligibilityWatch{Changed: closedEligibilitySignal}, false
 	}
 	watch := EligibilityWatch{Changed: runtime.eligibilityChanged}
@@ -112,7 +187,12 @@ func (registry *Registry) WatchEligibility(session Session, serviceID string) (E
 	return watch, true
 }
 
-func (runtime *TunnelRuntime) sessionEligibleLocked(session Session, serviceID string, now time.Time) bool {
+func (runtime *TunnelRuntime) sessionEligibleLocked(
+	session Session,
+	serviceID string,
+	revision serviceRevisionConstraint,
+	now time.Time,
+) bool {
 	if runtime.revoked || runtime.current[session.ConnectorID] != session {
 		return false
 	}
@@ -125,7 +205,8 @@ func (runtime *TunnelRuntime) sessionEligibleLocked(session Session, serviceID s
 		return false
 	}
 	service, exists := state.Services[serviceID]
-	if !exists || !service.Enabled || state.ObservedRevision < service.RequiredRevision {
+	if !exists || !service.Enabled || state.ObservedRevision < service.RequiredRevision ||
+		(revision.exact && service.RequiredRevision != revision.revision) {
 		return false
 	}
 	if service.HealthDisabled {

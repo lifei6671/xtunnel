@@ -162,7 +162,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 
 	waitForIdleWork(t, ctx, registry, sessions, agentConfig.Connector.ID())
 	serverOpen, err := serveropen.NewHandler(serveropen.Options{
-		WriteTimeout: 2 * time.Second, ReadTimeout: 2 * time.Second,
+		HandshakeTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, ReadTimeout: 2 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("create Server OPEN handler: %v", err)

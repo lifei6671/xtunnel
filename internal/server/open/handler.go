@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
@@ -28,10 +29,14 @@ var (
 	ErrRawCommitted = errors.New("server open RAW was already committed")
 )
 
-// Options 固定完整 OpenRequest/OpenResponse 交换的 IO 上限。
+// Options 固定完整 OpenRequest/OpenResponse 交换的总时限与单次 IO 上限。
 type Options struct {
-	WriteTimeout time.Duration
-	ReadTimeout  time.Duration
+	// HandshakeTimeout 覆盖写 OpenRequest、提交 OPENING、读 OpenResponse 和
+	// 提交 RAW 前状态转换的完整过程。WriteTimeout/ReadTimeout 只能进一步收紧
+	// 单次 IO，不能把总预算拆成两个可以累加的窗口。
+	HandshakeTimeout time.Duration
+	WriteTimeout     time.Duration
+	ReadTimeout      time.Duration
 	// MaxFrameBytes 由 Server Schema 收紧 OPEN Frame；零值使用协议绝对上限。
 	MaxFrameBytes uint64
 }
@@ -64,7 +69,8 @@ func NewHandler(options Options) (*Handler, error) {
 	if options.MaxFrameBytes == 0 {
 		options.MaxFrameBytes = frame.MaxWorkFrameSize
 	}
-	if options.WriteTimeout <= 0 || options.ReadTimeout <= 0 || options.MaxFrameBytes > frame.MaxWorkFrameSize {
+	if options.HandshakeTimeout <= 0 || options.WriteTimeout <= 0 || options.ReadTimeout <= 0 ||
+		options.MaxFrameBytes > frame.MaxWorkFrameSize {
 		return nil, ErrInvalidInput
 	}
 	return &Handler{options: options}, nil
@@ -94,6 +100,10 @@ func (handler *Handler) Handle(
 		idle.State.Close()
 		return nil, err
 	}
+	// OPEN 的冻结契约是端到端总预算。派生 Context 后，写与读 Deadline 都从
+	// 同一个绝对截止点收紧；写阶段已经消耗的时间不会在读阶段被重新赠予。
+	ctx, cancelHandshake := context.WithTimeout(ctx, handler.options.HandshakeTimeout)
+	defer cancelHandshake()
 	if err := validate.RejectUnknownFields(request); err != nil {
 		_ = connection.Close()
 		idle.State.Close()
@@ -118,7 +128,22 @@ func (handler *Handler) Handle(
 			resultErr = errors.Join(resultErr, fmt.Errorf("close Server WorkConn after OPEN failure: %w", err))
 		}
 	}()
-	stopContextIO := context.AfterFunc(ctx, func() { _ = connection.SetDeadline(time.Now()) })
+	contextIOComplete := make(chan struct{})
+	stopContextIOCallback := context.AfterFunc(ctx, func() {
+		defer close(contextIOComplete)
+		_ = connection.SetDeadline(time.Now())
+	})
+	// context.AfterFunc 的 stop=false 只表示回调已经开始，不表示 SetDeadline 已经
+	// 完成。stopAndWait 以 exactly-once 方式等待在途回调，避免成功路径清零后，
+	// 一个较晚完成的取消回调又把过期 Deadline 写回 ACTIVE WorkConn。
+	var stopContextIOOnce sync.Once
+	stopContextIO := func() {
+		stopContextIOOnce.Do(func() {
+			if !stopContextIOCallback() {
+				<-contextIOComplete
+			}
+		})
+	}
 	defer stopContextIO()
 
 	if err := connection.SetWriteDeadline(operationDeadline(ctx, handler.options.WriteTimeout)); err != nil {
@@ -158,11 +183,20 @@ func (handler *Handler) Handle(
 	if response.GetStatus() == protocolv1.OpenStatus_OPEN_STATUS_ERROR {
 		return nil, &Rejected{Code: response.GetErrorCode()}
 	}
+	// RAW 提交后不能再重放。先停止并等待 Context IO 回调，再检查总握手预算；
+	// 之后不再执行阻塞帧 IO，因此取消无需通过 Deadline 解阻塞。
+	stopContextIO()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := idle.State.AcceptRaw(); err != nil {
 		return nil, fmt.Errorf("%w: RAW handoff: %v", ErrProtocol, err)
 	}
 	if err := connection.SetDeadline(time.Time{}); err != nil {
 		return nil, fmt.Errorf("%w: clear Server WorkConn OPEN deadline: %w", ErrRawCommitted, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: OPEN context ended after RAW handoff: %w", ErrRawCommitted, err)
 	}
 	return &Active{Connection: connection, Identity: idle, Response: response}, nil
 }

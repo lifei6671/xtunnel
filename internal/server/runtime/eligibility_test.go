@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -95,6 +96,132 @@ func TestEligibilityAppliesRevisionHealthAndStrictFreshnessGates(t *testing.T) {
 				t.Fatalf("Eligible() = %t, want %t", got, test.eligible)
 			}
 		})
+	}
+}
+
+func TestEligibilityPinsServiceRequiredRevisionWithoutPinningObservedRevision(t *testing.T) {
+	registry := newRegistryWithClock(sessionGenerator(1), time.Now)
+	session, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, observed := registry.ObserveConnected(session, ConnectorMetadata{}); !observed {
+		t.Fatal("ObserveConnected() rejected current Session")
+	}
+	if !registry.PublishEligibility(session, SessionEligibility{
+		ConfigReady: true, HasObserved: true, ObservedRevision: 8,
+		Services: map[string]ServiceEligibility{runtimeEligibilityServiceID: {
+			RequiredRevision: 7, Enabled: true, HealthDisabled: true,
+		}},
+	}) {
+		t.Fatal("PublishEligibility() rejected current Session")
+	}
+
+	if !registry.EligibleAtRevision(session, runtimeEligibilityServiceID, 7) {
+		t.Fatal("Eligible() rejected exact Service revision when a newer Tunnel revision was observed")
+	}
+	if registry.EligibleAtRevision(session, runtimeEligibilityServiceID, 8) {
+		t.Fatal("Eligible() accepted a different Service revision")
+	}
+	if _, eligible := registry.WatchEligibilityAtRevision(session, runtimeEligibilityServiceID, 7); !eligible {
+		t.Fatal("WatchEligibility() rejected the exact Service revision")
+	}
+	if _, eligible := registry.WatchEligibilityAtRevision(session, runtimeEligibilityServiceID, 8); eligible {
+		t.Fatal("WatchEligibility() accepted a different Service revision")
+	}
+	lease, err := registry.AcquireEligibleConnectorAtRevisionWhere(
+		runtimeTunnelID, runtimeEligibilityServiceID, 7, func(Session) bool { return true },
+	)
+	if err != nil {
+		t.Fatalf("AcquireEligibleConnectorWhere(exact revision) error = %v", err)
+	}
+	lease.Release()
+	if _, err := registry.AcquireEligibleConnectorAtRevisionWhere(
+		runtimeTunnelID, runtimeEligibilityServiceID, 8, func(Session) bool { return true },
+	); !errors.Is(err, ErrNoAvailableConnector) {
+		t.Fatalf("AcquireEligibleConnectorWhere(different revision) error = %v, want ErrNoAvailableConnector", err)
+	}
+}
+
+func TestEligibilityTreatsZeroAsExactRevision(t *testing.T) {
+	registry := newRegistryWithClock(sessionGenerator(1), time.Now)
+	session, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, observed := registry.ObserveConnected(session, ConnectorMetadata{}); !observed {
+		t.Fatal("ObserveConnected() rejected current Session")
+	}
+	publish := func(requiredRevision uint64) {
+		t.Helper()
+		if !registry.PublishEligibility(session, SessionEligibility{
+			ConfigReady: true, HasObserved: true, ObservedRevision: 1,
+			Services: map[string]ServiceEligibility{runtimeEligibilityServiceID: {
+				RequiredRevision: requiredRevision, Enabled: true, HealthDisabled: true,
+			}},
+		}) {
+			t.Fatal("PublishEligibility() rejected current Session")
+		}
+	}
+
+	publish(1)
+	if !registry.Eligible(session, runtimeEligibilityServiceID) {
+		t.Fatal("Eligible() rejected the current Service revision")
+	}
+	if registry.EligibleAtRevision(session, runtimeEligibilityServiceID, 0) {
+		t.Fatal("EligibleAtRevision(0) accepted Service revision 1")
+	}
+	if _, eligible := registry.WatchEligibilityAtRevision(session, runtimeEligibilityServiceID, 0); eligible {
+		t.Fatal("WatchEligibilityAtRevision(0) accepted Service revision 1")
+	}
+	if _, err := registry.AcquireEligibleConnectorAtRevisionWhere(
+		runtimeTunnelID, runtimeEligibilityServiceID, 0, func(Session) bool { return true },
+	); !errors.Is(err, ErrNoAvailableConnector) {
+		t.Fatalf("AcquireEligibleConnectorAtRevisionWhere(0) error = %v, want ErrNoAvailableConnector", err)
+	}
+
+	publish(0)
+	if !registry.EligibleAtRevision(session, runtimeEligibilityServiceID, 0) {
+		t.Fatal("EligibleAtRevision(0) rejected Service revision 0")
+	}
+	if _, eligible := registry.WatchEligibilityAtRevision(session, runtimeEligibilityServiceID, 0); !eligible {
+		t.Fatal("WatchEligibilityAtRevision(0) rejected Service revision 0")
+	}
+	lease, err := registry.AcquireEligibleConnectorAtRevisionWhere(
+		runtimeTunnelID, runtimeEligibilityServiceID, 0, func(Session) bool { return true },
+	)
+	if err != nil {
+		t.Fatalf("AcquireEligibleConnectorAtRevisionWhere(0) error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestServiceConfigObservedSeparatesRevisionVisibilityFromHealthAndCapacity(t *testing.T) {
+	registry := newRegistryWithClock(sessionGenerator(1), time.Now)
+	session, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registry.ServiceConfigObserved(runtimeTunnelID, runtimeEligibilityServiceID, 7) {
+		t.Fatal("ServiceConfigObserved() accepted unpublished config")
+	}
+	state := SessionEligibility{
+		ConfigReady: true, HasObserved: true, ObservedRevision: 7,
+		Services: map[string]ServiceEligibility{runtimeEligibilityServiceID: {
+			RequiredRevision: 7,
+			// Health 仍为 UNKNOWN 且 Service disabled；本查询只裁决配置是否已观察，
+			// 不能把可用性门禁混入稳定错误码判断。
+			Enabled: false,
+		}},
+	}
+	if !registry.PublishEligibility(session, state) {
+		t.Fatal("PublishEligibility() rejected current Session")
+	}
+	if !registry.ServiceConfigObserved(runtimeTunnelID, runtimeEligibilityServiceID, 7) {
+		t.Fatal("ServiceConfigObserved() rejected observed revision")
+	}
+	if registry.ServiceConfigObserved(runtimeTunnelID, runtimeEligibilityServiceID, 8) {
+		t.Fatal("ServiceConfigObserved() accepted newer unobserved revision")
 	}
 }
 

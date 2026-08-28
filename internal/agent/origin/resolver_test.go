@@ -82,11 +82,33 @@ func TestResolverRejectsInvalidOriginSnapshot(t *testing.T) {
 		{name: "TCP HTTP host", mutate: func(value *protocolv1.ServiceConfig) { value.OriginHttpHost = "origin.test" }},
 		{name: "HTTP TLS name", mutate: func(value *protocolv1.ServiceConfig) {
 			value.OriginScheme = "http"
+			value.HttpProxyOptions = defaultHTTPProxyOptions()
 			value.TlsServerName = "origin.test"
 		}},
 		{name: "header injection", mutate: func(value *protocolv1.ServiceConfig) {
 			value.OriginScheme = "https"
+			value.HttpProxyOptions = defaultHTTPProxyOptions()
 			value.OriginHttpHost = "origin.test\r\nx-test: bad"
+		}},
+		{name: "missing Origin connection options", mutate: func(value *protocolv1.ServiceConfig) {
+			value.OriginConnectionOptions = nil
+		}},
+		{name: "TCP carries HTTP proxy options", mutate: func(value *protocolv1.ServiceConfig) {
+			value.HttpProxyOptions = &protocolv1.HTTPProxyOptions{IdleConnectionTimeoutMs: 90_000, MaxIdleConnections: 100}
+		}},
+		{name: "HTTP missing proxy options", mutate: func(value *protocolv1.ServiceConfig) {
+			value.OriginScheme = "http"
+			value.HttpProxyOptions = nil
+		}},
+		{name: "HTTP zero idle timeout", mutate: func(value *protocolv1.ServiceConfig) {
+			value.OriginScheme = "http"
+			value.HttpProxyOptions = defaultHTTPProxyOptions()
+			value.HttpProxyOptions.IdleConnectionTimeoutMs = 0
+		}},
+		{name: "HTTP zero max idle connections", mutate: func(value *protocolv1.ServiceConfig) {
+			value.OriginScheme = "http"
+			value.HttpProxyOptions = defaultHTTPProxyOptions()
+			value.HttpProxyOptions.MaxIdleConnections = 0
 		}},
 	}
 	for _, test := range tests {
@@ -137,29 +159,106 @@ func TestResolverAcceptsSupportedHostAndTLSModels(t *testing.T) {
 	}
 }
 
+func TestResolverCompilesTypedConnectionAndHTTPProxyOptions(t *testing.T) {
+	configured := service("https", "origin.test", 443)
+	configured.OriginConnectionOptions.DisableHappyEyeballs = true
+	configured.OriginConnectionOptions.TcpKeepaliveIntervalMs = 0
+	configured.HttpProxyOptions.DisableChunkedEncoding = true
+	configured.HttpProxyOptions.IdleConnectionTimeoutMs = 45_000
+	configured.HttpProxyOptions.MaxIdleConnections = 25
+
+	manager := activeManager(t, configured)
+	resolved, err := manager.Resolve(testServiceID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if !resolved.OriginConnectionOptions.DisableHappyEyeballs || resolved.OriginConnectionOptions.TCPKeepAliveInterval != 0 {
+		t.Fatalf("Origin connection options = %#v", resolved.OriginConnectionOptions)
+	}
+	if !resolved.HTTPProxyOptions.DisableChunkedEncoding ||
+		resolved.HTTPProxyOptions.IdleConnectionTimeout != 45*time.Second ||
+		resolved.HTTPProxyOptions.MaxIdleConnections != 25 {
+		t.Fatalf("HTTP proxy options = %#v", resolved.HTTPProxyOptions)
+	}
+}
+
+func TestOriginDialerMapsFastFallbackAndKeepaliveSemantics(t *testing.T) {
+	tests := []struct {
+		name              string
+		options           OriginConnectionOptions
+		wantFallbackDelay time.Duration
+		wantKeepAlive     time.Duration
+	}{
+		{
+			name:              "enabled Fast Fallback and positive keepalive",
+			options:           OriginConnectionOptions{TCPKeepAliveInterval: 90 * time.Second},
+			wantFallbackDelay: 0,
+			wantKeepAlive:     90 * time.Second,
+		},
+		{
+			name:              "disabled Fast Fallback and disabled keepalive",
+			options:           OriginConnectionOptions{DisableHappyEyeballs: true},
+			wantFallbackDelay: -1,
+			wantKeepAlive:     -1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dialer := originDialer(test.options)
+			if dialer.FallbackDelay != test.wantFallbackDelay || dialer.KeepAlive != test.wantKeepAlive {
+				t.Fatalf("originDialer() = FallbackDelay %v, KeepAlive %v", dialer.FallbackDelay, dialer.KeepAlive)
+			}
+		})
+	}
+}
+
+func TestDialOriginUsesCompiledConnectionOptions(t *testing.T) {
+	configured := service("tcp", "127.0.0.1", 8080)
+	configured.OriginConnectionOptions.DisableHappyEyeballs = true
+	configured.OriginConnectionOptions.TcpKeepaliveIntervalMs = 0
+	manager := activeManager(t, configured)
+	manager.dialContext = func(_ context.Context, network, address string, options OriginConnectionOptions) (net.Conn, error) {
+		if network != "tcp" || address != "127.0.0.1:8080" {
+			t.Fatalf("DialContext() = (%q, %q)", network, address)
+		}
+		if !options.DisableHappyEyeballs || options.TCPKeepAliveInterval != 0 {
+			t.Fatalf("DialContext options = %#v", options)
+		}
+		client, peer := net.Pipe()
+		t.Cleanup(func() { _ = peer.Close() })
+		return client, nil
+	}
+
+	connection, code, err := manager.DialOrigin(context.Background(), testServiceID)
+	if err != nil || code != protocolv1.ErrorCode_ERROR_CODE_OK {
+		t.Fatalf("DialOrigin() = (%v, %s, %v)", connection, code, err)
+	}
+	_ = connection.Close()
+}
+
 func TestDialOriginUsesPerServiceTimeoutAndErrorCodes(t *testing.T) {
 	tests := []struct {
 		name     string
-		dial     func(context.Context, string, string) (net.Conn, error)
+		dial     func(context.Context, string, string, OriginConnectionOptions) (net.Conn, error)
 		wantCode protocolv1.ErrorCode
 		wantErr  error
 	}{
 		{
 			name: "timeout",
-			dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dial: func(ctx context.Context, _, _ string, _ OriginConnectionOptions) (net.Conn, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
 			},
 			wantCode: protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT, wantErr: context.DeadlineExceeded,
 		},
 		{
-			name: "refused", dial: func(context.Context, string, string) (net.Conn, error) {
+			name: "refused", dial: func(context.Context, string, string, OriginConnectionOptions) (net.Conn, error) {
 				return nil, syscall.ECONNREFUSED
 			},
 			wantCode: protocolv1.ErrorCode_ERROR_CODE_ORIGIN_REFUSED, wantErr: syscall.ECONNREFUSED,
 		},
 		{
-			name: "unreachable", dial: func(context.Context, string, string) (net.Conn, error) {
+			name: "unreachable", dial: func(context.Context, string, string, OriginConnectionOptions) (net.Conn, error) {
 				return nil, errors.New("fixture unreachable")
 			},
 			wantCode: protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE, wantErr: ErrDial,
@@ -238,7 +337,7 @@ func TestDialOriginFailsClosedWhenMultipleResolversRemainActive(t *testing.T) {
 func TestCandidateScopedDialerNeverCrossesSnapshotGeneration(t *testing.T) {
 	manager := New()
 	addresses := make(chan string, 2)
-	manager.dialContext = func(_ context.Context, _, address string) (net.Conn, error) {
+	manager.dialContext = func(_ context.Context, _, address string, _ OriginConnectionOptions) (net.Conn, error) {
 		addresses <- address
 		client, server := net.Pipe()
 		_ = server.Close()
@@ -302,7 +401,7 @@ func TestDialOriginUsesSnapshotTimeoutBeyondFormerHandlerLimit(t *testing.T) {
 	configured := service("tcp", "origin.test", 8080)
 	configured.ConnectTimeoutMs = 20_000
 	manager := activeManager(t, configured)
-	manager.dialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+	manager.dialContext = func(ctx context.Context, _, _ string, _ OriginConnectionOptions) (net.Conn, error) {
 		deadline, exists := ctx.Deadline()
 		if !exists {
 			t.Fatal("DialContext did not receive Snapshot timeout deadline")
@@ -322,7 +421,7 @@ func TestDialOriginUsesSnapshotTimeoutBeyondFormerHandlerLimit(t *testing.T) {
 func TestDialOriginDoesNotResolveDuringBuildOrCacheConnections(t *testing.T) {
 	manager := activeManager(t, service("tcp", "origin.test", 8080))
 	var calls atomic.Int32
-	manager.dialContext = func(_ context.Context, network, address string) (net.Conn, error) {
+	manager.dialContext = func(_ context.Context, network, address string, _ OriginConnectionOptions) (net.Conn, error) {
 		if network != "tcp" || address != "origin.test:8080" {
 			t.Fatalf("DialContext() = (%q, %q)", network, address)
 		}
@@ -591,9 +690,21 @@ func snapshotRevision(revision uint64, configured ...*protocolv1.ServiceConfig) 
 }
 
 func service(scheme, host string, port uint32) *protocolv1.ServiceConfig {
-	return &protocolv1.ServiceConfig{
+	configured := &protocolv1.ServiceConfig{
 		ServiceId: testServiceID, OriginScheme: scheme, OriginHost: host, OriginPort: port,
 		ConnectTimeoutMs: 50, TlsVerify: true, Enabled: true, RequiredRevision: 1,
+		OriginConnectionOptions: &protocolv1.OriginConnectionOptions{TcpKeepaliveIntervalMs: 30_000},
+	}
+	if scheme == "http" || scheme == "https" {
+		configured.HttpProxyOptions = defaultHTTPProxyOptions()
+	}
+	return configured
+}
+
+func defaultHTTPProxyOptions() *protocolv1.HTTPProxyOptions {
+	return &protocolv1.HTTPProxyOptions{
+		IdleConnectionTimeoutMs: 90_000,
+		MaxIdleConnections:      100,
 	}
 }
 

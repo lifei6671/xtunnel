@@ -34,3 +34,13 @@ var ServiceDomain string
 //
 //go:embed 000006_tunnel_first_authentication.sql
 var TunnelFirstAuthentication string
+
+// RouteDomain 包含 M4-01 的 HTTP/TCP Route Desired State 与全局 Generation。
+//
+//go:embed 000007_routes.sql
+var RouteDomain string
+
+// ServiceProxyOptions 包含 V0.1 Service 代理行为的类型化持久化列。
+//
+//go:embed 000008_service_proxy_options.sql
+var ServiceProxyOptions string

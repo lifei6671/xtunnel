@@ -128,8 +128,12 @@ func (builder *Builder) Build(tunnelID string, revision int64, services []reposi
 	return Result{Snapshot: snapshot, DeterministicBytes: snapshotBytes}, nil
 }
 
+// mapService 把 Repository 中已经默认化、校验过的 Service 映射为完整 Wire 配置。
+// 通用连接参数始终下发；HTTP Transport 参数只对 HTTP/HTTPS 出现，使 Agent 能把
+// “消息缺失”识别为协议错误，而不是在运行时各自补一套可能漂移的默认值。
 func mapService(service repository.Service) *protocolv1.ServiceConfig {
-	return &protocolv1.ServiceConfig{
+	proxyOptions := service.ProxyOptions.WithDefaults()
+	wire := &protocolv1.ServiceConfig{
 		ServiceId:        service.ID,
 		OriginScheme:     string(service.OriginScheme),
 		OriginHost:       service.OriginHost,
@@ -141,7 +145,19 @@ func mapService(service repository.Service) *protocolv1.ServiceConfig {
 		Health:           mapHealth(service.Health),
 		Enabled:          service.Enabled,
 		RequiredRevision: uint64(service.RequiredRevision),
+		OriginConnectionOptions: &protocolv1.OriginConnectionOptions{
+			DisableHappyEyeballs:   proxyOptions.DisableHappyEyeballs,
+			TcpKeepaliveIntervalMs: proxyOptions.TCPKeepAliveIntervalMS,
+		},
 	}
+	if service.OriginScheme == repository.OriginSchemeHTTP || service.OriginScheme == repository.OriginSchemeHTTPS {
+		wire.HttpProxyOptions = &protocolv1.HTTPProxyOptions{
+			DisableChunkedEncoding:  proxyOptions.DisableChunkedEncoding,
+			IdleConnectionTimeoutMs: proxyOptions.HTTPIdleConnectionTimeoutMS,
+			MaxIdleConnections:      proxyOptions.HTTPMaxIdleConnections,
+		}
+	}
+	return wire
 }
 
 func mapHealth(health *repository.HealthCheck) *protocolv1.HealthCheckConfig {

@@ -56,6 +56,25 @@ type ServiceOriginInput struct {
 	TLSServerName    string
 	HTTPHost         string
 	ConnectTimeoutMS *uint32
+	// Connection 对所有 Origin 生效；各 nil 字段由 Application 补全冻结默认值。
+	Connection *ServiceConnectionOptionsInput
+	// HTTPProxy 只允许 HTTP/HTTPS Origin 使用。nil 表示采用完整冻结默认值；
+	// TCP Origin 必须保持 nil，避免把无法生效的 HTTP 参数静默落库。
+	HTTPProxy *ServiceHTTPProxyOptionsInput
+}
+
+// ServiceConnectionOptionsInput 是每次 Agent 拨号使用的连接级策略。
+// TCPKeepAliveIntervalMS 显式为 0 时关闭 Keepalive，因此使用指针区分未提供与禁用。
+type ServiceConnectionOptionsInput struct {
+	DisableHappyEyeballs   *bool
+	TCPKeepAliveIntervalMS *uint32
+}
+
+// ServiceHTTPProxyOptionsInput 是 Server HTTP Transport 使用的完整可配置策略。
+type ServiceHTTPProxyOptionsInput struct {
+	DisableChunkedEncoding  *bool
+	IdleConnectionTimeoutMS *uint32
+	MaxIdleConnections      *uint32
 }
 
 // ServiceHealthInput 是启用 Health 时提交的策略。nil 表示未提供或 Disabled。
@@ -543,6 +562,10 @@ func nextServiceRevision(current int64) (int64, error) {
 
 func newServiceCandidate(serviceID string, input CreateServiceInput, now int64) (repository.Service, error) {
 	origin := serviceOrigin(input.Origin)
+	proxyOptions, err := serviceProxyOptions(input.Origin)
+	if err != nil {
+		return repository.Service{}, err
+	}
 	health, err := serviceHealth(input.Health)
 	if err != nil {
 		return repository.Service{}, err
@@ -552,7 +575,8 @@ func newServiceCandidate(serviceID string, input CreateServiceInput, now int64) 
 		OriginScheme: origin.Scheme, OriginHost: origin.Host, OriginPort: origin.Port,
 		TLSVerify: origin.TLSVerify, TLSServerName: origin.TLSServerName,
 		OriginHTTPHost: origin.HTTPHost, ConnectTimeoutMS: origin.ConnectTimeoutMS,
-		Health: health, Enabled: boolValue(input.Enabled, true), Version: 1,
+		ProxyOptions: proxyOptions,
+		Health:       health, Enabled: boolValue(input.Enabled, true), Version: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := candidate.Validate(); err != nil {
@@ -576,6 +600,42 @@ func serviceOrigin(input ServiceOriginInput) normalizedServiceOrigin {
 		Scheme: input.Scheme, Host: input.Host, Port: input.Port,
 		TLSVerify: boolValue(input.TLSVerify, true), TLSServerName: input.TLSServerName,
 		HTTPHost: input.HTTPHost, ConnectTimeoutMS: uint32Value(input.ConnectTimeoutMS, defaultServiceConnectTimeoutMS),
+	}
+}
+
+// serviceProxyOptions 在 Application 边界一次性补全默认值并检查协议适用性。
+// Repository、Snapshot 与 Agent 后续只处理完整类型化值，不再各自猜测配置来源。
+func serviceProxyOptions(input ServiceOriginInput) (repository.ServiceProxyOptions, error) {
+	// 默认值只从 Repository 领域契约取得；Application 仅按显式 presence 覆盖，
+	// 因此显式 0 Keepalive 不会被误判成“未提供”。
+	options := (repository.ServiceProxyOptions{}).WithDefaults()
+	if input.Connection != nil {
+		options.DisableHappyEyeballs = boolValue(input.Connection.DisableHappyEyeballs, false)
+		if input.Connection.TCPKeepAliveIntervalMS != nil {
+			options.TCPKeepAliveIntervalMS = *input.Connection.TCPKeepAliveIntervalMS
+		}
+	}
+	switch input.Scheme {
+	case repository.OriginSchemeHTTP, repository.OriginSchemeHTTPS:
+		if input.HTTPProxy == nil {
+			return options, nil
+		}
+		options.DisableChunkedEncoding = boolValue(input.HTTPProxy.DisableChunkedEncoding, false)
+		if input.HTTPProxy.IdleConnectionTimeoutMS != nil {
+			options.HTTPIdleConnectionTimeoutMS = *input.HTTPProxy.IdleConnectionTimeoutMS
+		}
+		if input.HTTPProxy.MaxIdleConnections != nil {
+			options.HTTPMaxIdleConnections = *input.HTTPProxy.MaxIdleConnections
+		}
+		return options, nil
+	case repository.OriginSchemeTCP:
+		if input.HTTPProxy != nil {
+			return repository.ServiceProxyOptions{}, fmt.Errorf("%w: TCP origin contains HTTP proxy options", ErrServiceManagementInput)
+		}
+		// SQLite 使用非空类型化列保存 HTTP 默认值；TCP 运行时不会发布 HTTP 策略。
+		return options, nil
+	default:
+		return repository.ServiceProxyOptions{}, fmt.Errorf("%w: origin scheme", ErrServiceManagementInput)
 	}
 }
 
@@ -615,6 +675,10 @@ func applyServiceUpdate(
 	}
 	if input.Origin != nil {
 		origin := serviceOrigin(*input.Origin)
+		proxyOptions, err := serviceProxyOptions(*input.Origin)
+		if err != nil {
+			return repository.Service{}, false, false, err
+		}
 		candidate.OriginScheme = origin.Scheme
 		candidate.OriginHost = origin.Host
 		candidate.OriginPort = origin.Port
@@ -622,6 +686,7 @@ func applyServiceUpdate(
 		candidate.TLSServerName = origin.TLSServerName
 		candidate.OriginHTTPHost = origin.HTTPHost
 		candidate.ConnectTimeoutMS = origin.ConnectTimeoutMS
+		candidate.ProxyOptions = proxyOptions
 	}
 	if input.DisableHealth {
 		candidate.Health = nil
@@ -648,7 +713,8 @@ func sameServiceSnapshot(left, right repository.Service) bool {
 	return left.OriginScheme == right.OriginScheme && left.OriginHost == right.OriginHost &&
 		left.OriginPort == right.OriginPort && left.TLSVerify == right.TLSVerify &&
 		left.TLSServerName == right.TLSServerName && left.OriginHTTPHost == right.OriginHTTPHost &&
-		left.ConnectTimeoutMS == right.ConnectTimeoutMS && left.Enabled == right.Enabled &&
+		left.ConnectTimeoutMS == right.ConnectTimeoutMS &&
+		left.ProxyOptions.WithDefaults() == right.ProxyOptions.WithDefaults() && left.Enabled == right.Enabled &&
 		sameServiceHealth(left.Health, right.Health)
 }
 

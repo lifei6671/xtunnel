@@ -13,15 +13,20 @@ import (
 	"github.com/lifei6671/xtunnel/internal/application"
 	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
+	"github.com/lifei6671/xtunnel/internal/safego"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	servercontrolauth "github.com/lifei6671/xtunnel/internal/server/controlauth"
 	"github.com/lifei6671/xtunnel/internal/server/externallock"
 	"github.com/lifei6671/xtunnel/internal/server/gateway"
+	serverhttpingress "github.com/lifei6671/xtunnel/internal/server/httpingress"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
+	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
+	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	"github.com/lifei6671/xtunnel/internal/server/sessionruntime"
 	"github.com/lifei6671/xtunnel/internal/server/snapshot"
 	serverworkauth "github.com/lifei6671/xtunnel/internal/server/workauth"
+	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
 
 const (
@@ -32,11 +37,15 @@ const (
 	controlAuthRetryAfter   = time.Second
 	workAuthReadTimeout     = 10 * time.Second
 	workAuthWriteTimeout    = 10 * time.Second
+	// OPEN 从首字节写出到完整 OpenResponse 提交共用一个 6 秒总预算；单次
+	// Read/Write 也取相同上限，避免分阶段时限叠加成 12 秒。
+	openHandshakeTimeout = 6 * time.Second
 	// SQLite 预算覆盖数据库、WAL/SHM 与迁移期间的短暂文件；Listener 预算覆盖
-	// Gateway 和产品入口基座。Management/Metrics 独立列项，安全余量吸收日志、
-	// DNS 与运行时临时 FD，避免把理论上限顶到 RLIMIT_NOFILE。
+	// Admin Bootstrap、Backup Barrier、HTTP Ingress 与 Gateway 的启动重叠峰值。
+	// Management/Metrics 独立列项，安全余量吸收日志、DNS 与运行时临时 FD，
+	// 避免把真实稳定 Listener 隐含塞入安全余量。
 	fdSQLiteReserve    = uint64(8)
-	fdListenerReserve  = uint64(2)
+	fdListenerReserve  = uint64(4)
 	fdSafetyMargin     = uint64(128)
 	serverDrainTimeout = 30 * time.Second
 )
@@ -49,13 +58,13 @@ func openGatewayLifecycle(
 	logger *slog.Logger,
 	reportRuntimeError func(error),
 	healthBudget *healthbudget.Manager,
-) (*gateway.Server, *sessionruntime.Manager, error) {
+) (*gateway.Server, *sessionruntime.Manager, *tunnel.Proxy, error) {
 	if healthBudget == nil {
-		return nil, nil, errors.New("health target budget manager is required")
+		return nil, nil, nil, errors.New("health target budget manager is required")
 	}
 	serverResources, ok := resources.(*serverStorage)
 	if !ok {
-		return nil, nil, errors.New("unexpected server storage implementation")
+		return nil, nil, nil, errors.New("unexpected server storage implementation")
 	}
 	if err := serverlimits.CheckFDBudget(serverlimits.FDBudget{
 		WorkConnections:         uint64(config.Limits.MaxWorkConnections),
@@ -67,7 +76,7 @@ func openGatewayLifecycle(
 		Listeners:               fdListenerReserve, SQLite: fdSQLiteReserve,
 		Management: 1, Metrics: 1, SafetyMargin: fdSafetyMargin,
 	}); err != nil {
-		return nil, nil, fmt.Errorf("validate startup file descriptor budget: %w", err)
+		return nil, nil, nil, fmt.Errorf("validate startup file descriptor budget: %w", err)
 	}
 	limitManager, err := serverlimits.New(serverlimits.Options{
 		MaxConnectors:                uint64(config.Limits.MaxConnectors),
@@ -82,7 +91,7 @@ func openGatewayLifecycle(
 		MaxConnectionsPerSourceIP:    uint64(config.Limits.MaxConnectionsPerSourceIP),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("construct server resource limit manager: %w", err)
+		return nil, nil, nil, fmt.Errorf("construct server resource limit manager: %w", err)
 	}
 	var (
 		identity    gateway.Identity
@@ -99,14 +108,14 @@ func openGatewayLifecycle(
 	case gateway.PublicMode:
 		identity, identityErr = gateway.LoadPublicIdentity(config.AgentGateway.TLS.CertFile, config.AgentGateway.TLS.KeyFile)
 	default:
-		return nil, nil, fmt.Errorf("unsupported gateway TLS mode %q", config.AgentGateway.TLS.Mode)
+		return nil, nil, nil, fmt.Errorf("unsupported gateway TLS mode %q", config.AgentGateway.TLS.Mode)
 	}
 	if identityErr != nil {
-		return nil, nil, fmt.Errorf("load gateway TLS identity: %w", identityErr)
+		return nil, nil, nil, fmt.Errorf("load gateway TLS identity: %w", identityErr)
 	}
 	protector, err := application.NewAES256GCMTokenProtector(serverResources.tokenMasterKey[:])
 	if err != nil {
-		return nil, nil, fmt.Errorf("construct Tunnel Token protector for gateway authentication: %w", err)
+		return nil, nil, nil, fmt.Errorf("construct Tunnel Token protector for gateway authentication: %w", err)
 	}
 	tokenService := application.NewConnectionTokenService(serverResources.database, protector)
 	snapshotBuilder, err := snapshot.New(snapshot.Config{
@@ -116,11 +125,11 @@ func openGatewayLifecycle(
 		MaxControlFrameBytes: config.Limits.MaxControlFrameBytes,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("construct gateway Snapshot builder: %w", err)
+		return nil, nil, nil, fmt.Errorf("construct gateway Snapshot builder: %w", err)
 	}
 	snapshotSource, err := snapshot.NewSource(serverResources.database, snapshotBuilder)
 	if err != nil {
-		return nil, nil, fmt.Errorf("construct gateway Snapshot source: %w", err)
+		return nil, nil, nil, fmt.Errorf("construct gateway Snapshot source: %w", err)
 	}
 	registry := serverruntime.NewRegistryWithLimitsAndHealthBudget(limitManager, healthBudget)
 	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
@@ -141,7 +150,7 @@ func openGatewayLifecycle(
 		ReportRuntimeError:   reportRuntimeError,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("construct gateway Session runtime: %w", err)
+		return nil, nil, nil, fmt.Errorf("construct gateway Session runtime: %w", err)
 	}
 	controlAuthenticator, err := servercontrolauth.New(tokenService, registry, servercontrolauth.Options{
 		AuthenticationRecorder: serverResources.database,
@@ -151,14 +160,31 @@ func openGatewayLifecycle(
 		MaxFrameBytes:     uint64(config.Limits.MaxAuthFrameBytes),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("construct gateway Control authenticator: %w", err)
+		return nil, nil, nil, fmt.Errorf("construct gateway Control authenticator: %w", err)
 	}
 	workAuthenticator, err := serverworkauth.NewHandler(sessions, serverworkauth.HandlerOptions{
 		ReadTimeout: workAuthReadTimeout, WriteTimeout: workAuthWriteTimeout,
 		MaxFrameBytes: uint64(config.Limits.MaxWorkFrameBytes),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("construct gateway Work authenticator: %w", err)
+		return nil, nil, nil, fmt.Errorf("construct gateway Work authenticator: %w", err)
+	}
+	openHandler, err := serveropen.NewHandler(serveropen.Options{
+		HandshakeTimeout: openHandshakeTimeout,
+		ReadTimeout:      openHandshakeTimeout,
+		WriteTimeout:     openHandshakeTimeout,
+		MaxFrameBytes:    uint64(config.Limits.MaxWorkFrameBytes),
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("construct gateway OPEN handler: %w", err)
+	}
+	tunnelProxy, err := tunnel.NewProxy(tunnel.Options{
+		Registry: registry, Sessions: sessions, OpenHandler: openHandler,
+		AcquireTimeout: config.Transport.TCP.WorkAcquireTimeout.Duration,
+		LimitManager:   limitManager,
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("construct Tunnel data-plane proxy: %w", err)
 	}
 	protocolHandler := &gatewayProtocolHandler{
 		controlAuthenticator: controlAuthenticator,
@@ -181,9 +207,9 @@ func openGatewayLifecycle(
 		},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("construct agent gateway: %w", err)
+		return nil, nil, nil, fmt.Errorf("construct agent gateway: %w", err)
 	}
-	return server, sessions, nil
+	return server, sessions, tunnelProxy, nil
 }
 
 // gatewayProtocolHandler 是 TLS/ALPN 之后唯一的生产协议分发点。
@@ -265,12 +291,17 @@ func (gate *authGate) tryAcquire() (release func(), acquired bool) {
 	}
 }
 
-// gatewayBootstrapCloser 将运行中的 Gateway 与只在 SETUP_REQUIRED 存在的 Bootstrap Socket 一起收束。
+// gatewayBootstrapCloser 将 Route owner、运行中的 Gateway 与只在 SETUP_REQUIRED
+// 存在的 Bootstrap Socket 一起收束，并保证它们都先于 SQLite 退出。
 type gatewayBootstrapCloser struct {
 	backupBarrier io.Closer
 	bootstrap     io.Closer
 	gateway       *gateway.Server
+	httpIngress   *serverhttpingress.Server
+	httpHandler   *serverhttpingress.Handler
 	sessions      *sessionruntime.Manager
+	routes        *serverroute.Manager
+	cancelRoutes  context.CancelFunc
 	runtimeErrors chan error
 	drainTimeout  time.Duration
 	once          sync.Once
@@ -291,15 +322,58 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		if closer.bootstrap != nil {
 			bootstrapErr = closer.bootstrap.Close()
 		}
+		// 同时关闭两类公网入口后才开始排空。HTTP Listener 先停可避免新的
+		// RoundTrip 继续申请 WorkConn；Gateway 随后停止接受新的 Control/Work。
+		var httpStopErr error
+		if closer.httpIngress != nil {
+			httpStopErr = closer.httpIngress.StopAccepting()
+		}
 		stopErr := closer.gateway.StopAccepting()
 		timeout := closer.drainTimeout
 		if timeout <= 0 {
 			timeout = serverDrainTimeout
 		}
 		drainContext, cancelDrain := context.WithTimeout(context.Background(), timeout)
-		drainErr := closer.sessions.Shutdown(drainContext)
+		// 先关闭当前 idle Transport，避免没有请求的池化 WorkConn 占满排空窗口。
+		// Session 与 HTTP 使用同一个绝对 Deadline 并行排空：Session 立即建立禁止
+		// 新 OPEN 的 fence，HTTP 则允许已经进入 Handler 的请求自然完成。
+		if closer.httpHandler != nil {
+			closer.httpHandler.CloseIdleConnections()
+		}
+		sessionResult := make(chan error, 1)
+		safego.Go(
+			func(err error) { sessionResult <- err },
+			nil,
+			func() { sessionResult <- closer.sessions.Shutdown(drainContext) },
+		)
+		var httpDrainErr error
+		if closer.httpIngress != nil {
+			httpDrainErr = closer.httpIngress.Shutdown(drainContext)
+		}
+		// 在途请求完成后连接可能刚被 Transport 归还为 idle；再次同步关闭，
+		// 让并行等待的 Session Shutdown 立即观察到 ACTIVE 归零。
+		if closer.httpHandler != nil {
+			closer.httpHandler.CloseIdleConnections()
+		}
+		drainErr := <-sessionResult
 		cancelDrain()
-		closer.result = errors.Join(backupErr, bootstrapErr, stopErr, drainErr, closer.gateway.Close())
+		var httpCloseErr error
+		if closer.httpIngress != nil {
+			httpCloseErr = closer.httpIngress.Close()
+		}
+		gatewayErr := closer.gateway.Close()
+		// Route owner 必须晚于全部 Listener/Session 停止、早于 SQLite 关闭。
+		// 取消后同步 Wait，确保它不再持有数据库读取或遗留孤儿 goroutine。
+		if closer.cancelRoutes != nil {
+			closer.cancelRoutes()
+		}
+		if closer.routes != nil {
+			closer.routes.Wait()
+		}
+		closer.result = errors.Join(
+			backupErr, bootstrapErr, httpStopErr, stopErr,
+			httpDrainErr, drainErr, httpCloseErr, gatewayErr,
+		)
 	})
 	return closer.result
 }
@@ -375,29 +449,85 @@ func openGatewayAndBootstrapWith(
 		default:
 		}
 	}
-	gatewayServer, sessions, err := openGatewayLifecycle(config, resources, logger, reportRuntimeError, healthBudget)
+	gatewayServer, sessions, tunnelProxy, err := openGatewayLifecycle(
+		config, resources, logger, reportRuntimeError, healthBudget,
+	)
 	if err != nil {
 		return nil, err
 	}
+	routes, err := serverroute.NewManager(serverResources.database)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("construct immutable route snapshot manager: %w", err), gatewayServer.Close())
+	}
+	// Route owner 继承进程取消信号，使阻塞中的 SQLite 读取能及时解阻塞；取消不会
+	// 清除已经原子发布的不可变快照。closer 仍会在 Listener/Session 停止后 Wait，
+	// 保证 SQLite 关闭前 owner 已完整退出。
+	routeContext, cancelRoutes := context.WithCancel(ctx)
+	if err := routes.Start(routeContext); err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(fmt.Errorf("load immutable route snapshot before listener startup: %w", err), gatewayServer.Close())
+	}
+	httpHandler, err := serverhttpingress.NewHandler(routes, tunnelProxy)
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(fmt.Errorf("construct HTTP ingress handler: %w", err), gatewayServer.Close())
+	}
+	httpIngress, err := serverhttpingress.NewServer(serverhttpingress.ServerOptions{
+		Listen: config.HTTPIngress.Listen, Handler: httpHandler,
+		MaxHeaderBytes:     config.Limits.MaxHTTPHeaderBytes,
+		ReportRuntimeError: reportRuntimeError,
+	})
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(fmt.Errorf("construct HTTP ingress listener: %w", err), gatewayServer.Close())
+	}
+	cleanupBeforeOwnershipTransfer := func() error {
+		httpHandler.CloseIdleConnections()
+		httpErr := httpIngress.Close()
+		cancelRoutes()
+		routes.Wait()
+		return errors.Join(httpErr, gatewayServer.Close())
+	}
 	startGateway := func() error {
-		// 进程 Context 取消只触发外层冻结的排空顺序；已认证 Gateway 连接必须继续
-		// 存活到 ACTIVE 自然结束或 Server Drain Deadline。
-		if err := gatewayServer.Start(context.WithoutCancel(ctx)); err != nil {
-			startErr := errors.Join(fmt.Errorf("start agent gateway after admin bootstrap: %w", err), gatewayServer.Close())
+		// 冻结启动顺序是 Route Snapshot → HTTP Ingress → Gateway → Runtime
+		// Reconciler。进程取消只触发外层关闭 owner，不能直接杀死在途请求或 Session。
+		lifecycleContext := context.WithoutCancel(ctx)
+		if err := httpIngress.Start(lifecycleContext); err != nil {
+			startErr := errors.Join(
+				fmt.Errorf("start HTTP ingress after admin bootstrap: %w", err),
+				httpIngress.Close(),
+				gatewayServer.Close(),
+			)
 			reportRuntimeError(startErr)
 			return startErr
 		}
-		// 冻结的 Server 启动顺序是 Gateway 后紧接唯一 Runtime Reconciler。
-		// 极短窗口内到达的 Control Session 因 Reconciler 未启动而 fail-closed，
-		// Agent 使用现有 backoff 重连，不会回落到本地配置。
-		if err := sessions.Start(context.WithoutCancel(ctx)); err != nil {
+		if err := gatewayServer.Start(lifecycleContext); err != nil {
+			httpHandler.CloseIdleConnections()
+			startErr := errors.Join(
+				fmt.Errorf("start agent gateway after HTTP ingress: %w", err),
+				httpIngress.Close(),
+				gatewayServer.Close(),
+			)
+			reportRuntimeError(startErr)
+			return startErr
+		}
+		// 极短窗口内到达的 HTTP 或 Control 请求因 Reconciler 未启动而 fail-closed；
+		// 不查询 SQLite 热路径，也不回落到本地或旧配置。
+		if err := sessions.Start(lifecycleContext); err != nil {
 			drainContext, cancelDrain := context.WithTimeout(context.Background(), serverDrainTimeout)
+			httpStopErr := httpIngress.StopAccepting()
 			stopErr := gatewayServer.StopAccepting()
+			httpHandler.CloseIdleConnections()
 			shutdownErr := sessions.Shutdown(drainContext)
 			cancelDrain()
 			startErr := errors.Join(
 				fmt.Errorf("start server Snapshot reconciler: %w", err),
+				httpStopErr,
 				stopErr,
+				httpIngress.Close(),
 				shutdownErr,
 				gatewayServer.Close(),
 			)
@@ -408,17 +538,25 @@ func openGatewayAndBootstrapWith(
 	}
 	hasAdmin, err := serverResources.database.HasAdmin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("check admin bootstrap state before gateway start: %w", err)
+		return nil, errors.Join(fmt.Errorf("check admin bootstrap state before gateway start: %w", err), cleanupBeforeOwnershipTransfer())
 	}
 	if hasAdmin {
 		if err := startGateway(); err != nil {
-			return nil, err
+			return nil, errors.Join(err, cleanupBeforeOwnershipTransfer())
 		}
-		return &gatewayBootstrapCloser{gateway: gatewayServer, sessions: sessions, runtimeErrors: runtimeErrors}, nil
+		return &gatewayBootstrapCloser{
+			gateway: gatewayServer, httpIngress: httpIngress, httpHandler: httpHandler,
+			sessions: sessions, routes: routes, cancelRoutes: cancelRoutes,
+			runtimeErrors: runtimeErrors,
+		}, nil
 	}
 	socket, err := openBootstrapSocket(ctx, runtimeDir, serverResources.targetHash, serverResources.database, startGateway, reportRuntimeError)
 	if err != nil {
-		return nil, errors.Join(err, gatewayServer.Close())
+		return nil, errors.Join(err, cleanupBeforeOwnershipTransfer())
 	}
-	return &gatewayBootstrapCloser{bootstrap: socket, gateway: gatewayServer, sessions: sessions, runtimeErrors: runtimeErrors}, nil
+	return &gatewayBootstrapCloser{
+		bootstrap: socket, gateway: gatewayServer, httpIngress: httpIngress, httpHandler: httpHandler,
+		sessions: sessions, routes: routes, cancelRoutes: cancelRoutes,
+		runtimeErrors: runtimeErrors,
+	}, nil
 }

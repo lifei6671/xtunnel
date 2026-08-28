@@ -703,7 +703,7 @@ func TestTunnelDomainMigrationUpgradesAndRollsBackFailedNextVersion(t *testing.T
 	}
 
 	available := append([]migration{}, productionMigrations...)
-	available = append(available, migration{version: 7, statements: []string{
+	available = append(available, migration{version: 9, statements: []string{
 		"CREATE TABLE interrupted_tunnel_migration (id INTEGER PRIMARY KEY)",
 		"THIS IS NOT VALID SQL",
 	}})
@@ -717,7 +717,7 @@ func TestTunnelDomainMigrationUpgradesAndRollsBackFailedNextVersion(t *testing.T
 	if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
 		t.Fatalf("count migration versions error = %v", err)
 	}
-	if interruptedCount != 0 || versionCount != 6 {
+	if interruptedCount != 0 || versionCount != 8 {
 		t.Fatalf("failed migration rollback = table:%d versions:%d", interruptedCount, versionCount)
 	}
 }

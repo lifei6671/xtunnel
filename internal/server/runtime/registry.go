@@ -545,7 +545,7 @@ func (registry *Registry) Current(tunnelID, connectorID string) (Session, bool) 
 // AcquireConnector 以“最少活跃 + 稳定 RR”从指定 Tunnel 选择 Current Connector。
 // 选择与唯一负载计数递增都在该 TunnelRuntime.mu 内线性化。
 func (registry *Registry) AcquireConnector(tunnelID string) (*ConnectorLease, error) {
-	return registry.acquireConnectorWhere(tunnelID, "", nil)
+	return registry.acquireConnectorWhere(tunnelID, "", serviceRevisionConstraint{}, nil)
 }
 
 // AcquireConnectorWhere 只在调用方判定 eligible 的 Current Session 中执行最少活跃
@@ -555,23 +555,51 @@ func (registry *Registry) AcquireConnectorWhere(tunnelID string, predicate func(
 	if predicate == nil {
 		return nil, ErrNoAvailableConnector
 	}
-	return registry.acquireConnectorWhere(tunnelID, "", predicate)
+	return registry.acquireConnectorWhere(tunnelID, "", serviceRevisionConstraint{}, predicate)
 }
 
 // AcquireEligibleConnectorWhere 在同一 TunnelRuntime.mu 临界区内先执行
-// Current/Revision/Health/Stale TTL 门禁，再使用 predicate 检查调用方预先取得的
-// Pool 状态。predicate 不得回调 Registry 或 Session Manager。
+// Current/Health/Stale TTL 门禁，再使用 predicate 检查调用方预先取得的 Pool 状态。
+// predicate 不得回调 Registry 或 Session Manager。
 func (registry *Registry) AcquireEligibleConnectorWhere(
 	tunnelID, serviceID string,
+	predicate func(Session) bool,
+) (*ConnectorLease, error) {
+	return registry.acquireEligibleConnectorWhere(
+		tunnelID, serviceID, serviceRevisionConstraint{}, predicate,
+	)
+}
+
+// AcquireEligibleConnectorAtRevisionWhere 额外要求 Service 精确匹配 Route
+// Revision；Revision 0 也执行精确匹配。
+func (registry *Registry) AcquireEligibleConnectorAtRevisionWhere(
+	tunnelID, serviceID string,
+	requiredRevision uint64,
+	predicate func(Session) bool,
+) (*ConnectorLease, error) {
+	return registry.acquireEligibleConnectorWhere(
+		tunnelID, serviceID,
+		serviceRevisionConstraint{exact: true, revision: requiredRevision},
+		predicate,
+	)
+}
+
+func (registry *Registry) acquireEligibleConnectorWhere(
+	tunnelID, serviceID string,
+	revision serviceRevisionConstraint,
 	predicate func(Session) bool,
 ) (*ConnectorLease, error) {
 	if predicate == nil || identity.ValidateServiceID(serviceID) != nil {
 		return nil, ErrNoAvailableConnector
 	}
-	return registry.acquireConnectorWhere(tunnelID, serviceID, predicate)
+	return registry.acquireConnectorWhere(tunnelID, serviceID, revision, predicate)
 }
 
-func (registry *Registry) acquireConnectorWhere(tunnelID, serviceID string, predicate func(Session) bool) (*ConnectorLease, error) {
+func (registry *Registry) acquireConnectorWhere(
+	tunnelID, serviceID string,
+	revision serviceRevisionConstraint,
+	predicate func(Session) bool,
+) (*ConnectorLease, error) {
 	if err := identity.ValidateTunnelID(tunnelID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidTunnelID, err)
 	}
@@ -590,7 +618,7 @@ func (registry *Registry) acquireConnectorWhere(tunnelID, serviceID string, pred
 	}
 	candidates := make([]Session, 0, len(runtime.current))
 	for _, session := range runtime.current {
-		if serviceID != "" && !runtime.sessionEligibleLocked(session, serviceID, runtime.now()) {
+		if serviceID != "" && !runtime.sessionEligibleLocked(session, serviceID, revision, runtime.now()) {
 			continue
 		}
 		if predicate != nil && !predicate(session) {

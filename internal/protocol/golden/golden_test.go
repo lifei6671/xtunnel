@@ -62,8 +62,20 @@ func TestProtocolV1GoldenVectors(t *testing.T) {
 		TunnelId: "tun_01J00000000000000000000000",
 		Revision: 7,
 		Services: []*protocolv1.ServiceConfig{
-			{ServiceId: "svc_01J00000000000000000000001", OriginScheme: "http", OriginHost: "127.0.0.1", OriginPort: 8080, Enabled: true, RequiredRevision: 7},
-			{ServiceId: "svc_01J00000000000000000000000", OriginScheme: "tcp", OriginHost: "::1", OriginPort: 22, Enabled: true, RequiredRevision: 7},
+			{
+				ServiceId: "svc_01J00000000000000000000001", OriginScheme: "http", OriginHost: "127.0.0.1",
+				OriginPort: 8080, Enabled: true, RequiredRevision: 7,
+				OriginConnectionOptions: &protocolv1.OriginConnectionOptions{TcpKeepaliveIntervalMs: 30_000},
+				HttpProxyOptions: &protocolv1.HTTPProxyOptions{
+					IdleConnectionTimeoutMs: 90_000,
+					MaxIdleConnections:      100,
+				},
+			},
+			{
+				ServiceId: "svc_01J00000000000000000000000", OriginScheme: "tcp", OriginHost: "::1",
+				OriginPort: 22, Enabled: true, RequiredRevision: 7,
+				OriginConnectionOptions: &protocolv1.OriginConnectionOptions{DisableHappyEyeballs: true},
+			},
 		},
 	}
 	snapshotBytes, err := deterministic.MarshalSnapshot(snapshot)

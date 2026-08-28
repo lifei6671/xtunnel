@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -164,9 +165,113 @@ func TestHandleRejectsMismatchedConnectionID(t *testing.T) {
 	}
 }
 
+func TestHandleUsesOneTotalHandshakeBudgetAcrossWriteAndRead(t *testing.T) {
+	const handshakeTimeout = 150 * time.Millisecond
+	serverConnection, agentConnection := net.Pipe()
+	defer agentConnection.Close()
+	handler, err := NewHandler(Options{
+		HandshakeTimeout: handshakeTimeout,
+		WriteTimeout:     time.Second,
+		ReadTimeout:      time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+	idle := serverIdle(t)
+	started := time.Now()
+	result := make(chan error, 1)
+	go func() {
+		_, handleErr := handler.Handle(context.Background(), serverConnection, idle, validOpenRequest())
+		result <- handleErr
+	}()
+
+	// 先消耗一半以上总预算再接收请求。读取完成后不返回 OpenResponse；若读阶段
+	// 错误地重置为独立一秒窗口，本测试会在外层 500ms 门限处失败。
+	time.Sleep(80 * time.Millisecond)
+	request := &protocolv1.OpenRequest{}
+	if err := frame.ReadWork(agentConnection, request); err != nil {
+		t.Fatalf("read delayed OpenRequest: %v", err)
+	}
+	select {
+	case handleErr := <-result:
+		if !errors.Is(handleErr, ErrPreRAWTransport) {
+			t.Fatalf("Handle() error = %v, want ErrPreRAWTransport", handleErr)
+		}
+		elapsed := time.Since(started)
+		if elapsed < 100*time.Millisecond || elapsed > 400*time.Millisecond {
+			t.Fatalf("OPEN elapsed = %v, want one approximately %v total budget", elapsed, handshakeTimeout)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Handle() reset the read budget instead of enforcing one total handshake timeout")
+	}
+}
+
+func TestHandleStopsContextDeadlineCallbackBeforeClearingRawDeadline(t *testing.T) {
+	serverPipe, agentConnection := net.Pipe()
+	defer agentConnection.Close()
+	connection := &deadlineInterleavingConn{
+		Conn: serverPipe, clearStarted: make(chan struct{}), allowClear: make(chan struct{}),
+		expiredStarted: make(chan struct{}),
+	}
+	handler := newTestHandler(t)
+	idle := serverIdle(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, handleErr := handler.Handle(ctx, connection, idle, validOpenRequest())
+		result <- handleErr
+	}()
+	request := &protocolv1.OpenRequest{}
+	if err := frame.ReadWork(agentConnection, request); err != nil {
+		t.Fatalf("read OpenRequest: %v", err)
+	}
+	if err := frame.WriteWork(agentConnection, &protocolv1.OpenResponse{
+		ConnectionId: request.GetConnectionId(),
+		Status:       protocolv1.OpenStatus_OPEN_STATUS_OK,
+		ErrorCode:    protocolv1.ErrorCode_ERROR_CODE_OK,
+	}); err != nil {
+		t.Fatalf("write OpenResponse: %v", err)
+	}
+	select {
+	case <-connection.clearStarted:
+	case <-time.After(testTimeout):
+		t.Fatal("Handle() did not reach RAW deadline clear")
+	}
+
+	// 取消发生在清零 Deadline 正在执行时。正确实现已在进入清零前同步停止回调，
+	// 因此不会再出现一个等待连接内部锁、随后覆盖零值的过期 Deadline 写入。
+	cancel()
+	callbackStarted := false
+	select {
+	case <-connection.expiredStarted:
+		callbackStarted = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(connection.allowClear)
+	select {
+	case handleErr := <-result:
+		if !errors.Is(handleErr, ErrRawCommitted) || !errors.Is(handleErr, context.Canceled) {
+			t.Fatalf("Handle() error = %v, want ErrRawCommitted joined with context.Canceled", handleErr)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("Handle() did not return after deadline clear was released")
+	}
+	if callbackStarted {
+		t.Fatal("Context deadline callback started after RAW deadline clearing had begun")
+	}
+	select {
+	case <-connection.expiredStarted:
+		t.Fatal("Context deadline callback wrote an expired deadline after RAW clear")
+	default:
+	}
+}
+
 func newTestHandler(t *testing.T) *Handler {
 	t.Helper()
-	handler, err := NewHandler(Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	handler, err := NewHandler(Options{
+		HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second,
+	})
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -175,8 +280,15 @@ func newTestHandler(t *testing.T) *Handler {
 
 func TestNewHandlerRejectsFrameLimitAboveProtocol(t *testing.T) {
 	if _, err := NewHandler(Options{
-		WriteTimeout: time.Second, ReadTimeout: time.Second, MaxFrameBytes: frame.MaxWorkFrameSize + 1,
+		HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second,
+		MaxFrameBytes: frame.MaxWorkFrameSize + 1,
 	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("NewHandler() error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestNewHandlerRequiresTotalHandshakeTimeout(t *testing.T) {
+	if _, err := NewHandler(Options{WriteTimeout: time.Second, ReadTimeout: time.Second}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("NewHandler() error = %v, want ErrInvalidInput", err)
 	}
 }
@@ -213,4 +325,31 @@ func validOpenRequest() *protocolv1.OpenRequest {
 		ProtocolVersion: 1, ConnectionId: testConnectionID, ServiceId: testServiceID,
 		IngressType: protocolv1.IngressType_INGRESS_TYPE_TCP,
 	}
+}
+
+// deadlineInterleavingConn 把零值 SetDeadline 阻塞在连接内部临界区，并在取消
+// 回调尝试写过期 Deadline 时先发信号。它复现“clear 返回后旧 callback 覆盖”的
+// 精确交错，而不依赖底层网络实现的锁时序。
+type deadlineInterleavingConn struct {
+	net.Conn
+
+	deadlineMu     sync.Mutex
+	clearOnce      sync.Once
+	expiredOnce    sync.Once
+	clearStarted   chan struct{}
+	allowClear     chan struct{}
+	expiredStarted chan struct{}
+}
+
+func (connection *deadlineInterleavingConn) SetDeadline(deadline time.Time) error {
+	if !deadline.IsZero() && !deadline.After(time.Now()) {
+		connection.expiredOnce.Do(func() { close(connection.expiredStarted) })
+	}
+	connection.deadlineMu.Lock()
+	defer connection.deadlineMu.Unlock()
+	if deadline.IsZero() {
+		connection.clearOnce.Do(func() { close(connection.clearStarted) })
+		<-connection.allowClear
+	}
+	return connection.Conn.SetDeadline(deadline)
 }

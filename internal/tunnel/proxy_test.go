@@ -102,7 +102,7 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	agentResult := make(chan error, 1)
 	go func() { agentResult <- runEchoConnector(agentWork) }()
 
-	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("open.NewHandler() error = %v", err)
 	}
@@ -193,7 +193,7 @@ func TestProxyAggregatesConcurrentPendingOpensAndRefillsBeyondInitialDemand(t *t
 		readDemand(t, controlAgent)
 	}
 
-	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("open.NewHandler() error = %v", err)
 	}
@@ -342,7 +342,7 @@ func TestProxySelectsOnlyConnectorHealthyForService(t *testing.T) {
 	}
 	waitFor(t, func() bool { return sessions.Eligible(healthySession, testServiceID) })
 
-	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,9 @@ func TestProxySelectsOnlyConnectorHealthyForService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, selected, _, membership, err := tunnelProxy.selectConnector(context.Background(), testTunnelID, testServiceID)
+	lease, selected, _, membership, err := tunnelProxy.selectConnector(
+		context.Background(), testTunnelID, testServiceID, serviceRevisionConstraint{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +421,7 @@ func TestAcquireWorkReselectsWhenPendingSessionBecomesUnhealthy(t *testing.T) {
 		waitFor(t, func() bool { return registry.Eligible(session, testServiceID) })
 	}
 
-	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +440,9 @@ func TestAcquireWorkReselectsWhenPendingSessionBecomesUnhealthy(t *testing.T) {
 	}
 	result := make(chan acquireResult, 1)
 	go func() {
-		lease, session, _, work, acquireErr := tunnelProxy.acquireWork(context.Background(), testTunnelID, testServiceID)
+		lease, session, _, work, acquireErr := tunnelProxy.acquireWork(
+			context.Background(), testTunnelID, testServiceID, serviceRevisionConstraint{},
+		)
 		result <- acquireResult{lease: lease, session: session, work: work, err: acquireErr}
 	}()
 
@@ -551,7 +555,7 @@ func TestAcquirePendingWorkReselectsAfterHealthTTLExpires(t *testing.T) {
 		t.Fatal("PublishEligibility(fallback) rejected current Session")
 	}
 
-	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,7 +575,9 @@ func TestAcquirePendingWorkReselectsAfterHealthTTLExpires(t *testing.T) {
 	defer cancel()
 	acquired := make(chan acquireResult, 1)
 	go func() {
-		lease, session, _, work, acquireErr := tunnelProxy.acquireWork(ctx, testTunnelID, testServiceID)
+		lease, session, _, work, acquireErr := tunnelProxy.acquireWork(
+			ctx, testTunnelID, testServiceID, serviceRevisionConstraint{},
+		)
 		acquired <- acquireResult{lease: lease, session: session, work: work, err: acquireErr}
 	}()
 
@@ -652,7 +658,7 @@ func TestPendingGroupsAggregateCountsAcrossServicesPerSession(t *testing.T) {
 	}) {
 		t.Fatal("PublishEligibility() rejected current Session")
 	}
-	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,11 +669,15 @@ func TestPendingGroupsAggregateCountsAcrossServicesPerSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := tunnelProxy.joinPendingGroup(context.Background(), testTunnelID, testServiceID)
+	first, err := tunnelProxy.joinPendingGroup(
+		context.Background(), testTunnelID, testServiceID, serviceRevisionConstraint{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := tunnelProxy.joinPendingGroup(context.Background(), testTunnelID, testServiceTwo)
+	second, err := tunnelProxy.joinPendingGroup(
+		context.Background(), testTunnelID, testServiceTwo, serviceRevisionConstraint{},
+	)
 	if err != nil {
 		_ = first.Release()
 		t.Fatal(err)
@@ -751,7 +761,7 @@ func TestPendingGroupSerializesServicesWithDisjointEligibleConnectors(t *testing
 		sessionByService[serviceID] = session
 	}
 
-	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -761,7 +771,9 @@ func TestPendingGroupSerializesServicesWithDisjointEligibleConnectors(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := tunnelProxy.joinPendingGroup(context.Background(), testTunnelID, testServiceID)
+	first, err := tunnelProxy.joinPendingGroup(
+		context.Background(), testTunnelID, testServiceID, serviceRevisionConstraint{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +783,9 @@ func TestPendingGroupSerializesServicesWithDisjointEligibleConnectors(t *testing
 
 	waitContext, cancelWait := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancelWait()
-	if second, err := tunnelProxy.joinPendingGroup(waitContext, testTunnelID, testServiceTwo); second != nil || !errors.Is(err, context.DeadlineExceeded) {
+	if second, err := tunnelProxy.joinPendingGroup(
+		waitContext, testTunnelID, testServiceTwo, serviceRevisionConstraint{},
+	); second != nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("second Service join while Tunnel group active = (%#v, %v), want deadline", second, err)
 	}
 	tunnelProxy.pendingMu.Lock()
@@ -784,7 +798,9 @@ func TestPendingGroupSerializesServicesWithDisjointEligibleConnectors(t *testing
 	if err := first.Release(); err != nil {
 		t.Fatal(err)
 	}
-	second, err := tunnelProxy.joinPendingGroup(context.Background(), testTunnelID, testServiceTwo)
+	second, err := tunnelProxy.joinPendingGroup(
+		context.Background(), testTunnelID, testServiceTwo, serviceRevisionConstraint{},
+	)
 	if err != nil {
 		t.Fatalf("second Service join after prior Tunnel group drained: %v", err)
 	}
@@ -843,7 +859,7 @@ func TestProxyPendingOpenTimeoutAndCancelReleaseQuota(t *testing.T) {
 			controlResult := make(chan error, 1)
 			go func() { controlResult <- sessions.Serve(context.Background(), controlServer, &established) }()
 			readDemand(t, controlAgent)
-			openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+			openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 			if err != nil {
 				t.Fatalf("open.NewHandler() error = %v", err)
 			}
@@ -928,7 +944,7 @@ func TestProxyPendingGroupReselectsWhenSelectedSessionDrains(t *testing.T) {
 		go func() { result <- sessions.Serve(context.Background(), controlServer, &established) }()
 		readDemand(t, controlAgent)
 	}
-	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("open.NewHandler() error = %v", err)
 	}
@@ -1059,7 +1075,7 @@ func TestAcquireWorkRetriesStalePendingSessionAfterGenerationReplacement(t *test
 	oldSession, oldControl, oldResult := startSession(testConnectorID)
 	fallbackSession, fallbackControl, fallbackResult := startSession(testConnectorTwo)
 
-	openHandler, err := serveropen.NewHandler(serveropen.Options{WriteTimeout: time.Second, ReadTimeout: time.Second})
+	openHandler, err := serveropen.NewHandler(serveropen.Options{HandshakeTimeout: time.Second, WriteTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("open.NewHandler() error = %v", err)
 	}
@@ -1096,7 +1112,9 @@ func TestAcquireWorkRetriesStalePendingSessionAfterGenerationReplacement(t *test
 	}
 	result := make(chan acquireResult, 1)
 	go func() {
-		lease, session, pool, work, acquireErr := tunnelProxy.acquireWork(context.Background(), testTunnelID, testServiceID)
+		lease, session, pool, work, acquireErr := tunnelProxy.acquireWork(
+			context.Background(), testTunnelID, testServiceID, serviceRevisionConstraint{},
+		)
 		result <- acquireResult{lease: lease, session: session, pool: pool, work: work, err: acquireErr}
 	}()
 

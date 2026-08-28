@@ -546,6 +546,11 @@ func healthReporterService(serviceID string, revision uint64, healthType protoco
 		ServiceId: serviceID, RequiredRevision: revision, Enabled: true,
 		OriginScheme: "http", OriginHost: "origin.test", OriginPort: 8080,
 		ConnectTimeoutMs: 500, TlsVerify: true, Health: health,
+		OriginConnectionOptions: &protocolv1.OriginConnectionOptions{TcpKeepaliveIntervalMs: 30_000},
+		HttpProxyOptions: &protocolv1.HTTPProxyOptions{
+			IdleConnectionTimeoutMs: 90_000,
+			MaxIdleConnections:      100,
+		},
 	}
 }
 

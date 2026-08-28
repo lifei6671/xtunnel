@@ -32,7 +32,7 @@ func TestOpenCreatesAndReusesMigratedDatabase(t *testing.T) {
 	if err := store.database.Exec("INSERT INTO schema_migrations(version, applied_at) VALUES (1, 1)").Error; err == nil {
 		t.Fatal("schema_migrations accepted a duplicate primary key")
 	}
-	if err := store.database.Exec("INSERT INTO schema_migrations(version, applied_at) VALUES (7, NULL)").Error; err == nil {
+	if err := store.database.Exec("INSERT INTO schema_migrations(version, applied_at) VALUES (9, NULL)").Error; err == nil {
 		t.Fatal("schema_migrations accepted a NULL applied_at")
 	}
 	if err := store.Close(); err != nil {
@@ -52,8 +52,8 @@ func TestOpenCreatesAndReusesMigratedDatabase(t *testing.T) {
 	if err := store.database.Table("schema_migrations").Order("version").Pluck("version", &versions).Error; err != nil {
 		t.Fatalf("read versions error = %v", err)
 	}
-	if len(versions) != 6 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 || versions[3] != 4 || versions[4] != 5 || versions[5] != 6 {
-		t.Fatalf("versions = %#v, want [1 2 3 4 5 6]", versions)
+	if len(versions) != 8 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 || versions[3] != 4 || versions[4] != 5 || versions[5] != 6 || versions[6] != 7 || versions[7] != 8 {
+		t.Fatalf("versions = %#v, want [1 2 3 4 5 6 7 8]", versions)
 	}
 	var secondAppliedAt int64
 	if err := store.database.Table("schema_migrations").Select("applied_at").Where("version = ?", 1).Scan(&secondAppliedAt).Error; err != nil {
@@ -282,7 +282,7 @@ func TestTunnelFirstAuthenticationMigrationUpgradesV5AndIsIdempotent(t *testing.
 		t.Fatalf("seed v5 Tunnel error = %v", err)
 	}
 
-	if err := runMigrations(context.Background(), database, productionMigrations, testNow); err != nil {
+	if err := runMigrations(context.Background(), database, productionMigrations[:6], testNow); err != nil {
 		t.Fatalf("upgrade to v6 error = %v", err)
 	}
 	var firstAuthenticatedAt sql.NullInt64
@@ -299,7 +299,7 @@ func TestTunnelFirstAuthenticationMigrationUpgradesV5AndIsIdempotent(t *testing.
 		t.Fatal("v6 migration accepted zero first_authenticated_at")
 	}
 
-	if err := runMigrations(context.Background(), database, productionMigrations, testNow); err != nil {
+	if err := runMigrations(context.Background(), database, productionMigrations[:6], testNow); err != nil {
 		t.Fatalf("idempotent v6 rerun error = %v", err)
 	}
 	var versionCount int64
@@ -344,7 +344,7 @@ func TestTunnelFirstAuthenticationMigrationRollsBackAtomically(t *testing.T) {
 		t.Fatalf("failed v6 state = tunnels:%d versions:%d, want 1/5", tunnelCount, versionCount)
 	}
 
-	if err := runMigrations(context.Background(), database, productionMigrations, testNow); err != nil {
+	if err := runMigrations(context.Background(), database, productionMigrations[:6], testNow); err != nil {
 		t.Fatalf("recover v6 migration error = %v", err)
 	}
 	if !database.Migrator().HasColumn(&tunnelRecord{}, TunnelColumns.FirstAuthenticatedAt) {
@@ -616,7 +616,7 @@ func TestRunMigrationsRollsBackFailedMigration(t *testing.T) {
 
 	available := append([]migration{}, productionMigrations...)
 	available = append(available, migration{
-		version: 7,
+		version: 9,
 		statements: []string{
 			"CREATE TABLE interrupted_migration (id INTEGER PRIMARY KEY)",
 			"THIS IS NOT VALID SQL",
@@ -637,12 +637,12 @@ func TestRunMigrationsRollsBackFailedMigration(t *testing.T) {
 	if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
 		t.Fatalf("count schema versions error = %v", err)
 	}
-	if versionCount != 6 {
-		t.Fatalf("version count = %d, want 6", versionCount)
+	if versionCount != 8 {
+		t.Fatalf("version count = %d, want 8", versionCount)
 	}
 
 	available[len(available)-1] = migration{
-		version:    7,
+		version:    9,
 		statements: []string{"CREATE TABLE resumed_migration (id INTEGER PRIMARY KEY)"},
 	}
 	if err := runMigrations(context.Background(), database, available, testNow); err != nil {
@@ -652,8 +652,8 @@ func TestRunMigrationsRollsBackFailedMigration(t *testing.T) {
 	if err := database.Table("schema_migrations").Order("version").Pluck("version", &versions).Error; err != nil {
 		t.Fatalf("read repaired versions error = %v", err)
 	}
-	if len(versions) != 7 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 || versions[3] != 4 || versions[4] != 5 || versions[5] != 6 || versions[6] != 7 {
-		t.Fatalf("repaired versions = %#v, want [1 2 3 4 5 6 7]", versions)
+	if len(versions) != 9 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 || versions[3] != 4 || versions[4] != 5 || versions[5] != 6 || versions[6] != 7 || versions[7] != 8 || versions[8] != 9 {
+		t.Fatalf("repaired versions = %#v, want [1 2 3 4 5 6 7 8 9]", versions)
 	}
 }
 
@@ -727,7 +727,7 @@ func TestOpenRejectsNewerDatabaseVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if err := store.database.Exec("INSERT INTO schema_migrations(version, applied_at) VALUES (7, 1)").Error; err != nil {
+	if err := store.database.Exec("INSERT INTO schema_migrations(version, applied_at) VALUES (9, 1)").Error; err != nil {
 		t.Fatalf("insert newer version error = %v", err)
 	}
 	if err := store.Close(); err != nil {

@@ -64,6 +64,72 @@ func TestTunnelRuntimeRegisterAndFinishExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestDrainActiveWaitsForBlockingFinishCleanup(t *testing.T) {
+	fixture := newActiveWorkFixture(t, runtimeTunnelID, runtimeConnectorID)
+	closeStarted := make(chan struct{})
+	allowClose := make(chan struct{})
+	var allowCloseOnce sync.Once
+	unblock := func() { allowCloseOnce.Do(func() { close(allowClose) }) }
+	t.Cleanup(unblock)
+	fixture.workConn = &recordingConn{
+		name: "work", recorder: fixture.recorder,
+		closeStarted: closeStarted, allowClose: allowClose,
+	}
+	work, err := fixture.tunnel.RegisterActiveWork(fixture.spec(runtimeWorkID, runtimeConnectionID))
+	if err != nil {
+		t.Fatalf("RegisterActiveWork() error = %v", err)
+	}
+
+	finishResult := make(chan error, 1)
+	go func() { finishResult <- work.Finish() }()
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Finish() did not enter blocking WorkConn.Close")
+	}
+	if count := fixture.tunnel.ActiveCount(); count != 1 {
+		t.Fatalf("ActiveCount() while Close blocks = %d, want 1", count)
+	}
+	if state := fixture.lease.lifecycle.Load(); state != connectorLeaseActiveOwned {
+		t.Fatalf("ConnectorLease state while Close blocks = %d, want active-owned", state)
+	}
+
+	drainResult := make(chan error, 1)
+	go func() { drainResult <- fixture.registry.DrainActive(context.Background()) }()
+	select {
+	case err := <-drainResult:
+		t.Fatalf("DrainActive() returned before WorkConn.Close completed: %v", err)
+	case <-time.After(4 * activeDrainPollInterval):
+	}
+
+	unblock()
+	select {
+	case err := <-finishResult:
+		if err != nil {
+			t.Fatalf("Finish() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Finish() did not return after WorkConn.Close unblocked")
+	}
+	select {
+	case err := <-drainResult:
+		if err != nil {
+			t.Fatalf("DrainActive() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DrainActive() did not return after cleanup completed")
+	}
+	if count := fixture.tunnel.ActiveCount(); count != 0 {
+		t.Fatalf("ActiveCount() after cleanup = %d, want 0", count)
+	}
+	if fixture.lease.Release() {
+		t.Fatal("Finish() did not release ConnectorLease exactly once")
+	}
+	fixture.recorder.assertEvents(t, []string{
+		"cancel", "work:deadline", "peer:deadline", "work:close", "peer:close",
+	})
+}
+
 func TestTunnelRuntimeRejectsInvalidAndDuplicateActiveWork(t *testing.T) {
 	fixture := newActiveWorkFixture(t, runtimeTunnelID, runtimeConnectorID)
 	tests := []struct {
@@ -78,7 +144,6 @@ func TestTunnelRuntimeRejectsInvalidAndDuplicateActiveWork(t *testing.T) {
 		{name: "connection", mutate: func(spec *ActiveWorkSpec) { spec.ConnectionID = "conn_invalid" }},
 		{name: "cancel", mutate: func(spec *ActiveWorkSpec) { spec.Cancel = nil }},
 		{name: "work conn", mutate: func(spec *ActiveWorkSpec) { spec.WorkConn = nil }},
-		{name: "peer conn", mutate: func(spec *ActiveWorkSpec) { spec.PeerConn = nil }},
 		{name: "lease", mutate: func(spec *ActiveWorkSpec) { spec.Lease = nil }},
 	}
 	for _, test := range tests {
@@ -112,6 +177,24 @@ func TestTunnelRuntimeRejectsInvalidAndDuplicateActiveWork(t *testing.T) {
 	}
 	if err := work.Finish(); err != nil {
 		t.Fatalf("Finish() error = %v", err)
+	}
+}
+
+func TestTunnelRuntimeActiveWorkWithoutPublicPeer(t *testing.T) {
+	fixture := newActiveWorkFixture(t, runtimeTunnelID, runtimeConnectorID)
+	spec := fixture.spec(runtimeWorkID, runtimeConnectionID)
+	spec.PeerConn = nil
+
+	work, err := fixture.tunnel.RegisterActiveWork(spec)
+	if err != nil {
+		t.Fatalf("RegisterActiveWork() error = %v", err)
+	}
+	if err := work.Finish(); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	fixture.recorder.assertEvents(t, []string{"cancel", "work:deadline", "work:close"})
+	if fixture.lease.Release() {
+		t.Fatal("Finish() did not release ConnectorLease")
 	}
 }
 
@@ -552,16 +635,25 @@ func (recorder *eventRecorder) assertEventCounts(t *testing.T, want int) {
 }
 
 type recordingConn struct {
-	name        string
-	recorder    *eventRecorder
-	deadlineErr error
-	closeErr    error
+	name         string
+	recorder     *eventRecorder
+	deadlineErr  error
+	closeErr     error
+	closeStarted chan struct{}
+	allowClose   <-chan struct{}
+	closeOnce    sync.Once
 }
 
 func (connection *recordingConn) Read([]byte) (int, error)  { return 0, net.ErrClosed }
 func (connection *recordingConn) Write([]byte) (int, error) { return 0, net.ErrClosed }
 func (connection *recordingConn) Close() error {
 	connection.recorder.append(connection.name + ":close")
+	if connection.closeStarted != nil {
+		connection.closeOnce.Do(func() { close(connection.closeStarted) })
+	}
+	if connection.allowClose != nil {
+		<-connection.allowClose
+	}
 	return connection.closeErr
 }
 func (connection *recordingConn) LocalAddr() net.Addr  { return activeWorkAddr("local") }

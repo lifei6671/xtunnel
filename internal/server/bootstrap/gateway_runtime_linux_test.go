@@ -133,6 +133,12 @@ func TestFirstAdminCreationStartsGateway(t *testing.T) {
 	if address := gatewayCloser.gateway.Addr(); address != nil {
 		t.Fatalf("gateway address before first admin = %v, want nil", address)
 	}
+	if gatewayCloser.routes == nil || gatewayCloser.routes.Current() == nil {
+		t.Fatal("immutable route snapshot was not loaded before first admin bootstrap")
+	}
+	if generation := gatewayCloser.routes.Current().Generation(); generation != 0 {
+		t.Fatalf("initial route snapshot generation = %d, want 0", generation)
+	}
 
 	socketPath := filepath.Join(runtimeDir, adminBootstrapSocketName)
 	handled, err := requestAdminBootstrap(ctx, socketPath, resources.targetHash, "admin", "gateway lifecycle password")

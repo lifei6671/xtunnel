@@ -38,14 +38,31 @@ var (
 
 // Origin 是从一代完整 Snapshot 编译出的不可变连接配置。
 type Origin struct {
-	Scheme         string
-	Host           string
-	Port           uint16
-	ConnectTimeout time.Duration
-	TLSVerify      bool
-	TLSServerName  string
-	HTTPHostHeader string
-	enabled        bool
+	Scheme                  string
+	Host                    string
+	Port                    uint16
+	ConnectTimeout          time.Duration
+	TLSVerify               bool
+	TLSServerName           string
+	HTTPHostHeader          string
+	OriginConnectionOptions OriginConnectionOptions
+	HTTPProxyOptions        HTTPProxyOptions
+	enabled                 bool
+}
+
+// OriginConnectionOptions 是从完整 Snapshot 编译出的 TCP 建连参数。
+// 值为不可变 Origin 的一部分，每次拨号据此创建独立 net.Dialer。
+type OriginConnectionOptions struct {
+	DisableHappyEyeballs bool
+	TCPKeepAliveInterval time.Duration
+}
+
+// HTTPProxyOptions 是 HTTP/HTTPS Origin 后续创建 Transport 时使用的不可变参数。
+// Agent v0.1 的 Origin Dialer 不解释这些字段，也不提前构造 HTTP Transport。
+type HTTPProxyOptions struct {
+	DisableChunkedEncoding bool
+	IdleConnectionTimeout  time.Duration
+	MaxIdleConnections     uint32
 }
 
 type runtimeState struct {
@@ -58,16 +75,18 @@ type runtimeState struct {
 type Manager struct {
 	mu          sync.Mutex
 	states      map[*runtimeState]struct{}
-	dialContext func(context.Context, string, string) (net.Conn, error)
+	dialContext func(context.Context, string, string, OriginConnectionOptions) (net.Conn, error)
 	rootCAs     *x509.CertPool
 }
 
 // New 创建进程级 Resolver。DNS 只会在每次 DialOrigin 时交给系统 Resolver 解析。
 func New() *Manager {
-	dialer := &net.Dialer{}
 	return &Manager{
-		states:      make(map[*runtimeState]struct{}),
-		dialContext: dialer.DialContext,
+		states: make(map[*runtimeState]struct{}),
+		dialContext: func(ctx context.Context, network, address string, options OriginConnectionOptions) (net.Conn, error) {
+			dialer := originDialer(options)
+			return dialer.DialContext(ctx, network, address)
+		},
 	}
 }
 
@@ -165,7 +184,12 @@ func (manager *Manager) dialResolved(ctx context.Context, resolved Origin) (net.
 	dialContext, cancel := context.WithTimeout(ctx, resolved.ConnectTimeout)
 	defer cancel()
 
-	connection, err := manager.dialContext(dialContext, "tcp", net.JoinHostPort(resolved.Host, strconv.Itoa(int(resolved.Port))))
+	connection, err := manager.dialContext(
+		dialContext,
+		"tcp",
+		net.JoinHostPort(resolved.Host, strconv.Itoa(int(resolved.Port))),
+		resolved.OriginConnectionOptions,
+	)
 	if err != nil {
 		return nil, connectionErrorCode(dialContext, err), sanitizedError{kind: ErrDial, cause: err}
 	}
@@ -201,12 +225,41 @@ func compileService(service *protocolv1.ServiceConfig) (Origin, error) {
 	if err := originconfig.Validate(fields); err != nil {
 		return Origin{}, ErrInvalidSnapshot
 	}
+	originOptions := service.GetOriginConnectionOptions()
+	if originOptions == nil {
+		return Origin{}, ErrInvalidSnapshot
+	}
+	compiledOriginOptions := OriginConnectionOptions{
+		DisableHappyEyeballs: originOptions.GetDisableHappyEyeballs(),
+		TCPKeepAliveInterval: time.Duration(originOptions.GetTcpKeepaliveIntervalMs()) * time.Millisecond,
+	}
+
+	var compiledHTTPOptions HTTPProxyOptions
+	httpOptions := service.GetHttpProxyOptions()
+	switch fields.Scheme {
+	case "tcp":
+		if httpOptions != nil {
+			return Origin{}, ErrInvalidSnapshot
+		}
+	case "http", "https":
+		if httpOptions == nil || httpOptions.GetIdleConnectionTimeoutMs() == 0 || httpOptions.GetMaxIdleConnections() == 0 {
+			return Origin{}, ErrInvalidSnapshot
+		}
+		compiledHTTPOptions = HTTPProxyOptions{
+			DisableChunkedEncoding: httpOptions.GetDisableChunkedEncoding(),
+			IdleConnectionTimeout:  time.Duration(httpOptions.GetIdleConnectionTimeoutMs()) * time.Millisecond,
+			MaxIdleConnections:     httpOptions.GetMaxIdleConnections(),
+		}
+	}
 
 	resolved := Origin{
 		Scheme: fields.Scheme, Host: fields.Host, Port: uint16(fields.Port),
 		ConnectTimeout: time.Duration(fields.ConnectTimeoutMS) * time.Millisecond,
 		TLSVerify:      fields.TLSVerify, TLSServerName: fields.TLSServerName,
-		HTTPHostHeader: fields.HTTPHostHeader, enabled: service.GetEnabled(),
+		HTTPHostHeader:          fields.HTTPHostHeader,
+		OriginConnectionOptions: compiledOriginOptions,
+		HTTPProxyOptions:        compiledHTTPOptions,
+		enabled:                 service.GetEnabled(),
 	}
 	if resolved.Scheme == "https" {
 		if resolved.TLSServerName == "" {
@@ -217,6 +270,21 @@ func compileService(service *protocolv1.ServiceConfig) (Origin, error) {
 		}
 	}
 	return resolved, nil
+}
+
+// originDialer 把 Wire 上明确的 0 keepalive 映射为标准库的负值禁用语义。
+// FallbackDelay 小于 0 会明确禁用 Fast Fallback；connect_timeout 不写入 Dialer，
+// 因为 DNS、TCP 与 TLS 必须继续共享 dialResolved 创建的同一个 Context 总预算。
+func originDialer(options OriginConnectionOptions) net.Dialer {
+	keepAlive := options.TCPKeepAliveInterval
+	if keepAlive == 0 {
+		keepAlive = -1
+	}
+	dialer := net.Dialer{KeepAlive: keepAlive}
+	if options.DisableHappyEyeballs {
+		dialer.FallbackDelay = -1
+	}
+	return dialer
 }
 
 func resolveErrorCode(err error) protocolv1.ErrorCode {

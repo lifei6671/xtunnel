@@ -1045,6 +1045,12 @@ type ServiceConfig struct {
 	Health           *HealthCheckConfig     `protobuf:"bytes,9,opt,name=health,proto3" json:"health,omitempty"`
 	Enabled          bool                   `protobuf:"varint,10,opt,name=enabled,proto3" json:"enabled,omitempty"`
 	RequiredRevision uint64                 `protobuf:"varint,11,opt,name=required_revision,json=requiredRevision,proto3" json:"required_revision,omitempty"`
+	// origin_connection_options 对所有 Service 必填。connect_timeout_ms 仍是
+	// DNS、TCP 与可选 TLS 握手共享的总预算；本消息只控制 TCP 建连行为。
+	OriginConnectionOptions *OriginConnectionOptions `protobuf:"bytes,12,opt,name=origin_connection_options,json=originConnectionOptions,proto3" json:"origin_connection_options,omitempty"`
+	// http_proxy_options 对 HTTP/HTTPS Service 必填，对 TCP Service 必须缺失。
+	// Agent v0.1 只编译并保存本消息，后续 HTTP 数据面才会创建 HTTP Transport。
+	HttpProxyOptions *HTTPProxyOptions `protobuf:"bytes,13,opt,name=http_proxy_options,json=httpProxyOptions,proto3" json:"http_proxy_options,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -1156,6 +1162,138 @@ func (x *ServiceConfig) GetRequiredRevision() uint64 {
 	return 0
 }
 
+func (x *ServiceConfig) GetOriginConnectionOptions() *OriginConnectionOptions {
+	if x != nil {
+		return x.OriginConnectionOptions
+	}
+	return nil
+}
+
+func (x *ServiceConfig) GetHttpProxyOptions() *HTTPProxyOptions {
+	if x != nil {
+		return x.HttpProxyOptions
+	}
+	return nil
+}
+
+// OriginConnectionOptions 描述 Agent 每次连接 Origin 时采用的 TCP 建连参数。
+type OriginConnectionOptions struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// disable_happy_eyeballs 为 true 时禁用标准库 Fast Fallback。
+	DisableHappyEyeballs bool `protobuf:"varint,1,opt,name=disable_happy_eyeballs,json=disableHappyEyeballs,proto3" json:"disable_happy_eyeballs,omitempty"`
+	// tcp_keepalive_interval_ms 为 0 时明确禁用 TCP keepalive；否则是探测间隔。
+	TcpKeepaliveIntervalMs uint32 `protobuf:"varint,2,opt,name=tcp_keepalive_interval_ms,json=tcpKeepaliveIntervalMs,proto3" json:"tcp_keepalive_interval_ms,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *OriginConnectionOptions) Reset() {
+	*x = OriginConnectionOptions{}
+	mi := &file_control_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OriginConnectionOptions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OriginConnectionOptions) ProtoMessage() {}
+
+func (x *OriginConnectionOptions) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OriginConnectionOptions.ProtoReflect.Descriptor instead.
+func (*OriginConnectionOptions) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *OriginConnectionOptions) GetDisableHappyEyeballs() bool {
+	if x != nil {
+		return x.DisableHappyEyeballs
+	}
+	return false
+}
+
+func (x *OriginConnectionOptions) GetTcpKeepaliveIntervalMs() uint32 {
+	if x != nil {
+		return x.TcpKeepaliveIntervalMs
+	}
+	return 0
+}
+
+// HTTPProxyOptions 描述后续 HTTP/HTTPS 数据面使用的不可变代理参数。
+type HTTPProxyOptions struct {
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	DisableChunkedEncoding bool                   `protobuf:"varint,1,opt,name=disable_chunked_encoding,json=disableChunkedEncoding,proto3" json:"disable_chunked_encoding,omitempty"`
+	// idle_connection_timeout_ms 必须大于 0。
+	IdleConnectionTimeoutMs uint32 `protobuf:"varint,2,opt,name=idle_connection_timeout_ms,json=idleConnectionTimeoutMs,proto3" json:"idle_connection_timeout_ms,omitempty"`
+	// max_idle_connections 必须大于 0。
+	MaxIdleConnections uint32 `protobuf:"varint,3,opt,name=max_idle_connections,json=maxIdleConnections,proto3" json:"max_idle_connections,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *HTTPProxyOptions) Reset() {
+	*x = HTTPProxyOptions{}
+	mi := &file_control_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HTTPProxyOptions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HTTPProxyOptions) ProtoMessage() {}
+
+func (x *HTTPProxyOptions) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HTTPProxyOptions.ProtoReflect.Descriptor instead.
+func (*HTTPProxyOptions) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *HTTPProxyOptions) GetDisableChunkedEncoding() bool {
+	if x != nil {
+		return x.DisableChunkedEncoding
+	}
+	return false
+}
+
+func (x *HTTPProxyOptions) GetIdleConnectionTimeoutMs() uint32 {
+	if x != nil {
+		return x.IdleConnectionTimeoutMs
+	}
+	return 0
+}
+
+func (x *HTTPProxyOptions) GetMaxIdleConnections() uint32 {
+	if x != nil {
+		return x.MaxIdleConnections
+	}
+	return 0
+}
+
 // HealthCheckConfig 描述单个 Service 的 Origin 健康检查策略。
 type HealthCheckConfig struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
@@ -1173,7 +1311,7 @@ type HealthCheckConfig struct {
 
 func (x *HealthCheckConfig) Reset() {
 	*x = HealthCheckConfig{}
-	mi := &file_control_proto_msgTypes[13]
+	mi := &file_control_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1185,7 +1323,7 @@ func (x *HealthCheckConfig) String() string {
 func (*HealthCheckConfig) ProtoMessage() {}
 
 func (x *HealthCheckConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[13]
+	mi := &file_control_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1198,7 +1336,7 @@ func (x *HealthCheckConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthCheckConfig.ProtoReflect.Descriptor instead.
 func (*HealthCheckConfig) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{13}
+	return file_control_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *HealthCheckConfig) GetType() HealthType {
@@ -1269,7 +1407,7 @@ type ConfigAck struct {
 
 func (x *ConfigAck) Reset() {
 	*x = ConfigAck{}
-	mi := &file_control_proto_msgTypes[14]
+	mi := &file_control_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1281,7 +1419,7 @@ func (x *ConfigAck) String() string {
 func (*ConfigAck) ProtoMessage() {}
 
 func (x *ConfigAck) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[14]
+	mi := &file_control_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1294,7 +1432,7 @@ func (x *ConfigAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigAck.ProtoReflect.Descriptor instead.
 func (*ConfigAck) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{14}
+	return file_control_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ConfigAck) GetObservedRevision() uint64 {
@@ -1332,7 +1470,7 @@ type WorkDemand struct {
 
 func (x *WorkDemand) Reset() {
 	*x = WorkDemand{}
-	mi := &file_control_proto_msgTypes[15]
+	mi := &file_control_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1344,7 +1482,7 @@ func (x *WorkDemand) String() string {
 func (*WorkDemand) ProtoMessage() {}
 
 func (x *WorkDemand) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[15]
+	mi := &file_control_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1357,7 +1495,7 @@ func (x *WorkDemand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkDemand.ProtoReflect.Descriptor instead.
 func (*WorkDemand) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{15}
+	return file_control_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *WorkDemand) GetBudgetLeaseId() string {
@@ -1410,7 +1548,7 @@ type ServiceHealth struct {
 
 func (x *ServiceHealth) Reset() {
 	*x = ServiceHealth{}
-	mi := &file_control_proto_msgTypes[16]
+	mi := &file_control_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1422,7 +1560,7 @@ func (x *ServiceHealth) String() string {
 func (*ServiceHealth) ProtoMessage() {}
 
 func (x *ServiceHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[16]
+	mi := &file_control_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1435,7 +1573,7 @@ func (x *ServiceHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceHealth.ProtoReflect.Descriptor instead.
 func (*ServiceHealth) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{16}
+	return file_control_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ServiceHealth) GetServiceId() string {
@@ -1491,7 +1629,7 @@ type ServiceHealthBatch struct {
 
 func (x *ServiceHealthBatch) Reset() {
 	*x = ServiceHealthBatch{}
-	mi := &file_control_proto_msgTypes[17]
+	mi := &file_control_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1503,7 +1641,7 @@ func (x *ServiceHealthBatch) String() string {
 func (*ServiceHealthBatch) ProtoMessage() {}
 
 func (x *ServiceHealthBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[17]
+	mi := &file_control_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1516,7 +1654,7 @@ func (x *ServiceHealthBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceHealthBatch.ProtoReflect.Descriptor instead.
 func (*ServiceHealthBatch) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{17}
+	return file_control_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ServiceHealthBatch) GetGeneration() uint64 {
@@ -1544,7 +1682,7 @@ type DrainRequest struct {
 
 func (x *DrainRequest) Reset() {
 	*x = DrainRequest{}
-	mi := &file_control_proto_msgTypes[18]
+	mi := &file_control_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1556,7 +1694,7 @@ func (x *DrainRequest) String() string {
 func (*DrainRequest) ProtoMessage() {}
 
 func (x *DrainRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[18]
+	mi := &file_control_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1569,7 +1707,7 @@ func (x *DrainRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainRequest.ProtoReflect.Descriptor instead.
 func (*DrainRequest) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{18}
+	return file_control_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *DrainRequest) GetDrainId() string {
@@ -1597,7 +1735,7 @@ type DrainAck struct {
 
 func (x *DrainAck) Reset() {
 	*x = DrainAck{}
-	mi := &file_control_proto_msgTypes[19]
+	mi := &file_control_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1609,7 +1747,7 @@ func (x *DrainAck) String() string {
 func (*DrainAck) ProtoMessage() {}
 
 func (x *DrainAck) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[19]
+	mi := &file_control_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1622,7 +1760,7 @@ func (x *DrainAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainAck.ProtoReflect.Descriptor instead.
 func (*DrainAck) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{19}
+	return file_control_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *DrainAck) GetDrainId() string {
@@ -1650,7 +1788,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_control_proto_msgTypes[20]
+	mi := &file_control_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1662,7 +1800,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[20]
+	mi := &file_control_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1675,7 +1813,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{20}
+	return file_control_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Error) GetErrorCode() ErrorCode {
@@ -1769,7 +1907,7 @@ const file_control_proto_rawDesc = "" +
 	"\x0eTunnelSnapshot\x12\x1b\n" +
 	"\ttunnel_id\x18\x01 \x01(\tR\btunnelId\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12>\n" +
-	"\bservices\x18\x03 \x03(\v2\".xtunnel.protocol.v1.ServiceConfigR\bservices\"\xbb\x03\n" +
+	"\bservices\x18\x03 \x03(\v2\".xtunnel.protocol.v1.ServiceConfigR\bservices\"\xfa\x04\n" +
 	"\rServiceConfig\x12\x1d\n" +
 	"\n" +
 	"service_id\x18\x01 \x01(\tR\tserviceId\x12#\n" +
@@ -1786,7 +1924,16 @@ const file_control_proto_rawDesc = "" +
 	"\x06health\x18\t \x01(\v2&.xtunnel.protocol.v1.HealthCheckConfigR\x06health\x12\x18\n" +
 	"\aenabled\x18\n" +
 	" \x01(\bR\aenabled\x12+\n" +
-	"\x11required_revision\x18\v \x01(\x04R\x10requiredRevision\"\xd6\x02\n" +
+	"\x11required_revision\x18\v \x01(\x04R\x10requiredRevision\x12h\n" +
+	"\x19origin_connection_options\x18\f \x01(\v2,.xtunnel.protocol.v1.OriginConnectionOptionsR\x17originConnectionOptions\x12S\n" +
+	"\x12http_proxy_options\x18\r \x01(\v2%.xtunnel.protocol.v1.HTTPProxyOptionsR\x10httpProxyOptions\"\x8a\x01\n" +
+	"\x17OriginConnectionOptions\x124\n" +
+	"\x16disable_happy_eyeballs\x18\x01 \x01(\bR\x14disableHappyEyeballs\x129\n" +
+	"\x19tcp_keepalive_interval_ms\x18\x02 \x01(\rR\x16tcpKeepaliveIntervalMs\"\xbb\x01\n" +
+	"\x10HTTPProxyOptions\x128\n" +
+	"\x18disable_chunked_encoding\x18\x01 \x01(\bR\x16disableChunkedEncoding\x12;\n" +
+	"\x1aidle_connection_timeout_ms\x18\x02 \x01(\rR\x17idleConnectionTimeoutMs\x120\n" +
+	"\x14max_idle_connections\x18\x03 \x01(\rR\x12maxIdleConnections\"\xd6\x02\n" +
 	"\x11HealthCheckConfig\x123\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x1f.xtunnel.protocol.v1.HealthTypeR\x04type\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1f\n" +
@@ -1849,33 +1996,35 @@ func file_control_proto_rawDescGZIP() []byte {
 	return file_control_proto_rawDescData
 }
 
-var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_control_proto_goTypes = []any{
-	(*ConnectionToken)(nil),      // 0: xtunnel.protocol.v1.ConnectionToken
-	(*GatewayEndpoint)(nil),      // 1: xtunnel.protocol.v1.GatewayEndpoint
-	(*TlsTrustDescriptor)(nil),   // 2: xtunnel.protocol.v1.TlsTrustDescriptor
-	(*PublicCATrust)(nil),        // 3: xtunnel.protocol.v1.PublicCATrust
-	(*PinnedSPKITrust)(nil),      // 4: xtunnel.protocol.v1.PinnedSPKITrust
-	(*ConnectorAuthRequest)(nil), // 5: xtunnel.protocol.v1.ConnectorAuthRequest
-	(*ConnectorAuthResult)(nil),  // 6: xtunnel.protocol.v1.ConnectorAuthResult
-	(*ConnectorAuthSuccess)(nil), // 7: xtunnel.protocol.v1.ConnectorAuthSuccess
-	(*ConnectorAuthFailure)(nil), // 8: xtunnel.protocol.v1.ConnectorAuthFailure
-	(*ControlEnvelope)(nil),      // 9: xtunnel.protocol.v1.ControlEnvelope
-	(*Heartbeat)(nil),            // 10: xtunnel.protocol.v1.Heartbeat
-	(*TunnelSnapshot)(nil),       // 11: xtunnel.protocol.v1.TunnelSnapshot
-	(*ServiceConfig)(nil),        // 12: xtunnel.protocol.v1.ServiceConfig
-	(*HealthCheckConfig)(nil),    // 13: xtunnel.protocol.v1.HealthCheckConfig
-	(*ConfigAck)(nil),            // 14: xtunnel.protocol.v1.ConfigAck
-	(*WorkDemand)(nil),           // 15: xtunnel.protocol.v1.WorkDemand
-	(*ServiceHealth)(nil),        // 16: xtunnel.protocol.v1.ServiceHealth
-	(*ServiceHealthBatch)(nil),   // 17: xtunnel.protocol.v1.ServiceHealthBatch
-	(*DrainRequest)(nil),         // 18: xtunnel.protocol.v1.DrainRequest
-	(*DrainAck)(nil),             // 19: xtunnel.protocol.v1.DrainAck
-	(*Error)(nil),                // 20: xtunnel.protocol.v1.Error
-	(ErrorCode)(0),               // 21: xtunnel.protocol.v1.ErrorCode
-	(HealthType)(0),              // 22: xtunnel.protocol.v1.HealthType
-	(ConfigApplyStatus)(0),       // 23: xtunnel.protocol.v1.ConfigApplyStatus
-	(HealthStatus)(0),            // 24: xtunnel.protocol.v1.HealthStatus
+	(*ConnectionToken)(nil),         // 0: xtunnel.protocol.v1.ConnectionToken
+	(*GatewayEndpoint)(nil),         // 1: xtunnel.protocol.v1.GatewayEndpoint
+	(*TlsTrustDescriptor)(nil),      // 2: xtunnel.protocol.v1.TlsTrustDescriptor
+	(*PublicCATrust)(nil),           // 3: xtunnel.protocol.v1.PublicCATrust
+	(*PinnedSPKITrust)(nil),         // 4: xtunnel.protocol.v1.PinnedSPKITrust
+	(*ConnectorAuthRequest)(nil),    // 5: xtunnel.protocol.v1.ConnectorAuthRequest
+	(*ConnectorAuthResult)(nil),     // 6: xtunnel.protocol.v1.ConnectorAuthResult
+	(*ConnectorAuthSuccess)(nil),    // 7: xtunnel.protocol.v1.ConnectorAuthSuccess
+	(*ConnectorAuthFailure)(nil),    // 8: xtunnel.protocol.v1.ConnectorAuthFailure
+	(*ControlEnvelope)(nil),         // 9: xtunnel.protocol.v1.ControlEnvelope
+	(*Heartbeat)(nil),               // 10: xtunnel.protocol.v1.Heartbeat
+	(*TunnelSnapshot)(nil),          // 11: xtunnel.protocol.v1.TunnelSnapshot
+	(*ServiceConfig)(nil),           // 12: xtunnel.protocol.v1.ServiceConfig
+	(*OriginConnectionOptions)(nil), // 13: xtunnel.protocol.v1.OriginConnectionOptions
+	(*HTTPProxyOptions)(nil),        // 14: xtunnel.protocol.v1.HTTPProxyOptions
+	(*HealthCheckConfig)(nil),       // 15: xtunnel.protocol.v1.HealthCheckConfig
+	(*ConfigAck)(nil),               // 16: xtunnel.protocol.v1.ConfigAck
+	(*WorkDemand)(nil),              // 17: xtunnel.protocol.v1.WorkDemand
+	(*ServiceHealth)(nil),           // 18: xtunnel.protocol.v1.ServiceHealth
+	(*ServiceHealthBatch)(nil),      // 19: xtunnel.protocol.v1.ServiceHealthBatch
+	(*DrainRequest)(nil),            // 20: xtunnel.protocol.v1.DrainRequest
+	(*DrainAck)(nil),                // 21: xtunnel.protocol.v1.DrainAck
+	(*Error)(nil),                   // 22: xtunnel.protocol.v1.Error
+	(ErrorCode)(0),                  // 23: xtunnel.protocol.v1.ErrorCode
+	(HealthType)(0),                 // 24: xtunnel.protocol.v1.HealthType
+	(ConfigApplyStatus)(0),          // 25: xtunnel.protocol.v1.ConfigApplyStatus
+	(HealthStatus)(0),               // 26: xtunnel.protocol.v1.HealthStatus
 }
 var file_control_proto_depIdxs = []int32{
 	1,  // 0: xtunnel.protocol.v1.ConnectionToken.endpoint:type_name -> xtunnel.protocol.v1.GatewayEndpoint
@@ -1884,28 +2033,30 @@ var file_control_proto_depIdxs = []int32{
 	4,  // 3: xtunnel.protocol.v1.TlsTrustDescriptor.pinned_spki_sha256:type_name -> xtunnel.protocol.v1.PinnedSPKITrust
 	7,  // 4: xtunnel.protocol.v1.ConnectorAuthResult.success:type_name -> xtunnel.protocol.v1.ConnectorAuthSuccess
 	8,  // 5: xtunnel.protocol.v1.ConnectorAuthResult.failure:type_name -> xtunnel.protocol.v1.ConnectorAuthFailure
-	21, // 6: xtunnel.protocol.v1.ConnectorAuthFailure.error_code:type_name -> xtunnel.protocol.v1.ErrorCode
+	23, // 6: xtunnel.protocol.v1.ConnectorAuthFailure.error_code:type_name -> xtunnel.protocol.v1.ErrorCode
 	10, // 7: xtunnel.protocol.v1.ControlEnvelope.heartbeat:type_name -> xtunnel.protocol.v1.Heartbeat
 	11, // 8: xtunnel.protocol.v1.ControlEnvelope.config_snapshot:type_name -> xtunnel.protocol.v1.TunnelSnapshot
-	14, // 9: xtunnel.protocol.v1.ControlEnvelope.config_ack:type_name -> xtunnel.protocol.v1.ConfigAck
-	15, // 10: xtunnel.protocol.v1.ControlEnvelope.work_demand:type_name -> xtunnel.protocol.v1.WorkDemand
-	17, // 11: xtunnel.protocol.v1.ControlEnvelope.service_health_batch:type_name -> xtunnel.protocol.v1.ServiceHealthBatch
-	18, // 12: xtunnel.protocol.v1.ControlEnvelope.drain_request:type_name -> xtunnel.protocol.v1.DrainRequest
-	20, // 13: xtunnel.protocol.v1.ControlEnvelope.error:type_name -> xtunnel.protocol.v1.Error
-	19, // 14: xtunnel.protocol.v1.ControlEnvelope.drain_ack:type_name -> xtunnel.protocol.v1.DrainAck
+	16, // 9: xtunnel.protocol.v1.ControlEnvelope.config_ack:type_name -> xtunnel.protocol.v1.ConfigAck
+	17, // 10: xtunnel.protocol.v1.ControlEnvelope.work_demand:type_name -> xtunnel.protocol.v1.WorkDemand
+	19, // 11: xtunnel.protocol.v1.ControlEnvelope.service_health_batch:type_name -> xtunnel.protocol.v1.ServiceHealthBatch
+	20, // 12: xtunnel.protocol.v1.ControlEnvelope.drain_request:type_name -> xtunnel.protocol.v1.DrainRequest
+	22, // 13: xtunnel.protocol.v1.ControlEnvelope.error:type_name -> xtunnel.protocol.v1.Error
+	21, // 14: xtunnel.protocol.v1.ControlEnvelope.drain_ack:type_name -> xtunnel.protocol.v1.DrainAck
 	12, // 15: xtunnel.protocol.v1.TunnelSnapshot.services:type_name -> xtunnel.protocol.v1.ServiceConfig
-	13, // 16: xtunnel.protocol.v1.ServiceConfig.health:type_name -> xtunnel.protocol.v1.HealthCheckConfig
-	22, // 17: xtunnel.protocol.v1.HealthCheckConfig.type:type_name -> xtunnel.protocol.v1.HealthType
-	23, // 18: xtunnel.protocol.v1.ConfigAck.apply_status:type_name -> xtunnel.protocol.v1.ConfigApplyStatus
-	21, // 19: xtunnel.protocol.v1.ConfigAck.error_code:type_name -> xtunnel.protocol.v1.ErrorCode
-	24, // 20: xtunnel.protocol.v1.ServiceHealth.status:type_name -> xtunnel.protocol.v1.HealthStatus
-	16, // 21: xtunnel.protocol.v1.ServiceHealthBatch.items:type_name -> xtunnel.protocol.v1.ServiceHealth
-	21, // 22: xtunnel.protocol.v1.Error.error_code:type_name -> xtunnel.protocol.v1.ErrorCode
-	23, // [23:23] is the sub-list for method output_type
-	23, // [23:23] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	15, // 16: xtunnel.protocol.v1.ServiceConfig.health:type_name -> xtunnel.protocol.v1.HealthCheckConfig
+	13, // 17: xtunnel.protocol.v1.ServiceConfig.origin_connection_options:type_name -> xtunnel.protocol.v1.OriginConnectionOptions
+	14, // 18: xtunnel.protocol.v1.ServiceConfig.http_proxy_options:type_name -> xtunnel.protocol.v1.HTTPProxyOptions
+	24, // 19: xtunnel.protocol.v1.HealthCheckConfig.type:type_name -> xtunnel.protocol.v1.HealthType
+	25, // 20: xtunnel.protocol.v1.ConfigAck.apply_status:type_name -> xtunnel.protocol.v1.ConfigApplyStatus
+	23, // 21: xtunnel.protocol.v1.ConfigAck.error_code:type_name -> xtunnel.protocol.v1.ErrorCode
+	26, // 22: xtunnel.protocol.v1.ServiceHealth.status:type_name -> xtunnel.protocol.v1.HealthStatus
+	18, // 23: xtunnel.protocol.v1.ServiceHealthBatch.items:type_name -> xtunnel.protocol.v1.ServiceHealth
+	23, // 24: xtunnel.protocol.v1.Error.error_code:type_name -> xtunnel.protocol.v1.ErrorCode
+	25, // [25:25] is the sub-list for method output_type
+	25, // [25:25] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_control_proto_init() }
@@ -1938,7 +2089,7 @@ func file_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_control_proto_rawDesc), len(file_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   21,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

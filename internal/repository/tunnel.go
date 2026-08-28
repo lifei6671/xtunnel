@@ -147,6 +147,7 @@ type RepositoryView interface {
 	Tunnels() TunnelRepository
 	TunnelTokens() TunnelTokenRepository
 	Services() ServiceRepository
+	Routes() RouteRepository
 }
 
 // TxStore 是一次写事务内共享的 Repository 视图。

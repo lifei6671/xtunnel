@@ -17,6 +17,10 @@ const (
 	maximumHealthThreshold  uint32 = 20
 	minimumHTTPStatus       uint32 = 100
 	maximumHTTPStatus       uint32 = 599
+
+	defaultHTTPIdleConnectionTimeoutMS uint32 = 90_000
+	defaultHTTPMaxIdleConnections      uint32 = 100
+	defaultTCPKeepAliveIntervalMS      uint32 = 30_000
 )
 
 var (
@@ -58,6 +62,42 @@ type HealthCheck struct {
 	SuccessThreshold  uint32
 }
 
+// ServiceProxyOptions 是 Server 构建 Route Snapshot 时随 Service 传递的代理策略。
+// HTTP 前缀字段只对 HTTP/HTTPS Origin 生效；TCP Keepalive 与 Happy Eyeballs
+// 属于连接级策略。全部字段以类型化列持久化，不使用 JSON 或 map 形成第二套默认值。
+type ServiceProxyOptions struct {
+	// DisableChunkedEncoding 禁止 HTTP/HTTPS 代理使用分块编码；TCP 必须保持 false。
+	DisableChunkedEncoding bool
+	// DisableHappyEyeballs 禁止连接 Origin 时并行竞速 IPv6/IPv4 地址。
+	DisableHappyEyeballs bool
+	// HTTPIdleConnectionTimeoutMS 是 HTTP/HTTPS 空闲连接保留时间，范围 1..uint32 最大值，
+	// 默认 90000ms；TCP 只能保留默认值。
+	HTTPIdleConnectionTimeoutMS uint32
+	// HTTPMaxIdleConnections 是单个 Service 的 HTTP/HTTPS 空闲连接上限，
+	// 范围 1..uint32 最大值，默认 100；
+	// 运行时仍必须服从 Server 全局连接预算，不能把该值当成绕过全局上限的配额。
+	HTTPMaxIdleConnections uint32
+	// TCPKeepAliveIntervalMS 是连接级 Keepalive 间隔，范围 0..uint32 最大值，
+	// 默认 30000ms；0 显式禁用。
+	TCPKeepAliveIntervalMS uint32
+}
+
+// WithDefaults 将“整个结构全零”的未指定态替换为 V0.1 冻结默认值。
+//
+// Presence 规则只认整个结构：一旦任一字段被显式设置，其余零值都原样保留。因此调用方
+// 可同时写入 HTTP 默认值并把 TCPKeepAliveIntervalMS 设为 0，明确关闭 Keepalive；不会
+// 因局部字段补默认而把禁用意图改回 30000ms。
+func (options ServiceProxyOptions) WithDefaults() ServiceProxyOptions {
+	if options != (ServiceProxyOptions{}) {
+		return options
+	}
+	return ServiceProxyOptions{
+		HTTPIdleConnectionTimeoutMS: defaultHTTPIdleConnectionTimeoutMS,
+		HTTPMaxIdleConnections:      defaultHTTPMaxIdleConnections,
+		TCPKeepAliveIntervalMS:      defaultTCPKeepAliveIntervalMS,
+	}
+}
+
 // Service 是直接归属于一个 Tunnel 的 Origin 与 Health 配置聚合。
 type Service struct {
 	// ID 固定为 svc_ 加 26 位大写 ULID。
@@ -74,8 +114,11 @@ type Service struct {
 	TLSServerName    string
 	OriginHTTPHost   string
 	ConnectTimeoutMS uint32
-	Health           *HealthCheck
-	Enabled          bool
+	// ProxyOptions 由 Repository 以类型化列持久化，并原样进入 Server Snapshot 构建输入。
+	// 全零值仅表示使用 WithDefaults 冻结的 V0.1 默认值。
+	ProxyOptions ServiceProxyOptions
+	Health       *HealthCheck
+	Enabled      bool
 
 	// Version 是独立于 Tunnel ETag 与 Desired Revision 的 Service 乐观锁版本。
 	Version   int64
@@ -99,10 +142,29 @@ func (service Service) Validate() error {
 		TLSVerify:        service.TLSVerify,
 		TLSServerName:    service.TLSServerName,
 		HTTPHostHeader:   service.OriginHTTPHost,
-	}); err != nil || !validHealthCheck(service.Health) {
+	}); err != nil || !validServiceProxyOptions(service.OriginScheme, service.ProxyOptions) || !validHealthCheck(service.Health) {
 		return ErrInvalidService
 	}
 	return nil
+}
+
+// validServiceProxyOptions 在持久化边界验证协议适用性。HTTP 专属参数落到 TCP 时只
+// 允许冻结默认值，避免运行时悄悄忽略错误配置；Keepalive 的 0 则是合法禁用值。
+func validServiceProxyOptions(scheme OriginScheme, options ServiceProxyOptions) bool {
+	options = options.WithDefaults()
+	if options.HTTPIdleConnectionTimeoutMS == 0 || options.HTTPMaxIdleConnections == 0 {
+		return false
+	}
+	switch scheme {
+	case OriginSchemeHTTP, OriginSchemeHTTPS:
+		return true
+	case OriginSchemeTCP:
+		return !options.DisableChunkedEncoding &&
+			options.HTTPIdleConnectionTimeoutMS == defaultHTTPIdleConnectionTimeoutMS &&
+			options.HTTPMaxIdleConnections == defaultHTTPMaxIdleConnections
+	default:
+		return false
+	}
 }
 
 func validHealthCheck(health *HealthCheck) bool {

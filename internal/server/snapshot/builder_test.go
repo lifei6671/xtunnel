@@ -84,7 +84,12 @@ func TestBuilderBuildMapsAndSortsWithoutMutatingInput(t *testing.T) {
 		http.GetTlsVerify() || http.GetTlsServerName() != "" ||
 		http.GetOriginHttpHost() != "virtual.example" || !http.GetEnabled() ||
 		http.GetRequiredRevision() != 3 || http.GetHealth() == nil ||
-		http.GetHealth().GetType() != protocolv1.HealthType_HEALTH_TYPE_DISABLED {
+		http.GetHealth().GetType() != protocolv1.HealthType_HEALTH_TYPE_DISABLED ||
+		http.GetOriginConnectionOptions() == nil || http.GetOriginConnectionOptions().GetDisableHappyEyeballs() ||
+		http.GetOriginConnectionOptions().GetTcpKeepaliveIntervalMs() != 30_000 ||
+		http.GetHttpProxyOptions() == nil || http.GetHttpProxyOptions().GetDisableChunkedEncoding() ||
+		http.GetHttpProxyOptions().GetIdleConnectionTimeoutMs() != 90_000 ||
+		http.GetHttpProxyOptions().GetMaxIdleConnections() != 100 {
 		t.Fatalf("disabled-health HTTP mapping = %#v", http)
 	}
 
@@ -93,7 +98,9 @@ func TestBuilderBuildMapsAndSortsWithoutMutatingInput(t *testing.T) {
 		tcp.GetHealth().GetIntervalMs() != 5_000 || tcp.GetHealth().GetTimeoutMs() != 1_000 ||
 		tcp.GetHealth().GetPath() != "" || tcp.GetHealth().GetExpectedStatusMin() != 0 ||
 		tcp.GetHealth().GetExpectedStatusMax() != 0 || tcp.GetHealth().GetFailureThreshold() != 2 ||
-		tcp.GetHealth().GetSuccessThreshold() != 3 {
+		tcp.GetHealth().GetSuccessThreshold() != 3 || tcp.GetOriginConnectionOptions() == nil ||
+		tcp.GetOriginConnectionOptions().GetTcpKeepaliveIntervalMs() != 30_000 ||
+		tcp.GetHttpProxyOptions() != nil {
 		t.Fatalf("TCP mapping = %#v", tcp)
 	}
 
