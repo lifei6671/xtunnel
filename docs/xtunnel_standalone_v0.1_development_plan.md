@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-29
 >
-> **当前阶段**：M5-06 PATCH/ETag/Pagination 并发契约 · REVIEW（M2、M3、M4、M5-01 至 M5-05 均已 `DONE`）
+> **当前阶段**：M5-07 Settings/Runtime/Audit API 与 M5-08 Dashboard/Status UI · READY（M2、M3、M4、M5-01 至 M5-06 均已 `DONE`）
 >
-> **当前结论**：M5-06 已在实现提交 `e5407f29f7fb906487d2e9a00628be3d58205928` 中完成 Tunnel、Connector 与 Service 的 HMAC opaque Pagination、Tunnel/Service 完整 428/412、Service 强 composite ETag、PATCH 全字段 omitted/null/value 以及 Repository/HTTP 并发 CAS 证据。全仓本地验收、三路独立复审和精确绑定远程 Head `8146d254510bc1161f836d17992462a6f8ed2781` 的 [CI #33248860032](https://github.com/lifei6671/xtunnel/actions/runs/33248860032) 均已通过；尚无用户阶段复审结论，因此 M5-06 继续保持 `REVIEW`。M5 保持 `5/11`、全局保持 `69/95`；M5 Gate Checklist 六项继续全部未通过。
+> **当前结论**：M5-06 已在实现提交 `e5407f29f7fb906487d2e9a00628be3d58205928` 中完成 Tunnel、Connector 与 Service 的 HMAC opaque Pagination、Tunnel/Service 完整 428/412、Service 强 composite ETag、PATCH 全字段 omitted/null/value 以及 Repository/HTTP 并发 CAS 证据。全仓本地验收、三路独立复审、精确绑定远程 Head `8146d254510bc1161f836d17992462a6f8ed2781` 的 [CI #33248860032](https://github.com/lifei6671/xtunnel/actions/runs/33248860032) 和用户阶段复审均已通过，因此 M5-06 转为 `DONE`。M5 更新为 `6/11`、全局更新为 `70/95`；M5-07 与 M5-08 保持 `READY`，M5 Gate Checklist 六项继续全部未通过。
 
 ---
 
@@ -348,7 +348,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M5-03 | Admin Login/Session/CSRF | M5-02、M0-08、M0-11 | Auth Handler + Web Login | Secure/HttpOnly/SameSite Cookie；Origin/Host 规则；Login/Logout/CSRF E2E | `DONE` |
 | M5-04 | Tunnel/Connector/Credential API | M2-08、M5-02 | REST Handler | Tunnel CRUD/Tunnel Revoke；Token Reveal/Rotate/Revoke；Add Connector/Reveal 返回当前同一 Token；Connector 列表只读运行态；`Cache-Control: no-store` | `DONE` |
 | M5-05 | Service API | M3-13、M4-10、M5-02 | REST Handler | Service 直接归属 Tunnel；调用既有 Application Service；不在 Handler 重写事务逻辑 | `DONE` |
-| M5-06 | PATCH/ETag/Pagination 并发契约 | M5-04、M5-05 | Handler + Repository Tests | Tunnel 和 Service Aggregate 均覆盖 428/412；omitted/null/value；opaque token 50/200；version 原子递增 | `REVIEW` |
+| M5-06 | PATCH/ETag/Pagination 并发契约 | M5-04、M5-05 | Handler + Repository Tests | Tunnel 和 Service Aggregate 均覆盖 428/412；omitted/null/value；opaque token 50/200；version 原子递增 | `DONE` |
 | M5-07 | Settings/Read-only Runtime/Audit API | M5-02 | Settings/Audit Handler | 只返回允许公开的有效配置；Audit Query 只读且分页稳定；敏感字段永不返回，不泄露 Secret | `READY` |
 | M5-08 | Dashboard/Status UI | M5-02、M5-04、M5-05 | React Pages | 直接渲染 Server Status；不在前端重算状态 | `READY` |
 | M5-09 | Tunnel/Connector/Service 管理 UI | M5-03至 M5-08 | Tunnel CRUD/Token/Connector View/Service CRUD | 日常操作无需 SQLite 或手改 Agent Service Config | `NOT_STARTED` |
@@ -424,15 +424,14 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-05` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-06` 已完成。当前待办为：
 
-1. `M5-06` — PATCH/ETag/Pagination 并发契约保持 `REVIEW`；实现提交、本地验收、三路独立复审与精确 CI 已完成，尚待用户阶段复审。
-2. `M5-07` — Settings/Runtime/Audit 只读 API 已解锁为 `READY`；Audit 只允许查询，不得新增 UPDATE/DELETE。
-3. `M5-08` — Dashboard/Status UI 已解锁为 `READY`；只渲染 Server 权威状态，不在前端重算。
-4. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
-5. `M0-02` — Token-only Bootstrap 等待用户复审。
+1. `M5-07` — Settings/Runtime/Audit 只读 API 保持 `READY`；Audit 只允许查询，不得新增 UPDATE/DELETE。
+2. `M5-08` — Dashboard/Status UI 保持 `READY`；只渲染 Server 权威状态，不在前端重算。
+3. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
+4. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-05 已完成；M5-06 为 `REVIEW`，M5-07 与 M5-08 为 `READY`，M5-09 还必须等待 M5-06 至 M5-08 全部完成。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-06 已完成；M5-07 与 M5-08 为 `READY`，M5-09 还必须等待二者全部完成。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
 
 推进规则：
 
@@ -1339,3 +1338,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - CI 证据：[CI #33248860032](https://github.com/lifei6671/xtunnel/actions/runs/33248860032) 精确绑定远程 Head `8146d254510bc1161f836d17992462a6f8ed2781`，从 2026-08-29 18:53:47 至 18:59:21（Asia/Shanghai）运行 5 分 34 秒。`verify (amd64)`、`verify (arm64)` 与 `Windows Agent service` 三个 Job 全部成功；两路 Linux 均通过现行 OpenAPI/Web、全仓 Go Test/Vet/Build、定向 Race、M4 Product/OCI/systemd Gate 与最终工作树清洁检查，Windows Job 通过 Agent Service 安装、升级、卸载与 arm64 交叉构建。
 - 状态与 Gate：M5-06 已具备实现 Commit、本地验收、失败分支、三路独立复审和精确 CI 证据，但尚未取得用户阶段复审结论，因此继续保持 `REVIEW` 而非 `DONE`。M5 保持 `5/11`、全局保持 `69/95`，M5 Gate Checklist 六项全部保持未勾选；本次未勾选任何产品任务。
 - 文档同步：根 README 与开发计划同步 M5-06 精确 CI 事实与当前 Review 边界。总技术方案、OpenAPI、生成 Contract、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署配置、权限、日志契约与 `AGENTS.md` 无需更新：本轮只闭环已实现行为的远程验证证据，没有改变产品、机器契约或运行方式。
+
+## 2026-08-29 · M5-06 CI 与用户复审闭环 · DONE
+
+- 证据闭环：M5-06 实现提交 `e5407f29f7fb906487d2e9a00628be3d58205928`、三路独立复审和精确 [CI #33248860032](https://github.com/lifei6671/xtunnel/actions/runs/33248860032) 已齐备；CI 精确绑定远端 Head `8146d254510bc1161f836d17992462a6f8ed2781`，Windows Agent Service、Linux amd64 与 Linux arm64 三个 Job 全部成功。用户随后明确给出阶段复审结论“通过”。
+- 状态影响：M5-06 从 `REVIEW` 转为 `DONE`，M5 从 `5/11` 更新为 `6/11`，全局从 `69/95` 更新为 `70/95`；M5-07 与 M5-08 继续保持 `READY`，M5-09 仍等待二者完成。M5 Gate Checklist 六项全部保持未勾选，不把单个并发契约任务的验收冒充完整 M5 Gate。
+- 文档同步：根 README 同步 M5-06 已通过精确 CI 与用户复审；开发计划同步当前阶段、任务状态、仪表盘、队列和本记录。总技术方案、OpenAPI、生成 Contract、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署配置、权限、日志契约与 `AGENTS.md` 均无需更新，因为本轮只闭环既有实现证据，没有改变产品或机器契约。
