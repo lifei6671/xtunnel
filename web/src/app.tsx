@@ -21,6 +21,7 @@ import type { FormEvent } from "react";
 
 import { apiClient } from "./api/client";
 import type { components } from "./api/schema.gen";
+import { ManagementView } from "./management";
 
 type AuthSession = components["schemas"]["AuthSession"];
 type Dashboard = components["schemas"]["Dashboard"];
@@ -38,10 +39,16 @@ type DashboardState =
   | { status: "ready"; dashboard: Dashboard }
   | { status: "error"; message: string };
 
-const navigation = [
-  { label: "概览", icon: LayoutDashboard },
+type ConsolePage = "overview" | "management";
+
+const navigation: ReadonlyArray<{
+  label: string;
+  icon: typeof LayoutDashboard;
+  page?: ConsolePage;
+}> = [
+  { label: "概览", icon: LayoutDashboard, page: "overview" },
   { label: "Agent 管理", icon: Bot },
-  { label: "服务与隧道", icon: Network },
+  { label: "服务与隧道", icon: Network, page: "management" },
   { label: "访问入口", icon: RadioTower },
   { label: "系统设置", icon: Settings },
 ] as const;
@@ -246,6 +253,7 @@ function Console({ session, onSessionExpired }: {
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string>();
   const [dashboard, setDashboard] = useState<DashboardState>({ status: "loading" });
+  const [currentPage, setCurrentPage] = useState<ConsolePage>("overview");
 
   async function loadDashboard(signal?: AbortSignal) {
     setDashboard({ status: "loading" });
@@ -326,19 +334,22 @@ function Console({ session, onSessionExpired }: {
         <nav aria-label="主导航">
           <p className="nav-heading">工作台</p>
           <div className="nav-list">
-            {navigation.map((item, index) => {
+            {navigation.map((item) => {
               const Icon = item.icon;
+              const active = item.page === currentPage;
               return (
-                <div
-                  aria-current={index === 0 ? "page" : undefined}
-                  aria-disabled={index === 0 ? undefined : "true"}
-                  className={`nav-item${index === 0 ? " active" : ""}`}
+                <button
+                  type="button"
+                  aria-current={active ? "page" : undefined}
+                  className={`nav-item${active ? " active" : ""}`}
                   key={item.label}
+                  disabled={!item.page}
+                  onClick={() => item.page && setCurrentPage(item.page)}
                 >
                   <Icon className="nav-icon" aria-hidden="true" />
                   {item.label}
-                  {index !== 0 ? <span className="nav-pending">待接入</span> : null}
-                </div>
+                  {!item.page ? <span className="nav-pending">待接入</span> : null}
+                </button>
               );
             })}
           </div>
@@ -350,37 +361,43 @@ function Console({ session, onSessionExpired }: {
         </div>
       </aside>
 
-      <main className="main-content" id="overview">
+      <main className="main-content" id={currentPage}>
         {logoutError ? <div className="console-alert" role="alert">{logoutError}</div> : null}
-        <div className="page-heading">
-          <p className="breadcrumb">工作台 / 概览</p>
-          <h1>概览</h1>
-          <p>所有状态均直接来自 Server 权威快照；控制台只负责呈现，不在浏览器内重新判定。</p>
-        </div>
-
-        {dashboard.status === "loading" ? (
-          <section className="dashboard-loading" aria-live="polite" aria-busy="true">
-            <LoaderCircle className="button-spinner" aria-hidden="true" />
-            正在读取 Server 快照…
-          </section>
-        ) : null}
-
-        {dashboard.status === "error" ? (
-          <section className="dashboard-error" role="alert">
-            <AlertTriangle aria-hidden="true" />
-            <div>
-              <strong>运行状态暂不可用</strong>
-              <p>{dashboard.message}</p>
+        {currentPage === "overview" ? (
+          <>
+            <div className="page-heading">
+              <p className="breadcrumb">工作台 / 概览</p>
+              <h1>概览</h1>
+              <p>所有状态均直接来自 Server 权威快照；控制台只负责呈现，不在浏览器内重新判定。</p>
             </div>
-            <button type="button" onClick={() => void loadDashboard()}>
-              <RefreshCw aria-hidden="true" />重新读取
-            </button>
-          </section>
-        ) : null}
 
-        {dashboard.status === "ready" ? (
-          <DashboardView dashboard={dashboard.dashboard} onRefresh={() => void loadDashboard()} />
-        ) : null}
+            {dashboard.status === "loading" ? (
+              <section className="dashboard-loading" aria-live="polite" aria-busy="true">
+                <LoaderCircle className="button-spinner" aria-hidden="true" />
+                正在读取 Server 快照…
+              </section>
+            ) : null}
+
+            {dashboard.status === "error" ? (
+              <section className="dashboard-error" role="alert">
+                <AlertTriangle aria-hidden="true" />
+                <div>
+                  <strong>运行状态暂不可用</strong>
+                  <p>{dashboard.message}</p>
+                </div>
+                <button type="button" onClick={() => void loadDashboard()}>
+                  <RefreshCw aria-hidden="true" />重新读取
+                </button>
+              </section>
+            ) : null}
+
+            {dashboard.status === "ready" ? (
+              <DashboardView dashboard={dashboard.dashboard} onRefresh={() => void loadDashboard()} />
+            ) : null}
+          </>
+        ) : (
+          <ManagementView csrfToken={session.csrf_token} onSessionExpired={onSessionExpired} />
+        )}
       </main>
     </div>
   );

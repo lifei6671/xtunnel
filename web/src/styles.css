@@ -170,16 +170,23 @@ body {
 .nav-item {
   position: relative;
   display: flex;
+  width: 100%;
   align-items: center;
   gap: 0.7rem;
   min-height: 2.65rem;
   padding: 0.55rem 1rem 0.55rem 1.25rem;
+  border: 0;
   color: #526077;
+  background: transparent;
+  font-family: inherit;
   font-size: 0.86rem;
+  text-align: left;
+  cursor: pointer;
 }
 
-.nav-item[aria-disabled="true"] {
+.nav-item:disabled {
   color: #8a94a6;
+  cursor: default;
 }
 
 .nav-item.active {
