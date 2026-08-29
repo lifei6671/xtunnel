@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-29
 >
-> **当前阶段**：M5-04 Tunnel/Connector/Credential API · REVIEW（M2、M3、M4、M5-01 至 M5-03 均已 `DONE`）
+> **当前阶段**：M5-05 Service API · READY（M2、M3、M4、M5-01 至 M5-04 均已 `DONE`）
 >
-> **当前结论**：M5-04 已完成 Tunnel CRUD/Revoke、Token Reveal/Rotate/Revoke、Add Connector/Reveal、只读运行态 Connector 列表及生产 Bootstrap 接线；Create 在同一事务以 `COUNT(*)` 检查上限并提交 Tunnel 与 Token v1，Delete 在同一写事务检查 Service 引用，提交后以 AUTH/startup 临时栅栏完成无墓碑泄漏的 Runtime 收敛，Secret 响应固定 `no-store/no-cache`。真实 SQLite + TLS HTTP 黑盒、全仓 Test/Vet/Server Build 与定向 Race 均通过，任务进入 `REVIEW`；尚无本任务 Commit SHA、精确 CI 和用户阶段复审，因此 M5 仍为 `3/11`、全局仍为 `67/95`，M5 Gate Checklist 六项继续全部未通过。
+> **当前结论**：M5-04 的 Tunnel CRUD/Revoke、Token Reveal/Rotate/Revoke、Add Connector/Reveal、只读运行态 Connector 列表和生产 Bootstrap 接线已完成；实现提交为 `2a357544ccceb25b02eb9c410762b73b46747e81`，精确绑定该提交的 [CI #28](https://github.com/lifei6671/xtunnel/actions/runs/33233709963) 在 Windows、Linux amd64 和 Linux arm64 全部成功，用户阶段复审已通过，因此任务转为 `DONE`。M5 更新为 `4/11`、全局更新为 `68/95`；M5-05 与 M5-07 保持 `READY`，M5 Gate Checklist 六项继续全部未通过。
 
 ---
 
@@ -109,10 +109,10 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M2 Credential/Failover Hardening | 8 | 8 | `DONE` | M1-14 | M2-08 |
 | M3 Config/Health | 13 | 13 | `DONE` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
-| M5 REST API/Web | 11 | 3 | `IN_PROGRESS` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
+| M5 REST API/Web | 11 | 4 | `IN_PROGRESS` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 0 | `NOT_STARTED` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **67** |  |  |  |
+| **合计** | **95** | **68** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -346,7 +346,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M5-01 | 冻结完整 OpenAPI | M3-02、M3-11、M4-02 | `api/openapi/openapi.yaml` | 全部 Schema/Required/Nullable/Error/Status/Pagination/PATCH/ETag 完整；冻结 Security Audit Event 只读查询 Schema、稳定分页与错误结构，不提供 UPDATE/DELETE；Lint/Breaking PASS | `DONE` |
 | M5-02 | 生成 Client/Server Contract | M5-01 | Go Server Types + TypeScript Client | 可重复生成；干净 checkout 零漂移 | `DONE` |
 | M5-03 | Admin Login/Session/CSRF | M5-02、M0-08、M0-11 | Auth Handler + Web Login | Secure/HttpOnly/SameSite Cookie；Origin/Host 规则；Login/Logout/CSRF E2E | `DONE` |
-| M5-04 | Tunnel/Connector/Credential API | M2-08、M5-02 | REST Handler | Tunnel CRUD/Tunnel Revoke；Token Reveal/Rotate/Revoke；Add Connector/Reveal 返回当前同一 Token；Connector 列表只读运行态；`Cache-Control: no-store` | `REVIEW` |
+| M5-04 | Tunnel/Connector/Credential API | M2-08、M5-02 | REST Handler | Tunnel CRUD/Tunnel Revoke；Token Reveal/Rotate/Revoke；Add Connector/Reveal 返回当前同一 Token；Connector 列表只读运行态；`Cache-Control: no-store` | `DONE` |
 | M5-05 | Service API | M3-13、M4-10、M5-02 | REST Handler | Service 直接归属 Tunnel；调用既有 Application Service；不在 Handler 重写事务逻辑 | `READY` |
 | M5-06 | PATCH/ETag/Pagination 并发契约 | M5-04、M5-05 | Handler + Repository Tests | Tunnel 和 Service Aggregate 均覆盖 428/412；omitted/null/value；opaque token 50/200；version 原子递增 | `NOT_STARTED` |
 | M5-07 | Settings/Read-only Runtime/Audit API | M5-02 | Settings/Audit Handler | 只返回允许公开的有效配置；Audit Query 只读且分页稳定；敏感字段永不返回，不泄露 Secret | `READY` |
@@ -424,15 +424,14 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-03` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-04` 已完成。当前待办为：
 
-1. `M5-04` — Tunnel/Connector/Credential API 已进入 `REVIEW`；等待提交、精确 CI 与用户阶段复审，期间不启动依赖它的 M5-06/M5-08。
-2. `M5-05` — Service API 已解锁为 `READY`；必须调用既有 Application Service，不得在 Handler 重写事务、Route 或 Nested Exposure 不变量。
-3. `M5-07` — Settings/Runtime/Audit 只读 API 已解锁为 `READY`；Audit 只允许查询，不得新增 UPDATE/DELETE。
-4. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
-5. `M0-02` — Token-only Bootstrap 等待用户复审。
+1. `M5-05` — Service API 已解锁为 `READY`；必须调用既有 Application Service，不得在 Handler 重写事务、Route 或 Nested Exposure 不变量。
+2. `M5-07` — Settings/Runtime/Audit 只读 API 已解锁为 `READY`；Audit 只允许查询，不得新增 UPDATE/DELETE。
+3. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
+4. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-03 已完成；M5-04 处于 `REVIEW`，M5-05/M5-07 保持 `READY`，M5-08 仍等待 M5-04 与 M5-05 `DONE`，M5-09 还必须等待 M5-04 至 M5-08 全部完成。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次本地实现自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-04 已完成；M5-05/M5-07 保持 `READY`，M5-06 与 M5-08 现在只等待 M5-05 `DONE`，M5-09 还必须等待 M5-05 至 M5-08 全部完成。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
 
 推进规则：
 
@@ -1295,7 +1294,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 提交、CI、复审、状态与 Gate：最终 29 个文件的 staged snapshot 在未暂存/未跟踪文件均为 0 时完成复验，M5-03 实现提交为 `3cbdb337c2db302e5eb8c8f18bb7f1c669efa86d`，证据文档提交后远端 Head 为 `354682ee83ced2169fe10353fc878f92820cedc1`。精确绑定该 Head 的 [CI #27](https://github.com/lifei6671/xtunnel/actions/runs/33225874899) 从 2026-08-29 09:14:43 至 09:20:05（Asia/Shanghai）运行约 5 分 22 秒；Windows Agent Service、Linux amd64 与 Linux arm64 全部成功，两路 Linux 均通过 Web Check/Build、全仓 Go Test/Vet/Build、现行定向 Race、既有 M4/OCI/systemd Gate 与最终工作树清洁检查。用户阶段复审通过，因此 M5-03 转为 `DONE`，M5 `DONE` 更新为 `3/11`、全局更新为 `67/95`，并解锁 M5-04 进入 `IN_PROGRESS`。M5 Gate Checklist 六项全部保持未勾选；尤其 Login/Secure Cookie/CSRF/Logout 的 Go TLS 黑盒是 M5-03 任务证据，不能替代 M5-10 的完整 Browser E2E 和 M5-11 Gate。
 - 文档同步：总技术方案此前已同步 v9 身份迁移、Admin Session/CSRF 数据血缘、限流常量和 Management 生命周期；本次仅由根 README 与开发计划同步 M5-03 的精确 CI 证据和阶段 Review 边界。OpenAPI、生成物、Proto、Server Schema、依赖/Lockfile、CI/CD、部署配置、日志契约和 `AGENTS.md` 均无需更新，因为本次没有改变产品或机器行为。
 
-## 2026-08-29 · M5-04 Tunnel/Connector/Credential API · REVIEW
+## 2026-08-29 · M5-04 Tunnel/Connector/Credential API · DONE
 
 - 授权与范围：用户以“继续”明确确认 M5-04 所需的跨包导出符号、Repository 接口和 Application Service 变更。本轮只实现冻结 OpenAPI 已有的 10 个 Tunnel/Connector/Credential Operation；不新增 REST Path、依赖、Migration、配置字段或 Lockfile，不实现 M5-05 Service API、M5-06 opaque Pagination/完整 PATCH 并发矩阵、M5-08/M5-09 Web 页面。
 - 聚合与持久化：新增 `identity.NewTunnelID`，Tunnel Repository 增加 `COUNT(*)`、名称 CAS 与删除 CAS。`TunnelManagementService.Create` 在事务外生成、编码和加密首代 Credential，再在同一个 SQLite 写事务内以 `COUNT(*)` 检查 `max_tunnels`、创建 Tunnel 与 Token v1，Token 插入失败会整体回滚；`Delete` 在同一 `BEGIN IMMEDIATE` 内完成版本校验、Service Count/有界引用列表与删除，不级联 Service/Route。持久提交后使用删除专用 Runtime owner，以 per-Tunnel AUTH admission/startup 临时栅栏等待全部 generation 与 ActiveWork 收敛；成功后摘除 Runtime 与栅栏，失败则保留 fail-closed 栅栏并返回收敛错误，不复用永久 Revoke 墓碑。
@@ -1303,5 +1302,5 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - HTTP 与安全：生成 Strict Router 驱动 Tunnel CRUD、Tunnel Revoke、Reveal/Rotate/Revoke Token 和 Connector List；统一 Middleware 每请求只认证一次 Admin Session，所有 Mutation 统一执行同源 Origin 与 CSRF，Reveal GET 按冻结契约只要求 Session。Tunnel 强 ETag 只接受单个引号包围的正整数；缺失、非法和 stale 分别返回 428、400 和 412。Create/Reveal/Rotate 返回同一纯函数生成的四类部署命令，且固定 `Cache-Control: no-store`、`Pragma: no-cache`；Token Revoke 只返回 Metadata，不含 Token 或命令。
 - 自动化证据：真实 SQLite + TLS HTTP Server 黑盒覆盖 Create/Reveal 同值、Rename、Rotate、Token Revoke 无 Secret、Reveal 不可用、Tunnel Revoke、Delete、Service 引用 409 详情、Current Connector 投影、Session/Origin/CSRF、428/400/412、严格 JSON、Secret 缓存头，以及 Runtime 收敛失败不得掩盖持久提交；Application 负例证明 Token 插入失败时 Tunnel 同事务回滚并覆盖 `max_tunnels`。Runtime/Session 测试覆盖 admission 在持久化 Verify 前建立、认证成功后跨 Handler 返回转交 startup、Delete 不可穿越该交接、失败保留栅栏，以及 256 个不同 Tunnel 连续删除不增长 Runtime/栅栏 Map。Go `go1.27.0` 且 `GOTOOLCHAIN=local` 下，`go test -count=1 -timeout 300s ./...`、`go test -race -count=1 -timeout 300s ./internal/application ./internal/repository/... ./internal/server/runtime ./internal/server/controlauth ./internal/server/sessionruntime ./internal/server/managementapi ./internal/server/bootstrap ./tests/integration`、`go vet ./...`、`go build ./cmd/server` 与 `git diff --check` 均通过。全仓测试首次在受限沙箱中只因 Windows 临时目录父路径拒绝访问而失败，同一命令获准在沙箱外重跑后全绿；未把该环境失败写成产品失败或静默忽略。
 - 独立复审：契约与并发所有权两路只读复审先后发现事务配额线性化、提交后 Runtime 错误映射、AUTH 准入建立时点、Handler 到 startup 租约交接，以及 startup 被栅栏拒绝时过早释放 admission 的问题；全部完成生产修复和直接回归。最终两路复审均确认无剩余 P0/P1/P2/P3，交接阻塞 Close 用例另在 Race 下连续 20 轮通过。
-- 状态与 Gate 边界：当前产物和本地验收已完成，M5-04 进入 `REVIEW`。工作区尚无本任务 Commit SHA、精确绑定提交的 CI Run 与用户阶段复审，因此不得转为 `DONE`；M5 仍为 `3/11`、全局仍为 `67/95`。M5-06 仍负责 Tunnel/Service 完整 428/412、PATCH omitted/null/value、opaque token 默认 50/最大 200 与并发原子递增；M5 Gate Checklist 六项全部保持未勾选，本次未勾选任何产品任务。
-- 文档同步：根 README 同步已实现的 M5-04 REST 能力、Secret 缓存边界与 M5-06 残余范围；总技术方案补充 Delete 专用 AUTH/startup 临时栅栏、成功摘除 Runtime 与失败 fail-closed 的收敛契约；开发计划同步当前阶段、任务行、队列和本记录。OpenAPI 行为无漂移；Proto、Server Schema、Migration、生成 Contract、依赖/Lockfile、CI/CD、部署配置、日志契约和 `AGENTS.md` 均无需修改。
+- 提交、CI、复审、状态与 Gate：24 个 M5-04 代码、测试和文档文件组成实现提交 `2a357544ccceb25b02eb9c410762b73b46747e81`，14 个无关未跟踪 Skill 目录未暂存、未提交。精确绑定该提交的 [CI #28](https://github.com/lifei6671/xtunnel/actions/runs/33233709963) 从 2026-08-29 12:23:37 至 12:29:03（Asia/Shanghai）运行 5 分 26 秒；Windows Agent Service、Linux amd64 与 Linux arm64 全部成功，两路 Linux 均通过现行全仓 Test/Vet/Build、定向 Race、OpenAPI/Web 和既有 Product/OCI/systemd Gate。用户阶段复审通过，因此 M5-04 转为 `DONE`，M5 更新为 `4/11`、全局更新为 `68/95`。M5-06 仍负责 Tunnel/Service 完整 428/412、PATCH omitted/null/value、opaque token 默认 50/最大 200 与并发原子递增；M5 Gate Checklist 六项全部保持未勾选。
+- 文档同步：根 README 与开发计划同步 M5-04 的实现提交、精确 CI、用户复审、`DONE` 状态、仪表盘和后续队列；总技术方案此前已经同步 Delete 专用 AUTH/startup 临时栅栏契约，本次证据闭环不再改变产品行为。OpenAPI、Proto、Server Schema、Migration、生成 Contract、依赖/Lockfile、CI/CD、部署配置、日志契约和 `AGENTS.md` 均无需修改。
