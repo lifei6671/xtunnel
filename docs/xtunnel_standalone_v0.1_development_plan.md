@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M5-06 PATCH/ETag/Pagination 并发契约 · REVIEW（M2、M3、M4、M5-01 至 M5-05 均已 `DONE`）
 >
-> **当前结论**：M5-06 已在实现提交 `e5407f29f7fb906487d2e9a00628be3d58205928` 中完成 Tunnel、Connector 与 Service 的 HMAC opaque Pagination、Tunnel/Service 完整 428/412、Service 强 composite ETag、PATCH 全字段 omitted/null/value 以及 Repository/HTTP 并发 CAS 证据。全仓普通测试、全仓 Race、Vet、Server/Agent Build、Module 一致性、Web Check/Build 和三路独立复审均通过；尚无精确绑定该提交的 CI Run 和用户阶段复审，因此 M5-06 只进入 `REVIEW`。M5 保持 `5/11`、全局保持 `69/95`；M5 Gate Checklist 六项继续全部未通过。
+> **当前结论**：M5-06 已在实现提交 `e5407f29f7fb906487d2e9a00628be3d58205928` 中完成 Tunnel、Connector 与 Service 的 HMAC opaque Pagination、Tunnel/Service 完整 428/412、Service 强 composite ETag、PATCH 全字段 omitted/null/value 以及 Repository/HTTP 并发 CAS 证据。全仓本地验收、三路独立复审和精确绑定远程 Head `8146d254510bc1161f836d17992462a6f8ed2781` 的 [CI #33248860032](https://github.com/lifei6671/xtunnel/actions/runs/33248860032) 均已通过；尚无用户阶段复审结论，因此 M5-06 继续保持 `REVIEW`。M5 保持 `5/11`、全局保持 `69/95`；M5 Gate Checklist 六项继续全部未通过。
 
 ---
 
@@ -426,7 +426,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-05` 已完成。当前待办为：
 
-1. `M5-06` — PATCH/ETag/Pagination 并发契约已进入 `REVIEW`；实现提交与本地验收、三路独立复审已完成，下一步是精确 CI 证据与用户阶段复审。
+1. `M5-06` — PATCH/ETag/Pagination 并发契约保持 `REVIEW`；实现提交、本地验收、三路独立复审与精确 CI 已完成，尚待用户阶段复审。
 2. `M5-07` — Settings/Runtime/Audit 只读 API 已解锁为 `READY`；Audit 只允许查询，不得新增 UPDATE/DELETE。
 3. `M5-08` — Dashboard/Status UI 已解锁为 `READY`；只渲染 Server 权威状态，不在前端重算。
 4. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
@@ -1333,3 +1333,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 验证与复审：Windows `go1.27.0` 且 `GOTOOLCHAIN=local` 下，高重复并发测试 `count=20`、`go test -count=1 -timeout 360s ./...`、`go test -race -count=1 -timeout 360s ./...`、`go vet ./...`、`go build ./cmd/server ./cmd/agent`、`go mod verify`、`go mod tidy -diff`、`npm --prefix web run check`、`npm --prefix web run build` 和 `git diff --check` 全部通过。并发、契约与安全三路独立复审最终均为 `APPROVED`，无剩余 P0/P1/P2/P3。
 - 提交、状态与 Gate：11 个 M5-06 代码/测试文件的实现提交为 `e5407f29f7fb906487d2e9a00628be3d58205928`；14 个无关未跟踪 Skill 目录未被暂存或提交。当前没有精确绑定该提交的 GitHub CI Run，也没有用户阶段复审结论，因此 M5-06 从 `READY` 进入 `REVIEW` 而非 `DONE`。M5 保持 `5/11`、全局保持 `69/95`，M5 Gate Checklist 六项全部保持未勾选；完整 API Contract Suite、真实 Browser E2E 与 M5 总 Gate 仍分别属于 M5-10/M5-11。本次未勾选任何产品任务。
 - 文档同步：根 README 同步 M5-06 已完成本地实现并进入 `REVIEW`；开发计划同步当前阶段、任务状态、队列与本执行证据。总技术方案、OpenAPI、生成 Contract、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署配置、权限、日志契约与 `AGENTS.md` 无需更新：实现遵守现有唯一机器权威与已冻结产品语义，未新增外部行为或第二套默认值。
+
+## 2026-08-29 · M5-06 精确 CI 证据 · REVIEW
+
+- CI 证据：[CI #33248860032](https://github.com/lifei6671/xtunnel/actions/runs/33248860032) 精确绑定远程 Head `8146d254510bc1161f836d17992462a6f8ed2781`，从 2026-08-29 18:53:47 至 18:59:21（Asia/Shanghai）运行 5 分 34 秒。`verify (amd64)`、`verify (arm64)` 与 `Windows Agent service` 三个 Job 全部成功；两路 Linux 均通过现行 OpenAPI/Web、全仓 Go Test/Vet/Build、定向 Race、M4 Product/OCI/systemd Gate 与最终工作树清洁检查，Windows Job 通过 Agent Service 安装、升级、卸载与 arm64 交叉构建。
+- 状态与 Gate：M5-06 已具备实现 Commit、本地验收、失败分支、三路独立复审和精确 CI 证据，但尚未取得用户阶段复审结论，因此继续保持 `REVIEW` 而非 `DONE`。M5 保持 `5/11`、全局保持 `69/95`，M5 Gate Checklist 六项全部保持未勾选；本次未勾选任何产品任务。
+- 文档同步：根 README 与开发计划同步 M5-06 精确 CI 事实与当前 Review 边界。总技术方案、OpenAPI、生成 Contract、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署配置、权限、日志契约与 `AGENTS.md` 无需更新：本轮只闭环已实现行为的远程验证证据，没有改变产品、机器契约或运行方式。
