@@ -428,7 +428,9 @@ func gatewayLifecycleTestConfig(dataDir, listen string) serverconfig.Config {
 			HeartbeatInterval: baseconfig.Duration{Duration: time.Second},
 			HeartbeatTimeout:  baseconfig.Duration{Duration: 3 * time.Second},
 		},
+		Logging: serverconfig.Logging{Level: "info"},
 		Limits: serverconfig.Limits{
+			MaxTunnels:                          16,
 			MaxConnectors:                       8,
 			MaxConnectorsPerTunnel:              4,
 			MaxHealthTargetsPerTunnel:           2_000,
