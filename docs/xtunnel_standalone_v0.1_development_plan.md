@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M5-07 Settings/Runtime/Audit API 与 M5-08 Dashboard/Status UI · REVIEW（M2、M3、M4、M5-01 至 M5-06 均已 `DONE`）
 >
-> **当前结论**：M5-07 已完成冻结 System Info/Health/Config 与 Security Audit GET-only 查询，M5-08 已完成只消费 Server 权威状态的 Dashboard API/UI；Server 与 Agent 的 Build Version 统一由 `internal/buildinfo` 在链接期注入，普通开发构建固定为 `(devel)`。全仓本地 Test/Vet、受影响包 Race、Web Check/Build、POSIX Shell 语法检查和三路独立复审已通过，两项进入 `REVIEW`。当前仍无实现 Commit、精确 CI Run 与用户阶段复审，Docker/OCI 正负例也因本机无 Docker 仅新增到 CI、尚无本轮运行证据，因此不得标记 `DONE`。M5 保持 `6/11`、全局保持 `70/95`；M5-09 不解锁，M5 Gate Checklist 六项继续全部未通过。
+> **当前结论**：M5-07 已完成冻结 System Info/Health/Config 与 Security Audit GET-only 查询，M5-08 已完成只消费 Server 权威状态的 Dashboard API/UI；Server 与 Agent 的 Build Version 统一由 `internal/buildinfo` 在链接期注入，普通开发构建固定为 `(devel)`。实现与文档提交为 `440d0183e2668b4213bbf6a74f2f11601de6a911`、`7fe01da441e079876964a5eb91b15b22e84301ff`；首轮 CI 暴露 Linux 生命周期测试 Fixture 漏同步，修复提交 `71c706a013861946e6ca45f7104b72a28d04766e` 已由精确 [CI #33253581635](https://github.com/lifei6671/xtunnel/actions/runs/33253581635) 在 Windows、Linux amd64 与 Linux arm64 三路全部验证通过。两项继续保持 `REVIEW`，仍等待用户阶段复审，不得标记 `DONE`。M5 保持 `6/11`、全局保持 `70/95`；M5-09 不解锁，M5 Gate Checklist 六项继续全部未通过。
 
 ---
 
@@ -426,8 +426,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-06` 已完成。当前待办为：
 
-1. `M5-07` — Settings/Runtime/Audit 只读 API 等待 Commit、精确 CI 与用户阶段复审；Audit 只允许查询，不得新增 UPDATE/DELETE。
-2. `M5-08` — Dashboard/Status UI 等待 Commit、精确 CI 与用户阶段复审；只渲染 Server 权威状态，不在前端重算。
+1. `M5-07` — Settings/Runtime/Audit 只读 API 已具备 Commit 与精确 CI，等待用户阶段复审；Audit 只允许查询，不得新增 UPDATE/DELETE。
+2. `M5-08` — Dashboard/Status UI 已具备 Commit 与精确 CI，等待用户阶段复审；只渲染 Server 权威状态，不在前端重算。
 3. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 4. `M0-02` — Token-only Bootstrap 等待用户复审。
 
@@ -1354,3 +1354,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 验证与复审：Windows `go1.27.0`、`GOTOOLCHAIN=local` 下，`./tools/check-go-version.ps1`、`go test -count=1 -timeout 300s ./...`、受影响包 `go test -race -count=1 -timeout 300s`、`go vet ./...`、`$buildVersion='v0.1.0-local.verify'; $ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$buildVersion"; go build -trimpath -ldflags $ldflags ./cmd/server ./cmd/agent`、`npm --prefix web run check`、`npm --prefix web run build`、`sh -n`、`dash -n`、`bash --posix -n` 和 `git diff --check` 均通过。三路独立只读复审最终均为 `APPROVED`，无剩余 P0/P1/P2/P3。本机没有 Docker 与 Actionlint，OCI 正负例和 CI YAML 尚无本轮本地运行证据，等待远程 CI 验证。
 - 状态与 Gate：当前为混合 staged/unstaged/untracked 脏工作区，没有最终 staged snapshot 复验、实现 Commit SHA、push、精确 CI Run 或用户阶段复审，因此 M5-07 与 M5-08 只进入 `REVIEW`，不得标记 `DONE`。M5 保持 `6/11`、全局保持 `70/95`，M5-09 不解锁，M5 Gate Checklist 六项全部保持未勾选。本次未勾选任何产品任务。
 - 文档同步：根 README 同步本地实现状态、Dashboard 与双 Binary Version 构建入口；总技术方案同步 Build Version、Dashboard/System/Audit 与 OCI/Compose 长期契约；开发计划同步状态、计数、队列与本记录。OpenAPI、生成 Contract、Proto、Server Schema、Migration、依赖/Lockfile、反向代理、systemd/Windows 安装方式、权限与日志契约无需更新，因为机器契约和运行安装边界未变化。提交前必须选择性重新暂存本任务最终文件，并排除无关 `.agents/skills` 与 `output/`。
+
+## 2026-08-29 · M5-07/M5-08 Linux Fixture 修复与精确 CI · REVIEW
+
+- 首轮远程证据：实现与文档推送到远端 Head `7fe01da441e079876964a5eb91b15b22e84301ff` 后，[CI #33253282206](https://github.com/lifei6671/xtunnel/actions/runs/33253282206) 的 Windows Agent Service 成功，但 Linux amd64/arm64 同时在 `Test Go modules and build both processes` 失败。远程日志定位到四个 Linux-only Bootstrap 生命周期测试均因 `gatewayLifecycleTestConfig` 缺少现行公开投影要求的 `logging.level` 与 `limits.max_tunnels`，导致构造 System Read Service 返回 `system read input is invalid`；该失败不记录为产品 Gate 通过。
+- 最小修复：提交 `71c706a013861946e6ca45f7104b72a28d04766e` 只在 Linux 生命周期测试 Fixture 补入 `Logging.Level=info` 与 `MaxTunnels=16`，不放宽生产 Config/System Read 校验，不修改外部行为、机器契约、依赖、部署或运行配置。
+- 本地验证：Windows `go1.27.0`、`GOTOOLCHAIN=local` 下，Bootstrap 定向测试、`go test -count=1 -timeout 300s ./...`、`go vet ./...`、`go test -race -count=1 -timeout 180s ./internal/server/bootstrap`、Linux amd64/arm64 Bootstrap Test Binary 交叉编译与 `git diff --check` 全部通过。WSL 实例没有 `go`，因此 Linux 原生定向测试未在本地运行，未将交叉编译冒充原生证据。
+- 精确 CI：修复 Head `71c706a013861946e6ca45f7104b72a28d04766e` 触发的 [CI #33253581635](https://github.com/lifei6671/xtunnel/actions/runs/33253581635) 从 2026-08-29 20:52:10 至 20:57:50（Asia/Shanghai）运行 5 分 40 秒；`verify (amd64)`、`verify (arm64)` 与 `Windows Agent service` 三个 Job 全部成功。两路 Linux 均穿过原失败 Bootstrap 测试，并完成现行 OpenAPI/Web、全仓 Go Test/Vet/Build、定向 Race、M4 Product、OCI Version 正负例、systemd 与最终工作树清洁检查。
+- 状态与 Gate：M5-07/M5-08 已具备实现 Commit、失败修复、独立复审、本地验证与精确 CI，但尚未取得用户阶段复审结论，因此继续保持 `REVIEW`。M5 保持 `6/11`、全局保持 `70/95`，M5-09 不解锁，M5 Gate Checklist 六项全部保持未勾选；本次未勾选任何产品任务。
+- 文档同步：只更新开发计划的当前结论、队列和精确 CI 证据。总技术方案、README、OpenAPI/生成物、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署配置、权限与日志契约无需更新，因为本次是测试 Fixture 修复和既有行为的验证闭环，没有改变产品或用户命令。
