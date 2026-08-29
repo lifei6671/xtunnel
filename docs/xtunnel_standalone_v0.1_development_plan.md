@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M5-05 Service API · REVIEW（M2、M3、M4、M5-01 至 M5-04 均已 `DONE`）
 >
-> **当前结论**：M5-05 已完成 7 个冻结 Service Operation、复合 Application Owner、Nested Exposure v10 持久化约束、生产 Bootstrap 接线和真实 SQLite + TLS 黑盒；全仓 Go Test/Race/Vet/Build 与三路独立复审均通过。当前工作区尚无本任务 Commit SHA 和精确 CI Run，因此任务只进入 `REVIEW`，M5 仍为 `4/11`、全局仍为 `68/95`；M5-07 保持 `READY`，M5-06/M5-08 继续等待 M5-05 `DONE`，M5 Gate Checklist 六项继续全部未通过。
+> **当前结论**：M5-05 已完成 7 个冻结 Service Operation、复合 Application Owner、Nested Exposure v10 持久化约束、生产 Bootstrap 接线和真实 SQLite + TLS 黑盒；全仓 Go Test/Race/Vet/Build 与三路独立复审均通过，实现提交为 `0841eb4ac9115e1e19cfc5b0934be3a4aec49ac9`。该提交尚未推送，也没有精确 CI Run，因此任务只进入 `REVIEW`，M5 仍为 `4/11`、全局仍为 `68/95`；M5-07 保持 `READY`，M5-06/M5-08 继续等待 M5-05 `DONE`，M5 Gate Checklist 六项继续全部未通过。
 
 ---
 
@@ -426,7 +426,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-04` 已完成。当前待办为：
 
-1. `M5-05` — Service API 已进入 `REVIEW`；等待最终 Commit、精确 CI Run 与用户阶段复审后再决定是否 `DONE`。
+1. `M5-05` — Service API 已进入 `REVIEW`；实现提交为 `0841eb4ac9115e1e19cfc5b0934be3a4aec49ac9`，等待推送、精确 CI Run 与用户阶段复审后再决定是否 `DONE`。
 2. `M5-07` — Settings/Runtime/Audit 只读 API 已解锁为 `READY`；Audit 只允许查询，不得新增 UPDATE/DELETE。
 3. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 4. `M0-02` — Token-only Bootstrap 等待用户复审。
@@ -1313,5 +1313,5 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - HTTP 与安全：生成 Strict Router 驱动 List/Create/Get/PATCH/Delete/Enable/Disable；统一 Session/Origin/CSRF Middleware，Create 使用父 Tunnel ETag，后续 Mutation 使用绑定 Service/Tunnel 双版本的强 composite ETag。响应使用冻结 Origin/Health/Exposure 联合类型，不公开内部 Route ID；TCP 端口冲突、HTTP Route 冲突、Snapshot/Health Budget 失败映射到冻结错误码。请求预检对 Create 联合类型与 PATCH 四个嵌套对象执行 `DisallowUnknownFields` 和 EOF 校验，真实 TLS 黑盒覆盖 8 个 unknown-field `400 INVALID_REQUEST`；Application 按有效 Origin scheme 拒绝不适用的 HTTP/TLS 字段。
 - 自动化证据：Go `go1.27.0` 且 `GOTOOLCHAIN=local` 下，`go test -count=1 -timeout 360s ./...`、`go test -race -count=1 -timeout 360s ./...`、`go vet ./...`、`go build ./cmd/server ./cmd/agent`、`go mod verify`、`go mod tidy -diff` 与 `git diff --check` 均通过；`npm --prefix web run check`、`npm --prefix web run build` 通过。Repository/Migration 测试覆盖 v9→v10 重复数据 fail-closed、事务回滚、只读保护和 CRUD；Application 覆盖原子版本、端口分配、Exposure 切型/移除、无 Exposure 删除、通知失败持久事实和运行态投影；真实 SQLite + TLS 黑盒覆盖完整 Service 生命周期、认证、同源/CSRF、ETag、响应默认值和 unknown field。
 - 独立复审：存储、并发所有权与冻结契约三路只读复审发现并推动修复在线 Service 字段更新未推进 Route Generation、Create/PATCH 嵌套 unknown field 被静默接受，以及 Origin Patch 不适用字段被清零的问题；最终三路复核均确认原问题关闭，无剩余 P0/P1/P2/P3。M5-06 负责的完整并发 PATCH、omitted/null/value 与 opaque Pagination 仍保持后续边界。
-- 状态与 Gate：当前实现与本地证据齐备并通过独立复审，因此 M5-05 从 `READY` 进入 `REVIEW`。工作区尚无本任务 Commit SHA，也没有精确绑定该提交的 CI Run，故不得标记 `DONE`；M5 保持 `4/11`、全局保持 `68/95`，M5-06/M5-08 仍未解锁，M5 Gate Checklist 六项全部保持未勾选。本次未勾选任何产品任务。
+- 状态与 Gate：当前实现与本地证据齐备并通过独立复审，实现提交为 `0841eb4ac9115e1e19cfc5b0934be3a4aec49ac9`，因此 M5-05 从 `READY` 进入 `REVIEW`。该提交尚未推送，也没有精确绑定它的 CI Run，故不得标记 `DONE`；M5 保持 `4/11`、全局保持 `68/95`，M5-06/M5-08 仍未解锁，M5 Gate Checklist 六项全部保持未勾选。本次未勾选任何产品任务。
 - 文档同步：总技术方案同步 one-Exposure 持久化约束、Service Snapshot 与 Route Generation 的收敛语义；根 README 同步已实现但尚待 CI 的 Service API 能力；开发计划同步 M5-05 `REVIEW`、当前队列和本执行记录。OpenAPI、生成 Contract、Proto、Server Schema、依赖/Lockfile、CI/CD、部署配置、日志契约与 `AGENTS.md` 无需更新，因为实现遵守既有机器契约且没有改变这些边界。
