@@ -3350,6 +3350,11 @@ INSERT INTO route_config_state(id, generation) VALUES (1, 0);
 `http_routes`、`tcp_routes` 与该单行 generation 必须在同一个
 `BEGIN IMMEDIATE` 事务中提交；运行时只消费提交后的完整状态。
 
+Route Desired State 还包含 Tunnel 与 Service 绑定。任何会改变 Server Route Snapshot
+所缓存字段的 Service Mutation（包括 Enabled、Origin、Proxy Options、
+RequiredRevision 和 Service Delete）也必须在同一事务推进 generation；不能只在
+`http_routes`/`tcp_routes` 行变化时通知 Route owner，否则在线快照会永久保留旧值。
+
 TCP Route 创建输入未指定 `public_port` 时，ConfigWriteCoordinator 在
 Normalize/Validate 阶段从 `tcp_ingress.min_port..max_port` 逻辑池分配具体端口；
 事务内基于最新完整 Desired State 再次裁决，并把该端口、所属 Service 新版本、
@@ -4136,6 +4141,10 @@ HTTP 返回 canonical `hostname`、`path_prefix` 与 `preserve_host`；TCP 返�
 Config Write Coordinator 从配置端口池原子分配。删除 Service 必须在同一事务先清理其
 Exposure，不能留下 Route 引用。
 
+SQLite 必须以单表唯一索引和跨 `http_routes`/`tcp_routes` 的双向写入约束共同保证
+每个 Service 最多只有一个 Exposure。升级时若历史数据已经存在同表重复或跨表重复，
+Migration 必须整体回滚并拒绝启动，不能任意保留一条或静默修复。
+
 Server Transaction：
 
 ```text
@@ -4149,14 +4158,17 @@ INSERT http_route
 
 SET tunnel.desired_revision = next_revision
 
+SET route_config_state.generation = generation + 1
+
 COMMIT
 ```
 
 Revision 规则：
 
 ```text
-修改 Origin / Health / Service Enabled
-→ 在同一事务递增所属 Tunnel Revision，并更新 required_revision
+修改 Origin / Proxy Options / Health / Service Enabled
+→ 在同一事务递增所属 Tunnel Revision、Route Generation，并更新 required_revision；
+  Agent Snapshot 和 Server Route Snapshot 分别由各自 dirty 通知收敛
 
 切换 Service 所属 Tunnel
 → V0.1 禁止；必须在目标 Tunnel 新建 Service，再显式删除旧 Service
@@ -5536,7 +5548,9 @@ POST /services/{id}/disable
 Service 的 `origin`、`health`、`exposure` 都使用 OpenAPI 中的封闭类型；内部 Route ID
 不进入 REST。Create Service 的 `If-Match` 校验父 Tunnel，后续 PATCH/DELETE/enable/disable
 使用 Service composite ETag。Exposure 的创建、切换、移除以及 Service 删除必须复用同一
-Application 事务，只推进一次 Service Version、Tunnel Revision 与 Route Generation。
+Application 事务；Origin、Proxy Options、Health、Enabled 或 Exposure 的有效快照变化，
+以及 Service Delete，都只推进一次 Tunnel Revision 与 Route Generation，普通更新同时只
+推进一次 Service Version。事务提交后才分别通知 Tunnel Snapshot 与 Route Snapshot owner。
 
 创建或修改 Service 在提交前触发 Tunnel Snapshot 预算检查。超限统一返回：
 

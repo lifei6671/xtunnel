@@ -87,7 +87,7 @@ func TestRouteManagementRejectsPredictablePortErrorsBeforeTransaction(t *testing
 	store := openServiceManagementStore(t)
 	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
 	owner := newServiceManagementTestService(
-		store, &recordingSnapshotGate{}, serviceManagementIDOne,
+		store, &recordingSnapshotGate{}, serviceManagementIDOne, serviceManagementIDTwo,
 	)
 	createdService, err := owner.Create(
 		context.Background(), validCreateServiceInput(serviceManagementTunnelID, "tcp"),
@@ -141,9 +141,15 @@ func TestRouteManagementRejectsPredictablePortErrorsBeforeTransaction(t *testing
 	if got := routeNotifier.snapshot(); !reflect.DeepEqual(got, []uint64{1}) {
 		t.Fatalf("Route MarkDirty calls after rejected writes = %v, want [1]", got)
 	}
+	secondServiceInput := validCreateServiceInput(serviceManagementTunnelID, "tcp-two")
+	secondServiceInput.ExpectedTunnelVersion = first.TunnelVersion
+	secondService, err := owner.Create(context.Background(), secondServiceInput)
+	if err != nil {
+		t.Fatalf("create second Service error = %v", err)
+	}
 	second, err := service.CreateTCP(context.Background(), CreateTCPRouteInput{
-		ID: "tcp-route-two", TunnelID: serviceManagementTunnelID, ServiceID: serviceManagementIDOne,
-		ExpectedTunnelVersion: first.TunnelVersion, ExpectedServiceVersion: first.Service.Version,
+		ID: "tcp-route-two", TunnelID: serviceManagementTunnelID, ServiceID: secondService.Service.ID,
+		ExpectedTunnelVersion: secondService.TunnelVersion, ExpectedServiceVersion: secondService.Service.Version,
 		PublicPort: 10002, Enabled: true,
 	})
 	if err != nil {
@@ -159,6 +165,9 @@ func TestRouteManagementRejectsPredictablePortErrorsBeforeTransaction(t *testing
 	}
 	if counting.withTxCalls != before {
 		t.Fatalf("exhausted pool WithTx calls = %d, want unchanged %d", counting.withTxCalls, before)
+	}
+	if got := routeNotifier.snapshot(); !reflect.DeepEqual(got, []uint64{1, 2}) {
+		t.Fatalf("Route MarkDirty calls = %v, want [1 2]", got)
 	}
 }
 

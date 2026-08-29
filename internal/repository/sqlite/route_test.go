@@ -7,9 +7,14 @@ import (
 	"testing"
 
 	"github.com/lifei6671/xtunnel/internal/repository"
+	"gorm.io/gorm"
 )
 
-const repositoryRouteTestServiceID = "svc_01J00000000000000000000000"
+const (
+	repositoryRouteTestServiceID       = "svc_01J00000000000000000000000"
+	repositoryRouteSecondTestServiceID = "svc_01J00000000000000000000001"
+	repositoryRouteThirdTestServiceID  = "svc_01J00000000000000000000003"
+)
 
 func TestRouteMigrationUpgradesV6AndIsIdempotent(t *testing.T) {
 	database := openUnmigratedDatabase(t)
@@ -105,9 +110,180 @@ func TestRouteMigrationRollsBackAtomically(t *testing.T) {
 	}
 }
 
+func TestServiceExposureMigrationUpgradesV9AndIsIdempotent(t *testing.T) {
+	database := openUnmigratedDatabase(t)
+	if err := runMigrations(context.Background(), database, productionMigrations[:9], testNow); err != nil {
+		t.Fatalf("run v9 migrations error = %v", err)
+	}
+	seedServiceExposureMigrationRelations(t, database)
+	if err := database.Create(&httpRouteRecord{
+		ID: "http-main", ServiceID: repositoryRouteTestServiceID,
+		Hostname: "example.test", PathPrefix: "/", PreserveHost: true,
+		Enabled: true, CreatedAt: 1, UpdatedAt: 1,
+	}).Error; err != nil {
+		t.Fatalf("seed v9 HTTP exposure error = %v", err)
+	}
+	if err := database.Create(&tcpRouteRecord{
+		ID: "tcp-main", ServiceID: repositoryRouteSecondTestServiceID,
+		PublicPort: 8443, Enabled: true, CreatedAt: 1, UpdatedAt: 1,
+	}).Error; err != nil {
+		t.Fatalf("seed v9 TCP exposure error = %v", err)
+	}
+
+	if err := runMigrations(context.Background(), database, productionMigrations, testNow); err != nil {
+		t.Fatalf("upgrade to v10 error = %v", err)
+	}
+	var indexCount, triggerCount int64
+	if err := database.Raw(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
+		"http_routes_unique_service_exposure", "tcp_routes_unique_service_exposure",
+	).Scan(&indexCount).Error; err != nil {
+		t.Fatalf("inspect Exposure indexes error = %v", err)
+	}
+	if err := database.Raw(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE '%_reject_%_exposure_%'",
+	).Scan(&triggerCount).Error; err != nil {
+		t.Fatalf("inspect Exposure triggers error = %v", err)
+	}
+	if indexCount != 2 || triggerCount != 4 {
+		t.Fatalf("Exposure constraints = indexes:%d triggers:%d, want 2/4", indexCount, triggerCount)
+	}
+	if err := runMigrations(context.Background(), database, productionMigrations, testNow); err != nil {
+		t.Fatalf("idempotent v10 rerun error = %v", err)
+	}
+	var versionCount int64
+	if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
+		t.Fatalf("count versions error = %v", err)
+	}
+	if versionCount != 10 {
+		t.Fatalf("version count = %d, want 10", versionCount)
+	}
+}
+
+func TestServiceExposureMigrationRejectsLegacyDuplicatesAtomically(t *testing.T) {
+	tests := []struct {
+		name string
+		seed func(*testing.T, *gorm.DB)
+	}{
+		{
+			name: "duplicate HTTP",
+			seed: func(t *testing.T, database *gorm.DB) {
+				t.Helper()
+				for _, route := range []httpRouteRecord{
+					{ID: "http-one", ServiceID: repositoryRouteTestServiceID, Hostname: "one.test", PathPrefix: "/", CreatedAt: 1, UpdatedAt: 1},
+					{ID: "http-two", ServiceID: repositoryRouteTestServiceID, Hostname: "two.test", PathPrefix: "/", CreatedAt: 1, UpdatedAt: 1},
+				} {
+					if err := database.Create(&route).Error; err != nil {
+						t.Fatalf("seed duplicate HTTP exposure error = %v", err)
+					}
+				}
+			},
+		},
+		{
+			name: "duplicate TCP",
+			seed: func(t *testing.T, database *gorm.DB) {
+				t.Helper()
+				for _, route := range []tcpRouteRecord{
+					{ID: "tcp-one", ServiceID: repositoryRouteTestServiceID, PublicPort: 8443, CreatedAt: 1, UpdatedAt: 1},
+					{ID: "tcp-two", ServiceID: repositoryRouteTestServiceID, PublicPort: 9443, CreatedAt: 1, UpdatedAt: 1},
+				} {
+					if err := database.Create(&route).Error; err != nil {
+						t.Fatalf("seed duplicate TCP exposure error = %v", err)
+					}
+				}
+			},
+		},
+		{
+			name: "cross type",
+			seed: func(t *testing.T, database *gorm.DB) {
+				t.Helper()
+				if err := database.Create(&httpRouteRecord{
+					ID: "http-main", ServiceID: repositoryRouteTestServiceID,
+					Hostname: "example.test", PathPrefix: "/", CreatedAt: 1, UpdatedAt: 1,
+				}).Error; err != nil {
+					t.Fatalf("seed HTTP exposure error = %v", err)
+				}
+				if err := database.Create(&tcpRouteRecord{
+					ID: "tcp-main", ServiceID: repositoryRouteTestServiceID,
+					PublicPort: 8443, CreatedAt: 1, UpdatedAt: 1,
+				}).Error; err != nil {
+					t.Fatalf("seed TCP exposure error = %v", err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database := openUnmigratedDatabase(t)
+			if err := runMigrations(context.Background(), database, productionMigrations[:9], testNow); err != nil {
+				t.Fatalf("run v9 migrations error = %v", err)
+			}
+			seedServiceExposureMigrationRelations(t, database)
+			test.seed(t, database)
+
+			if err := runMigrations(context.Background(), database, productionMigrations, testNow); err == nil {
+				t.Fatal("upgrade with duplicate Exposure error = nil")
+			}
+			var versionCount, constraintCount int64
+			if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
+				t.Fatalf("count versions after rejected v10 error = %v", err)
+			}
+			if err := database.Raw(
+				"SELECT COUNT(*) FROM sqlite_master WHERE name IN (?, ?, ?)",
+				"http_routes_unique_service_exposure",
+				"tcp_routes_unique_service_exposure",
+				"http_routes_reject_tcp_exposure_insert",
+			).Scan(&constraintCount).Error; err != nil {
+				t.Fatalf("inspect rolled-back Exposure constraints error = %v", err)
+			}
+			if versionCount != 9 || constraintCount != 0 {
+				t.Fatalf("rejected v10 state = versions:%d constraints:%d, want 9/0", versionCount, constraintCount)
+			}
+		})
+	}
+}
+
+func TestServiceExposureMigrationRollsBackConstraintsAtomically(t *testing.T) {
+	database := openUnmigratedDatabase(t)
+	if err := runMigrations(context.Background(), database, productionMigrations[:9], testNow); err != nil {
+		t.Fatalf("run v9 migrations error = %v", err)
+	}
+	failed := append([]migration{}, productionMigrations[:9]...)
+	statements := append([]string{}, productionMigrations[9].statements...)
+	statements = append(statements, "THIS IS NOT VALID SQL")
+	failed = append(failed, migration{
+		version: 10, prepare: productionMigrations[9].prepare, statements: statements,
+	})
+	if err := runMigrations(context.Background(), database, failed, testNow); err == nil {
+		t.Fatal("interrupted v10 migration error = nil")
+	}
+
+	var versionCount, constraintCount int64
+	if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
+		t.Fatalf("count versions after interrupted v10 error = %v", err)
+	}
+	if err := database.Raw(
+		`SELECT COUNT(*) FROM sqlite_master
+		 WHERE name IN (?, ?, ?, ?, ?, ?)`,
+		"http_routes_unique_service_exposure",
+		"tcp_routes_unique_service_exposure",
+		"http_routes_reject_tcp_exposure_insert",
+		"http_routes_reject_tcp_exposure_update",
+		"tcp_routes_reject_http_exposure_insert",
+		"tcp_routes_reject_http_exposure_update",
+	).Scan(&constraintCount).Error; err != nil {
+		t.Fatalf("inspect rolled-back v10 constraints error = %v", err)
+	}
+	if versionCount != 9 || constraintCount != 0 {
+		t.Fatalf("interrupted v10 state = versions:%d constraints:%d, want 9/0", versionCount, constraintCount)
+	}
+}
+
 func TestRouteMigrationEnforcesDesiredStateConstraints(t *testing.T) {
 	store := openRouteTestStore(t)
 	seedRouteTestService(t, store)
+	seedAdditionalRouteTestService(t, store, repositoryRouteSecondTestServiceID)
+	seedAdditionalRouteTestService(t, store, repositoryRouteThirdTestServiceID)
 
 	if err := store.database.Exec(
 		`INSERT INTO http_routes(id, service_id, hostname, path_prefix, preserve_host, enabled, created_at, updated_at)
@@ -119,7 +295,7 @@ func TestRouteMigrationEnforcesDesiredStateConstraints(t *testing.T) {
 	if err := store.database.Exec(
 		`INSERT INTO tcp_routes(id, service_id, public_port, enabled, created_at, updated_at)
 		 VALUES ('tcp-main', ?, 8443, 1, 1, 1)`,
-		repositoryRouteTestServiceID,
+		repositoryRouteSecondTestServiceID,
 	).Error; err != nil {
 		t.Fatalf("insert valid TCP Route error = %v", err)
 	}
@@ -130,37 +306,52 @@ func TestRouteMigrationEnforcesDesiredStateConstraints(t *testing.T) {
 		args []any
 	}{
 		{
-			name: "duplicate HTTP match key",
-			sql:  `INSERT INTO http_routes(id, service_id, hostname, path_prefix, created_at, updated_at) VALUES ('http-duplicate', ?, 'example.test', '/', 1, 1)`,
+			name: "duplicate HTTP service",
+			sql:  `INSERT INTO http_routes(id, service_id, hostname, path_prefix, created_at, updated_at) VALUES ('http-duplicate', ?, 'another.test', '/', 1, 1)`,
 			args: []any{repositoryRouteTestServiceID},
 		},
 		{
+			name: "HTTP conflicts with TCP service",
+			sql:  `INSERT INTO http_routes(id, service_id, hostname, path_prefix, created_at, updated_at) VALUES ('http-cross', ?, 'cross.test', '/', 1, 1)`,
+			args: []any{repositoryRouteSecondTestServiceID},
+		},
+		{
 			name: "HTTP route missing Service",
-			sql:  `INSERT INTO http_routes(id, service_id, hostname, path_prefix, created_at, updated_at) VALUES ('http-orphan', 'svc_01J00000000000000000000001', 'orphan.test', '/', 1, 1)`,
+			sql:  `INSERT INTO http_routes(id, service_id, hostname, path_prefix, created_at, updated_at) VALUES ('http-orphan', 'svc_01J00000000000000000000002', 'orphan.test', '/', 1, 1)`,
 		},
 		{
 			name: "HTTP path is not absolute",
 			sql:  `INSERT INTO http_routes(id, service_id, hostname, path_prefix, created_at, updated_at) VALUES ('http-path', ?, 'path.test', 'api', 1, 1)`,
-			args: []any{repositoryRouteTestServiceID},
+			args: []any{repositoryRouteThirdTestServiceID},
 		},
 		{
 			name: "HTTP boolean out of range",
 			sql:  `INSERT INTO http_routes(id, service_id, hostname, path_prefix, preserve_host, created_at, updated_at) VALUES ('http-bool', ?, 'bool.test', '/', 2, 1, 1)`,
-			args: []any{repositoryRouteTestServiceID},
+			args: []any{repositoryRouteThirdTestServiceID},
 		},
 		{
 			name: "duplicate TCP public port",
 			sql:  `INSERT INTO tcp_routes(id, service_id, public_port, created_at, updated_at) VALUES ('tcp-duplicate', ?, 8443, 1, 1)`,
+			args: []any{repositoryRouteThirdTestServiceID},
+		},
+		{
+			name: "duplicate TCP service",
+			sql:  `INSERT INTO tcp_routes(id, service_id, public_port, created_at, updated_at) VALUES ('tcp-service', ?, 9443, 1, 1)`,
+			args: []any{repositoryRouteSecondTestServiceID},
+		},
+		{
+			name: "TCP conflicts with HTTP service",
+			sql:  `INSERT INTO tcp_routes(id, service_id, public_port, created_at, updated_at) VALUES ('tcp-cross', ?, 10443, 1, 1)`,
 			args: []any{repositoryRouteTestServiceID},
 		},
 		{
 			name: "TCP port out of range",
 			sql:  `INSERT INTO tcp_routes(id, service_id, public_port, created_at, updated_at) VALUES ('tcp-port', ?, 65536, 1, 1)`,
-			args: []any{repositoryRouteTestServiceID},
+			args: []any{repositoryRouteThirdTestServiceID},
 		},
 		{
 			name: "TCP route missing Service",
-			sql:  `INSERT INTO tcp_routes(id, service_id, public_port, created_at, updated_at) VALUES ('tcp-orphan', 'svc_01J00000000000000000000001', 9443, 1, 1)`,
+			sql:  `INSERT INTO tcp_routes(id, service_id, public_port, created_at, updated_at) VALUES ('tcp-orphan', 'svc_01J00000000000000000000002', 9443, 1, 1)`,
 		},
 	}
 	for _, test := range tests {
@@ -169,6 +360,14 @@ func TestRouteMigrationEnforcesDesiredStateConstraints(t *testing.T) {
 				t.Fatal("invalid Route row was accepted")
 			}
 		})
+	}
+	if err := store.database.Model(&httpRouteRecord{}).Where("id = ?", "http-main").
+		Update("service_id", repositoryRouteSecondTestServiceID).Error; err == nil {
+		t.Fatal("HTTP Exposure update accepted a Service with TCP Exposure")
+	}
+	if err := store.database.Model(&tcpRouteRecord{}).Where("id = ?", "tcp-main").
+		Update("service_id", repositoryRouteTestServiceID).Error; err == nil {
+		t.Fatal("TCP Exposure update accepted a Service with HTTP Exposure")
 	}
 
 	if err := store.database.Model(&routeConfigStateRecord{}).
@@ -187,6 +386,7 @@ func TestRouteMigrationEnforcesDesiredStateConstraints(t *testing.T) {
 func TestLoadRouteDesiredStateReadsCompleteIndependentValues(t *testing.T) {
 	store := openRouteTestStore(t)
 	seedRouteTestService(t, store)
+	seedAdditionalRouteTestService(t, store, repositoryRouteSecondTestServiceID)
 	if err := store.database.Create(&httpRouteRecord{
 		ID: "http-main", ServiceID: repositoryRouteTestServiceID, Hostname: "example.test",
 		PathPrefix: "/api", PreserveHost: true, Enabled: true, CreatedAt: 1, UpdatedAt: 2,
@@ -194,7 +394,7 @@ func TestLoadRouteDesiredStateReadsCompleteIndependentValues(t *testing.T) {
 		t.Fatalf("seed HTTP Route error = %v", err)
 	}
 	if err := store.database.Create(&tcpRouteRecord{
-		ID: "tcp-main", ServiceID: repositoryRouteTestServiceID, PublicPort: 8443,
+		ID: "tcp-main", ServiceID: repositoryRouteSecondTestServiceID, PublicPort: 8443,
 		Enabled: true, CreatedAt: 1, UpdatedAt: 2,
 	}).Error; err != nil {
 		t.Fatalf("seed TCP Route error = %v", err)
@@ -209,7 +409,7 @@ func TestLoadRouteDesiredStateReadsCompleteIndependentValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRouteDesiredState() error = %v", err)
 	}
-	if state.Generation != 3 || len(state.Tunnels) != 1 || len(state.Services) != 1 ||
+	if state.Generation != 3 || len(state.Tunnels) != 1 || len(state.Services) != 2 ||
 		len(state.HTTPRoutes) != 1 || len(state.TCPRoutes) != 1 {
 		t.Fatalf("LoadRouteDesiredState() = %#v", state)
 	}
@@ -375,6 +575,164 @@ func TestTCPRouteRepositoryCRUDGenerationAndReadOnlyBoundary(t *testing.T) {
 	}
 }
 
+func TestHTTPRouteRepositoryCRUDExposureUniquenessAndRollback(t *testing.T) {
+	store := openRouteTestStore(t)
+	seedRouteTestService(t, store)
+	ctx := context.Background()
+	httpRoute := repository.HTTPRoute{
+		ID: "http-main", ServiceID: repositoryRouteTestServiceID,
+		Hostname: "example.test", PathPrefix: "/api", PreserveHost: true,
+		Enabled: true, CreatedAt: 1, UpdatedAt: 1,
+	}
+	if err := store.Read(ctx, func(view repository.RepositoryView) error {
+		if err := view.Routes().CreateHTTP(ctx, httpRoute); !errors.Is(err, errRepositoryWriteOutsideTransaction) {
+			t.Fatalf("CreateHTTP(read view) error = %v", err)
+		}
+		if err := view.Routes().UpdateHTTP(ctx, httpRoute); !errors.Is(err, errRepositoryWriteOutsideTransaction) {
+			t.Fatalf("UpdateHTTP(read view) error = %v", err)
+		}
+		if err := view.Routes().DeleteHTTP(ctx, httpRoute.ID); !errors.Is(err, errRepositoryWriteOutsideTransaction) {
+			t.Fatalf("DeleteHTTP(read view) error = %v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
+		if err := transaction.Routes().CreateHTTP(ctx, httpRoute); err != nil {
+			return err
+		}
+		_, err := transaction.Routes().AdvanceGeneration(ctx, 0)
+		return err
+	}); err != nil {
+		t.Fatalf("create HTTP Exposure transaction error = %v", err)
+	}
+	if err := store.Read(ctx, func(view repository.RepositoryView) error {
+		got, err := view.Routes().GetHTTP(ctx, httpRoute.ID)
+		if err != nil {
+			return err
+		}
+		if got != httpRoute {
+			t.Fatalf("GetHTTP() = %+v, want %+v", got, httpRoute)
+		}
+		exposure, err := view.Routes().GetExposureByService(ctx, repositoryRouteTestServiceID)
+		if err != nil {
+			return err
+		}
+		if exposure.HTTP == nil || *exposure.HTTP != httpRoute || exposure.TCP != nil {
+			t.Fatalf("GetExposureByService() = %+v, want HTTP only", exposure)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read HTTP Exposure error = %v", err)
+	}
+
+	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
+		return transaction.Routes().CreateTCP(ctx, repository.TCPRoute{
+			ID: "tcp-conflict", ServiceID: repositoryRouteTestServiceID,
+			PublicPort: 8443, Enabled: true, CreatedAt: 1, UpdatedAt: 1,
+		})
+	}); err == nil {
+		t.Fatal("cross-type duplicate Exposure error = nil")
+	}
+
+	updated := httpRoute
+	updated.Hostname = "updated.test"
+	updated.UpdatedAt = 2
+	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
+		if err := transaction.Routes().UpdateHTTP(ctx, updated); err != nil {
+			return err
+		}
+		_, err := transaction.Routes().AdvanceGeneration(ctx, 0)
+		return err
+	}); !errors.Is(err, repository.ErrVersionConflict) {
+		t.Fatalf("stale HTTP Exposure transaction error = %v, want ErrVersionConflict", err)
+	}
+	if err := store.Read(ctx, func(view repository.RepositoryView) error {
+		got, err := view.Routes().GetHTTP(ctx, httpRoute.ID)
+		if err != nil {
+			return err
+		}
+		if got != httpRoute {
+			t.Fatalf("rolled-back HTTP Exposure = %+v, want %+v", got, httpRoute)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read rolled-back HTTP Exposure error = %v", err)
+	}
+
+	tcpRoute := repository.TCPRoute{
+		ID: "tcp-main", ServiceID: repositoryRouteTestServiceID,
+		PublicPort: 8443, Enabled: true, CreatedAt: 2, UpdatedAt: 2,
+	}
+	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
+		if err := transaction.Routes().DeleteHTTP(ctx, httpRoute.ID); err != nil {
+			return err
+		}
+		if err := transaction.Routes().CreateTCP(ctx, tcpRoute); err != nil {
+			return err
+		}
+		_, err := transaction.Routes().AdvanceGeneration(ctx, 1)
+		return err
+	}); err != nil {
+		t.Fatalf("switch Exposure type transaction error = %v", err)
+	}
+	if err := store.Read(ctx, func(view repository.RepositoryView) error {
+		exposure, err := view.Routes().GetExposureByService(ctx, repositoryRouteTestServiceID)
+		if err != nil {
+			return err
+		}
+		if exposure.TCP == nil || *exposure.TCP != tcpRoute || exposure.HTTP != nil {
+			t.Fatalf("switched Exposure = %+v, want TCP only", exposure)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read switched Exposure error = %v", err)
+	}
+	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
+		return transaction.Routes().DeleteTCP(ctx, tcpRoute.ID)
+	}); err != nil {
+		t.Fatalf("delete switched TCP Exposure error = %v", err)
+	}
+	if err := store.Read(ctx, func(view repository.RepositoryView) error {
+		_, err := view.Routes().GetExposureByService(ctx, repositoryRouteTestServiceID)
+		return err
+	}); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("GetExposureByService(without Exposure) error = %v, want ErrNotFound", err)
+	}
+	if err := store.Read(ctx, func(view repository.RepositoryView) error {
+		if _, err := view.Routes().GetExposureByService(ctx, "invalid"); !errors.Is(err, repository.ErrInvalidRoute) {
+			t.Fatalf("GetExposureByService(invalid) error = %v, want ErrInvalidRoute", err)
+		}
+		if _, err := view.Routes().GetHTTP(ctx, "missing"); !errors.Is(err, repository.ErrNotFound) {
+			t.Fatalf("GetHTTP(missing) error = %v, want ErrNotFound", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read missing Exposure error = %v", err)
+	}
+	if err := store.WithTx(ctx, func(transaction repository.TxStore) error {
+		if err := transaction.Routes().UpdateHTTP(ctx, httpRoute); !errors.Is(err, repository.ErrNotFound) {
+			t.Fatalf("UpdateHTTP(missing) error = %v, want ErrNotFound", err)
+		}
+		if err := transaction.Routes().DeleteHTTP(ctx, httpRoute.ID); !errors.Is(err, repository.ErrNotFound) {
+			t.Fatalf("DeleteHTTP(missing) error = %v, want ErrNotFound", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("missing HTTP mutation transaction error = %v", err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := store.Read(canceled, func(view repository.RepositoryView) error {
+		_, err := view.Routes().GetExposureByService(canceled, repositoryRouteTestServiceID)
+		return err
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetExposureByService(canceled) error = %v, want context.Canceled", err)
+	}
+}
+
 func openRouteTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(context.Background(), t.TempDir())
@@ -401,5 +759,29 @@ func seedRouteTestService(t *testing.T, store *Store) {
 		)
 	}); err != nil {
 		t.Fatalf("seed Route relation error = %v", err)
+	}
+}
+
+func seedAdditionalRouteTestService(t *testing.T, store *Store, serviceID string) {
+	t.Helper()
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		return transaction.Services().Create(
+			context.Background(),
+			testService(serviceID, repositoryTestTunnelID),
+		)
+	}); err != nil {
+		t.Fatalf("seed additional Route relation error = %v", err)
+	}
+}
+
+func seedServiceExposureMigrationRelations(t *testing.T, database *gorm.DB) {
+	t.Helper()
+	if err := database.Create(tunnelRecordFromDomain(testTunnel())).Error; err != nil {
+		t.Fatalf("seed v9 Tunnel error = %v", err)
+	}
+	for _, serviceID := range []string{repositoryRouteTestServiceID, repositoryRouteSecondTestServiceID} {
+		if err := database.Create(serviceRecordFromDomain(testService(serviceID, repositoryTestTunnelID))).Error; err != nil {
+			t.Fatalf("seed v9 Service %q error = %v", serviceID, err)
+		}
 	}
 }

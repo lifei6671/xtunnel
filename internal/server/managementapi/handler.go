@@ -27,6 +27,7 @@ const (
 	adminSessionCookieName               = "xtunnel_admin_session"
 	managementLoginMaxBody               = 64 << 10
 	managementTunnelMaxBody              = 64 << 10
+	managementServiceMaxBody             = 64 << 10
 	loginPasswordVerificationConcurrency = 4
 	loginBusyRetryAfterSeconds           = 1
 )
@@ -58,6 +59,7 @@ type HandlerOptions struct {
 	Tunnels         *application.TunnelManagementService
 	Credentials     *application.CredentialLifecycleService
 	TunnelLifecycle *application.TunnelLifecycleService
+	Services        *application.ServiceAPIService
 	Logger          *slog.Logger
 }
 
@@ -67,6 +69,7 @@ type ManagementHandler struct {
 	tunnels                   *application.TunnelManagementService
 	credentials               *application.CredentialLifecycleService
 	tunnelLifecycle           *application.TunnelLifecycleService
+	services                  *application.ServiceAPIService
 	security                  *managementSecurityPolicy
 	limiter                   *loginFailureLimiter
 	passwordVerificationSlots chan struct{}
@@ -103,6 +106,7 @@ func NewHandler(options HandlerOptions) (*ManagementHandler, error) {
 		tunnels:                   options.Tunnels,
 		credentials:               options.Credentials,
 		tunnelLifecycle:           options.TunnelLifecycle,
+		services:                  options.Services,
 		security:                  security,
 		limiter:                   newLoginFailureLimiter(time.Now),
 		passwordVerificationSlots: make(chan struct{}, loginPasswordVerificationConcurrency),
@@ -165,6 +169,17 @@ func (handler *ManagementHandler) ServeHTTP(writer http.ResponseWriter, request 
 			return
 		}
 		handler.api.ServeHTTP(writer, request)
+	case handler.serviceAPIReady() && isServiceAPIPath(request.URL.Path):
+		if err := handler.prepareServiceRequest(writer, request); err != nil {
+			var validationErr *managementValidationError
+			if errors.As(err, &validationErr) {
+				handler.writeError(writer, request, http.StatusUnprocessableEntity, APIErrorCodeVALIDATIONFAILED, validationErr.Error(), requestID)
+				return
+			}
+			handler.writeError(writer, request, http.StatusBadRequest, APIErrorCodeINVALIDREQUEST, err.Error(), requestID)
+			return
+		}
+		handler.api.ServeHTTP(writer, request)
 	case request.URL.Path == "/api/v1" || strings.HasPrefix(request.URL.Path, "/api/v1/auth/"):
 		handler.api.ServeHTTP(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/api/v1/"):
@@ -207,6 +222,168 @@ func (handler *ManagementHandler) tunnelAPIReady() bool {
 
 func isTunnelAPIPath(path string) bool {
 	return path == "/api/v1/tunnels" || strings.HasPrefix(path, "/api/v1/tunnels/")
+}
+
+func (handler *ManagementHandler) serviceAPIReady() bool { return handler.services != nil }
+
+func isServiceAPIPath(path string) bool {
+	return path == "/api/v1/services" || strings.HasPrefix(path, "/api/v1/services/")
+}
+
+// prepareServiceRequest 在生成 Decoder 前固定 Service Create 与 Merge Patch 的
+// JSON 媒体类型、大小和 unknown-field 边界。联合类型及字段适用性由 Strict Handler
+// 转换为类型化 Application 输入时校验，避免在 HTTP 层复制领域默认值。
+func (handler *ManagementHandler) prepareServiceRequest(writer http.ResponseWriter, request *http.Request) error {
+	switch {
+	case request.Method == http.MethodPost && request.URL.Path == "/api/v1/services":
+		// 生成的 oneOf 类型把 JSON 保存在 RawMessage 中，顶层 Decoder 的
+		// DisallowUnknownFields 无法递归检查联合分支，因此预检保留原始对象并按
+		// discriminator 严格解码，确保 unknown field 一律在进入 Handler 前返回 400。
+		var body struct {
+			Enabled      json.RawMessage `json:"enabled"`
+			Exposure     json.RawMessage `json:"exposure"`
+			Health       json.RawMessage `json:"health"`
+			Name         json.RawMessage `json:"name"`
+			Origin       json.RawMessage `json:"origin"`
+			ProxyOptions json.RawMessage `json:"proxy_options"`
+			TunnelID     json.RawMessage `json:"tunnel_id"`
+		}
+		if err := prepareManagementJSON(writer, request, managementServiceMaxBody, "application/json", &body); err != nil {
+			return err
+		}
+		if err := validateCreateServiceNestedObjects(body.Origin, body.ProxyOptions, body.Health, body.Exposure); err != nil {
+			return errors.New("Service 请求体无效")
+		}
+	case request.Method == http.MethodPatch && isSingleServiceResourcePath(request.URL.Path):
+		var body struct {
+			Name         json.RawMessage `json:"name"`
+			Origin       json.RawMessage `json:"origin"`
+			ProxyOptions json.RawMessage `json:"proxy_options"`
+			Health       json.RawMessage `json:"health"`
+			Exposure     json.RawMessage `json:"exposure"`
+		}
+		if err := prepareManagementJSON(writer, request, managementServiceMaxBody, "application/merge-patch+json", &body); err != nil {
+			return err
+		}
+		if len(body.Name) == 0 && len(body.Origin) == 0 && len(body.ProxyOptions) == 0 &&
+			len(body.Health) == 0 && len(body.Exposure) == 0 {
+			return &managementValidationError{message: "Service 更新至少需要一个字段"}
+		}
+		for _, field := range []struct {
+			name  string
+			value json.RawMessage
+		}{{"name", body.Name}, {"origin", body.Origin}, {"proxy_options", body.ProxyOptions}} {
+			if len(field.value) > 0 && bytes.Equal(bytes.TrimSpace(field.value), []byte("null")) {
+				return &managementValidationError{message: "Service " + field.name + " 不能为 null"}
+			}
+		}
+		for _, field := range []struct {
+			name   string
+			value  json.RawMessage
+			target any
+		}{
+			{"origin", body.Origin, &OriginPatch{}},
+			{"proxy_options", body.ProxyOptions, &ProxyOptionsPatch{}},
+			{"health", body.Health, &HealthCheckPatch{}},
+			{"exposure", body.Exposure, &ExposurePatch{}},
+		} {
+			if len(field.value) == 0 || bytes.Equal(bytes.TrimSpace(field.value), []byte("null")) {
+				continue
+			}
+			if err := strictServiceObjectDecode(field.value, field.target); err != nil {
+				return errors.New("Service " + field.name + " 对象无效")
+			}
+			var object map[string]json.RawMessage
+			if json.Unmarshal(field.value, &object) != nil || len(object) == 0 {
+				return &managementValidationError{message: "Service " + field.name + " 必须包含至少一个字段"}
+			}
+		}
+	}
+	return nil
+}
+
+func validateCreateServiceNestedObjects(origin, proxyOptions, health, exposure json.RawMessage) error {
+	var discriminator struct {
+		Scheme string `json:"scheme"`
+		Type   string `json:"type"`
+	}
+	if err := json.Unmarshal(origin, &discriminator); err != nil {
+		return err
+	}
+	var originTarget any
+	switch discriminator.Scheme {
+	case "http":
+		originTarget = &HTTPOriginInput{}
+	case "https":
+		originTarget = &HTTPSOriginInput{}
+	case "tcp":
+		originTarget = &TCPOriginInput{}
+	default:
+		return errors.New("origin scheme 无效")
+	}
+	if err := strictServiceObjectDecode(origin, originTarget); err != nil {
+		return err
+	}
+	if len(proxyOptions) > 0 {
+		if bytes.Equal(bytes.TrimSpace(proxyOptions), []byte("null")) {
+			return errors.New("proxy_options 无效")
+		}
+		if err := strictServiceObjectDecode(proxyOptions, &ProxyOptionsInput{}); err != nil {
+			return err
+		}
+	}
+	if len(health) > 0 && !bytes.Equal(bytes.TrimSpace(health), []byte("null")) {
+		discriminator = struct {
+			Scheme string `json:"scheme"`
+			Type   string `json:"type"`
+		}{}
+		if err := json.Unmarshal(health, &discriminator); err != nil {
+			return err
+		}
+		var healthTarget any
+		switch discriminator.Type {
+		case "TCP":
+			healthTarget = &TCPHealthCheckInput{}
+		case "HTTP":
+			healthTarget = &HTTPHealthCheckInput{}
+		default:
+			return errors.New("health type 无效")
+		}
+		if err := strictServiceObjectDecode(health, healthTarget); err != nil {
+			return err
+		}
+	}
+	discriminator = struct {
+		Scheme string `json:"scheme"`
+		Type   string `json:"type"`
+	}{}
+	if err := json.Unmarshal(exposure, &discriminator); err != nil {
+		return err
+	}
+	var exposureTarget any
+	switch discriminator.Type {
+	case "http":
+		exposureTarget = &HTTPExposureInput{}
+	case "tcp":
+		exposureTarget = &TCPExposureInput{}
+	default:
+		return errors.New("exposure type 无效")
+	}
+	return strictServiceObjectDecode(exposure, exposureTarget)
+}
+
+func strictServiceObjectDecode(value json.RawMessage, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	return ensureJSONEOF(decoder)
+}
+
+func isSingleServiceResourcePath(path string) bool {
+	const prefix = "/api/v1/services/"
+	return strings.HasPrefix(path, prefix) && !strings.Contains(strings.TrimPrefix(path, prefix), "/")
 }
 
 // prepareTunnelRequest 在生成 Decoder 前收紧有 Body 的两个 Tunnel Operation。
@@ -330,7 +507,8 @@ func (handler *ManagementHandler) securityMiddleware(next StrictHandlerFunc, ope
 
 func isStateChangingOperation(operationID string) bool {
 	switch operationID {
-	case "Logout", "CreateTunnel", "UpdateTunnel", "DeleteTunnel", "RevokeTunnel", "RotateTunnelToken", "RevokeTunnelToken":
+	case "Logout", "CreateTunnel", "UpdateTunnel", "DeleteTunnel", "RevokeTunnel", "RotateTunnelToken", "RevokeTunnelToken",
+		"CreateService", "UpdateService", "DeleteService", "EnableService", "DisableService":
 		return true
 	default:
 		return false

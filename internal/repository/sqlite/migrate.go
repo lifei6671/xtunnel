@@ -78,6 +78,49 @@ var productionMigrations = []migration{
 			migrations.AdminSessions,
 		},
 	},
+	{
+		version: 10,
+		prepare: migrateServiceExposureUniqueness,
+		statements: []string{
+			migrations.ServiceExposure,
+		},
+	},
+}
+
+// migrateServiceExposureUniqueness 在建立唯一索引和跨表触发器前检查历史数据。
+// 任一重复都会阻止升级，避免启动后把多个入口静默解释为某一个 Exposure。
+func migrateServiceExposureUniqueness(ctx context.Context, transaction *gorm.DB) error {
+	checks := []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "HTTP",
+			query: "SELECT COUNT(*) FROM (SELECT service_id FROM http_routes GROUP BY service_id HAVING COUNT(*) > 1)",
+		},
+		{
+			name:  "TCP",
+			query: "SELECT COUNT(*) FROM (SELECT service_id FROM tcp_routes GROUP BY service_id HAVING COUNT(*) > 1)",
+		},
+		{
+			name: "cross-type",
+			query: `SELECT COUNT(*) FROM (
+				SELECT http_routes.service_id FROM http_routes
+				INNER JOIN tcp_routes ON tcp_routes.service_id = http_routes.service_id
+				GROUP BY http_routes.service_id
+			)`,
+		},
+	}
+	for _, check := range checks {
+		var duplicateServices int64
+		if err := transaction.WithContext(ctx).Raw(check.query).Scan(&duplicateServices).Error; err != nil {
+			return fmt.Errorf("inspect %s service exposure uniqueness: %w", check.name, err)
+		}
+		if duplicateServices != 0 {
+			return fmt.Errorf("%s service exposure uniqueness violated by %d service(s)", check.name, duplicateServices)
+		}
+	}
+	return nil
 }
 
 // migrate 使用生产迁移集合把数据库推进到当前二进制支持的最新版本。

@@ -57,6 +57,27 @@ type TCPRoute struct {
 	UpdatedAt int64
 }
 
+// ServiceExposure 是 Service 唯一公网入口的持久化投影。
+// HTTP 与 TCP 至多设置一个；零值表示 Service 尚未配置 Exposure。
+type ServiceExposure struct {
+	HTTP *HTTPRoute
+	TCP  *TCPRoute
+}
+
+// Validate 检查 union 形状及其中 Route 的领域约束。
+func (exposure ServiceExposure) Validate() error {
+	if exposure.HTTP != nil && exposure.TCP != nil {
+		return ErrInvalidRoute
+	}
+	if exposure.HTTP != nil {
+		return exposure.HTTP.Validate()
+	}
+	if exposure.TCP != nil {
+		return exposure.TCP.Validate()
+	}
+	return nil
+}
+
 // Validate 检查 TCP Route 从 SQLite 进入快照构建边界时必须满足的不变量。
 func (route TCPRoute) Validate() error {
 	if strings.TrimSpace(route.ID) == "" || !identity.ValidServiceID(route.ServiceID) ||
@@ -85,6 +106,11 @@ type RouteDesiredState struct {
 type RouteRepository interface {
 	LoadDesiredState(context.Context) (RouteDesiredState, error)
 	CurrentGeneration(context.Context) (uint64, error)
+	GetExposureByService(context.Context, string) (ServiceExposure, error)
+	GetHTTP(context.Context, string) (HTTPRoute, error)
+	CreateHTTP(context.Context, HTTPRoute) error
+	UpdateHTTP(context.Context, HTTPRoute) error
+	DeleteHTTP(context.Context, string) error
 	GetTCP(context.Context, string) (TCPRoute, error)
 	ListTCP(context.Context) ([]TCPRoute, error)
 	CreateTCP(context.Context, TCPRoute) error

@@ -49,3 +49,8 @@ var ServiceProxyOptions string
 //
 //go:embed 000009_admin_sessions.sql
 var AdminSessions string
+
+// ServiceExposure 包含每个 Service 至多一个 HTTP/TCP 公网 Exposure 的数据库约束。
+//
+//go:embed 000010_service_exposure.sql
+var ServiceExposure string

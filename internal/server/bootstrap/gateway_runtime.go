@@ -32,6 +32,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/server/snapshot"
 	servertcpingress "github.com/lifei6671/xtunnel/internal/server/tcpingress"
 	serverworkauth "github.com/lifei6671/xtunnel/internal/server/workauth"
+	"github.com/lifei6671/xtunnel/internal/tcpport"
 	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
 
@@ -609,6 +610,50 @@ func openGatewayAndBootstrapWith(
 		)
 	}
 	auditWriter := application.NewSecurityAuditWriter(serverResources.database, logger)
+	serviceSnapshotGate, err := snapshot.New(snapshot.Config{
+		ProtocolVersion:      snapshotProtocolVersion,
+		MaxServices:          config.Limits.MaxServicesPerTunnel,
+		MaxSnapshotBytes:     config.Limits.MaxTunnelSnapshotBytes,
+		MaxControlFrameBytes: config.Limits.MaxControlFrameBytes,
+	})
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("construct management Service Snapshot gate: %w", err),
+			httpIngress.Close(),
+			tcpIngress.Close(),
+			gatewayServer.Close(),
+		)
+	}
+	reservedPorts, err := reservedTCPPorts(config)
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("construct management TCP port policy: %w", err),
+			httpIngress.Close(),
+			tcpIngress.Close(),
+			gatewayServer.Close(),
+		)
+	}
+	tcpPolicy, err := tcpport.New(config.TCPIngress.MinPort, config.TCPIngress.MaxPort, reservedPorts)
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("construct management TCP port policy: %w", err),
+			httpIngress.Close(),
+			tcpIngress.Close(),
+			gatewayServer.Close(),
+		)
+	}
+	serviceOwner := application.NewServiceManagementService(
+		serverResources.database, serviceSnapshotGate, sessions, healthBudget,
+	)
+	serviceAPI := application.NewServiceAPIService(
+		serviceOwner, tcpPolicy, routes, sessions, limitManager, tcpIngress,
+	)
 	managementHandler, err := servermanagementapi.NewHandler(servermanagementapi.HandlerOptions{
 		Management: config.Management,
 		Store:      serverResources.database,
@@ -617,6 +662,7 @@ func openGatewayAndBootstrapWith(
 		),
 		Credentials:     application.NewCredentialLifecycleService(tokenService, auditWriter),
 		TunnelLifecycle: application.NewTunnelLifecycleService(serverResources.database, auditWriter, sessions),
+		Services:        serviceAPI,
 		Logger:          logger,
 	})
 	if err != nil {

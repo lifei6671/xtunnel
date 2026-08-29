@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-29
 >
-> **当前阶段**：M5-05 Service API · READY（M2、M3、M4、M5-01 至 M5-04 均已 `DONE`）
+> **当前阶段**：M5-05 Service API · REVIEW（M2、M3、M4、M5-01 至 M5-04 均已 `DONE`）
 >
-> **当前结论**：M5-04 的 Tunnel CRUD/Revoke、Token Reveal/Rotate/Revoke、Add Connector/Reveal、只读运行态 Connector 列表和生产 Bootstrap 接线已完成；实现提交为 `2a357544ccceb25b02eb9c410762b73b46747e81`，精确绑定该提交的 [CI #28](https://github.com/lifei6671/xtunnel/actions/runs/33233709963) 在 Windows、Linux amd64 和 Linux arm64 全部成功，用户阶段复审已通过，因此任务转为 `DONE`。M5 更新为 `4/11`、全局更新为 `68/95`；M5-05 与 M5-07 保持 `READY`，M5 Gate Checklist 六项继续全部未通过。
+> **当前结论**：M5-05 已完成 7 个冻结 Service Operation、复合 Application Owner、Nested Exposure v10 持久化约束、生产 Bootstrap 接线和真实 SQLite + TLS 黑盒；全仓 Go Test/Race/Vet/Build 与三路独立复审均通过。当前工作区尚无本任务 Commit SHA 和精确 CI Run，因此任务只进入 `REVIEW`，M5 仍为 `4/11`、全局仍为 `68/95`；M5-07 保持 `READY`，M5-06/M5-08 继续等待 M5-05 `DONE`，M5 Gate Checklist 六项继续全部未通过。
 
 ---
 
@@ -347,7 +347,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M5-02 | 生成 Client/Server Contract | M5-01 | Go Server Types + TypeScript Client | 可重复生成；干净 checkout 零漂移 | `DONE` |
 | M5-03 | Admin Login/Session/CSRF | M5-02、M0-08、M0-11 | Auth Handler + Web Login | Secure/HttpOnly/SameSite Cookie；Origin/Host 规则；Login/Logout/CSRF E2E | `DONE` |
 | M5-04 | Tunnel/Connector/Credential API | M2-08、M5-02 | REST Handler | Tunnel CRUD/Tunnel Revoke；Token Reveal/Rotate/Revoke；Add Connector/Reveal 返回当前同一 Token；Connector 列表只读运行态；`Cache-Control: no-store` | `DONE` |
-| M5-05 | Service API | M3-13、M4-10、M5-02 | REST Handler | Service 直接归属 Tunnel；调用既有 Application Service；不在 Handler 重写事务逻辑 | `READY` |
+| M5-05 | Service API | M3-13、M4-10、M5-02 | REST Handler | Service 直接归属 Tunnel；调用既有 Application Service；不在 Handler 重写事务逻辑 | `REVIEW` |
 | M5-06 | PATCH/ETag/Pagination 并发契约 | M5-04、M5-05 | Handler + Repository Tests | Tunnel 和 Service Aggregate 均覆盖 428/412；omitted/null/value；opaque token 50/200；version 原子递增 | `NOT_STARTED` |
 | M5-07 | Settings/Read-only Runtime/Audit API | M5-02 | Settings/Audit Handler | 只返回允许公开的有效配置；Audit Query 只读且分页稳定；敏感字段永不返回，不泄露 Secret | `READY` |
 | M5-08 | Dashboard/Status UI | M5-02、M5-04、M5-05 | React Pages | 直接渲染 Server Status；不在前端重算状态 | `NOT_STARTED` |
@@ -426,12 +426,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-04` 已完成。当前待办为：
 
-1. `M5-05` — Service API 已解锁为 `READY`；必须调用既有 Application Service，不得在 Handler 重写事务、Route 或 Nested Exposure 不变量。
+1. `M5-05` — Service API 已进入 `REVIEW`；等待最终 Commit、精确 CI Run 与用户阶段复审后再决定是否 `DONE`。
 2. `M5-07` — Settings/Runtime/Audit 只读 API 已解锁为 `READY`；Audit 只允许查询，不得新增 UPDATE/DELETE。
 3. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 4. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-04 已完成；M5-05/M5-07 保持 `READY`，M5-06 与 M5-08 现在只等待 M5-05 `DONE`，M5-09 还必须等待 M5-05 至 M5-08 全部完成。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-04 已完成；M5-05 为 `REVIEW`，M5-07 保持 `READY`，M5-06 与 M5-08 继续等待 M5-05 `DONE`，M5-09 还必须等待 M5-05 至 M5-08 全部完成。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
 
 推进规则：
 
@@ -1304,3 +1304,14 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 独立复审：契约与并发所有权两路只读复审先后发现事务配额线性化、提交后 Runtime 错误映射、AUTH 准入建立时点、Handler 到 startup 租约交接，以及 startup 被栅栏拒绝时过早释放 admission 的问题；全部完成生产修复和直接回归。最终两路复审均确认无剩余 P0/P1/P2/P3，交接阻塞 Close 用例另在 Race 下连续 20 轮通过。
 - 提交、CI、复审、状态与 Gate：24 个 M5-04 代码、测试和文档文件组成实现提交 `2a357544ccceb25b02eb9c410762b73b46747e81`，14 个无关未跟踪 Skill 目录未暂存、未提交。精确绑定该提交的 [CI #28](https://github.com/lifei6671/xtunnel/actions/runs/33233709963) 从 2026-08-29 12:23:37 至 12:29:03（Asia/Shanghai）运行 5 分 26 秒；Windows Agent Service、Linux amd64 与 Linux arm64 全部成功，两路 Linux 均通过现行全仓 Test/Vet/Build、定向 Race、OpenAPI/Web 和既有 Product/OCI/systemd Gate。用户阶段复审通过，因此 M5-04 转为 `DONE`，M5 更新为 `4/11`、全局更新为 `68/95`。M5-06 仍负责 Tunnel/Service 完整 428/412、PATCH omitted/null/value、opaque token 默认 50/最大 200 与并发原子递增；M5 Gate Checklist 六项全部保持未勾选。
 - 文档同步：根 README 与开发计划同步 M5-04 的实现提交、精确 CI、用户复审、`DONE` 状态、仪表盘和后续队列；总技术方案此前已经同步 Delete 专用 AUTH/startup 临时栅栏契约，本次证据闭环不再改变产品行为。OpenAPI、Proto、Server Schema、Migration、生成 Contract、依赖/Lockfile、CI/CD、部署配置、日志契约和 `AGENTS.md` 均无需修改。
+
+## 2026-08-29 · M5-05 Service API · REVIEW
+
+- 授权与范围：用户明确确认 M5-05 所需的内部导出 Application 类型/接口、Route Repository 扩展、Handler 接线与 v10 Migration。本轮只实现冻结 OpenAPI 已有的 7 个 Service Operation；不修改 OpenAPI、Proto、Server Schema、依赖/Lockfile、CI/CD、生产配置或权限模型，也不提前实现 M5-06 的完整 omitted/null/value、428/412 与 opaque Pagination 矩阵。
+- 聚合与持久化：新增复合 `ServiceAPIService`，复用既有 per-Tunnel 写 owner，在同一 `BEGIN IMMEDIATE` 中原子提交 Service、唯一 Nested Exposure、Tunnel Desired Revision 与 Route Generation；Health Budget 先 Reserve、提交后 Commit，Runtime dirty 只在释放写锁后通知。v10 以单表唯一索引和跨 HTTP/TCP 双向 INSERT/UPDATE Trigger 保证一个 Service 最多一个 Exposure；同表或跨表历史重复会使 Migration 整体回滚。Repository 新增 HTTP CRUD 与一次一致性 `GetExposureByService`，Service Delete 先删 Exposure，并在 Exposure 已移除时仍推进 Route Generation，避免完整 Route Snapshot 保留旧 Tunnel/Service 状态。
+- Runtime 与投影：生产 Bootstrap 将 Session Snapshot、Route Manager、Connection Limits、TCP Apply Failure 和冻结 TCP Port Policy 注入复合 owner。List/Get 从一次 Route Desired State 读取中组合持久化 Service/Exposure，并只消费 generation-fenced Runtime 值型快照；状态统一调用 `server/status`，`active_connections` 来自 Limit owner，M6 Usage 未就绪时固定返回 `UNAVAILABLE` 与三个 null 计数器。Service Snapshot 字段变化与 Exposure 变化都会在同事务推进新 Route Generation；在线 Manager 回归证明 disable 移除、enable 恢复、Origin/RequiredRevision 刷新均收敛，name-only/no-op 不误推进配置代次。
+- HTTP 与安全：生成 Strict Router 驱动 List/Create/Get/PATCH/Delete/Enable/Disable；统一 Session/Origin/CSRF Middleware，Create 使用父 Tunnel ETag，后续 Mutation 使用绑定 Service/Tunnel 双版本的强 composite ETag。响应使用冻结 Origin/Health/Exposure 联合类型，不公开内部 Route ID；TCP 端口冲突、HTTP Route 冲突、Snapshot/Health Budget 失败映射到冻结错误码。请求预检对 Create 联合类型与 PATCH 四个嵌套对象执行 `DisallowUnknownFields` 和 EOF 校验，真实 TLS 黑盒覆盖 8 个 unknown-field `400 INVALID_REQUEST`；Application 按有效 Origin scheme 拒绝不适用的 HTTP/TLS 字段。
+- 自动化证据：Go `go1.27.0` 且 `GOTOOLCHAIN=local` 下，`go test -count=1 -timeout 360s ./...`、`go test -race -count=1 -timeout 360s ./...`、`go vet ./...`、`go build ./cmd/server ./cmd/agent`、`go mod verify`、`go mod tidy -diff` 与 `git diff --check` 均通过；`npm --prefix web run check`、`npm --prefix web run build` 通过。Repository/Migration 测试覆盖 v9→v10 重复数据 fail-closed、事务回滚、只读保护和 CRUD；Application 覆盖原子版本、端口分配、Exposure 切型/移除、无 Exposure 删除、通知失败持久事实和运行态投影；真实 SQLite + TLS 黑盒覆盖完整 Service 生命周期、认证、同源/CSRF、ETag、响应默认值和 unknown field。
+- 独立复审：存储、并发所有权与冻结契约三路只读复审发现并推动修复在线 Service 字段更新未推进 Route Generation、Create/PATCH 嵌套 unknown field 被静默接受，以及 Origin Patch 不适用字段被清零的问题；最终三路复核均确认原问题关闭，无剩余 P0/P1/P2/P3。M5-06 负责的完整并发 PATCH、omitted/null/value 与 opaque Pagination 仍保持后续边界。
+- 状态与 Gate：当前实现与本地证据齐备并通过独立复审，因此 M5-05 从 `READY` 进入 `REVIEW`。工作区尚无本任务 Commit SHA，也没有精确绑定该提交的 CI Run，故不得标记 `DONE`；M5 保持 `4/11`、全局保持 `68/95`，M5-06/M5-08 仍未解锁，M5 Gate Checklist 六项全部保持未勾选。本次未勾选任何产品任务。
+- 文档同步：总技术方案同步 one-Exposure 持久化约束、Service Snapshot 与 Route Generation 的收敛语义；根 README 同步已实现但尚待 CI 的 Service API 能力；开发计划同步 M5-05 `REVIEW`、当前队列和本执行记录。OpenAPI、生成 Contract、Proto、Server Schema、依赖/Lockfile、CI/CD、部署配置、日志契约与 `AGENTS.md` 无需更新，因为实现遵守既有机器契约且没有改变这些边界。
