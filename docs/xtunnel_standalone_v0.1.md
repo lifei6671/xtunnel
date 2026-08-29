@@ -4342,6 +4342,10 @@ CREATE TABLE admin_users (
 
 `last_login_at` 仅在一次成功登录完成后更新；创建首个管理员不会写入该字段。
 
+M5-03 的 v9 Migration 会在创建 `admin_sessions` 的同一事务内，把历史数据库中规范的
+小写 UUID Admin ID 转换为新的 `adm_<ULID>`。遇到损坏或无法规范化的历史 ID 时整个
+Migration 回滚，不得留下部分转换状态。
+
 密码：
 
 ```text
@@ -4394,24 +4398,49 @@ Server External Lock 位于 Data Directory 替换边界之外：
 
 ```sql
 CREATE TABLE admin_sessions (
-    id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY
+        CHECK (
+            length(id) = 30
+            AND substr(id, 1, 4) = 'ads_'
+            AND substr(id, 5, 1) GLOB '[0-7]'
+            AND substr(id, 5) NOT GLOB '*[^0123456789ABCDEFGHJKMNPQRSTVWXYZ]*'
+        ),
 
-    user_id TEXT NOT NULL,
+    user_id TEXT NOT NULL
+        CHECK (
+            length(user_id) = 30
+            AND substr(user_id, 1, 4) = 'adm_'
+            AND substr(user_id, 5, 1) GLOB '[0-7]'
+            AND substr(user_id, 5) NOT GLOB '*[^0123456789ABCDEFGHJKMNPQRSTVWXYZ]*'
+        ),
 
-    token_hash BLOB NOT NULL UNIQUE,
+    token_hash BLOB NOT NULL UNIQUE
+        CHECK (typeof(token_hash) = 'blob' AND length(token_hash) = 32),
 
-    expires_at INTEGER NOT NULL,
+    csrf_token BLOB NOT NULL
+        CHECK (typeof(csrf_token) = 'blob' AND length(csrf_token) = 32),
 
-    created_at INTEGER NOT NULL,
-    last_seen_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK (expires_at > 0),
+
+    created_at INTEGER NOT NULL CHECK (created_at > 0),
+    last_seen_at INTEGER NOT NULL CHECK (last_seen_at > 0),
 
     FOREIGN KEY(user_id)
         REFERENCES admin_users(id)
-        ON DELETE CASCADE
+        ON DELETE CASCADE,
+
+    CHECK (expires_at > created_at),
+    CHECK (last_seen_at >= created_at AND last_seen_at < expires_at)
 );
+
+CREATE INDEX admin_sessions_user ON admin_sessions(user_id);
+CREATE INDEX admin_sessions_expiration ON admin_sessions(expires_at);
+CREATE INDEX admin_sessions_idle_expiration ON admin_sessions(last_seen_at);
 ```
 
-Session Token 使用 32 byte `crypto/rand`，数据库保存 `SHA-256(token)`。
+Session Token 和 CSRF Token 分别使用独立的 32 byte `crypto/rand`。Cookie 中的原始
+Session Token 永不落库，数据库只保存 `SHA-256(token)`；CSRF Token 需要由
+`GET /api/v1/auth/me` 恢复，因此保存独立原始随机值，但不写 Cookie、URL、日志或错误文本。
 
 默认策略：
 
@@ -4422,6 +4451,10 @@ idle_ttl = 30min
 
 logout = 删除数据库 Session
 ```
+
+成功校验管理员口令后、创建新 Session 前，Repository 每次最多清理 128 条绝对过期或
+空闲超过 30 分钟的 Session。读取会话时同样检查绝对到期与空闲到期；`last_seen_at`
+最多每分钟触碰一次，避免每个请求都产生 SQLite 写入。
 
 ---
 
@@ -4616,7 +4649,7 @@ Host-only（禁止设置 Domain）
 Path=/api/v1
 ```
 
-Management 只能通过 HTTPS 前置代理或本机 loopback 访问。客户端 IP、Scheme 和 Host 使用独立于 Tunnel Ingress 的 `management.trusted_proxies` 规则解析。
+Management 只能通过 HTTPS 前置代理或本机 loopback 访问。客户端 IP、Scheme 和 Host 使用独立于 Tunnel Ingress 的 `management.trusted_proxies` 规则解析；未受信任代理提供的 Forwarded 元数据不得改变判定，非 Loopback 的明文请求直接拒绝。HTTP Server 固定使用 10 秒 Header Read、30 秒 Read、30 秒 Write 和 90 秒 Idle Timeout。Shutdown 先关闭新请求准入，再排空既有 Handler；Deadline 到期后主动关闭连接并等待 Handler 所有权归零，SQLite 只能在 Management 完成收敛后关闭。
 
 ---
 
@@ -4667,13 +4700,18 @@ normalized client IP + normalized username
 minute
 ```
 
-另设 Server 全局失败预算，避免攻击者通过大量用户名绕过限制。
+另设每分钟 100 次失败的 Server 全局预算，避免攻击者通过大量用户名绕过限制。
 
 连续失败增加：
 
 ```text
 cooldown
 ```
+
+同一 Key 的冷却时间逐级固定为 `1m / 2m / 4m / 8m / 15m`；失败状态使用最多
+4096 项的 LRU，30 分钟无活动后回收。密码校验最多允许 4 个并发槽位，容量已满时
+立即返回 `429` 和 `Retry-After: 1`，不得排队放大 Argon2 内存占用，也不把该拒绝计入
+失败预算。
 
 只统计失败登录；成功登录不会清除同 IP 的全局攻击计数。所有限流 Key 必须使用 Management Trusted Proxy 规则得到的客户端 IP，禁止直接使用 loopback Peer 或未经验证的 X-Forwarded-For。
 

@@ -1,0 +1,125 @@
+package managementapi
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"testing"
+)
+
+func TestManagementSecurityPolicyTrustedProxyBoundary(t *testing.T) {
+	policy, err := newManagementSecurityPolicy(
+		"https://Admin.Example.",
+		[]string{"console.example:8443"},
+		[]string{"127.0.0.1/32"},
+	)
+	if err != nil {
+		t.Fatalf("newManagementSecurityPolicy() error = %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/", nil)
+	request.RemoteAddr = "127.0.0.1:45123"
+	request.Header.Set("X-Forwarded-For", "198.51.100.7, 127.0.0.1")
+	request.Header.Set("X-Forwarded-Proto", "https")
+	request.Header.Set("X-Forwarded-Host", "admin.example")
+	metadata, err := policy.metadata(request)
+	if err != nil {
+		t.Fatalf("metadata(trusted proxy) error = %v", err)
+	}
+	if metadata.clientIP != netip.MustParseAddr("198.51.100.7") || metadata.scheme != "https" || metadata.authority != "admin.example:443" {
+		t.Fatalf("metadata(trusted proxy) = %#v", metadata)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
+	request.RemoteAddr = "203.0.113.9:45123"
+	request.Header.Set("X-Forwarded-For", "198.51.100.8")
+	metadata, err = policy.metadata(request)
+	if err != nil {
+		t.Fatalf("metadata(untrusted peer) error = %v", err)
+	}
+	if metadata.clientIP != netip.MustParseAddr("203.0.113.9") {
+		t.Fatalf("untrusted forwarded client IP = %s", metadata.clientIP)
+	}
+}
+
+func TestManagementSecurityPolicyRejectsAmbiguousMetadata(t *testing.T) {
+	policy, err := newManagementSecurityPolicy(
+		"https://admin.example",
+		nil,
+		[]string{"127.0.0.1/32"},
+	)
+	if err != nil {
+		t.Fatalf("newManagementSecurityPolicy() error = %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{
+			name: "disallowed host",
+			mutate: func(request *http.Request) {
+				request.Host = "attacker.example"
+			},
+		},
+		{
+			name: "remote plaintext even with https authority port",
+			mutate: func(request *http.Request) {
+				request.RemoteAddr = "203.0.113.9:45123"
+				request.Host = "admin.example:443"
+				request.Header.Del("X-Forwarded-Proto")
+			},
+		},
+		{
+			name: "ambiguous forwarded host",
+			mutate: func(request *http.Request) {
+				request.Header["X-Forwarded-Host"] = []string{"admin.example", "attacker.example"}
+			},
+		},
+		{
+			name: "invalid forwarded proto",
+			mutate: func(request *http.Request) {
+				request.Header.Set("X-Forwarded-Proto", "ftp")
+			},
+		},
+		{
+			name: "oversized forwarded chain",
+			mutate: func(request *http.Request) {
+				value := "127.0.0.1"
+				for range managementMaxForwardedHops {
+					value += ", 127.0.0.1"
+				}
+				request.Header.Set("X-Forwarded-For", value)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://admin.example/", nil)
+			request.RemoteAddr = "127.0.0.1:45123"
+			request.Header.Set("X-Forwarded-Proto", "https")
+			test.mutate(request)
+			if _, err := policy.metadata(request); err == nil {
+				t.Fatal("metadata() error = nil")
+			}
+		})
+	}
+}
+
+func TestManagementSecurityPolicyOriginIsExact(t *testing.T) {
+	policy, err := newManagementSecurityPolicy("https://admin.example", nil, nil)
+	if err != nil {
+		t.Fatalf("newManagementSecurityPolicy() error = %v", err)
+	}
+	for value, want := range map[string]bool{
+		"https://admin.example":      true,
+		"https://ADMIN.EXAMPLE:443":  true,
+		"http://admin.example":       false,
+		"https://admin.example/path": false,
+		"https://attacker.example":   false,
+	} {
+		if got := policy.allowsOrigin(value); got != want {
+			t.Errorf("allowsOrigin(%q) = %t, want %t", value, got, want)
+		}
+	}
+}

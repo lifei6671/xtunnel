@@ -228,6 +228,9 @@ func TestTCPIngressWaitsForFirstAdminAndRestoresAfterRestart(t *testing.T) {
 		t.Fatalf("openGatewayAndBootstrapWith() before first Admin error = %v", err)
 	}
 	firstRuntime := closer.(*gatewayBootstrapCloser)
+	if firstRuntime.management.Addr() == nil {
+		t.Fatal("Management listener did not start during SETUP_REQUIRED")
+	}
 	if actual := firstRuntime.tcpIngress.Actual(); len(actual) != 0 {
 		t.Fatalf("TCP listeners before first Admin = %+v, want none", actual)
 	}
@@ -401,8 +404,12 @@ func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
 
 func gatewayLifecycleTestConfig(dataDir, listen string) serverconfig.Config {
 	return serverconfig.Config{
-		Server:      serverconfig.Server{DataDir: dataDir},
-		Management:  serverconfig.Management{Listen: "127.0.0.1:0"},
+		Server: serverconfig.Server{DataDir: dataDir},
+		Management: serverconfig.Management{
+			Listen:         "127.0.0.1:0",
+			PublicURL:      "https://admin.example.test",
+			TrustedProxies: []string{"127.0.0.1/32", "::1/128"},
+		},
 		HTTPIngress: serverconfig.HTTPIngress{Listen: "127.0.0.1:0"},
 		AgentGateway: serverconfig.AgentGateway{
 			Listen:         listen,

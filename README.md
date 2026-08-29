@@ -1,6 +1,6 @@
 # XTunnel
 
-XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面、M2 Credential Lifecycle & Failover Hardening、M3 Configuration/Health/Durable Operations、M4 Product Data Plane、M5-01 OpenAPI Contract Freeze 和 M5-02 Generated Client/Server Contract 均已通过验收与全绿 CI。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算、生产 HTTP Ingress，以及按持久化 Route 恢复的 Raw TCP/SSH Listener 与转发生命周期；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。Management REST Handler、Web Console 页面和 `/metrics` 导出仍由后续里程碑实现。
+XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面、M2 Credential Lifecycle & Failover Hardening、M3 Configuration/Health/Durable Operations、M4 Product Data Plane、M5-01 OpenAPI Contract Freeze 和 M5-02 Generated Client/Server Contract 均已通过验收与全绿 CI。M5-03 已完成 Admin Login/Session/CSRF Handler、持久化 Session 和 Web Login 的本地实现与验证，当前处于 `REVIEW`；其余 Management REST Handler、日常管理页面和 `/metrics` 导出仍由后续任务实现。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算、生产 HTTP Ingress，以及按持久化 Route 恢复的 Raw TCP/SSH Listener 与转发生命周期；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。
 
 ## 开发运行
 
@@ -50,7 +50,7 @@ go test ./...
 go build ./cmd/server
 ```
 
-`web/dist` 是被忽略的可重复构建产物，不提交占位文件；缺少生产构建时 Go Embed 会直接编译失败。当前页面只是 React/Vite 工程骨架，不包含业务 DTO、API Client 或真实管理页面。
+`web/dist` 是被忽略的可重复构建产物，不提交占位文件；缺少生产构建时 Go Embed 会直接编译失败。当前 Web 已接入生成的同源 API Client，并提供登录、`SETUP_REQUIRED` 引导、会话恢复和退出界面；CSRF Token 只保存在页面内存中。Tunnel/Connector/Service 等日常管理页面仍由 M5-08/M5-09 实现。
 
 本地开发只允许 HTTPS。将两个环境变量指向仓库外已信任的 Loopback Certificate 和 Private Key，并把 `management.public_url` 配置为浏览器实际使用的 Vite HTTPS Origin：
 
@@ -62,7 +62,7 @@ npm --prefix web run dev
 ./tools/test-web-proxy.ps1
 ```
 
-开发代理只转发 `/api/v1` 到 `127.0.0.1:8080`，并保留 Host/Origin。缺少证书时不会降级 HTTP；脚本 Smoke 只验证 HTTPS 和代理机械链路，真实 Login、Secure Cookie、CSRF 与 Logout E2E 留到 M5。
+开发代理只转发 `/api/v1` 到 `127.0.0.1:8080`，并保留 Host/Origin。缺少证书时不会降级 HTTP。M5-03 已用真实 SQLite 和 TLS HTTP Server 黑盒覆盖 Login、Secure Cookie、`/auth/me`、CSRF 失败与 Logout；真实 Caddy/Nginx 加浏览器链路仍由 M5-10 的正式 Browser E2E 验收。
 
 Server 继续使用 Schema 驱动的配置入口；Agent 没有 YAML 或本地配置文件，只接收一个版本化 Connection Token：
 
@@ -91,6 +91,8 @@ Resolve Stable Data Target
 → Load/Create independent Tunnel Token Master Key
 → Validate stored Snapshots and rebuild Health Target Budget
 → Load immutable Route Snapshot
+→ Start Management API
+→ No Admin: remain SETUP_REQUIRED with Management only
 → After first Admin: TCP Listener Restore → HTTP Ingress → Agent Gateway → Runtime Reconciler
 ```
 

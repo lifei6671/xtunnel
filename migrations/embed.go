@@ -44,3 +44,8 @@ var RouteDomain string
 //
 //go:embed 000008_service_proxy_options.sql
 var ServiceProxyOptions string
+
+// AdminSessions 包含 M5-03 的管理员 Session、CSRF 与过期索引前向 Migration。
+//
+//go:embed 000009_admin_sessions.sql
+var AdminSessions string

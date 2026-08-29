@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/lifei6671/xtunnel/internal/identity"
 	"github.com/lifei6671/xtunnel/migrations"
 	"gorm.io/gorm"
 )
@@ -13,6 +15,7 @@ import (
 // 在同一事务内完成，最后才记录版本，避免部分 DDL 被误认为已应用。
 type migration struct {
 	version    int
+	prepare    func(context.Context, *gorm.DB) error
 	statements []string
 }
 
@@ -66,6 +69,15 @@ var productionMigrations = []migration{
 			migrations.ServiceProxyOptions,
 		},
 	},
+	{
+		version: 9,
+		prepare: func(ctx context.Context, transaction *gorm.DB) error {
+			return migrateLegacyAdminIDs(ctx, transaction, identity.NewAdminID)
+		},
+		statements: []string{
+			migrations.AdminSessions,
+		},
+	},
 }
 
 // migrate 使用生产迁移集合把数据库推进到当前二进制支持的最新版本。
@@ -102,6 +114,11 @@ func runMigrations(ctx context.Context, database *gorm.DB, available []migration
 
 	for _, next := range available[len(applied):] {
 		if err := database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+			if next.prepare != nil {
+				if err := next.prepare(ctx, transaction); err != nil {
+					return fmt.Errorf("prepare migration %d: %w", next.version, err)
+				}
+			}
 			for _, statement := range next.statements {
 				if err := transaction.Exec(statement).Error; err != nil {
 					return fmt.Errorf("execute migration %d: %w", next.version, err)
@@ -117,6 +134,46 @@ func runMigrations(ctx context.Context, database *gorm.DB, available []migration
 			return nil
 		}); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// migrateLegacyAdminIDs 在 admin_sessions 外键建立前修正开发期遗留的 UUID 主键。
+// 整个转换由 Migration 事务拥有；任一损坏 ID 或写入失败都会连同 v9 DDL 一起回滚。
+func migrateLegacyAdminIDs(
+	ctx context.Context,
+	transaction *gorm.DB,
+	newAdminID func() (string, error),
+) error {
+	var admins []AdminUser
+	if err := transaction.WithContext(ctx).Order(AdminUserColumns.CreatedAt + " ASC").
+		Order(AdminUserColumns.ID + " ASC").Find(&admins).Error; err != nil {
+		return fmt.Errorf("read admin identifiers: %w", err)
+	}
+	for index, admin := range admins {
+		if identity.ValidAdminID(admin.ID) {
+			continue
+		}
+		legacy, err := uuid.Parse(admin.ID)
+		if err != nil || legacy.String() != admin.ID {
+			return fmt.Errorf("admin identifier at row %d is neither adm_ ULID nor canonical UUID", index+1)
+		}
+		replacement, err := newAdminID()
+		if err != nil {
+			return fmt.Errorf("generate replacement admin identifier at row %d: %w", index+1, err)
+		}
+		if !identity.ValidAdminID(replacement) {
+			return fmt.Errorf("generated replacement admin identifier at row %d is invalid", index+1)
+		}
+		result := transaction.WithContext(ctx).Model(&AdminUser{}).
+			Where(AdminUserColumns.ID+" = ?", admin.ID).
+			Update(AdminUserColumns.ID, replacement)
+		if result.Error != nil {
+			return fmt.Errorf("replace legacy admin identifier at row %d: %w", index+1, result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("replace legacy admin identifier at row %d affected %d rows, want 1", index+1, result.RowsAffected)
 		}
 	}
 	return nil

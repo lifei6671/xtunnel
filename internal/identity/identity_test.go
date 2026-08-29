@@ -62,6 +62,14 @@ func TestConnectorAndSessionIdentity(t *testing.T) {
 	if err != nil || !ValidServiceID(serviceID) {
 		t.Fatalf("NewServiceID() = %q, %v, want svc_ ULID", serviceID, err)
 	}
+	adminID, err := NewAdminID()
+	if err != nil || !ValidAdminID(adminID) {
+		t.Fatalf("NewAdminID() = %q, %v, want adm_ ULID", adminID, err)
+	}
+	adminSessionID, err := NewAdminSessionID()
+	if err != nil || !ValidAdminSessionID(adminSessionID) {
+		t.Fatalf("NewAdminSessionID() = %q, %v, want ads_ ULID", adminSessionID, err)
+	}
 
 	connector, err := NewConnector()
 	if err != nil {
@@ -126,6 +134,10 @@ func TestConnectorAndSessionIdentity(t *testing.T) {
 	operationID, err := NewOperationID()
 	if err != nil || !validID(operationID, operationPrefix) {
 		t.Fatalf("NewOperationID() = %q, %v, want op_ ULID", operationID, err)
+	}
+	requestID, err := NewRequestID()
+	if err != nil || !validID(requestID, requestPrefix) {
+		t.Fatalf("NewRequestID() = %q, %v, want req_ ULID", requestID, err)
 	}
 }
 

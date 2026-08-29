@@ -162,8 +162,8 @@ func TestServiceProxyOptionsMigrationUpgradesV7AndPreservesDefaults(t *testing.T
 	if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
 		t.Fatalf("count upgraded versions error = %v", err)
 	}
-	if versionCount != 8 {
-		t.Fatalf("version count = %d, want 8", versionCount)
+	if versionCount != int64(CurrentSchemaVersion()) {
+		t.Fatalf("version count = %d, want %d", versionCount, CurrentSchemaVersion())
 	}
 }
 

@@ -14,6 +14,10 @@ const (
 	tunnelPrefix = "tun_"
 	// servicePrefix 标识 Tunnel 下的持久化 Service ID，用于生成和校验 svc_<ULID>。
 	servicePrefix = "svc_"
+	// adminPrefix 标识持久化管理员身份，用于生成 adm_<ULID>。
+	adminPrefix = "adm_"
+	// adminSessionPrefix 标识持久化管理员登录 Session，不与 Control Session 共用命名空间。
+	adminSessionPrefix = "ads_"
 	// connectorPrefix 标识一次 Agent 进程的临时 Connector ID，用于生成和校验 con_<ULID>。
 	connectorPrefix = "con_"
 	// sessionPrefix 标识一次认证成功的 Control Session ID，用于生成和校验 sess_<ULID>。
@@ -30,6 +34,8 @@ const (
 	auditEventPrefix = "evt_"
 	// operationPrefix 标识一次管理操作 ID，用于生成 op_<ULID> 并关联操作结果。
 	operationPrefix = "op_"
+	// requestPrefix 标识一次 Management HTTP 请求，用于生成可关联的 req_<ULID>。
+	requestPrefix = "req_"
 
 	// ulidLength 是不含业务前缀的 Crockford Base32 ULID 固定字符数。
 	ulidLength = 26
@@ -77,6 +83,24 @@ func NewServiceID() (string, error) {
 	id, err := newID(servicePrefix, time.Now(), rand.Reader)
 	if err != nil {
 		return "", fmt.Errorf("generate service identifier: %w", err)
+	}
+	return id, nil
+}
+
+// NewAdminID 使用 CSPRNG 生成一个持久化管理员身份。
+func NewAdminID() (string, error) {
+	id, err := newID(adminPrefix, time.Now(), rand.Reader)
+	if err != nil {
+		return "", fmt.Errorf("generate admin identifier: %w", err)
+	}
+	return id, nil
+}
+
+// NewAdminSessionID 为一次持久化管理员登录生成独立身份。
+func NewAdminSessionID() (string, error) {
+	id, err := newID(adminSessionPrefix, time.Now(), rand.Reader)
+	if err != nil {
+		return "", fmt.Errorf("generate admin session identifier: %w", err)
 	}
 	return id, nil
 }
@@ -153,6 +177,15 @@ func NewOperationID() (string, error) {
 	return id, nil
 }
 
+// NewRequestID 为一次 Management HTTP 请求生成独立关联身份。
+func NewRequestID() (string, error) {
+	id, err := newID(requestPrefix, time.Now(), rand.Reader)
+	if err != nil {
+		return "", fmt.Errorf("generate request identifier: %w", err)
+	}
+	return id, nil
+}
+
 // ValidateTunnelID 校验 tun_ 前缀和 26 位大写 Crockford ULID。
 func ValidateTunnelID(value string) error {
 	if !validID(value, tunnelPrefix) {
@@ -193,6 +226,16 @@ func ValidTunnelID(value string) bool {
 // ValidServiceID 返回 value 是否为合法 Service ID。
 func ValidServiceID(value string) bool {
 	return validID(value, servicePrefix)
+}
+
+// ValidAdminID 返回 value 是否为合法管理员 ID。
+func ValidAdminID(value string) bool {
+	return validID(value, adminPrefix)
+}
+
+// ValidAdminSessionID 返回 value 是否为合法管理员登录 Session ID。
+func ValidAdminSessionID(value string) bool {
+	return validID(value, adminSessionPrefix)
 }
 
 // ValidConnectorID 返回 value 是否为合法 Connector ID。

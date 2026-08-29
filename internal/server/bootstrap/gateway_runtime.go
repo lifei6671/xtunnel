@@ -23,6 +23,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/server/gateway"
 	serverhttpingress "github.com/lifei6671/xtunnel/internal/server/httpingress"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
+	servermanagementapi "github.com/lifei6671/xtunnel/internal/server/managementapi"
 	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
 	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
@@ -300,6 +301,7 @@ type gatewayBootstrapCloser struct {
 	backupBarrier io.Closer
 	bootstrap     io.Closer
 	gateway       *gateway.Server
+	management    *servermanagementapi.Server
 	httpIngress   *serverhttpingress.Server
 	httpHandler   *serverhttpingress.Handler
 	tcpIngress    *servertcpingress.Manager
@@ -327,8 +329,13 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		if closer.bootstrap != nil {
 			bootstrapErr = closer.bootstrap.Close()
 		}
-		// 同时关闭三类公网入口后才开始排空。TCP/HTTP Listener 先停可避免新的
-		// OPEN/RoundTrip 继续申请 WorkConn；Gateway 随后停止新的 Control/Work。
+		// 同时关闭 Management 与三类公网入口后才开始排空。TCP/HTTP Listener
+		// 先停可避免新的 OPEN/RoundTrip 继续申请 WorkConn；Gateway 随后停止
+		// 新的 Control/Work。
+		var managementStopErr error
+		if closer.management != nil {
+			managementStopErr = closer.management.StopAccepting()
+		}
 		var tcpStopErr error
 		if closer.tcpIngress != nil {
 			tcpStopErr = closer.tcpIngress.StopAccepting()
@@ -366,6 +373,16 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		} else {
 			tcpResult <- nil
 		}
+		managementResult := make(chan error, 1)
+		if closer.management != nil {
+			safego.Go(
+				func(err error) { managementResult <- err },
+				nil,
+				func() { managementResult <- closer.management.Shutdown(drainContext) },
+			)
+		} else {
+			managementResult <- nil
+		}
 		var httpDrainErr error
 		if closer.httpIngress != nil {
 			httpDrainErr = closer.httpIngress.Shutdown(drainContext)
@@ -377,7 +394,12 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		}
 		drainErr := <-sessionResult
 		tcpDrainErr := <-tcpResult
+		managementDrainErr := <-managementResult
 		cancelDrain()
+		var managementCloseErr error
+		if closer.management != nil {
+			managementCloseErr = closer.management.Close()
+		}
 		var httpCloseErr error
 		if closer.httpIngress != nil {
 			httpCloseErr = closer.httpIngress.Close()
@@ -396,8 +418,9 @@ func (closer *gatewayBootstrapCloser) Close() error {
 			closer.routes.Wait()
 		}
 		closer.result = errors.Join(
-			backupErr, bootstrapErr, tcpStopErr, httpStopErr, stopErr,
-			tcpDrainErr, httpDrainErr, drainErr, tcpCloseErr, httpCloseErr, gatewayErr,
+			backupErr, bootstrapErr, managementStopErr, tcpStopErr, httpStopErr, stopErr,
+			managementDrainErr, tcpDrainErr, httpDrainErr, drainErr,
+			managementCloseErr, tcpCloseErr, httpCloseErr, gatewayErr,
 		)
 	})
 	return closer.result
@@ -524,20 +547,56 @@ func openGatewayAndBootstrapWith(
 		routes.Wait()
 		return nil, errors.Join(fmt.Errorf("construct HTTP ingress listener: %w", err), tcpIngress.Close(), gatewayServer.Close())
 	}
+	managementHandler, err := servermanagementapi.NewHandler(servermanagementapi.HandlerOptions{
+		Management: config.Management,
+		Store:      serverResources.database,
+		Logger:     logger,
+	})
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("construct management handler: %w", err),
+			httpIngress.Close(),
+			tcpIngress.Close(),
+			gatewayServer.Close(),
+		)
+	}
+	managementServer, err := servermanagementapi.NewServer(servermanagementapi.ServerOptions{
+		Listen: config.Management.Listen, Handler: managementHandler,
+		MaxHeaderBytes:     config.Limits.MaxHTTPHeaderBytes,
+		ReportRuntimeError: reportRuntimeError,
+	})
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("construct management listener: %w", err),
+			httpIngress.Close(),
+			tcpIngress.Close(),
+			gatewayServer.Close(),
+		)
+	}
 	cleanupBeforeOwnershipTransfer := func() error {
 		httpHandler.CloseIdleConnections()
+		managementErr := managementServer.Close()
 		httpErr := httpIngress.Close()
 		tcpErr := tcpIngress.Close()
 		cancelRoutes()
 		routes.Wait()
-		return errors.Join(tcpErr, httpErr, gatewayServer.Close())
+		return errors.Join(managementErr, tcpErr, httpErr, gatewayServer.Close())
+	}
+	// Management 必须早于 Admin Bootstrap State 检查启动。SETUP_REQUIRED 时只保留
+	// 这一入口；本机 Bootstrap 事务提交后再启动三个公网入口。
+	lifecycleContext := context.WithoutCancel(ctx)
+	if err := managementServer.Start(lifecycleContext); err != nil {
+		return nil, errors.Join(fmt.Errorf("start management listener: %w", err), cleanupBeforeOwnershipTransfer())
 	}
 	startGateway := func() error {
 		// 冻结启动顺序是 Route Snapshot → TCP Listener Restore → HTTP Ingress →
 		// Gateway → Runtime Reconciler。TCP Handler 按准入时 Route 建立精确
 		// Revision Tunnel；进程取消只触发外层关闭 owner，不能直接杀死
 		// 已经准入的请求或 Session。
-		lifecycleContext := context.WithoutCancel(ctx)
 		if err := tcpIngress.Start(lifecycleContext); err != nil {
 			startErr := errors.Join(
 				fmt.Errorf("start TCP ingress after admin bootstrap: %w", err),
@@ -604,7 +663,8 @@ func openGatewayAndBootstrapWith(
 			return nil, errors.Join(err, cleanupBeforeOwnershipTransfer())
 		}
 		return &gatewayBootstrapCloser{
-			gateway: gatewayServer, httpIngress: httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
+			gateway: gatewayServer, management: managementServer,
+			httpIngress: httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
 			sessions: sessions, routes: routes, cancelRoutes: cancelRoutes,
 			runtimeErrors: runtimeErrors,
 		}, nil
@@ -614,7 +674,8 @@ func openGatewayAndBootstrapWith(
 		return nil, errors.Join(err, cleanupBeforeOwnershipTransfer())
 	}
 	return &gatewayBootstrapCloser{
-		bootstrap: socket, gateway: gatewayServer, httpIngress: httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
+		bootstrap: socket, gateway: gatewayServer, management: managementServer,
+		httpIngress: httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
 		sessions: sessions, routes: routes, cancelRoutes: cancelRoutes,
 		runtimeErrors: runtimeErrors,
 	}, nil
