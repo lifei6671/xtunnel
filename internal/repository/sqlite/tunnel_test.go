@@ -367,6 +367,59 @@ func TestTunnelRepositoryUpdateNameRejectsInvalidInputAndMissingTunnel(t *testin
 	}
 }
 
+func TestTunnelRepositoryConcurrentUpdateNameCommitsOnce(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		return transaction.Tunnels().Create(context.Background(), testTunnel())
+	}); err != nil {
+		t.Fatalf("seed Tunnel error = %v", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, name := range []string{"concurrent-a", "concurrent-b"} {
+		go func() {
+			<-start
+			results <- store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+				_, err := transaction.Tunnels().UpdateName(context.Background(), repositoryTestTunnelID, name, 1, 2)
+				return err
+			})
+		}()
+	}
+	close(start)
+
+	var succeeded, conflicted int
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, repository.ErrVersionConflict):
+			conflicted++
+		default:
+			t.Fatalf("concurrent UpdateName() error = %v", err)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("concurrent UpdateName() results = succeeded:%d conflicted:%d, want 1/1", succeeded, conflicted)
+	}
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		tunnel, err := view.Tunnels().Get(context.Background(), repositoryTestTunnelID)
+		if err != nil {
+			return err
+		}
+		if tunnel.Version != 2 || tunnel.Name != "concurrent-a" && tunnel.Name != "concurrent-b" {
+			return errors.New("concurrent Tunnel update did not commit exactly one candidate")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTunnelRepositoryDeleteUsesAggregateCAS(t *testing.T) {
 	store, err := Open(context.Background(), t.TempDir())
 	if err != nil {

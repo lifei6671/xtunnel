@@ -433,6 +433,64 @@ func TestServiceAPIProjectsReadyApplyFailureAndActiveConnections(t *testing.T) {
 	}
 }
 
+func TestServiceAPIProjectMutationKeepsCommittedVersionAfterLaterWrite(t *testing.T) {
+	store := openServiceManagementStore(t)
+	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+	service := newServiceAPITestService(
+		t, store, &recordingSnapshotGate{}, &recordingSnapshotNotifier{}, &recordingRouteNotifier{},
+		serviceManagementIDOne,
+	)
+	created, err := service.Create(context.Background(), CreateServiceAPIInput{
+		Service:  validCreateServiceInput(serviceManagementTunnelID, "projection"),
+		Exposure: ServiceExposureInput{Type: ServiceExposureHTTP, Hostname: "projection.example.test"},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	disabled := false
+	committed, err := service.Update(context.Background(), UpdateServiceAPIInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: created.TunnelVersion, ExpectedServiceVersion: created.Service.Version,
+		Enabled: &disabled,
+	})
+	if err != nil {
+		t.Fatalf("Update(disable) error = %v", err)
+	}
+	enabled := true
+	if _, err := service.Update(context.Background(), UpdateServiceAPIInput{
+		TunnelID: serviceManagementTunnelID, ServiceID: created.Service.ID,
+		ExpectedTunnelVersion: committed.TunnelVersion, ExpectedServiceVersion: committed.Service.Version,
+		Enabled: &enabled,
+	}); err != nil {
+		t.Fatalf("Update(enable) error = %v", err)
+	}
+
+	current, err := service.Get(context.Background(), created.Service.ID)
+	if err != nil {
+		t.Fatalf("Get(current) error = %v", err)
+	}
+	if current.Service.Version != 3 || current.Status == serverstatus.ServiceStatusDisabled {
+		t.Fatalf("current projection = version:%d status:%s", current.Service.Version, current.Status)
+	}
+	projected, err := service.ProjectMutation(committed)
+	if err != nil {
+		t.Fatalf("ProjectMutation() error = %v", err)
+	}
+	if projected.Service.Version != 2 || projected.Service.Enabled ||
+		projected.Status != serverstatus.ServiceStatusDisabled ||
+		projected.TunnelVersion != committed.TunnelVersion || projected.Exposure != committed.Exposure {
+		t.Fatalf("committed projection = %+v, mutation = %+v", projected, committed)
+	}
+	createdProjection, err := service.ProjectMutation(created)
+	if err != nil {
+		t.Fatalf("ProjectMutation(create result) error = %v", err)
+	}
+	if createdProjection.Service.Version != 1 || !createdProjection.Service.Enabled ||
+		createdProjection.TunnelVersion != created.TunnelVersion || createdProjection.Exposure != created.Exposure {
+		t.Fatalf("create projection after later writes = %+v, create mutation = %+v", createdProjection, created)
+	}
+}
+
 func TestServiceAPINotifierFailurePreservesCommittedFact(t *testing.T) {
 	store := openServiceManagementStore(t)
 	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)

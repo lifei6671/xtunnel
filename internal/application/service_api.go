@@ -525,6 +525,24 @@ func (service *ServiceAPIService) List(ctx context.Context, tunnelID string) ([]
 	return service.readViews(ctx, tunnelID, "")
 }
 
+// ProjectMutation 将一次已提交 Mutation 的持久化结果与当前 Runtime 值型快照组合成响应投影。
+// 持久化字段只取自 result，避免并发后续写入让成功响应混入另一个 Desired State 版本。
+func (service *ServiceAPIService) ProjectMutation(result ServiceAPIMutationResult) (ServiceView, error) {
+	if !service.validProjection() || result.Deleted || strings.TrimSpace(result.Service.ID) == "" ||
+		strings.TrimSpace(result.Service.TunnelID) == "" {
+		return ServiceView{}, ErrServiceManagementInput
+	}
+	return projectService(
+		result.Service,
+		result.Exposure,
+		result.TunnelVersion,
+		service.runtime.RuntimeStatusSnapshots(),
+		service.limits.Snapshot(),
+		service.applyFailures,
+		service.now().UTC(),
+	), nil
+}
+
 func (service *ServiceAPIService) readViews(ctx context.Context, tunnelID, serviceID string) ([]ServiceView, error) {
 	runtimeSnapshots := service.runtime.RuntimeStatusSnapshots()
 	limitSnapshot := service.limits.Snapshot()
@@ -639,8 +657,12 @@ func (service *ServiceAPIService) validMutation(ctx context.Context) bool {
 }
 
 func (service *ServiceAPIService) validQuery(ctx context.Context) bool {
-	return service != nil && ctx != nil && service.owner != nil && service.owner.store != nil &&
-		service.runtime != nil && service.limits != nil && service.applyFailures != nil && service.now != nil
+	return service != nil && ctx != nil && service.owner != nil && service.owner.store != nil && service.validProjection()
+}
+
+func (service *ServiceAPIService) validProjection() bool {
+	return service != nil && service.runtime != nil && service.limits != nil &&
+		service.applyFailures != nil && service.now != nil
 }
 
 func (service *ServiceAPIService) timestamp() (int64, error) {

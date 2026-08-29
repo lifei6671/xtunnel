@@ -203,6 +203,88 @@ func TestTunnelCRUDSecurityAndConnectorRuntime(t *testing.T) {
 	assertAPIError(t, response, http.StatusNotFound, APIErrorCodeRESOURCENOTFOUND)
 }
 
+func TestTunnelAndConnectorOpaquePaginationOverTLS(t *testing.T) {
+	harness := newTunnelAPIHarness(t)
+	firstTunnel := createTunnelForTest(t, harness, "page tunnel a")
+	createTunnelForTest(t, harness, "page tunnel b")
+	createTunnelForTest(t, harness, "page tunnel c")
+
+	response := doTunnelRequest(t, harness, http.MethodGet, "/api/v1/tunnels?page_size=1", nil, "", false)
+	var firstPage TunnelList
+	decodeSuccess(t, response, &firstPage)
+	if len(firstPage.Items) != 1 || firstPage.NextPageToken == nil {
+		t.Fatalf("first Tunnel page = %#v", firstPage)
+	}
+	response = doTunnelRequest(t, harness, http.MethodGet, "/api/v1/tunnels?page_size=1&page_token="+*firstPage.NextPageToken, nil, "", false)
+	var secondPage TunnelList
+	decodeSuccess(t, response, &secondPage)
+	if len(secondPage.Items) != 1 || secondPage.Items[0].Id <= firstPage.Items[0].Id || secondPage.NextPageToken == nil {
+		t.Fatalf("second Tunnel page = %#v after %#v", secondPage, firstPage)
+	}
+	response = doTunnelRequest(t, harness, http.MethodGet, "/api/v1/tunnels?page_size=1&page_token="+*secondPage.NextPageToken, nil, "", false)
+	terminalTunnelBody, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read terminal Tunnel page: %v", err)
+	}
+	var terminalTunnelPage TunnelList
+	if err := json.Unmarshal(terminalTunnelBody, &terminalTunnelPage); err != nil {
+		t.Fatalf("decode terminal Tunnel page: %v", err)
+	}
+	if len(terminalTunnelPage.Items) != 1 || terminalTunnelPage.NextPageToken != nil ||
+		bytes.Contains(terminalTunnelBody, []byte(`"next_page_token"`)) {
+		t.Fatalf("terminal Tunnel page must omit next_page_token: %s", terminalTunnelBody)
+	}
+
+	response = doTunnelRequest(t, harness, http.MethodGet, "/api/v1/tunnels?page_size=1&page_token="+*firstPage.NextPageToken+"&status=PENDING", nil, "", false)
+	assertAPIError(t, response, http.StatusBadRequest, APIErrorCodeINVALIDPAGETOKEN)
+	response = doTunnelRequest(t, harness, http.MethodGet, "/api/v1/tunnels?page_token=", nil, "", false)
+	assertAPIError(t, response, http.StatusBadRequest, APIErrorCodeINVALIDPAGETOKEN)
+	response = doTunnelRequest(t, harness, http.MethodGet, "/api/v1/tunnels?page_size=201", nil, "", false)
+	assertAPIError(t, response, http.StatusBadRequest, APIErrorCodeINVALIDREQUEST)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	harness.runtime.mu.Lock()
+	for index, connectorID := range []string{"con_01J00000000000000000000000", "con_01J00000000000000000000001"} {
+		sessionID := []string{"sess_01J00000000000000000000000", "sess_01J00000000000000000000001"}[index]
+		harness.runtime.statuses = append(harness.runtime.statuses, serverruntime.SessionStatusSnapshot{
+			Session: serverruntime.Session{
+				TunnelID: firstTunnel.Tunnel.Id, ConnectorID: connectorID,
+				SessionID: sessionID, Generation: 1,
+			},
+			ConnectorMetadata: serverruntime.ConnectorMetadata{Hostname: "edge", OS: "linux", Arch: "amd64", Version: "v0.1.0"},
+			ConnectedAt:       now.Add(-time.Minute), LastHeartbeatAt: now,
+			CurrentControlSession: true, HeartbeatFresh: true,
+			Config: serverruntime.SessionEligibility{ConfigReady: true, HasObserved: true, ObservedRevision: 1},
+		})
+	}
+	harness.runtime.mu.Unlock()
+
+	connectorPath := "/api/v1/tunnels/" + firstTunnel.Tunnel.Id + "/connectors?page_size=1"
+	response = doTunnelRequest(t, harness, http.MethodGet, connectorPath, nil, "", false)
+	var connectorPage ConnectorList
+	decodeSuccess(t, response, &connectorPage)
+	if len(connectorPage.Items) != 1 || connectorPage.NextPageToken == nil {
+		t.Fatalf("first Connector page = %#v", connectorPage)
+	}
+	response = doTunnelRequest(t, harness, http.MethodGet, connectorPath+"&page_token="+*connectorPage.NextPageToken, nil, "", false)
+	terminalConnectorBody, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read terminal Connector page: %v", err)
+	}
+	var nextConnectorPage ConnectorList
+	if err := json.Unmarshal(terminalConnectorBody, &nextConnectorPage); err != nil {
+		t.Fatalf("decode terminal Connector page: %v", err)
+	}
+	if len(nextConnectorPage.Items) != 1 || nextConnectorPage.Items[0].Id <= connectorPage.Items[0].Id ||
+		nextConnectorPage.NextPageToken != nil || bytes.Contains(terminalConnectorBody, []byte(`"next_page_token"`)) {
+		t.Fatalf("second Connector page = %#v after %#v", nextConnectorPage, connectorPage)
+	}
+	response = doTunnelRequest(t, harness, http.MethodGet, connectorPath+"&page_token="+*firstPage.NextPageToken, nil, "", false)
+	assertAPIError(t, response, http.StatusBadRequest, APIErrorCodeINVALIDPAGETOKEN)
+}
+
 func TestDeleteTunnelRejectsServiceReferences(t *testing.T) {
 	harness := newTunnelAPIHarness(t)
 	created := createTunnelForTest(t, harness, "referenced tunnel")
@@ -254,6 +336,10 @@ func TestTunnelMutationPreconditionsAndStrictJSON(t *testing.T) {
 	assertAPIError(t, response, http.StatusBadRequest, APIErrorCodeINVALIDIFMATCH)
 	response = doTunnelRequest(t, harness, http.MethodPatch, path, map[string]string{"name": "next"}, `"9"`, true)
 	assertAPIError(t, response, http.StatusPreconditionFailed, APIErrorCodeRESOURCEVERSIONCONFLICT)
+	response = doTunnelRequest(t, harness, http.MethodPatch, path, map[string]any{"name": nil}, `"1"`, true)
+	assertAPIError(t, response, http.StatusUnprocessableEntity, APIErrorCodeVALIDATIONFAILED)
+	response = doTunnelRequest(t, harness, http.MethodPatch, path, map[string]any{"name": "next", "unknown": true}, `"1"`, true)
+	assertAPIError(t, response, http.StatusBadRequest, APIErrorCodeINVALIDREQUEST)
 
 	body := strings.NewReader(`{"name":"bad","unknown":true}`)
 	request, err := http.NewRequest(http.MethodPost, harness.server.URL+"/api/v1/tunnels", body)
@@ -280,6 +366,142 @@ func TestTunnelMutationPreconditionsAndStrictJSON(t *testing.T) {
 		t.Fatalf("client.Do(rotate missing CSRF) error = %v", err)
 	}
 	assertAPIError(t, response, http.StatusForbidden, APIErrorCodeCSRFINVALID)
+}
+
+func TestTunnelMutationPreconditionMatrixOverTLS(t *testing.T) {
+	harness := newTunnelAPIHarness(t)
+	created := createTunnelForTest(t, harness, "tunnel precondition matrix")
+	basePath := "/api/v1/tunnels/" + created.Tunnel.Id
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   any
+	}{
+		{name: "delete", method: http.MethodDelete, path: basePath},
+		{name: "rotate token", method: http.MethodPost, path: basePath + "/token/rotate"},
+		{name: "revoke token", method: http.MethodPost, path: basePath + "/token/revoke"},
+		{name: "revoke tunnel", method: http.MethodPost, path: basePath + "/revoke"},
+	}
+	for _, test := range tests {
+		t.Run(test.name+" missing", func(t *testing.T) {
+			response := doTunnelRequest(t, harness, test.method, test.path, test.body, "", true)
+			assertAPIError(t, response, http.StatusPreconditionRequired, APIErrorCodePRECONDITIONREQUIRED)
+		})
+		t.Run(test.name+" stale", func(t *testing.T) {
+			response := doTunnelRequest(t, harness, test.method, test.path, test.body, `"9"`, true)
+			assertAPIError(t, response, http.StatusPreconditionFailed, APIErrorCodeRESOURCEVERSIONCONFLICT)
+		})
+	}
+}
+
+func TestTunnelPatchRejectsJSONMediaTypeOverTLS(t *testing.T) {
+	harness := newTunnelAPIHarness(t)
+	created := createTunnelForTest(t, harness, "tunnel media type")
+	request, err := http.NewRequest(
+		http.MethodPatch,
+		harness.server.URL+"/api/v1/tunnels/"+created.Tunnel.Id,
+		strings.NewReader(`{"name":"wrong media type"}`),
+	)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", harness.publicURL)
+	request.Header.Set("X-XTunnel-CSRF", harness.csrf)
+	request.Header.Set("If-Match", `"1"`)
+	response, err := harness.client.Do(request)
+	if err != nil {
+		t.Fatalf("client.Do() error = %v", err)
+	}
+	assertAPIError(t, response, http.StatusBadRequest, APIErrorCodeINVALIDREQUEST)
+}
+
+func TestTunnelConcurrentPatchWithSameETagCommitsOnce(t *testing.T) {
+	harness := newTunnelAPIHarness(t)
+	created := createTunnelForTest(t, harness, "concurrent tunnel")
+	path := "/api/v1/tunnels/" + created.Tunnel.Id
+
+	type patchResult struct {
+		status int
+		etag   string
+		body   []byte
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan patchResult, 2)
+	var wait sync.WaitGroup
+	for _, name := range []string{"winner-a", "winner-b"} {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			body, err := json.Marshal(map[string]string{"name": name})
+			if err != nil {
+				results <- patchResult{err: err}
+				return
+			}
+			request, err := http.NewRequest(http.MethodPatch, harness.server.URL+path, bytes.NewReader(body))
+			if err != nil {
+				results <- patchResult{err: err}
+				return
+			}
+			request.Header.Set("Content-Type", "application/merge-patch+json")
+			request.Header.Set("Origin", harness.publicURL)
+			request.Header.Set("X-XTunnel-CSRF", harness.csrf)
+			request.Header.Set("If-Match", `"1"`)
+			response, err := harness.client.Do(request)
+			if err != nil {
+				results <- patchResult{err: err}
+				return
+			}
+			responseBody, readErr := io.ReadAll(response.Body)
+			closeErr := response.Body.Close()
+			results <- patchResult{
+				status: response.StatusCode, etag: response.Header.Get("ETag"), body: responseBody,
+				err: errors.Join(readErr, closeErr),
+			}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+
+	var succeeded, conflicted int
+	var committed Tunnel
+	var committedETag string
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent PATCH error = %v", result.err)
+		}
+		switch result.status {
+		case http.StatusOK:
+			succeeded++
+			committedETag = result.etag
+			if err := json.Unmarshal(result.body, &committed); err != nil {
+				t.Fatalf("decode committed Tunnel response: %v", err)
+			}
+		case http.StatusPreconditionFailed:
+			conflicted++
+		default:
+			t.Fatalf("concurrent PATCH status = %d", result.status)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 || committedETag != `"2"` {
+		t.Fatalf("concurrent PATCH results = succeeded:%d conflicted:%d, want 1/1", succeeded, conflicted)
+	}
+
+	response := doTunnelRequest(t, harness, http.MethodGet, path, nil, "", false)
+	if response.Header.Get("ETag") != `"2"` {
+		response.Body.Close()
+		t.Fatalf("final Tunnel ETag = %q, want \"2\"", response.Header.Get("ETag"))
+	}
+	var tunnel Tunnel
+	decodeSuccess(t, response, &tunnel)
+	if committed.Version != 2 || tunnel.Version != committed.Version || tunnel.Name != committed.Name ||
+		tunnel.Name != "winner-a" && tunnel.Name != "winner-b" {
+		t.Fatalf("final Tunnel = version:%d name:%q", tunnel.Version, tunnel.Name)
+	}
 }
 
 func TestIgnorableTunnelPostCommitCleanupDoesNotHideRuntimeConvergence(t *testing.T) {

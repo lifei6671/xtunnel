@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -35,14 +36,35 @@ func (api *managementStrictAPI) ListTunnels(ctx context.Context, request ListTun
 		failure := api.handler.mapTunnelError(ctx, requestContext, err)
 		return ListTunnels500JSONResponse{InternalErrorJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
 	}
-	items := make([]Tunnel, 0, len(views))
+	filtered := make([]application.TunnelView, 0, len(views))
 	for _, view := range views {
 		if request.Params.Status != nil && string(*request.Params.Status) != string(view.Status) {
 			continue
 		}
+		filtered = append(filtered, view)
+	}
+	statusFilter := ""
+	if request.Params.Status != nil {
+		statusFilter = string(*request.Params.Status)
+	}
+	page, nextPageToken, err := paginateManagementItems(
+		api.handler.pageTokens, filtered, request.Params.PageSize, request.Params.PageToken,
+		pageTokenScope{resource: "tunnels", idPrefix: "tun_", filter: pageFilter("status", statusFilter)},
+		func(view application.TunnelView) string { return view.Tunnel.ID },
+	)
+	if err != nil {
+		failure := paginationFailure(err)
+		if failure.status == http.StatusInternalServerError {
+			api.handler.logInternalError(ctx, requestIDFromContext(requestContext), "management_tunnel_pagination_failed", err)
+			return ListTunnels500JSONResponse{InternalErrorJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
+		}
+		return ListTunnels400JSONResponse{BadRequestJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
+	}
+	items := make([]Tunnel, 0, len(page))
+	for _, view := range page {
 		items = append(items, tunnelResponse(view))
 	}
-	return ListTunnels200JSONResponse(TunnelList{Items: items}), nil
+	return ListTunnels200JSONResponse(TunnelList{Items: items, NextPageToken: nextPageToken}), nil
 }
 
 func (api *managementStrictAPI) CreateTunnel(ctx context.Context, request CreateTunnelRequestObject) (CreateTunnelResponseObject, error) {
@@ -116,18 +138,21 @@ func (api *managementStrictAPI) UpdateTunnel(ctx context.Context, request Update
 	if request.Body == nil || request.Body.Name == nil || strings.TrimSpace(*request.Body.Name) == "" {
 		return UpdateTunnel422JSONResponse{ValidationFailedJSONResponse(apiError(APIErrorCodeVALIDATIONFAILED, "Tunnel 名称不能为空", requestIDFromContext(requestContext)))}, nil
 	}
-	_, err = api.handler.tunnels.Update(ctx, application.UpdateTunnelInput{
+	view, err := api.handler.tunnels.Get(ctx, request.TunnelId)
+	if err != nil {
+		failure := api.handler.mapTunnelError(ctx, requestContext, err)
+		return updateTunnelFailure(failure, requestIDFromContext(requestContext)), nil
+	}
+	updated, err := api.handler.tunnels.Update(ctx, application.UpdateTunnelInput{
 		TunnelID: request.TunnelId, ExpectedVersion: expectedVersion, Name: *request.Body.Name,
 	})
 	if err != nil {
 		failure := api.handler.mapTunnelError(ctx, requestContext, err)
 		return updateTunnelFailure(failure, requestIDFromContext(requestContext)), nil
 	}
-	view, err := api.handler.tunnels.Get(ctx, request.TunnelId)
-	if err != nil {
-		failure := api.handler.mapTunnelError(ctx, requestContext, err)
-		return UpdateTunnel500JSONResponse{InternalErrorJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
-	}
+	// 运行态字段可以保持写前快照，但持久字段和 ETag 必须绑定本次 CAS 的提交结果，
+	// 不能在解锁后重新 GET 并误返回后一个管理员的版本。
+	view.Tunnel = updated
 	etag := tunnelETag(view.Tunnel.Version)
 	return UpdateTunnel200JSONResponse{TunnelOKJSONResponse{Body: tunnelResponse(view), Headers: TunnelOKResponseHeaders{ETag: &etag}}}, nil
 }
@@ -173,11 +198,35 @@ func (api *managementStrictAPI) ListTunnelConnectors(ctx context.Context, reques
 			return ListTunnelConnectors500JSONResponse{InternalErrorJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
 		}
 	}
-	items := make([]Connector, 0, len(views))
+	filtered := make([]application.ConnectorView, 0, len(views))
 	for _, view := range views {
 		if request.Params.Status != nil && string(*request.Params.Status) != string(view.Status) {
 			continue
 		}
+		filtered = append(filtered, view)
+	}
+	statusFilter := ""
+	if request.Params.Status != nil {
+		statusFilter = string(*request.Params.Status)
+	}
+	page, nextPageToken, err := paginateManagementItems(
+		api.handler.pageTokens, filtered, request.Params.PageSize, request.Params.PageToken,
+		pageTokenScope{
+			resource: "connectors", idPrefix: "con_",
+			filter: pageFilter("tunnel_id", request.TunnelId, "status", statusFilter),
+		},
+		func(view application.ConnectorView) string { return view.ID },
+	)
+	if err != nil {
+		failure := paginationFailure(err)
+		if failure.status == http.StatusInternalServerError {
+			api.handler.logInternalError(ctx, requestIDFromContext(requestContext), "management_connector_pagination_failed", err)
+			return ListTunnelConnectors500JSONResponse{InternalErrorJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
+		}
+		return ListTunnelConnectors400JSONResponse{BadRequestJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
+	}
+	items := make([]Connector, 0, len(page))
+	for _, view := range page {
 		item, err := connectorResponse(view)
 		if err != nil {
 			api.handler.logInternalError(ctx, requestIDFromContext(requestContext), "management_connector_projection_failed", err)
@@ -185,7 +234,7 @@ func (api *managementStrictAPI) ListTunnelConnectors(ctx context.Context, reques
 		}
 		items = append(items, item)
 	}
-	return ListTunnelConnectors200JSONResponse(ConnectorList{Items: items}), nil
+	return ListTunnelConnectors200JSONResponse(ConnectorList{Items: items, NextPageToken: nextPageToken}), nil
 }
 
 func (api *managementStrictAPI) RevealTunnelToken(ctx context.Context, request RevealTunnelTokenRequestObject) (RevealTunnelTokenResponseObject, error) {
@@ -402,11 +451,8 @@ func validateMutationIdentity(tunnelID string, ifMatch IfMatch) (int64, *managem
 }
 
 func validateListRequest(pageSize *PageSize, pageToken *PageToken) *managementFailure {
-	if pageSize != nil && (*pageSize < 1 || *pageSize > 200) {
+	if pageSize != nil && (*pageSize < 1 || *pageSize > maximumPageSize) {
 		return &managementFailure{status: 400, code: APIErrorCodeINVALIDREQUEST, message: "page_size 必须在 1 到 200 之间"}
-	}
-	if pageToken != nil && *pageToken != "" {
-		return &managementFailure{status: 400, code: APIErrorCodeINVALIDPAGETOKEN, message: "page_token 无效"}
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package managementapi
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -73,6 +74,7 @@ type ManagementHandler struct {
 	security                  *managementSecurityPolicy
 	limiter                   *loginFailureLimiter
 	passwordVerificationSlots chan struct{}
+	pageTokens                *pageTokenCodec
 	logger                    *slog.Logger
 	api                       http.Handler
 	web                       http.Handler
@@ -101,6 +103,10 @@ func NewHandler(options HandlerOptions) (*ManagementHandler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read embedded management index: %w", err)
 	}
+	pageTokens, err := newPageTokenCodec(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
 	handler := &ManagementHandler{
 		auth:                      application.NewAdminAuthenticationService(options.Store),
 		tunnels:                   options.Tunnels,
@@ -110,6 +116,7 @@ func NewHandler(options HandlerOptions) (*ManagementHandler, error) {
 		security:                  security,
 		limiter:                   newLoginFailureLimiter(time.Now),
 		passwordVerificationSlots: make(chan struct{}, loginPasswordVerificationConcurrency),
+		pageTokens:                pageTokens,
 		logger:                    options.Logger,
 		web:                       http.FileServer(http.FS(assets)),
 		index:                     index,
@@ -296,6 +303,11 @@ func (handler *ManagementHandler) prepareServiceRequest(writer http.ResponseWrit
 			var object map[string]json.RawMessage
 			if json.Unmarshal(field.value, &object) != nil || len(object) == 0 {
 				return &managementValidationError{message: "Service " + field.name + " 必须包含至少一个字段"}
+			}
+			for nestedName, nestedValue := range object {
+				if bytes.Equal(bytes.TrimSpace(nestedValue), []byte("null")) {
+					return &managementValidationError{message: "Service " + field.name + "." + nestedName + " 不能为 null"}
+				}
 			}
 		}
 	}

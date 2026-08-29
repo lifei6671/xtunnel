@@ -2,10 +2,13 @@ package managementapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -39,12 +42,40 @@ func (api *managementStrictAPI) ListServices(ctx context.Context, request ListSe
 		}
 		return ListServices500JSONResponse{InternalErrorJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
 	}
-	items := make([]Service, 0, len(views))
+	filtered := make([]application.ServiceView, 0, len(views))
 	for _, view := range views {
 		if request.Params.Status != nil && ServiceStatus(view.Status) != *request.Params.Status ||
 			request.Params.Enabled != nil && view.Service.Enabled != *request.Params.Enabled {
 			continue
 		}
+		filtered = append(filtered, view)
+	}
+	statusFilter := ""
+	if request.Params.Status != nil {
+		statusFilter = string(*request.Params.Status)
+	}
+	enabledFilter := ""
+	if request.Params.Enabled != nil {
+		enabledFilter = strconv.FormatBool(*request.Params.Enabled)
+	}
+	page, nextPageToken, err := paginateManagementItems(
+		api.handler.pageTokens, filtered, request.Params.PageSize, request.Params.PageToken,
+		pageTokenScope{
+			resource: "services", idPrefix: "svc_",
+			filter: pageFilter("tunnel_id", request.Params.TunnelId, "status", statusFilter, "enabled", enabledFilter),
+		},
+		func(view application.ServiceView) string { return view.Service.ID },
+	)
+	if err != nil {
+		failure := paginationFailure(err)
+		if failure.status == http.StatusInternalServerError {
+			api.handler.logInternalError(ctx, requestIDFromContext(requestContext), "management_service_pagination_failed", err)
+			return ListServices500JSONResponse{InternalErrorJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
+		}
+		return ListServices400JSONResponse{BadRequestJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
+	}
+	items := make([]Service, 0, len(page))
+	for _, view := range page {
 		item, err := serviceResponse(view)
 		if err != nil {
 			api.handler.logInternalError(ctx, requestIDFromContext(requestContext), "management_service_projection_failed", err)
@@ -52,7 +83,7 @@ func (api *managementStrictAPI) ListServices(ctx context.Context, request ListSe
 		}
 		items = append(items, item)
 	}
-	return ListServices200JSONResponse(ServiceList{Items: items}), nil
+	return ListServices200JSONResponse(ServiceList{Items: items, NextPageToken: nextPageToken}), nil
 }
 
 func (api *managementStrictAPI) CreateService(ctx context.Context, request CreateServiceRequestObject) (CreateServiceResponseObject, error) {
@@ -73,10 +104,10 @@ func (api *managementStrictAPI) CreateService(ctx context.Context, request Creat
 		failure := api.handler.mapServiceError(ctx, requestContext, err)
 		return createServiceFailure(failure, requestIDFromContext(requestContext)), nil
 	}
-	view, err := api.handler.services.Get(ctx, result.Service.ID)
+	view, err := api.handler.services.ProjectMutation(result)
 	if err != nil {
-		failure := api.handler.mapServiceError(ctx, requestContext, err)
-		return CreateService500JSONResponse{InternalErrorJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
+		api.handler.logInternalError(ctx, requestIDFromContext(requestContext), "management_service_post_commit_projection_failed", err)
+		return CreateService500JSONResponse{InternalErrorJSONResponse(apiError(APIErrorCodeINTERNALERROR, "服务器内部错误", requestIDFromContext(requestContext)))}, nil
 	}
 	body, err := serviceResponse(view)
 	if err != nil {
@@ -84,7 +115,7 @@ func (api *managementStrictAPI) CreateService(ctx context.Context, request Creat
 		return CreateService500JSONResponse{InternalErrorJSONResponse(apiError(APIErrorCodeINTERNALERROR, "服务器内部错误", requestIDFromContext(requestContext)))}, nil
 	}
 	etag := serviceETag(view)
-	location := "/api/v1/services/" + view.Service.ID
+	location := "/api/v1/services/" + result.Service.ID
 	return CreateService201JSONResponse{Body: body, Headers: CreateService201ResponseHeaders{ETag: &etag, Location: &location}}, nil
 }
 
@@ -112,12 +143,9 @@ func (api *managementStrictAPI) GetService(ctx context.Context, request GetServi
 
 func (api *managementStrictAPI) UpdateService(ctx context.Context, request UpdateServiceRequestObject) (UpdateServiceResponseObject, error) {
 	requestContext := managementRequestContextFrom(ctx)
-	if !validate.ValidID(request.ServiceId, "svc_") {
-		return UpdateService400JSONResponse{BadRequestJSONResponse(apiError(APIErrorCodeINVALIDREQUEST, "Service ID 无效", requestIDFromContext(requestContext)))}, nil
-	}
-	identity, err := parseServiceIfMatch(request.Params.IfMatch, request.ServiceId)
-	if err != nil {
-		return UpdateService400JSONResponse{BadRequestJSONResponse(apiError(APIErrorCodeINVALIDIFMATCH, "If-Match 无效", requestIDFromContext(requestContext)))}, nil
+	_, identity, failure := api.resolveServiceMutation(ctx, requestContext, request.ServiceId, request.Params.IfMatch)
+	if failure != nil {
+		return updateServiceFailure(*failure, requestIDFromContext(requestContext)), nil
 	}
 	if request.Body == nil {
 		return UpdateService422JSONResponse{ValidationFailedJSONResponse(apiError(APIErrorCodeVALIDATIONFAILED, "Service 更新至少需要一个字段", requestIDFromContext(requestContext)))}, nil
@@ -126,23 +154,25 @@ func (api *managementStrictAPI) UpdateService(ctx context.Context, request Updat
 	if err != nil {
 		return UpdateService422JSONResponse{ValidationFailedJSONResponse(apiError(APIErrorCodeVALIDATIONFAILED, err.Error(), requestIDFromContext(requestContext)))}, nil
 	}
-	if _, err := api.handler.services.Update(ctx, input); err != nil {
+	result, err := api.handler.services.Update(ctx, input)
+	if err != nil {
 		failure := api.handler.mapServiceError(ctx, requestContext, err)
 		return updateServiceFailure(failure, requestIDFromContext(requestContext)), nil
 	}
-	return api.updatedServiceResponse(ctx, requestContext, request.ServiceId)
+	response, projectionFailure := api.committedServiceOK(ctx, requestContext, result)
+	if projectionFailure != nil {
+		return UpdateService500JSONResponse{InternalErrorJSONResponse(projectionFailure.response(requestIDFromContext(requestContext)))}, nil
+	}
+	return UpdateService200JSONResponse{response}, nil
 }
 
 func (api *managementStrictAPI) DeleteService(ctx context.Context, request DeleteServiceRequestObject) (DeleteServiceResponseObject, error) {
 	requestContext := managementRequestContextFrom(ctx)
-	if !validate.ValidID(request.ServiceId, "svc_") {
-		return DeleteService400JSONResponse{BadRequestJSONResponse(apiError(APIErrorCodeINVALIDREQUEST, "Service ID 无效", requestIDFromContext(requestContext)))}, nil
+	_, identity, failure := api.resolveServiceMutation(ctx, requestContext, request.ServiceId, request.Params.IfMatch)
+	if failure != nil {
+		return deleteServiceFailure(*failure, requestIDFromContext(requestContext)), nil
 	}
-	identity, err := parseServiceIfMatch(request.Params.IfMatch, request.ServiceId)
-	if err != nil {
-		return DeleteService400JSONResponse{BadRequestJSONResponse(apiError(APIErrorCodeINVALIDIFMATCH, "If-Match 无效", requestIDFromContext(requestContext)))}, nil
-	}
-	_, err = api.handler.services.Delete(ctx, application.DeleteServiceInput{
+	_, err := api.handler.services.Delete(ctx, application.DeleteServiceInput{
 		TunnelID: identity.tunnelID, ServiceID: request.ServiceId,
 		ExpectedTunnelVersion: identity.tunnelVersion, ExpectedServiceVersion: identity.serviceVersion,
 	})
@@ -155,12 +185,12 @@ func (api *managementStrictAPI) DeleteService(ctx context.Context, request Delet
 
 func (api *managementStrictAPI) EnableService(ctx context.Context, request EnableServiceRequestObject) (EnableServiceResponseObject, error) {
 	requestContext := managementRequestContextFrom(ctx)
-	identity, failure := validateServiceMutationIdentity(request.ServiceId, request.Params.IfMatch)
+	_, identity, failure := api.resolveServiceMutation(ctx, requestContext, request.ServiceId, request.Params.IfMatch)
 	if failure != nil {
 		return enableServiceFailure(*failure, requestIDFromContext(requestContext)), nil
 	}
 	enabled := true
-	_, err := api.handler.services.Update(ctx, application.UpdateServiceAPIInput{
+	result, err := api.handler.services.Update(ctx, application.UpdateServiceAPIInput{
 		TunnelID: identity.tunnelID, ServiceID: request.ServiceId,
 		ExpectedTunnelVersion: identity.tunnelVersion, ExpectedServiceVersion: identity.serviceVersion,
 		Enabled: &enabled,
@@ -169,7 +199,7 @@ func (api *managementStrictAPI) EnableService(ctx context.Context, request Enabl
 		failure := api.handler.mapServiceError(ctx, requestContext, err)
 		return enableServiceFailure(failure, requestIDFromContext(requestContext)), nil
 	}
-	response, projectionFailure := api.serviceOK(ctx, requestContext, request.ServiceId)
+	response, projectionFailure := api.committedServiceOK(ctx, requestContext, result)
 	if projectionFailure != nil {
 		return EnableService500JSONResponse{InternalErrorJSONResponse(projectionFailure.response(requestIDFromContext(requestContext)))}, nil
 	}
@@ -178,12 +208,12 @@ func (api *managementStrictAPI) EnableService(ctx context.Context, request Enabl
 
 func (api *managementStrictAPI) DisableService(ctx context.Context, request DisableServiceRequestObject) (DisableServiceResponseObject, error) {
 	requestContext := managementRequestContextFrom(ctx)
-	identity, failure := validateServiceMutationIdentity(request.ServiceId, request.Params.IfMatch)
+	_, identity, failure := api.resolveServiceMutation(ctx, requestContext, request.ServiceId, request.Params.IfMatch)
 	if failure != nil {
 		return disableServiceFailure(*failure, requestIDFromContext(requestContext)), nil
 	}
 	enabled := false
-	_, err := api.handler.services.Update(ctx, application.UpdateServiceAPIInput{
+	result, err := api.handler.services.Update(ctx, application.UpdateServiceAPIInput{
 		TunnelID: identity.tunnelID, ServiceID: request.ServiceId,
 		ExpectedTunnelVersion: identity.tunnelVersion, ExpectedServiceVersion: identity.serviceVersion,
 		Enabled: &enabled,
@@ -192,25 +222,24 @@ func (api *managementStrictAPI) DisableService(ctx context.Context, request Disa
 		failure := api.handler.mapServiceError(ctx, requestContext, err)
 		return disableServiceFailure(failure, requestIDFromContext(requestContext)), nil
 	}
-	response, projectionFailure := api.serviceOK(ctx, requestContext, request.ServiceId)
+	response, projectionFailure := api.committedServiceOK(ctx, requestContext, result)
 	if projectionFailure != nil {
 		return DisableService500JSONResponse{InternalErrorJSONResponse(projectionFailure.response(requestIDFromContext(requestContext)))}, nil
 	}
 	return DisableService200JSONResponse{response}, nil
 }
 
-func (api *managementStrictAPI) updatedServiceResponse(ctx context.Context, requestContext *managementRequestContext, serviceID string) (UpdateServiceResponseObject, error) {
-	response, failure := api.serviceOK(ctx, requestContext, serviceID)
-	if failure != nil {
-		return UpdateService500JSONResponse{InternalErrorJSONResponse(failure.response(requestIDFromContext(requestContext)))}, nil
-	}
-	return UpdateService200JSONResponse{response}, nil
-}
-
-func (api *managementStrictAPI) serviceOK(ctx context.Context, requestContext *managementRequestContext, serviceID string) (ServiceOKJSONResponse, *managementFailure) {
-	view, err := api.handler.services.Get(ctx, serviceID)
+// committedServiceOK 从本次 Mutation 结果投影响应；持久化字段、派生状态与 ETag
+// 因此始终绑定同一已提交版本，不会混入后续并发写的 Desired State。
+func (api *managementStrictAPI) committedServiceOK(
+	ctx context.Context,
+	requestContext *managementRequestContext,
+	result application.ServiceAPIMutationResult,
+) (ServiceOKJSONResponse, *managementFailure) {
+	view, err := api.handler.services.ProjectMutation(result)
 	if err != nil {
-		failure := api.handler.mapServiceError(ctx, requestContext, err)
+		api.handler.logInternalError(ctx, requestIDFromContext(requestContext), "management_service_post_commit_projection_failed", err)
+		failure := managementFailure{status: 500, code: APIErrorCodeINTERNALERROR, message: "服务器内部错误"}
 		return ServiceOKJSONResponse{}, &failure
 	}
 	body, err := serviceResponse(view)
@@ -230,37 +259,52 @@ type serviceMutationIdentity struct {
 }
 
 func serviceETag(view application.ServiceView) string {
-	return fmt.Sprintf("\"service:%s:%s:%d:%d\"", view.Service.ID, view.Service.TunnelID, view.Service.Version, view.TunnelVersion)
+	payload := pageFilter(
+		"service", view.Service.ID, "tunnel", view.Service.TunnelID,
+		"service_version", strconv.FormatInt(view.Service.Version, 10),
+		"tunnel_version", strconv.FormatInt(view.TunnelVersion, 10),
+	)
+	digest := sha256.Sum256([]byte(payload))
+	return "\"" + base64.RawURLEncoding.EncodeToString(digest[:]) + "\""
 }
 
-func parseServiceIfMatch(value, serviceID string) (serviceMutationIdentity, error) {
-	if len(value) < 2 || value[0] != '"' || value[len(value)-1] != '"' || strings.HasPrefix(value, "W/") {
-		return serviceMutationIdentity{}, errors.New("invalid Service ETag")
+func validServiceIfMatch(value string) bool {
+	if len(value) < 3 || value[0] != '"' || value[len(value)-1] != '"' || strings.HasPrefix(value, "W/") {
+		return false
 	}
-	parts := strings.Split(value[1:len(value)-1], ":")
-	if len(parts) != 5 || parts[0] != "service" || parts[1] != serviceID || !validate.ValidID(parts[2], "tun_") {
-		return serviceMutationIdentity{}, errors.New("invalid Service ETag")
+	for _, char := range []byte(value[1 : len(value)-1]) {
+		if char != 0x21 && (char < 0x23 || char > 0x7e) && char < 0x80 {
+			return false
+		}
 	}
-	serviceVersion, err := strconv.ParseInt(parts[3], 10, 64)
-	if err != nil || serviceVersion < 1 {
-		return serviceMutationIdentity{}, errors.New("invalid Service ETag")
-	}
-	tunnelVersion, err := strconv.ParseInt(parts[4], 10, 64)
-	if err != nil || tunnelVersion < 1 {
-		return serviceMutationIdentity{}, errors.New("invalid Service ETag")
-	}
-	return serviceMutationIdentity{tunnelID: parts[2], serviceVersion: serviceVersion, tunnelVersion: tunnelVersion}, nil
+	return true
 }
 
-func validateServiceMutationIdentity(serviceID, ifMatch string) (serviceMutationIdentity, *managementFailure) {
+func (api *managementStrictAPI) resolveServiceMutation(
+	ctx context.Context,
+	requestContext *managementRequestContext,
+	serviceID, ifMatch string,
+) (application.ServiceView, serviceMutationIdentity, *managementFailure) {
 	if !validate.ValidID(serviceID, "svc_") {
-		return serviceMutationIdentity{}, &managementFailure{status: 400, code: APIErrorCodeINVALIDREQUEST, message: "Service ID 无效"}
+		return application.ServiceView{}, serviceMutationIdentity{}, &managementFailure{status: 400, code: APIErrorCodeINVALIDREQUEST, message: "Service ID 无效"}
 	}
-	identity, err := parseServiceIfMatch(ifMatch, serviceID)
+	if !validServiceIfMatch(ifMatch) {
+		return application.ServiceView{}, serviceMutationIdentity{}, &managementFailure{status: 400, code: APIErrorCodeINVALIDIFMATCH, message: "If-Match 无效"}
+	}
+	view, err := api.handler.services.Get(ctx, serviceID)
 	if err != nil {
-		return serviceMutationIdentity{}, &managementFailure{status: 400, code: APIErrorCodeINVALIDIFMATCH, message: "If-Match 无效"}
+		failure := api.handler.mapServiceError(ctx, requestContext, err)
+		return application.ServiceView{}, serviceMutationIdentity{}, &failure
 	}
-	return identity, nil
+	expected := serviceETag(view)
+	if subtle.ConstantTimeCompare([]byte(expected), []byte(ifMatch)) != 1 {
+		return application.ServiceView{}, serviceMutationIdentity{}, &managementFailure{
+			status: 412, code: APIErrorCodeRESOURCEVERSIONCONFLICT, message: "Service 版本冲突",
+		}
+	}
+	return view, serviceMutationIdentity{
+		tunnelID: view.Service.TunnelID, serviceVersion: view.Service.Version, tunnelVersion: view.TunnelVersion,
+	}, nil
 }
 
 func createServiceInput(body CreateServiceRequest, expectedTunnelVersion int64) (application.CreateServiceAPIInput, error) {
@@ -622,6 +666,8 @@ func createServiceFailure(f managementFailure, requestID string) CreateServiceRe
 
 func updateServiceFailure(f managementFailure, requestID string) UpdateServiceResponseObject {
 	switch f.status {
+	case 400:
+		return UpdateService400JSONResponse{BadRequestJSONResponse(f.response(requestID))}
 	case 404:
 		return UpdateService404JSONResponse{NotFoundJSONResponse(f.response(requestID))}
 	case 409:
@@ -637,6 +683,8 @@ func updateServiceFailure(f managementFailure, requestID string) UpdateServiceRe
 
 func deleteServiceFailure(f managementFailure, requestID string) DeleteServiceResponseObject {
 	switch f.status {
+	case 400:
+		return DeleteService400JSONResponse{BadRequestJSONResponse(f.response(requestID))}
 	case 404:
 		return DeleteService404JSONResponse{NotFoundJSONResponse(f.response(requestID))}
 	case 412:

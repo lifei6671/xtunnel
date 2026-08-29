@@ -207,6 +207,60 @@ func TestServiceRepositoryFencesTunnelAndVersion(t *testing.T) {
 	}
 }
 
+func TestServiceRepositoryConcurrentUpdateCommitsOnce(t *testing.T) {
+	store := openServiceTestStore(t)
+	seedServiceTestTunnel(t, store, repositoryTestTunnelID)
+	service := testService(serviceTestIDOne, repositoryTestTunnelID)
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		return transaction.Services().Create(context.Background(), service)
+	}); err != nil {
+		t.Fatalf("seed Service error = %v", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, name := range []string{"concurrent-a", "concurrent-b"} {
+		candidate := service
+		candidate.Name = name
+		candidate.UpdatedAt = 2
+		go func() {
+			<-start
+			results <- store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+				_, err := transaction.Services().Update(context.Background(), candidate, 1)
+				return err
+			})
+		}()
+	}
+	close(start)
+
+	var succeeded, conflicted int
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, repository.ErrVersionConflict):
+			conflicted++
+		default:
+			t.Fatalf("concurrent Service Update() error = %v", err)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("concurrent Service Update() results = succeeded:%d conflicted:%d, want 1/1", succeeded, conflicted)
+	}
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		updated, err := view.Services().Get(context.Background(), repositoryTestTunnelID, serviceTestIDOne)
+		if err != nil {
+			return err
+		}
+		if updated.Version != 2 || updated.Name != "concurrent-a" && updated.Name != "concurrent-b" {
+			return errors.New("concurrent Service update did not commit exactly one candidate")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestServiceRepositoryRejectsInvalidDomainAndPreservesForeignKey(t *testing.T) {
 	store := openServiceTestStore(t)
 	services := serviceRepository{database: store.database}
