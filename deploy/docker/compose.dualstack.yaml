@@ -8,6 +8,8 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
       target: server
+      args:
+        XTUNNEL_VERSION: ${XTUNNEL_VERSION:?set XTUNNEL_VERSION}
     user: "65532:65532"
     read_only: true
     # Server 默认 FD 预算为 87188；容器内的非 root 进程不能自行提升硬上限。
@@ -62,6 +64,8 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
       target: agent
+      args:
+        XTUNNEL_VERSION: ${XTUNNEL_VERSION:?set XTUNNEL_VERSION}
     user: "65532:65532"
     read_only: true
     cap_drop:

@@ -4878,6 +4878,8 @@ go build ./cmd/server
 
 `web/embed.go` 与 `web/dist` 位于同一个 Go Package 目录，避免 `go:embed` 跨目录。CI 在执行 `go build` 前必须构建前端；发布源码包若不包含 dist，则普通 Go 构建目标必须依赖该前置步骤。
 
+Server 与 Agent 的产品版本只由 `internal/buildinfo.Version()` 读取。正式 Binary 构建必须同时使用 `-X github.com/lifei6671/xtunnel/internal/buildinfo.version=<version>` 注入同一版本；未注入的普通开发构建固定返回 `(devel)`。版本不读取运行时 Environment、Config 或 VCS Metadata，避免遗漏注入时伪装成正式产物。
+
 开发模式使用 `web/vite.config.ts`：
 
 ```text
@@ -4944,6 +4946,8 @@ Egress Traffic Today
 
 Recent Errors
 ```
+
+当前 Dashboard 已直接展示 Server Status、Tunnel/Connector/Service 计数和 Active Connections。Server Status 只来自 System Health owner，页面不得根据资源数量重算；M6 尚未提供的 Connections Today、Ingress/Egress Traffic Today 与 Recent Errors 必须明确显示 `UNAVAILABLE`，不得用零值伪装为真实统计。
 
 ---
 
@@ -5591,6 +5595,8 @@ Traffic Summary
 Recent Errors
 ```
 
+Dashboard API 复用 System Health 的状态 owner，以及既有 Tunnel/Service Application 投影计算资源计数；不同 owner 的只读快照允许最终一致，但不得访问 SQLite 重算运行态或在前端推导第二套状态。M6 Usage 与 Recent Errors 未接线时固定返回 `UNAVAILABLE`、`null` 或空列表，并明确保留未实现语义。
+
 ---
 
 # 138. System API
@@ -5602,6 +5608,8 @@ GET /system/health
 
 GET /system/config
 ```
+
+`GET /system/info.version` 来自 Server/Agent 共用的链接期 Build Version owner；正式构建必须显式注入，普通开发构建返回 `(devel)`，运行时输入不能覆盖。`started_at` 在进程入口捕获，`uptime_seconds` 使用该启动时间携带的单调时钟计算。`GET /system/health` 执行真实注入检查，Dashboard 只复用聚合结果，不另行重算。
 
 敏感配置：
 
@@ -5623,10 +5631,12 @@ Hostname/TLS Mode、TCP Ingress Port Range、Logging Level，以及 OpenAPI 明�
 GET /security-audit-events
 ```
 
-该资源只提供 GET，不提供 POST/PUT/PATCH/DELETE。结果固定按
-`occurred_at DESC, event_id DESC`，允许按 Action、Result、Resource Type、Resource ID 和
-UTC 时间范围过滤；opaque Cursor 必须绑定全部 Filter。REST 将 32-byte Digest 编码为
-64 字符小写 hex，所有时间统一返回 RFC3339 UTC。
+该资源只提供 GET，不提供 POST/PUT/PATCH/DELETE。结果使用严格的
+`(occurred_at, event_id) DESC` Keyset，允许按 Action、Result、Resource Type、Resource ID
+和 UTC 时间范围过滤；`from` 为 inclusive，`to` 为 exclusive。SQLite 按秒存储事件时间，
+带小数的时间边界向上取整到下一秒后比较；opaque Cursor 必须绑定全部 Filter。REST 将
+32-byte Digest 编码为 64 字符小写 hex，可空 JSON 字段保持 `null`，所有时间统一返回
+RFC3339 UTC `Z`。
 
 ---
 
@@ -5917,7 +5927,7 @@ ExecStart=/usr/local/bin/xtunnel-agent run
 
 Windows Binary 自安装到 `%ProgramFiles%\XTunnel\xtunnel-agent.exe`，并把一次性安装 Token 使用 `CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN` 加密为 `%ProgramData%\XTunnel\credentials\agent.token.dpapi`。SCM Service `XTunnelAgent`（DisplayName `XTunnel Agent`）使用 `NT AUTHORITY\LocalService`，ImagePath 只包含安装 Binary 与 `run`，不包含 Token。该 DPAPI Blob 是安装器内部 Credential，不是用户配置文件或可跨机器复制的明文备份；ACL 只允许管理员、系统和运行服务所必需的身份访问。Token Rotate 后，Linux 或 Windows 管理员都用新的单字符串 Token 重新执行 `service install`，由 Binary 安全替换平台 Credential 并重启 Agent。
 
-OCI/Compose 直接把部署环境中的 Secret 映射为容器内 `XTUNNEL_TOKEN`，不挂 Agent 配置、Token Secret 文件或持久 Volume。
+OCI/Compose 直接把部署环境中的 Secret 映射为容器内 `XTUNNEL_TOKEN`，不挂 Agent 配置、Token Secret 文件或持久 Volume。Server 与 Agent 的官方 OCI 构建必须同时提供同一个 `XTUNNEL_VERSION`；Dockerfile 校验 1 至 64 个安全字符后，通过 `-X github.com/lifei6671/xtunnel/internal/buildinfo.version` 注入两个 Binary，缺失或非法时构建失败。
 
 ---
 
@@ -5943,7 +5953,7 @@ Server 继续使用 `deploy/systemd/install.sh server ...` 与 `uninstall.sh ser
 
 Windows `service install` 把当前可执行文件安装到 `%ProgramFiles%\XTunnel\xtunnel-agent.exe`，写入 DPAPI Machine-scope Credential，再通过 SCM 创建或更新 `XTunnelAgent`。Service 使用 `NT AUTHORITY\LocalService`，ImagePath 只执行 `"%ProgramFiles%\XTunnel\xtunnel-agent.exe" run`。Binary 内嵌的 Description managed marker 精确为 `Managed by xtunnel-agent service install`；同名 Service 缺少该 marker 时拒绝覆盖或卸载。重复安装使用 Windows `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)` 语义分别原子替换 Binary/Credential，更新受管 SCM 配置并重启服务；任一步失败必须明确返回，不得静默报告安装成功。
 
-Agent OCI Image 固定 `CMD ["run"]`，容器只运行数据面进程，不允许在镜像内执行服务安装。官方 Compose v2 Profile 使用自定义 Bridge 并启用 IPv6；IPv4 保持 Docker Bridge 默认启用。Server 与 Agent 必须同时获得 IPv4、IPv6 容器地址。Management 仅发布到宿主机 IPv4/IPv6 回环，Agent Gateway 才发布到宿主机全部 IPv4/IPv6 地址。部署者设置 Compose 输入变量 `XTUNNEL_AGENT_TOKEN`，Compose 将它映射为 Agent 容器内的 `XTUNNEL_TOKEN`；Agent 不声明 Secret mount 或持久 Volume。
+Agent OCI Image 固定 `CMD ["run"]`，容器只运行数据面进程，不允许在镜像内执行服务安装。官方 Compose v2 Profile 使用自定义 Bridge 并启用 IPv6；IPv4 保持 Docker Bridge 默认启用。Server 与 Agent 必须同时获得 IPv4、IPv6 容器地址。Management 仅发布到宿主机 IPv4/IPv6 回环，Agent Gateway 才发布到宿主机全部 IPv4/IPv6 地址。部署者设置 Compose 输入变量 `XTUNNEL_VERSION` 与 `XTUNNEL_AGENT_TOKEN`；前者以同值构建两个 Binary，后者只映射为 Agent 容器内的 `XTUNNEL_TOKEN`。Agent 不声明 Secret mount 或持久 Volume。
 
 Linux 安装命令：
 

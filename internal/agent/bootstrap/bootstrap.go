@@ -16,6 +16,7 @@ import (
 
 	"github.com/lifei6671/xtunnel/internal/agent/connector"
 	"github.com/lifei6671/xtunnel/internal/agent/service"
+	"github.com/lifei6671/xtunnel/internal/buildinfo"
 	"github.com/lifei6671/xtunnel/internal/logging"
 )
 
@@ -24,7 +25,6 @@ const (
 	tokenEnvironment      = "XTUNNEL_TOKEN"
 	credentialsDirectory  = "CREDENTIALS_DIRECTORY"
 	systemdCredentialName = "xtunnel-agent.token"
-	agentVersion          = "v0.1.0-dev"
 )
 
 type lifecycleRunner func(context.Context, string, io.Writer) error
@@ -281,7 +281,7 @@ func runLifecycle(ctx context.Context, token string, stderr io.Writer) error {
 	logger.InfoContext(ctx, "process_started")
 	defer logger.Info("process_stopped")
 
-	config, err := connector.HostConfig(token, agentVersion)
+	config, err := connector.HostConfig(token, buildinfo.Version())
 	if err != nil {
 		return fmt.Errorf("create ephemeral Connector identity: %w", err)
 	}

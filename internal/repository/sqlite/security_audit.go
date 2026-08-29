@@ -85,6 +85,78 @@ type securityAuditEventRepository struct {
 	readOnly bool
 }
 
+// QuerySecurityAuditEvents 按冻结的 (occurred_at, event_id) DESC 顺序读取一页证据。
+// After 使用严格小于比较，确保同一秒内依靠 Event ID 完成稳定、不重叠的翻页。
+func (store *Store) QuerySecurityAuditEvents(
+	ctx context.Context,
+	query repository.SecurityAuditEventQuery,
+) (repository.SecurityAuditEventPage, error) {
+	if ctx == nil {
+		return repository.SecurityAuditEventPage{}, repository.ErrInvalidSecurityAuditEventQuery
+	}
+	if err := query.Validate(); err != nil {
+		return repository.SecurityAuditEventPage{}, err
+	}
+
+	database := store.database.WithContext(ctx).Model(&securityAuditEventRecord{})
+	if query.Action != "" {
+		database = database.Where(SecurityAuditEventColumns.Action+" = ?", query.Action)
+	}
+	if query.Result != "" {
+		database = database.Where(SecurityAuditEventColumns.Result+" = ?", query.Result)
+	}
+	if query.ResourceType != "" {
+		database = database.Where(SecurityAuditEventColumns.ResourceType+" = ?", query.ResourceType)
+	}
+	if query.ResourceID != "" {
+		database = database.Where(SecurityAuditEventColumns.ResourceID+" = ?", query.ResourceID)
+	}
+	if query.OccurredFrom != nil {
+		database = database.Where(SecurityAuditEventColumns.OccurredAt+" >= ?", *query.OccurredFrom)
+	}
+	if query.OccurredTo != nil {
+		database = database.Where(SecurityAuditEventColumns.OccurredAt+" < ?", *query.OccurredTo)
+	}
+	if query.After != nil {
+		database = database.Where(
+			"("+SecurityAuditEventColumns.OccurredAt+" < ?) OR ("+
+				SecurityAuditEventColumns.OccurredAt+" = ? AND "+SecurityAuditEventColumns.EventID+" < ?)",
+			query.After.OccurredAt,
+			query.After.OccurredAt,
+			query.After.EventID,
+		)
+	}
+
+	var records []securityAuditEventRecord
+	if err := database.
+		Order(SecurityAuditEventColumns.OccurredAt + " DESC").
+		Order(SecurityAuditEventColumns.EventID + " DESC").
+		Limit(query.Limit + 1).
+		Find(&records).Error; err != nil {
+		return repository.SecurityAuditEventPage{}, fmt.Errorf("query security audit events: %w", err)
+	}
+
+	hasNext := len(records) > query.Limit
+	if hasNext {
+		records = records[:query.Limit]
+	}
+	page := repository.SecurityAuditEventPage{
+		Events: make([]repository.SecurityAuditEvent, 0, len(records)),
+	}
+	for _, record := range records {
+		event := record.toDomain()
+		if err := event.Validate(); err != nil {
+			return repository.SecurityAuditEventPage{}, fmt.Errorf("decode security audit event %q: %w", record.EventID, err)
+		}
+		page.Events = append(page.Events, event)
+	}
+	if hasNext {
+		last := page.Events[len(page.Events)-1]
+		page.Next = &repository.SecurityAuditEventCursor{OccurredAt: last.OccurredAt, EventID: last.EventID}
+	}
+	return page, nil
+}
+
 // Append 幂等追加事件。相同 Event ID 与 Operation ID 的完全相同重放视为成功；
 // 任一 ID 已绑定到不同内容时快速失败，绝不覆盖已有证据。
 func (store securityAuditEventRepository) Append(ctx context.Context, event repository.SecurityAuditEvent) error {
@@ -136,6 +208,28 @@ func securityAuditEventRecordFromDomain(event repository.SecurityAuditEvent) sec
 	}
 }
 
+// toDomain 返回与 GORM 扫描缓存解耦的事件，避免上层修改 Digest 时污染后续读取。
+func (record securityAuditEventRecord) toDomain() repository.SecurityAuditEvent {
+	return repository.SecurityAuditEvent{
+		EventID:           record.EventID,
+		OperationID:       record.OperationID,
+		Event:             record.Event,
+		Action:            record.Action,
+		ActorType:         record.ActorType,
+		ActorID:           valueOrEmpty(record.ActorID),
+		SourceIP:          valueOrEmpty(record.SourceIP),
+		ResourceType:      record.ResourceType,
+		ResourceID:        record.ResourceID,
+		Result:            record.Result,
+		ErrorCode:         valueOrEmpty(record.ErrorCode),
+		RequestID:         valueOrEmpty(record.RequestID),
+		TraceID:           valueOrEmpty(record.TraceID),
+		BeforeStateDigest: nullableBytes(record.BeforeStateDigest),
+		AfterStateDigest:  nullableBytes(record.AfterStateDigest),
+		OccurredAt:        record.OccurredAt,
+	}
+}
+
 // equal 用于幂等追加：同一 Event ID 只有逐字段完全一致才算安全重放，任何差异
 // 都必须报告冲突，不能覆盖或吞掉已经落库的审计事实。
 func (record securityAuditEventRecord) equal(other securityAuditEventRecord) bool {
@@ -164,6 +258,13 @@ func nullableBytes(value []byte) []byte {
 		return nil
 	}
 	return append([]byte(nil), value...)
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // equalNullableString 保留 NULL 与空字符串的语义差异。

@@ -61,6 +61,9 @@ type HandlerOptions struct {
 	Credentials     *application.CredentialLifecycleService
 	TunnelLifecycle *application.TunnelLifecycleService
 	Services        *application.ServiceAPIService
+	System          *application.SystemReadService
+	SecurityAudits  *application.SecurityAuditQueryService
+	Dashboard       *application.DashboardService
 	Logger          *slog.Logger
 }
 
@@ -71,6 +74,9 @@ type ManagementHandler struct {
 	credentials               *application.CredentialLifecycleService
 	tunnelLifecycle           *application.TunnelLifecycleService
 	services                  *application.ServiceAPIService
+	system                    *application.SystemReadService
+	securityAudits            *application.SecurityAuditQueryService
+	dashboard                 *application.DashboardService
 	security                  *managementSecurityPolicy
 	limiter                   *loginFailureLimiter
 	passwordVerificationSlots chan struct{}
@@ -113,6 +119,9 @@ func NewHandler(options HandlerOptions) (*ManagementHandler, error) {
 		credentials:               options.Credentials,
 		tunnelLifecycle:           options.TunnelLifecycle,
 		services:                  options.Services,
+		system:                    options.System,
+		securityAudits:            options.SecurityAudits,
+		dashboard:                 options.Dashboard,
 		security:                  security,
 		limiter:                   newLoginFailureLimiter(time.Now),
 		passwordVerificationSlots: make(chan struct{}, loginPasswordVerificationConcurrency),
@@ -187,6 +196,8 @@ func (handler *ManagementHandler) ServeHTTP(writer http.ResponseWriter, request 
 			return
 		}
 		handler.api.ServeHTTP(writer, request)
+	case handler.readAPIReady(request.URL.Path):
+		handler.api.ServeHTTP(writer, request)
 	case request.URL.Path == "/api/v1" || strings.HasPrefix(request.URL.Path, "/api/v1/auth/"):
 		handler.api.ServeHTTP(writer, request)
 	case strings.HasPrefix(request.URL.Path, "/api/v1/"):
@@ -235,6 +246,19 @@ func (handler *ManagementHandler) serviceAPIReady() bool { return handler.servic
 
 func isServiceAPIPath(path string) bool {
 	return path == "/api/v1/services" || strings.HasPrefix(path, "/api/v1/services/")
+}
+
+func (handler *ManagementHandler) readAPIReady(path string) bool {
+	switch path {
+	case "/api/v1/system/info", "/api/v1/system/health", "/api/v1/system/config":
+		return handler.system != nil
+	case "/api/v1/security-audit-events":
+		return handler.securityAudits != nil
+	case "/api/v1/dashboard":
+		return handler.dashboard != nil
+	default:
+		return false
+	}
 }
 
 // prepareServiceRequest 在生成 Decoder 前固定 Service Create 与 Merge Patch 的

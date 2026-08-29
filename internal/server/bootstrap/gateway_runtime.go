@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/application"
+	"github.com/lifei6671/xtunnel/internal/buildinfo"
 	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
@@ -472,7 +473,17 @@ func (closer *gatewayBootstrapCloser) RuntimeErrors() <-chan error {
 // openGatewayAndBootstrap 在通用 Gateway 生命周期之外接入生产 Backup Barrier Socket。
 // Barrier 必须与 Server 共用同一个 SQLite Store 和 target hash，不能另开配置来源。
 func openGatewayAndBootstrap(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
-	lifecycle, err := openGatewayAndBootstrapWith(ctx, config, resources, logger, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
+	return openGatewayAndBootstrapAt(ctx, config, resources, logger, time.Now())
+}
+
+func openGatewayAndBootstrapAt(
+	ctx context.Context,
+	config serverconfig.Config,
+	resources storage,
+	logger *slog.Logger,
+	startedAt time.Time,
+) (io.Closer, error) {
+	lifecycle, err := openGatewayAndBootstrapWithStartedAt(ctx, config, resources, logger, startedAt, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
 		return openAdminBootstrapSocketAfter(ctx, runtimeDir, targetHash, store, afterCreate, reportRuntimeError)
 	})
 	if err != nil {
@@ -513,6 +524,18 @@ func openGatewayAndBootstrapWith(
 	config serverconfig.Config,
 	resources storage,
 	logger *slog.Logger,
+	runtimeDir string,
+	openBootstrapSocket func(context.Context, string, string, *sqlite.Store, func() error, func(error)) (io.Closer, error),
+) (io.Closer, error) {
+	return openGatewayAndBootstrapWithStartedAt(ctx, config, resources, logger, time.Now(), runtimeDir, openBootstrapSocket)
+}
+
+func openGatewayAndBootstrapWithStartedAt(
+	ctx context.Context,
+	config serverconfig.Config,
+	resources storage,
+	logger *slog.Logger,
+	startedAt time.Time,
 	runtimeDir string,
 	openBootstrapSocket func(context.Context, string, string, *sqlite.Store, func() error, func(error)) (io.Closer, error),
 ) (io.Closer, error) {
@@ -654,15 +677,43 @@ func openGatewayAndBootstrapWith(
 	serviceAPI := application.NewServiceAPIService(
 		serviceOwner, tcpPolicy, routes, sessions, limitManager, tcpIngress,
 	)
+	tunnels := application.NewTunnelManagementService(
+		serverResources.database, tokenService, sessions, endpoint, tlsTrust, config.Limits.MaxTunnels,
+	)
+	systemRead, err := application.NewSystemReadService(
+		buildinfo.Version(),
+		startedAt,
+		config,
+		func(checkContext context.Context) application.SystemHealthCheckResult {
+			if _, checkErr := serverResources.database.HasAdmin(checkContext); checkErr != nil {
+				message := "SQLite 只读检查失败"
+				return application.SystemHealthCheckResult{
+					Name: "sqlite", Status: application.SystemHealthDegraded, Message: &message,
+				}
+			}
+			return application.SystemHealthCheckResult{Name: "sqlite", Status: application.SystemHealthReady}
+		},
+	)
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("construct management system read service: %w", err),
+			httpIngress.Close(),
+			tcpIngress.Close(),
+			gatewayServer.Close(),
+		)
+	}
 	managementHandler, err := servermanagementapi.NewHandler(servermanagementapi.HandlerOptions{
-		Management: config.Management,
-		Store:      serverResources.database,
-		Tunnels: application.NewTunnelManagementService(
-			serverResources.database, tokenService, sessions, endpoint, tlsTrust, config.Limits.MaxTunnels,
-		),
+		Management:      config.Management,
+		Store:           serverResources.database,
+		Tunnels:         tunnels,
 		Credentials:     application.NewCredentialLifecycleService(tokenService, auditWriter),
 		TunnelLifecycle: application.NewTunnelLifecycleService(serverResources.database, auditWriter, sessions),
 		Services:        serviceAPI,
+		System:          systemRead,
+		SecurityAudits:  application.NewSecurityAuditQueryService(serverResources.database),
+		Dashboard:       application.NewDashboardService(tunnels, serviceAPI, systemRead),
 		Logger:          logger,
 	})
 	if err != nil {

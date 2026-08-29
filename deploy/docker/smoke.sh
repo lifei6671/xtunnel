@@ -16,6 +16,7 @@ target=server
 platform=linux/amd64
 image=
 build_image=1
+build_version=${XTUNNEL_VERSION:-v0.1.0-smoke}
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -102,6 +103,7 @@ if [ "$build_image" -eq 1 ]; then
 		--load \
 		--platform "$platform" \
 		--target "$target" \
+		--build-arg "XTUNNEL_VERSION=$build_version" \
 		--tag "$image" \
 		--file "$script_dir/Dockerfile" \
 		"$repo_dir"
@@ -222,6 +224,15 @@ verify_runtime_mounts() {
 	fi
 }
 
+verify_embedded_version() {
+	[ "$build_image" -eq 1 ] || return 0
+	binary_path="$layout_dir/xtunnel-$target"
+	docker cp "$container:$expected_entrypoint" "$binary_path"
+	# Linker 符号在最终 Distroless Image 中没有可执行的诊断 Shell；直接从刚构建
+	# 的 Binary 查找精确测试版本，并与 buildinfo 的 Linker 子进程测试共同锁定接线。
+	LC_ALL=C grep -aF -- "$build_version" "$binary_path" >/dev/null
+}
+
 verify_server_data_layout() {
 	[ "$target" = server ] || return 0
 	rm -f -- "$layout_dir/xtunnel.db" "$layout_dir/legacy-xtunnel.db"
@@ -298,6 +309,7 @@ verify_server_runtime_boundary
 container=$(run_target)
 wait_for_start
 verify_runtime_mounts
+verify_embedded_version
 verify_server_data_layout
 stop_target
 

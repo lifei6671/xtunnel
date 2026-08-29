@@ -1,5 +1,9 @@
 import {
+  Activity,
+  AlertTriangle,
   Bot,
+  Cable,
+  CircleCheck,
   KeyRound,
   LayoutDashboard,
   LoaderCircle,
@@ -7,6 +11,7 @@ import {
   LogOut,
   Network,
   RadioTower,
+  RefreshCw,
   Server,
   Settings,
   ShieldCheck,
@@ -18,6 +23,7 @@ import { apiClient } from "./api/client";
 import type { components } from "./api/schema.gen";
 
 type AuthSession = components["schemas"]["AuthSession"];
+type Dashboard = components["schemas"]["Dashboard"];
 type APIErrorEnvelope =
   | components["schemas"]["ErrorResponse"]
   | components["schemas"]["SetupRequiredErrorResponse"];
@@ -27,18 +33,17 @@ type AuthState =
   | { status: "anonymous"; message?: string }
   | { status: "authenticated"; session: AuthSession };
 
+type DashboardState =
+  | { status: "loading" }
+  | { status: "ready"; dashboard: Dashboard }
+  | { status: "error"; message: string };
+
 const navigation = [
   { label: "概览", icon: LayoutDashboard },
   { label: "Agent 管理", icon: Bot },
   { label: "服务与隧道", icon: Network },
   { label: "访问入口", icon: RadioTower },
   { label: "系统设置", icon: Settings },
-] as const;
-
-const foundationStatus = [
-  ["管理认证", "已启用", "管理员 Session 与 CSRF 保护已接入"],
-  ["同源代理", "已就绪", "/api/v1 保持浏览器 Host 与 Origin"],
-  ["生产构建", "已嵌入", "静态资源随 Server Binary 一起交付"],
 ] as const;
 
 function isAbortError(error: unknown) {
@@ -240,6 +245,36 @@ function Console({ session, onSessionExpired }: {
 }) {
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string>();
+  const [dashboard, setDashboard] = useState<DashboardState>({ status: "loading" });
+
+  async function loadDashboard(signal?: AbortSignal) {
+    setDashboard({ status: "loading" });
+    try {
+      const result = await apiClient.GET("/dashboard", { signal });
+      if (result.data) {
+        setDashboard({ status: "ready", dashboard: result.data as Dashboard });
+        return;
+      }
+      if (result.response.status === 401) {
+        onSessionExpired("管理会话已过期，请重新登录。");
+        return;
+      }
+      setDashboard({
+        status: "error",
+        message: apiErrorMessage(result.error as APIErrorEnvelope | undefined) ?? "无法读取运行状态。",
+      });
+    } catch (error: unknown) {
+      if (!isAbortError(error)) {
+        setDashboard({ status: "error", message: "无法连接管理服务，请稍后重试。" });
+      }
+    }
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadDashboard(controller.signal);
+    return () => controller.abort();
+  }, []);
 
   async function logout() {
     setLoggingOut(true);
@@ -320,57 +355,171 @@ function Console({ session, onSessionExpired }: {
         <div className="page-heading">
           <p className="breadcrumb">工作台 / 概览</p>
           <h1>概览</h1>
-          <p>查看 XTunnel 管理面的接入状态。其余业务页面将在对应 REST API 完成后开放。</p>
+          <p>所有状态均直接来自 Server 权威快照；控制台只负责呈现，不在浏览器内重新判定。</p>
         </div>
 
-        <section className="status-grid" aria-label="工程基础状态">
-          {foundationStatus.map(([label, state, detail]) => (
-            <article className="status-card" key={label}>
-              <div className="status-card-heading">
-                <h2>{label}</h2>
-                <span>{state}</span>
-              </div>
-              <p>{detail}</p>
-            </article>
-          ))}
-        </section>
+        {dashboard.status === "loading" ? (
+          <section className="dashboard-loading" aria-live="polite" aria-busy="true">
+            <LoaderCircle className="button-spinner" aria-hidden="true" />
+            正在读取 Server 快照…
+          </section>
+        ) : null}
 
-        <section className="data-panel" aria-labelledby="resources-title">
-          <div className="panel-heading">
+        {dashboard.status === "error" ? (
+          <section className="dashboard-error" role="alert">
+            <AlertTriangle aria-hidden="true" />
             <div>
-              <h2 id="resources-title">资源状态</h2>
-              <p>Agent、服务与隧道的真实运行数据将在接口接入后展示。</p>
+              <strong>运行状态暂不可用</strong>
+              <p>{dashboard.message}</p>
             </div>
-            <span className="panel-state">等待业务 API</span>
-          </div>
+            <button type="button" onClick={() => void loadDashboard()}>
+              <RefreshCw aria-hidden="true" />重新读取
+            </button>
+          </section>
+        ) : null}
 
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">资源名称</th>
-                  <th scope="col">资源类型</th>
-                  <th scope="col">运行状态</th>
-                  <th scope="col">最近更新</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td colSpan={4}>
-                    <div className="empty-state">
-                      <span className="empty-icon" aria-hidden="true" />
-                      <strong>暂无资源数据</strong>
-                      <span>当前已完成管理认证，不展示尚未接入的推测数据。</span>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
+        {dashboard.status === "ready" ? (
+          <DashboardView dashboard={dashboard.dashboard} onRefresh={() => void loadDashboard()} />
+        ) : null}
       </main>
     </div>
   );
+}
+
+function DashboardView({ dashboard, onRefresh }: {
+  dashboard: Dashboard;
+  onRefresh: () => void;
+}) {
+  const counts = dashboard.counts;
+  const trafficAvailable = dashboard.traffic.availability === "AVAILABLE";
+  const errorsAvailable = dashboard.recent_errors.availability === "AVAILABLE";
+
+  return (
+    <div className="dashboard-stack">
+      <section className="control-spine" aria-labelledby="control-spine-title">
+        <div className="section-heading">
+          <div>
+            <p className="section-kicker">CONTROL CHAIN</p>
+            <h2 id="control-spine-title">控制链状态</h2>
+          </div>
+          <div className="snapshot-meta">
+            <span>{new Date(dashboard.generated_at).toLocaleString("zh-CN", { hour12: false })}</span>
+            <button type="button" onClick={onRefresh} aria-label="刷新运行状态">
+              <RefreshCw aria-hidden="true" />刷新
+            </button>
+          </div>
+        </div>
+
+        <div className="spine-track">
+          <article className={`spine-node server-node ${dashboard.server_status.toLowerCase()}`}>
+            <span className="spine-icon"><Server aria-hidden="true" /></span>
+            <div>
+              <small>SERVER</small>
+              <strong>{dashboard.server_status}</strong>
+              <p>管理面权威状态</p>
+            </div>
+          </article>
+          <span className="spine-link" aria-hidden="true" />
+          <article className="spine-node">
+            <span className="spine-icon"><Network aria-hidden="true" /></span>
+            <div>
+              <small>TUNNEL</small>
+              <strong>{counts.tunnels_online} / {counts.tunnels_total}</strong>
+              <p>在线 · 离线 {counts.tunnels_offline}</p>
+            </div>
+          </article>
+          <span className="spine-link" aria-hidden="true" />
+          <article className="spine-node">
+            <span className="spine-icon"><Cable aria-hidden="true" /></span>
+            <div>
+              <small>CONNECTOR</small>
+              <strong>{counts.connectors_online}</strong>
+              <p>当前在线</p>
+            </div>
+          </article>
+          <span className="spine-link" aria-hidden="true" />
+          <article className="spine-node">
+            <span className="spine-icon"><CircleCheck aria-hidden="true" /></span>
+            <div>
+              <small>SERVICE</small>
+              <strong>{counts.services_ready} / {counts.services_total}</strong>
+              <p>就绪 · 应用失败 {counts.services_error}</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section className="operations-grid" aria-label="运行指标">
+        <article className="operations-panel active-connections">
+          <div className="metric-heading">
+            <span><Activity aria-hidden="true" />实时连接</span>
+            <small>LIVE</small>
+          </div>
+          <strong className="metric-value">{counts.active_connections.toLocaleString("zh-CN")}</strong>
+          <p>当前活跃连接，由 Server 快照直接返回。</p>
+        </article>
+
+        <article className="operations-panel traffic-panel">
+          <div className="metric-heading">
+            <span><RadioTower aria-hidden="true" />今日流量</span>
+            <small>{dashboard.traffic.availability}</small>
+          </div>
+          {trafficAvailable ? (
+            <dl className="traffic-values">
+              <div><dt>连接</dt><dd>{dashboard.traffic.connections_today?.toLocaleString("zh-CN")}</dd></div>
+              <div><dt>入站</dt><dd>{formatBytes(dashboard.traffic.ingress_bytes_today)}</dd></div>
+              <div><dt>出站</dt><dd>{formatBytes(dashboard.traffic.egress_bytes_today)}</dd></div>
+            </dl>
+          ) : (
+            <div className="unavailable-state">
+              <span>—</span>
+              <p>M6 Usage Read Model 尚未接入，未将缺失数据伪造为 0。</p>
+            </div>
+          )}
+        </article>
+
+        <article className="operations-panel recent-errors">
+          <div className="metric-heading">
+            <span><AlertTriangle aria-hidden="true" />最近错误</span>
+            <small>{dashboard.recent_errors.availability}</small>
+          </div>
+          {errorsAvailable && dashboard.recent_errors.items.length > 0 ? (
+            <ul className="error-list">
+              {dashboard.recent_errors.items.map((item) => (
+                <li key={`${item.occurred_at}-${item.code}`}>
+                  <strong>{item.code}</strong>
+                  <span>{item.message}</span>
+                  <time dateTime={item.occurred_at}>{new Date(item.occurred_at).toLocaleString("zh-CN", { hour12: false })}</time>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="unavailable-state compact">
+              <span>—</span>
+              <p>{errorsAvailable ? "当前快照没有最近错误。" : "M6 Error Read Model 尚未接入。"}</p>
+            </div>
+          )}
+        </article>
+      </section>
+    </div>
+  );
+}
+
+function formatBytes(value: number | null) {
+  if (value === null) {
+    return "—";
+  }
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let amount = value / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && amount >= 1024; index += 1) {
+    amount /= 1024;
+    unit = units[index];
+  }
+  return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${unit}`;
 }
 
 export function App() {

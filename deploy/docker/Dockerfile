@@ -1,3 +1,5 @@
+ARG XTUNNEL_VERSION
+
 FROM --platform=$BUILDPLATFORM node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS web-build
 WORKDIR /src/web
 
@@ -27,15 +29,34 @@ COPY migrations ./migrations
 COPY web/embed.go ./web/embed.go
 COPY --from=web-build /src/web/dist ./web/dist
 
-FROM go-source AS agent-build
-ARG TARGETOS
-ARG TARGETARCH
-RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -p=1 -mod=readonly -trimpath -ldflags='-s -w' -o /out/xtunnel-agent ./cmd/agent
+FROM go-source AS versioned-go-source
+ARG XTUNNEL_VERSION
+RUN case "$XTUNNEL_VERSION" in \
+        ''|[!0-9A-Za-z]*|*[!0-9A-Za-z._+-]*) \
+            printf '%s\n' 'XTUNNEL_VERSION must be 1-64 characters using letters, digits, dot, underscore, plus, or hyphen' >&2; \
+            exit 1 \
+            ;; \
+    esac \
+    && if [ "${#XTUNNEL_VERSION}" -gt 64 ]; then \
+        printf '%s\n' 'XTUNNEL_VERSION must be 1-64 characters using letters, digits, dot, underscore, plus, or hyphen' >&2; \
+        exit 1; \
+    fi
 
-FROM go-source AS server-build
+FROM versioned-go-source AS agent-build
 ARG TARGETOS
 ARG TARGETARCH
-RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -p=1 -mod=readonly -trimpath -ldflags='-s -w' -o /out/xtunnel-server ./cmd/server \
+ARG XTUNNEL_VERSION
+RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -p=1 -mod=readonly -trimpath \
+    -ldflags="-s -w -X github.com/lifei6671/xtunnel/internal/buildinfo.version=$XTUNNEL_VERSION" \
+    -o /out/xtunnel-agent ./cmd/agent
+
+FROM versioned-go-source AS server-build
+ARG TARGETOS
+ARG TARGETARCH
+ARG XTUNNEL_VERSION
+RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -p=1 -mod=readonly -trimpath \
+        -ldflags="-s -w -X github.com/lifei6671/xtunnel/internal/buildinfo.version=$XTUNNEL_VERSION" \
+        -o /out/xtunnel-server ./cmd/server \
     && install -d -o 65532 -g 65532 -m 0700 \
         /out/runtime/run/xtunnel \
         /out/runtime/var/lib/xtunnel \

@@ -1,6 +1,6 @@
 # XTunnel
 
-XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面、M2 Credential Lifecycle & Failover Hardening、M3 Configuration/Health/Durable Operations、M4 Product Data Plane、M5-01 OpenAPI Contract Freeze、M5-02 Generated Client/Server Contract、M5-03 Admin Login/Session/CSRF、M5-04 Tunnel/Connector/Credential API、M5-05 Service API 和 M5-06 PATCH/ETag/Pagination 并发契约均已通过验收、精确 CI 与用户阶段复审。Tunnel CRUD/Revoke、Token Reveal/Rotate/Revoke、四类部署命令、只读运行态 Connector 列表，以及 7 个 Service Operation、唯一 Nested Exposure 事务与运行态状态投影均已接入生成 Contract；Tunnel、Connector 和 Service List 已接入 HMAC opaque Pagination，Tunnel/Service 已覆盖完整 428/412、PATCH omitted/null/value 和原子 CAS 并发矩阵。其余 Management REST Handler、日常管理页面和 `/metrics` 导出仍由后续任务实现。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算、生产 HTTP Ingress，以及按持久化 Route 恢复的 Raw TCP/SSH Listener 与转发生命周期；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。
+XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面、M2 Credential Lifecycle & Failover Hardening、M3 Configuration/Health/Durable Operations、M4 Product Data Plane、M5-01 OpenAPI Contract Freeze、M5-02 Generated Client/Server Contract、M5-03 Admin Login/Session/CSRF、M5-04 Tunnel/Connector/Credential API、M5-05 Service API 和 M5-06 PATCH/ETag/Pagination 并发契约均已通过验收、精确 CI 与用户阶段复审。Tunnel CRUD/Revoke、Token Reveal/Rotate/Revoke、四类部署命令、只读运行态 Connector 列表，以及 7 个 Service Operation、唯一 Nested Exposure 事务与运行态状态投影均已接入生成 Contract；Tunnel、Connector 和 Service List 已接入 HMAC opaque Pagination，Tunnel/Service 已覆盖完整 428/412、PATCH omitted/null/value 和原子 CAS 并发矩阵。M5-07 的 System/Config/Security Audit 只读 Handler 与 M5-08 的 Dashboard API/UI 已完成本地实现并进入 `REVIEW`；Tunnel/Connector/Service 日常管理页面和 `/metrics` 导出仍由后续任务实现。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算、生产 HTTP Ingress，以及按持久化 Route 恢复的 Raw TCP/SSH Listener 与转发生命周期；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。
 
 ## 开发运行
 
@@ -47,10 +47,15 @@ Pop-Location
 
 $env:GOTOOLCHAIN='local'
 go test ./...
-go build ./cmd/server
+$buildVersion='v0.1.0-local'
+$ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$buildVersion"
+go build -ldflags $ldflags ./cmd/server
+go build -ldflags $ldflags ./cmd/agent
 ```
 
-`web/dist` 是被忽略的可重复构建产物，不提交占位文件；缺少生产构建时 Go Embed 会直接编译失败。当前 Web 已接入生成的同源 API Client，并提供登录、`SETUP_REQUIRED` 引导、会话恢复和退出界面；CSRF Token 只保存在页面内存中。Tunnel/Connector/Service 等日常管理页面仍由 M5-08/M5-09 实现。
+`v0.1.0-local` 只用于本地开发；正式发布值由发布流程同时注入 Server 与 Agent。未显式注入的普通构建固定报告 `(devel)`，运行时配置和环境变量不能覆盖 Binary Version。
+
+`web/dist` 是被忽略的可重复构建产物，不提交占位文件；缺少生产构建时 Go Embed 会直接编译失败。当前 Web 已接入生成的同源 API Client，并提供登录、`SETUP_REQUIRED` 引导、会话恢复、退出和 Dashboard；CSRF Token 只保存在页面内存中。Agent、Service、Ingress 与 Settings 导航仍禁用待接入，Tunnel/Connector/Service 日常管理 UI 属于 M5-09。
 
 本地开发只允许 HTTPS。将两个环境变量指向仓库外已信任的 Loopback Certificate 和 Private Key，并把 `management.public_url` 配置为浏览器实际使用的 Vite HTTPS Origin：
 
@@ -124,8 +129,8 @@ M4-09 已把 Public Ingress 限额接入真实入口。Raw TCP 在 `Accept` 后�
 Server 默认配置的启动 FD 预算为 `137192`。其中 TCP Listener 按默认逻辑端口池 `10000..60000` 的最大占用量和一个原子换口候选计入峰值预算，但启动时只绑定已启用 Route 的具体端口。仓库提供的 Compose 和 systemd Unit 将 `nofile` soft/hard limit 固定为 `1048576`；若绕过这些入口直接运行 Server OCI 镜像，也必须向容器提供同等上限，例如 `--ulimit nofile=1048576:1048576`。应用仍按配置预算限制实际连接数，不会因为提高进程上限而无界占用 FD。
 
 ```sh
-docker buildx build --load --platform linux/amd64 --target server --tag xtunnel-server:local -f deploy/docker/Dockerfile .
-docker buildx build --load --platform linux/amd64 --target agent --tag xtunnel-agent:local -f deploy/docker/Dockerfile .
+docker buildx build --load --platform linux/amd64 --target server --build-arg XTUNNEL_VERSION=v0.1.0-local --tag xtunnel-server:local -f deploy/docker/Dockerfile .
+docker buildx build --load --platform linux/amd64 --target agent --build-arg XTUNNEL_VERSION=v0.1.0-local --tag xtunnel-agent:local -f deploy/docker/Dockerfile .
 
 ./deploy/docker/smoke.sh --target server --platform linux/amd64
 ./deploy/docker/smoke.sh --target agent --platform linux/amd64
@@ -137,6 +142,7 @@ docker buildx build --load --platform linux/amd64 --target agent --tag xtunnel-a
 export XTUNNEL_MANAGEMENT_PUBLIC_URL=https://admin.example.com
 export XTUNNEL_AGENT_GATEWAY_HOSTNAME=tunnel.example.com
 export XTUNNEL_AGENT_TOKEN='xta_...'
+export XTUNNEL_VERSION=v0.1.0-local
 
 docker compose --file deploy/docker/compose.dualstack.yaml up --build --detach
 docker compose --file deploy/docker/compose.dualstack.yaml down
@@ -144,7 +150,7 @@ docker compose --file deploy/docker/compose.dualstack.yaml down
 sh deploy/docker/dualstack-smoke.sh --platform linux/amd64
 ```
 
-Compose 内部使用 `:8080`、`:7443` 表示双栈通配监听。Server 的底层监听原语会为这种空 Host 地址分别创建原生 `tcp4`、`tcp6` Socket；显式 IPv4 或 IPv6 地址仍保持单一地址族。当前该双栈原语尚未接入 Server 启动路径；Management 和 Ingress 仍未实现，Agent Gateway 已由独立 Listener 接入首个 Admin 之后的生产生命周期，但尚未取得 Compose 双栈应用连通证据。因此现阶段的 Compose Smoke 只证明双栈网络、宿主端口绑定、OCI 安全边界与进程生命周期，不代表双栈 Agent Gateway 已可建立应用连接，也不证明公网 IPv6 路由或防火墙已经就绪。
+Compose 内部使用 `:8080`、`:7443` 表示双栈通配监听。Server 的底层监听原语会为这种空 Host 地址分别创建原生 `tcp4`、`tcp6` Socket；显式 IPv4 或 IPv6 地址仍保持单一地址族。Management、HTTP/TCP Ingress 与 Agent Gateway 均已接入生产启动生命周期，但该双栈监听原语尚未接入这些产品 Listener，也尚未取得 Compose 双栈应用连通证据。因此现阶段的 Compose Smoke 只证明双栈网络、宿主端口绑定、OCI 安全边界与进程生命周期，不代表 Management、Ingress 或 Agent Gateway 已通过双栈应用连接验收，也不证明公网 IPv6 路由或防火墙已经就绪。
 
 Agent systemd 自安装只支持 root、Linux 和 systemd 249 及以上；任一条件不满足都会在写文件或创建用户前快速失败。Binary 内嵌首行为 `# Managed by xtunnel-agent service install` 的 Unit，`service install` 创建 `xtunnel-agent` 系统用户/组，把当前 Binary 原子安装到 `/usr/local/bin/xtunnel-agent`，并创建 `/etc/xtunnel/credentials/agent.token`（父目录 `root:root 0700`、文件 `root:root 0600`）。Unit 使用 `LoadCredential` 注入 Token，`ExecStart=/usr/local/bin/xtunnel-agent run`，不含 Secret。已有 Unit 不是普通文件或缺少该 marker 时拒绝覆盖或卸载。
 

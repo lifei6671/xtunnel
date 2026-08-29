@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
 )
@@ -27,6 +28,9 @@ const (
 	maxAuditErrorCodeBytes   = 64
 	maxAuditCorrelationBytes = 128
 	auditDigestBytes         = 32
+	// MaxSecurityAuditEventQueryLimit 是 Repository 单次只读查询的硬上限。
+	// Handler 仍负责应用 API 默认值并在进入 Application 前拒绝超限输入。
+	MaxSecurityAuditEventQueryLimit = 200
 )
 
 var (
@@ -34,6 +38,8 @@ var (
 	ErrInvalidSecurityAuditEvent = errors.New("security audit event is invalid")
 	// ErrSecurityAuditConflict 表示相同事件或操作 ID 已绑定到不同内容。
 	ErrSecurityAuditConflict = errors.New("security audit event conflicts with existing evidence")
+	// ErrInvalidSecurityAuditEventQuery 表示查询筛选、时间边界或 keyset 不合法。
+	ErrInvalidSecurityAuditEventQuery = errors.New("security audit event query is invalid")
 )
 
 // SecurityAuditEvent 是 M1/M2 写入的最小持久化安全证据。
@@ -115,6 +121,84 @@ func validRequiredAuditText(value string, maximum int) bool {
 
 func validOptionalAuditDigest(value []byte) bool {
 	return len(value) == 0 || len(value) == auditDigestBytes
+}
+
+// SecurityAuditEventCursor 是已经由上层 opaque cursor codec 验证过的稳定分页键。
+// Repository 只按该键执行 keyset 查询，不负责编码 cursor 或重新绑定筛选条件。
+type SecurityAuditEventCursor struct {
+	OccurredAt int64
+	EventID    string
+}
+
+// SecurityAuditEventQuery 描述安全审计事件的只读筛选。
+// OccurredFrom 包含边界，OccurredTo 不包含边界；After 按
+// (occurred_at, event_id) DESC 继续读取下一页。
+type SecurityAuditEventQuery struct {
+	Action       string
+	Result       string
+	ResourceType string
+	ResourceID   string
+	OccurredFrom *int64
+	OccurredTo   *int64
+	After        *SecurityAuditEventCursor
+	Limit        int
+}
+
+// Validate 检查 Repository 查询边界；Limit 不在此处应用默认值。
+func (query SecurityAuditEventQuery) Validate() error {
+	if query.Limit < 1 || query.Limit > MaxSecurityAuditEventQueryLimit ||
+		!validOptionalAuditAction(query.Action) ||
+		!validOptionalAuditResult(query.Result) ||
+		!validOptionalAuditResourceType(query.ResourceType) ||
+		!validOptionalAuditQueryResourceID(query.ResourceID) {
+		return ErrInvalidSecurityAuditEventQuery
+	}
+	if query.OccurredFrom != nil && query.OccurredTo != nil && *query.OccurredFrom >= *query.OccurredTo {
+		return ErrInvalidSecurityAuditEventQuery
+	}
+	if query.After != nil &&
+		(query.After.OccurredAt <= 0 || !validate.ValidID(query.After.EventID, "evt_")) {
+		return ErrInvalidSecurityAuditEventQuery
+	}
+	return nil
+}
+
+func validOptionalAuditQueryResourceID(value string) bool {
+	return value == "" || utf8.ValidString(value) && utf8.RuneCountInString(value) <= maxAuditResourceIDBytes
+}
+
+func validOptionalAuditAction(value string) bool {
+	switch value {
+	case "", SecurityAuditActionGatewayKeyRotate, SecurityAuditActionTokenReveal,
+		SecurityAuditActionTokenRotate, SecurityAuditActionTokenRevoke, SecurityAuditActionTunnelRevoke:
+		return true
+	default:
+		return false
+	}
+}
+
+func validOptionalAuditResult(value string) bool {
+	return value == "" || value == SecurityAuditResultSucceeded || value == SecurityAuditResultFailed
+}
+
+func validOptionalAuditResourceType(value string) bool {
+	switch value {
+	case "", SecurityAuditResourceGatewayIdentity, SecurityAuditResourceTunnelToken, SecurityAuditResourceTunnel:
+		return true
+	default:
+		return false
+	}
+}
+
+// SecurityAuditEventPage 返回一页权威审计事件。仅当还有下一页时 Next 非空。
+type SecurityAuditEventPage struct {
+	Events []SecurityAuditEvent
+	Next   *SecurityAuditEventCursor
+}
+
+// SecurityAuditEventQueryStore 只暴露读取能力，不允许修改或删除审计证据。
+type SecurityAuditEventQueryStore interface {
+	QuerySecurityAuditEvents(context.Context, SecurityAuditEventQuery) (SecurityAuditEventPage, error)
 }
 
 // SecurityAuditEventRepository 只允许幂等追加安全事件，不暴露修改或删除入口。

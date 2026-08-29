@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	"github.com/lifei6671/xtunnel/internal/logging"
@@ -20,11 +21,12 @@ import (
 
 // Execute 把操作系统输入和信号接入 Server 生命周期，并返回进程退出码。
 func Execute(program string, args, environ []string, stderr io.Writer) int {
+	startedAt := time.Now()
 	return executeWithRun(program, args, environ, stderr, func(ctx context.Context, options baseconfig.Options, stderr io.Writer) error {
 		return runWithStorageAndBootstrapOptions(ctx, options, stderr, func(ctx context.Context, dataDir string) (storage, error) {
 			return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
 		}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
-			return openGatewayAndBootstrap(ctx, config, resources, logger)
+			return openGatewayAndBootstrapAt(ctx, config, resources, logger, startedAt)
 		})
 	})
 }
@@ -56,10 +58,11 @@ func executeWithRun(
 // run 完成 Server 的配置、日志、Web 资源、External Lock 和 SQLite 初始化，并保持前台运行直到收到退出信号。
 // 后续任务会在 SQLite 已就绪且 External Lock 仍被持有时继续接入 PKI 和 Listener。
 func run(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
+	startedAt := time.Now()
 	return runWithStorageAndBootstrap(ctx, program, args, environ, stderr, func(ctx context.Context, dataDir string) (storage, error) {
 		return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
 	}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
-		return openGatewayAndBootstrap(ctx, config, resources, logger)
+		return openGatewayAndBootstrapAt(ctx, config, resources, logger, startedAt)
 	})
 }
 

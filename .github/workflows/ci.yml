@@ -116,7 +116,8 @@ jobs:
             ./internal/tunnel \
             ./tests/integration
           go vet ./...
-          go build ./cmd/server ./cmd/agent
+          build_version="v0.1.0-ci.${GITHUB_SHA}"
+          go build -ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$build_version" ./cmd/server ./cmd/agent
 
       - name: Run native M4 product data plane E2E
         shell: bash
@@ -158,6 +159,26 @@ jobs:
           ./deploy/docker/smoke.sh --target server --platform '${{ matrix.platform }}'
           ./deploy/docker/smoke.sh --target agent --platform '${{ matrix.platform }}'
 
+          expect_version_rejected() {
+            name=$1
+            shift
+            log="$RUNNER_TEMP/oci-version-$name.log"
+            if docker buildx build \
+              --progress plain \
+              --platform '${{ matrix.platform }}' \
+              --target versioned-go-source \
+              --file deploy/docker/Dockerfile \
+              "$@" \
+              . >"$log" 2>&1; then
+              printf 'OCI build unexpectedly accepted %s XTUNNEL_VERSION\n' "$name" >&2
+              return 1
+            fi
+            grep -F 'XTUNNEL_VERSION must be 1-64 characters' "$log" >/dev/null
+          }
+          expect_version_rejected missing
+          expect_version_rejected invalid --build-arg 'XTUNNEL_VERSION=v0.1.0 invalid'
+          expect_version_rejected too-long --build-arg 'XTUNNEL_VERSION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
       - name: Run native systemd packaging smoke
         shell: bash
         timeout-minutes: 5
@@ -165,8 +186,9 @@ jobs:
           set -euo pipefail
           server_binary="$RUNNER_TEMP/xtunnel-server"
           agent_binary="$RUNNER_TEMP/xtunnel-agent"
-          go build -trimpath -o "$server_binary" ./cmd/server
-          go build -trimpath -o "$agent_binary" ./cmd/agent
+          build_version="v0.1.0-ci.${GITHUB_SHA}"
+          go build -trimpath -ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$build_version" -o "$server_binary" ./cmd/server
+          go build -trimpath -ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$build_version" -o "$agent_binary" ./cmd/agent
           sudo ./deploy/systemd/smoke.sh \
             --server-binary "$server_binary" \
             --agent-binary "$agent_binary"
@@ -220,7 +242,9 @@ jobs:
           go vet ./internal/agent/... ./cmd/agent
           if ($LASTEXITCODE -ne 0) { throw 'Agent vet failed' }
           $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent.exe'
-          go build -trimpath -o $agentPath ./cmd/agent
+          $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"
+          $ldflags = "-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$buildVersion"
+          go build -trimpath -ldflags $ldflags -o $agentPath ./cmd/agent
           if ($LASTEXITCODE -ne 0) { throw 'Agent build failed' }
 
       - name: Cross-build Windows arm64 Agent
@@ -234,7 +258,9 @@ jobs:
           $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent-arm64.exe'
           $bootstrapTest = Join-Path $env:RUNNER_TEMP 'agent-bootstrap-arm64.test.exe'
           $serviceTest = Join-Path $env:RUNNER_TEMP 'agent-service-arm64.test.exe'
-          go build -trimpath -o $agentPath ./cmd/agent
+          $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"
+          $ldflags = "-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$buildVersion"
+          go build -trimpath -ldflags $ldflags -o $agentPath ./cmd/agent
           if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 Agent build failed' }
           go test -c -o $bootstrapTest ./internal/agent/bootstrap
           if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 bootstrap test compile failed' }

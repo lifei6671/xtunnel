@@ -55,6 +55,7 @@ project="xtunnel-dualstack-smoke-$(date +%s)-$$"
 export COMPOSE_PROJECT_NAME="$project"
 export COMPOSE_PARALLEL_LIMIT=1
 export XTUNNEL_PLATFORM="$platform"
+export XTUNNEL_VERSION=v0.1.0-smoke
 export XTUNNEL_MANAGEMENT_PUBLIC_URL=https://localhost:8080
 export XTUNNEL_AGENT_GATEWAY_HOSTNAME=localhost
 # 端口 0 让 Docker 为四个宿主监听分别选择空闲端口，避免 Smoke 与现有服务冲突。

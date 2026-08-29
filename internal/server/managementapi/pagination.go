@@ -20,6 +20,7 @@ const (
 	pageTokenVersion         = 1
 	pageTokenMACSize         = sha256.Size
 	pageTokenSortIDAscending = "id_asc"
+	pageTokenSortAuditDesc   = "occurred_at_event_id_desc"
 	pageTokenDomain          = "xtunnel-management-page-v1\x00"
 )
 
@@ -42,6 +43,15 @@ type pageTokenPayload struct {
 	Version    int    `json:"v"`
 	Resource   string `json:"r"`
 	Sort       string `json:"s"`
+	LastID     string `json:"i"`
+	FilterHash string `json:"f"`
+}
+
+type auditPageTokenPayload struct {
+	Version    int    `json:"v"`
+	Resource   string `json:"r"`
+	Sort       string `json:"s"`
+	OccurredAt int64  `json:"t"`
 	LastID     string `json:"i"`
 	FilterHash string `json:"f"`
 }
@@ -104,6 +114,60 @@ func (codec *pageTokenCodec) decode(token string, scope pageTokenScope) (pageTok
 		payload.Sort != pageTokenSortIDAscending || payload.FilterHash != pageFilterHash(scope.filter) ||
 		!validate.ValidID(payload.LastID, scope.idPrefix) {
 		return pageTokenPayload{}, errInvalidPageToken
+	}
+	return payload, nil
+}
+
+// encodeAudit 固定 Security Audit 的复合降序 Cursor。时间只保存 SQLite
+// 权威的 Unix 秒，筛选绑定仍由 Handler 生成的 Filter Hash 保证。
+func (codec *pageTokenCodec) encodeAudit(scope pageTokenScope, occurredAt int64, lastID string) (string, error) {
+	if codec == nil || occurredAt <= 0 || !validate.ValidID(lastID, "evt_") {
+		return "", errInvalidPageSource
+	}
+	payload, err := json.Marshal(auditPageTokenPayload{
+		Version: pageTokenVersion, Resource: scope.resource, Sort: pageTokenSortAuditDesc,
+		OccurredAt: occurredAt, LastID: lastID, FilterHash: pageFilterHash(scope.filter),
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal management audit page token: %w", err)
+	}
+	mac := hmac.New(sha256.New, codec.key[:])
+	if _, err := mac.Write([]byte(pageTokenDomain)); err != nil {
+		return "", fmt.Errorf("sign management audit page token domain: %w", err)
+	}
+	if _, err := mac.Write(payload); err != nil {
+		return "", fmt.Errorf("sign management audit page token: %w", err)
+	}
+	signed := append(payload, mac.Sum(nil)...)
+	return base64.RawURLEncoding.EncodeToString(signed), nil
+}
+
+func (codec *pageTokenCodec) decodeAudit(token string, scope pageTokenScope) (auditPageTokenPayload, error) {
+	if codec == nil || len(token) == 0 || len(token) > 4096 {
+		return auditPageTokenPayload{}, errInvalidPageToken
+	}
+	signed, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(signed) <= pageTokenMACSize || base64.RawURLEncoding.EncodeToString(signed) != token {
+		return auditPageTokenPayload{}, errInvalidPageToken
+	}
+	payloadBytes := signed[:len(signed)-pageTokenMACSize]
+	providedMAC := signed[len(signed)-pageTokenMACSize:]
+	mac := hmac.New(sha256.New, codec.key[:])
+	if _, err := mac.Write([]byte(pageTokenDomain)); err != nil {
+		return auditPageTokenPayload{}, fmt.Errorf("verify management audit page token domain: %w", err)
+	}
+	if _, err := mac.Write(payloadBytes); err != nil {
+		return auditPageTokenPayload{}, fmt.Errorf("verify management audit page token: %w", err)
+	}
+	if !hmac.Equal(providedMAC, mac.Sum(nil)) {
+		return auditPageTokenPayload{}, errInvalidPageToken
+	}
+	var payload auditPageTokenPayload
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil ||
+		payload.Version != pageTokenVersion || payload.Resource != scope.resource ||
+		payload.Sort != pageTokenSortAuditDesc || payload.FilterHash != pageFilterHash(scope.filter) ||
+		payload.OccurredAt <= 0 || !validate.ValidID(payload.LastID, "evt_") {
+		return auditPageTokenPayload{}, errInvalidPageToken
 	}
 	return payload, nil
 }
