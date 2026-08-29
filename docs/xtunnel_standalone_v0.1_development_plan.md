@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M5-03 Admin Login/Session/CSRF · REVIEW（M2、M3、M4、M5-01、M5-02 均已 `DONE`）
 >
-> **当前结论**：M5-03 已完成 v9 Admin Session Migration、`adm_`/`ads_` 身份迁移、Repository/Application、生成 Strict Contract 驱动的 Auth Handler、Management 生命周期接线和 Web Login；全仓 Go Test/Vet/Race、Server Build、Web Check/Build 与三路独立复审均通过。当前工作树尚无本任务 Commit SHA、对应 CI Run 和用户阶段 Review，因此只进入 `REVIEW`，M5 仍为 `2/11`、全局仍为 `66/95`；M5 Gate Checklist 六项继续全部未通过。
+> **当前结论**：M5-03 已完成 v9 Admin Session Migration、`adm_`/`ads_` 身份迁移、Repository/Application、生成 Strict Contract 驱动的 Auth Handler、Management 生命周期接线和 Web Login；全仓 Go Test/Vet/Race、Server Build、Web Check/Build 与三路独立复审均通过，实现提交为 `3cbdb337c2db302e5eb8c8f18bb7f1c669efa86d`。该提交尚未推送，也没有精确绑定的 CI Run，因此 M5-03 继续保持 `REVIEW`，M5 仍为 `2/11`、全局仍为 `66/95`；M5 Gate Checklist 六项继续全部未通过。
 
 ---
 
@@ -426,7 +426,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-02` 已完成。当前待办为：
 
-1. `M5-03` — Admin Login/Session/CSRF 已进入 `REVIEW`；优先完成用户 Code Review、提交和精确 CI 证据闭环，本轮没有引入 Gin 或其他依赖。
+1. `M5-03` — Admin Login/Session/CSRF 已进入 `REVIEW`，本地实现提交为 `3cbdb337c2db302e5eb8c8f18bb7f1c669efa86d`；下一步需要推送并取得精确 CI 证据，本轮没有引入 Gin 或其他依赖。
 2. `M5-04` — Tunnel/Connector/Credential API 已解锁为 `READY`；必须调用既有 Token/Application Owner，并保持 Secret `Cache-Control: no-store`。
 3. `M5-05` — Service API 已解锁为 `READY`；必须调用既有 Application Service，不得在 Handler 重写事务、Route 或 Nested Exposure 不变量。
 4. `M5-07` — Settings/Runtime/Audit 只读 API 已解锁为 `READY`；Audit 只允许查询，不得新增 UPDATE/DELETE。
@@ -1293,5 +1293,5 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - Handler 与运行时：Login、Logout、`/auth/me` 由生成 Strict Handler/Router 接管，未知 Auth 路径与 Method 保持类型化 404/405，其他尚未实现 API 由边界返回稳定 500 而不落入 SPA。Cookie 固定 Secure、HttpOnly、SameSite=Lax、Host-only、Path `/api/v1`；Login 严格校验单值 JSON Content-Type、64 KiB Body、Origin、Host 和可信代理 Client IP，非 Loopback 明文 fail closed。失败限流固定为 `(Client IP, Username)` 每分钟 5 次、全局每分钟 100 次、冷却 `1/2/4/8/15` 分钟、4096 项 LRU、30 分钟无活动回收；Argon2 最多 4 个非阻塞并发槽位，饱和时立即 `429`。Management 使用 10/30/30/90 秒 Header/Read/Write/Idle Timeout，启动早于 Admin 检查；`SETUP_REQUIRED` 只保留 Management，Shutdown 关闭准入、排空或强关连接并等待 Handler 归零后才允许关闭 SQLite。
 - Web 与验证：Web 提供会话探测、登录、`SETUP_REQUIRED` 初始化引导、认证错误/限流反馈和带 Origin/CSRF 的退出，CSRF 只驻留内存。Go 1.27.0 且 `GOTOOLCHAIN=local` 下，`go test -count=1 -timeout 300s ./...`、`go test -race -count=1 -timeout 300s ./...`、`go vet ./...`、`go build ./cmd/server`、`git diff --check` 均通过；`npm --prefix web run check` 与 `npm --prefix web run build` 通过，Vite 构建 1806 Modules。真实 SQLite + TLS HTTP Server 黑盒覆盖 `SETUP_REQUIRED`、Origin、密码、Cookie、`/auth/me`、CSRF 失败、Logout、生成路由 404/405、重复 Header/Cookie 和 Argon2 并发饱和。
 - 独立复审：数据库、集成和安全三路复审发现并推动修复 Touch 到期竞态测试、远端明文准入、Handler Drain、生成 Strict Router 接线、Argon2 并发上限、HTTP Timeout 与重复 Content-Type；最终三路均确认无剩余 P0/P1/P2。残余验证边界只有真实 Caddy/Nginx HTTPS Browser E2E、长时 FD/慢读压力和对应平台 CI，均由 M5-10/M7 或提交后 CI 继续闭环。
-- 状态与 Gate：本轮未提交、未推送，没有包含最终工作树的 Commit SHA、精确 CI Run 或用户阶段 Code Review，因此 M5-03 只进入 `REVIEW`，M5 `DONE` 仍为 `2/11`、全局仍为 `66/95`。M5 Gate Checklist 六项全部保持未勾选；尤其 Login/Secure Cookie/CSRF/Logout 的 Go TLS 黑盒是 M5-03 本地证据，不能替代 M5-10 的完整 Browser E2E 和 M5-11 Gate。
+- 提交、状态与 Gate：最终 29 个文件的 staged snapshot 在未暂存/未跟踪文件均为 0 时完成复验，M5-03 实现提交为 `3cbdb337c2db302e5eb8c8f18bb7f1c669efa86d`。该提交未推送且没有精确绑定的 CI Run，因此 M5-03 继续保持 `REVIEW`，M5 `DONE` 仍为 `2/11`、全局仍为 `66/95`。M5 Gate Checklist 六项全部保持未勾选；尤其 Login/Secure Cookie/CSRF/Logout 的 Go TLS 黑盒是 M5-03 本地证据，不能替代 M5-10 的完整 Browser E2E 和 M5-11 Gate。
 - 文档同步：总技术方案同步 v9 身份迁移、Admin Session/CSRF 数据血缘、限流常量和 Management 生命周期；根 README 同步 M5-03 `REVIEW` 的真实能力与 Browser E2E 边界；开发计划同步当前阶段、任务行、队列和本记录。OpenAPI、生成物、Proto、Server Schema、依赖/Lockfile、CI/CD、部署配置、日志契约和 `AGENTS.md` 均未改变。
