@@ -78,6 +78,15 @@ func NewConnector() (Connector, error) {
 	return Connector{id: id}, nil
 }
 
+// NewTunnelID 使用 CSPRNG 生成一个持久化 Tunnel 身份。
+func NewTunnelID() (string, error) {
+	id, err := newID(tunnelPrefix, time.Now(), rand.Reader)
+	if err != nil {
+		return "", fmt.Errorf("generate tunnel identifier: %w", err)
+	}
+	return id, nil
+}
+
 // NewServiceID 使用 CSPRNG 生成一个持久化 Service 身份。
 func NewServiceID() (string, error) {
 	id, err := newID(servicePrefix, time.Now(), rand.Reader)

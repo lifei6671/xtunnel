@@ -324,7 +324,7 @@ func (runtime *TunnelRuntime) detach(work *ActiveWork) bool {
 	return true
 }
 
-func (runtime *TunnelRuntime) revoke() ([]*ActiveWork, []*serverlimits.ConnectorLease, []string, []ConnectorLifecycleEvent) {
+func (runtime *TunnelRuntime) revoke(reason string) ([]*ActiveWork, []*serverlimits.ConnectorLease, []string, []ConnectorLifecycleEvent) {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	runtime.revoked = true
@@ -336,7 +336,7 @@ func (runtime *TunnelRuntime) revoke() ([]*ActiveWork, []*serverlimits.Connector
 		disconnectEvents = append(disconnectEvents, ConnectorLifecycleEvent{
 			Name:     ConnectorEventDisconnected,
 			Snapshot: runtime.connectorSnapshotLocked(observation),
-			Reason:   "tunnel_revoked",
+			Reason:   reason,
 		})
 	}
 
@@ -406,7 +406,34 @@ func (registry *Registry) RevokeTunnelWithLifecycle(tunnelID string) ([]Connecto
 	if err != nil {
 		return nil, err
 	}
-	works, connectorLimits, sessionIDs, disconnectEvents := runtime.revoke()
+	return registry.convergeTunnelRuntime(runtime, "tunnel_revoked")
+}
+
+// DeleteTunnelWithLifecycle 使用与 Revoke 相同的资源收敛顺序，但成功后删除 Registry
+// 顶层定位项。收敛失败时保留已经 revoked 的 Runtime，使迟到请求继续 fail closed；
+// 调用方还必须保留外层 admission fence，直到人工重试完成。
+func (registry *Registry) DeleteTunnelWithLifecycle(tunnelID string) ([]ConnectorLifecycleEvent, error) {
+	if registry == nil || identity.ValidateTunnelID(tunnelID) != nil {
+		return nil, ErrInvalidTunnelID
+	}
+	runtime := registry.tunnel(tunnelID, false)
+	if runtime == nil {
+		return nil, nil
+	}
+	disconnectEvents, err := registry.convergeTunnelRuntime(runtime, "tunnel_deleted")
+	if err != nil {
+		return disconnectEvents, err
+	}
+	registry.mu.Lock()
+	if registry.tunnels[tunnelID] == runtime {
+		delete(registry.tunnels, tunnelID)
+	}
+	registry.mu.Unlock()
+	return disconnectEvents, nil
+}
+
+func (registry *Registry) convergeTunnelRuntime(runtime *TunnelRuntime, reason string) ([]ConnectorLifecycleEvent, error) {
+	works, connectorLimits, sessionIDs, disconnectEvents := runtime.revoke(reason)
 	for _, lease := range connectorLimits {
 		lease.Release()
 	}

@@ -5511,6 +5511,8 @@ referencing_service_ids（有界分页）
 
 删除不得隐式级联 Service 或 Route。需要停用凭据时使用 `POST /tunnels/{id}/revoke`；需要删除 Tunnel 时，管理员必须先显式迁移或删除它下面的 Service。
 
+Control AUTH 必须在完成 Token 格式解析并取得 Tunnel ID 后、执行持久化 Verify 前登记 per-Tunnel admission，并在认证成功后把该租约转交 Session Manager，直到 startup reservation 发布或交接失败才释放。Tunnel Delete 的持久化提交完成后，Session Runtime 必须建立删除专用的临时准入栅栏，等待已准入 AUTH、startup、全部 generation Session 和 ActiveWork 收敛，再删除对应 Runtime 定位项并释放临时栅栏。该路径不得复用 Tunnel Revoke 的永久墓碑语义。任一运行态清理失败时，持久化删除不回滚，临时栅栏保持 fail closed，并向管理端返回 `RUNTIME_CONVERGENCE_FAILED`，不得误报删除成功。
+
 ---
 
 # 136. Service API

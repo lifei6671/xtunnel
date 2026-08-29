@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/healthbudget"
+	"github.com/lifei6671/xtunnel/internal/identity"
 )
 
 const (
@@ -544,6 +545,73 @@ func TestRevokeTunnelAggregatesErrorsFromAllActiveWork(t *testing.T) {
 	}
 	first.recorder.assertEventCounts(t, 1)
 	second.recorder.assertEventCounts(t, 1)
+}
+
+func TestDeleteTunnelRemovesRuntimeOnlyAfterSuccessfulConvergence(t *testing.T) {
+	registry := newRegistry(sessionGenerator(1))
+	original, err := registry.Tunnel(runtimeTunnelID)
+	if err != nil {
+		t.Fatalf("Tunnel() error = %v", err)
+	}
+	if _, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID); err != nil {
+		t.Fatalf("installAuthenticated() error = %v", err)
+	}
+	if _, err := registry.DeleteTunnelWithLifecycle(runtimeTunnelID); err != nil {
+		t.Fatalf("DeleteTunnelWithLifecycle() error = %v", err)
+	}
+	registry.mu.Lock()
+	remaining := len(registry.tunnels)
+	registry.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("Registry runtimes after delete = %d, want 0", remaining)
+	}
+	recreated, err := registry.Tunnel(runtimeTunnelID)
+	if err != nil {
+		t.Fatalf("Tunnel(recreate) error = %v", err)
+	}
+	if recreated == original || recreated.revoked {
+		t.Fatal("successful delete retained the old revoked Runtime")
+	}
+}
+
+func TestDeleteTunnelFailureRetainsRevokedRuntime(t *testing.T) {
+	fixture := newActiveWorkFixture(t, runtimeTunnelID, runtimeConnectorID)
+	closeErr := errors.New("injected delete close failure")
+	fixture.workConn.closeErr = closeErr
+	if _, err := fixture.tunnel.RegisterActiveWork(fixture.spec(runtimeWorkID, runtimeConnectionID)); err != nil {
+		t.Fatalf("RegisterActiveWork() error = %v", err)
+	}
+	if _, err := fixture.registry.DeleteTunnelWithLifecycle(runtimeTunnelID); !errors.Is(err, closeErr) {
+		t.Fatalf("DeleteTunnelWithLifecycle() error = %v, want %v", err, closeErr)
+	}
+	fixture.registry.mu.Lock()
+	retained := fixture.registry.tunnels[runtimeTunnelID]
+	fixture.registry.mu.Unlock()
+	if retained != fixture.tunnel || !retained.revoked {
+		t.Fatal("failed delete did not retain the revoked Runtime fence")
+	}
+}
+
+func TestDeleteManyDifferentTunnelsDoesNotGrowRegistry(t *testing.T) {
+	registry := NewRegistry()
+	for range 256 {
+		tunnelID, err := identity.NewTunnelID()
+		if err != nil {
+			t.Fatalf("NewTunnelID() error = %v", err)
+		}
+		if _, err := registry.Tunnel(tunnelID); err != nil {
+			t.Fatalf("Tunnel(%q) error = %v", tunnelID, err)
+		}
+		if _, err := registry.DeleteTunnelWithLifecycle(tunnelID); err != nil {
+			t.Fatalf("DeleteTunnelWithLifecycle(%q) error = %v", tunnelID, err)
+		}
+	}
+	registry.mu.Lock()
+	remaining := len(registry.tunnels)
+	registry.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("Registry runtimes after churn = %d, want 0", remaining)
+	}
 }
 
 type activeWorkFixture struct {

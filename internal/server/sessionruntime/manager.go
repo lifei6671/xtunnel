@@ -143,9 +143,9 @@ type managedSession struct {
 	demandDeadline       time.Duration
 }
 
-// startupGroup 跟踪同一 Tunnel 尚在 Owner.Start 到 install 之间的短暂窗口。
-// done 在最后一个预留结束时关闭，供 Revoke/Shutdown 在锁外等待。
-type startupGroup struct {
+// convergenceGroup 跟踪同一 Tunnel 已准入但尚未结束的 AUTH 或 Owner startup。
+// done 在最后一个预留结束时关闭，供 Delete/Revoke/Shutdown 在锁外等待。
+type convergenceGroup struct {
 	count int
 	done  chan struct{}
 }
@@ -169,7 +169,9 @@ type Manager struct {
 	// liveSessions 保存从 install 成功到 Serve cleanup 完成之间的全部 generation。
 	// byConnector/bySession 只承担 Current 查找，不能用来枚举 Revoke/Shutdown 的关闭目标。
 	liveSessions                 map[*managedSession]struct{}
-	startingByTunnel             map[string]*startupGroup
+	admittingByTunnel            map[string]*convergenceGroup
+	startingByTunnel             map[string]*convergenceGroup
+	deletingTunnels              map[string]struct{}
 	revokedTunnels               map[string]struct{}
 	logger                       *slog.Logger
 	beforeInstallForTest         func(serverruntime.Session)
@@ -193,6 +195,8 @@ type Manager struct {
 	snapshotErr                  error
 }
 
+var _ servercontrolauth.TunnelAdmissionController = (*Manager)(nil)
+
 // New 创建空的 Session 运行时管理器。startedAt 仅用于构造单调时钟，不会参与
 // Agent/Server wall clock 比较。
 func New(registry *serverruntime.Registry, options Options) (*Manager, error) {
@@ -211,11 +215,13 @@ func New(registry *serverruntime.Registry, options Options) (*Manager, error) {
 	}
 	return &Manager{
 		registry: registry, options: options, startedAt: time.Now(), demandLeaseTTL: initialLeaseTTL,
-		byConnector:      make(map[connectorKey]*managedSession),
-		bySession:        make(map[string]*managedSession),
-		liveSessions:     make(map[*managedSession]struct{}),
-		startingByTunnel: make(map[string]*startupGroup),
-		revokedTunnels:   make(map[string]struct{}), logger: options.Logger,
+		byConnector:       make(map[connectorKey]*managedSession),
+		bySession:         make(map[string]*managedSession),
+		liveSessions:      make(map[*managedSession]struct{}),
+		admittingByTunnel: make(map[string]*convergenceGroup),
+		startingByTunnel:  make(map[string]*convergenceGroup),
+		deletingTunnels:   make(map[string]struct{}),
+		revokedTunnels:    make(map[string]struct{}), logger: options.Logger,
 		shutdownDone:     make(chan struct{}),
 		snapshotDirty:    make(map[string]uint64),
 		snapshotFailures: make(map[string]error),
@@ -231,13 +237,17 @@ func New(registry *serverruntime.Registry, options Options) (*Manager, error) {
 func (manager *Manager) Serve(ctx context.Context, connection net.Conn, established *servercontrolauth.Established) error {
 	if manager == nil || ctx == nil || connection == nil || established == nil ||
 		!validSession(established.Session) || established.Control == nil || established.ProtocolVersion == 0 {
+		if established != nil {
+			established.ReleaseTunnelAdmission()
+		}
 		return ErrInvalidSession
 	}
 	sessionContext, managed, err := manager.prepareSession(ctx, connection, established)
 	if err != nil {
+		established.ReleaseTunnelAdmission()
 		return err
 	}
-	previous, err := manager.startSession(sessionContext, connection, managed)
+	previous, err := manager.startSession(sessionContext, connection, managed, established.ReleaseTunnelAdmission)
 	if err != nil {
 		return err
 	}
@@ -333,14 +343,21 @@ func (manager *Manager) startSession(
 	sessionContext context.Context,
 	connection net.Conn,
 	managed *managedSession,
+	releaseAdmission func(),
 ) (*managedSession, error) {
 	if err := manager.beginStartup(managed.session.TunnelID); err != nil {
+		// startup 尚未发布，当前 admission 是失败清理的唯一生命周期 owner。
+		// 必须等连接和已构造资源全部关闭后再释放，否则 Delete 会提前返回成功。
+		defer releaseAdmission()
 		managed.cancel()
 		managed.authenticator.Close()
 		_ = managed.pool.Close()
 		manager.registry.ClearIfCurrent(managed.session)
 		return nil, errors.Join(err, connection.Close())
 	}
+	// startup reservation 已在 Manager.mu 下发布；从这一刻起 Delete 即使获得锁，
+	// 也会等待 startupDone，因此可以安全结束 AUTH admission 的交接所有权。
+	releaseAdmission()
 	if err := managed.owner.Start(sessionContext); err != nil {
 		managed.cancel()
 		managed.authenticator.Close()
@@ -621,6 +638,10 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 		managed.setConvergenceReason("server_shutdown")
 		managedSessions = append(managedSessions, managed)
 	}
+	admissionDone := make([]<-chan struct{}, 0, len(manager.admittingByTunnel))
+	for _, group := range manager.admittingByTunnel {
+		admissionDone = append(admissionDone, group.done)
+	}
 	startupDone := make([]<-chan struct{}, 0, len(manager.startingByTunnel))
 	for _, group := range manager.startingByTunnel {
 		startupDone = append(startupDone, group.done)
@@ -644,6 +665,9 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 	}
 	if manager.afterConvergenceFenceForTest != nil {
 		manager.afterConvergenceFenceForTest("shutdown")
+	}
+	for _, done := range admissionDone {
+		<-done
 	}
 	for _, done := range startupDone {
 		<-done
@@ -891,6 +915,7 @@ func (manager *Manager) RevokeTunnel(tunnelID string) error {
 	}
 	manager.mu.Lock()
 	manager.revokedTunnels[tunnelID] = struct{}{}
+	admissionDone := groupDoneLocked(manager.admittingByTunnel, tunnelID)
 	startupDone := manager.startupDoneLocked(tunnelID)
 	managedSessions := make([]*managedSession, 0)
 	for managed := range manager.liveSessions {
@@ -911,6 +936,9 @@ func (manager *Manager) RevokeTunnel(tunnelID string) error {
 	if manager.afterConvergenceFenceForTest != nil {
 		manager.afterConvergenceFenceForTest("revoke")
 	}
+	if admissionDone != nil {
+		<-admissionDone
+	}
 	if startupDone != nil {
 		<-startupDone
 	}
@@ -922,6 +950,101 @@ func (manager *Manager) RevokeTunnel(tunnelID string) error {
 		revokeErr = errors.Join(revokeErr, manager.cleanupManaged(managed, cleanupNonActive))
 	}
 	return revokeErr
+}
+
+// BeginTunnelAdmission 在 Token 格式解析后、持久化 Verify 与 Registry 预留前登记
+// 一次 AUTH 准入。返回的 release 先由 Control AUTH 持有，认证成功后转交 Session
+// Manager，直到 startup reservation 发布；删除先建立临时 fence，再在锁外等待
+// 所有已准入 AUTH 退出，从而关闭 Verify 到 startup 之间的竞争窗。
+func (manager *Manager) BeginTunnelAdmission(tunnelID string) (release func(), err error) {
+	if manager == nil || identity.ValidateTunnelID(tunnelID) != nil {
+		return nil, ErrSessionUnavailable
+	}
+	manager.mu.Lock()
+	if manager.shutdownStarted {
+		manager.mu.Unlock()
+		return nil, ErrSessionUnavailable
+	}
+	if _, revoked := manager.revokedTunnels[tunnelID]; revoked {
+		manager.mu.Unlock()
+		return nil, serverruntime.ErrTunnelRuntimeRevoked
+	}
+	if _, deleting := manager.deletingTunnels[tunnelID]; deleting {
+		manager.mu.Unlock()
+		return nil, serverruntime.ErrTunnelRuntimeRevoked
+	}
+	group := manager.admittingByTunnel[tunnelID]
+	if group == nil {
+		group = &convergenceGroup{done: make(chan struct{})}
+		manager.admittingByTunnel[tunnelID] = group
+	}
+	group.count++
+	manager.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() { manager.endAdmission(tunnelID) })
+	}, nil
+}
+
+// DeleteTunnel 建立只持续到成功删除结束的 per-Tunnel fence，等待 AUTH admission 与
+// Owner startup 归零后，依次摘除 Runtime、Control Owner 与 Work 资源。任何阶段失败
+// 都保留 fence，禁止一个已经耐久删除但尚未完全收敛的 Tunnel 重新进入运行时。
+func (manager *Manager) DeleteTunnel(tunnelID string) error {
+	if manager == nil || identity.ValidateTunnelID(tunnelID) != nil {
+		return ErrSessionUnavailable
+	}
+	manager.mu.Lock()
+	if manager.shutdownStarted {
+		manager.mu.Unlock()
+		return ErrSessionUnavailable
+	}
+	if _, deleting := manager.deletingTunnels[tunnelID]; deleting {
+		manager.mu.Unlock()
+		return serverruntime.ErrTunnelRuntimeRevoked
+	}
+	manager.deletingTunnels[tunnelID] = struct{}{}
+	admissionDone := groupDoneLocked(manager.admittingByTunnel, tunnelID)
+	startupDone := manager.startupDoneLocked(tunnelID)
+	managedSessions := make([]*managedSession, 0)
+	for managed := range manager.liveSessions {
+		if managed.session.TunnelID != tunnelID {
+			continue
+		}
+		managed.setConvergenceReason("tunnel_deleted")
+		managedSessions = append(managedSessions, managed)
+		key := connectorKey{tunnelID: managed.session.TunnelID, connectorID: managed.session.ConnectorID}
+		if manager.byConnector[key] == managed {
+			delete(manager.byConnector, key)
+		}
+		if manager.bySession[managed.session.SessionID] == managed {
+			delete(manager.bySession, managed.session.SessionID)
+		}
+	}
+	manager.mu.Unlock()
+	if manager.afterConvergenceFenceForTest != nil {
+		manager.afterConvergenceFenceForTest("delete")
+	}
+	if admissionDone != nil {
+		<-admissionDone
+	}
+	if startupDone != nil {
+		<-startupDone
+	}
+	disconnectEvents, deleteErr := manager.registry.DeleteTunnelWithLifecycle(tunnelID)
+	for _, event := range disconnectEvents {
+		manager.logLifecycle(event)
+	}
+	for _, managed := range managedSessions {
+		deleteErr = errors.Join(deleteErr, manager.cleanupManaged(managed, cleanupNonActive))
+	}
+	if deleteErr != nil {
+		return deleteErr
+	}
+	manager.mu.Lock()
+	delete(manager.deletingTunnels, tunnelID)
+	manager.mu.Unlock()
+	return nil
 }
 
 // SetPendingOpens 发布 Tunnel Proxy 已按 Tunnel 聚合到当前 Connector 的绝对等待数。
@@ -957,6 +1080,9 @@ func (manager *Manager) install(managed *managedSession) (*managedSession, error
 	if _, revoked := manager.revokedTunnels[managed.session.TunnelID]; revoked {
 		return nil, serverruntime.ErrTunnelRuntimeRevoked
 	}
+	if _, deleting := manager.deletingTunnels[managed.session.TunnelID]; deleting {
+		return nil, serverruntime.ErrTunnelRuntimeRevoked
+	}
 	previous := manager.byConnector[key]
 	if previous != nil && previous.session.Generation >= managed.session.Generation {
 		return nil, ErrSessionSuperseded
@@ -982,9 +1108,12 @@ func (manager *Manager) beginStartup(tunnelID string) error {
 	if _, revoked := manager.revokedTunnels[tunnelID]; revoked {
 		return serverruntime.ErrTunnelRuntimeRevoked
 	}
+	if _, deleting := manager.deletingTunnels[tunnelID]; deleting {
+		return serverruntime.ErrTunnelRuntimeRevoked
+	}
 	group := manager.startingByTunnel[tunnelID]
 	if group == nil {
-		group = &startupGroup{done: make(chan struct{})}
+		group = &convergenceGroup{done: make(chan struct{})}
 		manager.startingByTunnel[tunnelID] = group
 	}
 	group.count++
@@ -1005,6 +1134,29 @@ func (manager *Manager) endStartup(tunnelID string) {
 		close(group.done)
 	}
 	manager.mu.Unlock()
+}
+
+func (manager *Manager) endAdmission(tunnelID string) {
+	manager.mu.Lock()
+	group := manager.admittingByTunnel[tunnelID]
+	if group == nil || group.count <= 0 {
+		manager.mu.Unlock()
+		panic("server session admission ownership invariant violated")
+	}
+	group.count--
+	if group.count == 0 {
+		delete(manager.admittingByTunnel, tunnelID)
+		close(group.done)
+	}
+	manager.mu.Unlock()
+}
+
+func groupDoneLocked(groups map[string]*convergenceGroup, tunnelID string) <-chan struct{} {
+	group := groups[tunnelID]
+	if group == nil {
+		return nil
+	}
+	return group.done
 }
 
 // startupDoneLocked 返回当前 Tunnel 的启动栅栏；调用方必须持有 Manager.mu，

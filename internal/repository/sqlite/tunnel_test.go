@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -88,6 +89,39 @@ func TestTunnelRepositoryListReturnsNonNilEmptySlice(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("Read(List) error = %v", err)
+	}
+}
+
+func TestTunnelRepositoryCountReturnsPersistedRows(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		for _, tunnel := range []repository.Tunnel{
+			testTunnel(),
+			{ID: "tun_01J00000000000000000000001", Name: "second", Version: 1, CreatedAt: 2, UpdatedAt: 2},
+		} {
+			if err := transaction.Tunnels().Create(context.Background(), tunnel); err != nil {
+				return err
+			}
+		}
+		count, err := transaction.Tunnels().Count(context.Background())
+		if err != nil {
+			return err
+		}
+		if count != 2 {
+			t.Fatalf("Count() = %d, want 2", count)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithTx(Count) error = %v", err)
 	}
 }
 
@@ -244,6 +278,163 @@ func TestTunnelRepositoriesRollBackWholeTransaction(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTunnelRepositoryUpdateNameUsesAggregateCAS(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		if err := transaction.Tunnels().Create(context.Background(), testTunnel()); err != nil {
+			return err
+		}
+		updated, err := transaction.Tunnels().UpdateName(
+			context.Background(), repositoryTestTunnelID, "renamed", 1, 2,
+		)
+		if err != nil {
+			return err
+		}
+		if updated.Name != "renamed" || updated.Version != 2 || updated.UpdatedAt != 2 ||
+			updated.DesiredRevision != 0 || updated.RevokedAt != nil || updated.FirstAuthenticatedAt != nil {
+			return errors.New("name CAS changed unexpected Tunnel fields")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("UpdateName() error = %v", err)
+	}
+
+	err = store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		_, err := transaction.Tunnels().UpdateName(
+			context.Background(), repositoryTestTunnelID, "stale", 1, 3,
+		)
+		return err
+	})
+	if !errors.Is(err, repository.ErrVersionConflict) {
+		t.Fatalf("UpdateName(stale) error = %v, want ErrVersionConflict", err)
+	}
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		tunnel, err := view.Tunnels().Get(context.Background(), repositoryTestTunnelID)
+		if err != nil {
+			return err
+		}
+		if tunnel.Name != "renamed" || tunnel.Version != 2 || tunnel.UpdatedAt != 2 {
+			return errors.New("stale name CAS changed the Tunnel")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTunnelRepositoryUpdateNameRejectsInvalidInputAndMissingTunnel(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	tests := []struct {
+		name            string
+		tunnelID        string
+		tunnelName      string
+		expectedVersion int64
+		updatedAt       int64
+		wantErr         error
+	}{
+		{name: "错误 Tunnel ID", tunnelID: "tun_invalid", tunnelName: "name", expectedVersion: 1, updatedAt: 2, wantErr: repository.ErrInvalidTunnel},
+		{name: "空白名称", tunnelID: repositoryTestTunnelID, tunnelName: " \t", expectedVersion: 1, updatedAt: 2, wantErr: repository.ErrInvalidTunnel},
+		{name: "零版本", tunnelID: repositoryTestTunnelID, tunnelName: "name", expectedVersion: 0, updatedAt: 2, wantErr: repository.ErrInvalidTunnel},
+		{name: "最大版本", tunnelID: repositoryTestTunnelID, tunnelName: "name", expectedVersion: math.MaxInt64, updatedAt: 2, wantErr: repository.ErrInvalidTunnel},
+		{name: "零更新时间", tunnelID: repositoryTestTunnelID, tunnelName: "name", expectedVersion: 1, updatedAt: 0, wantErr: repository.ErrInvalidTunnel},
+		{name: "不存在", tunnelID: repositoryTestTunnelID, tunnelName: "name", expectedVersion: 1, updatedAt: 2, wantErr: repository.ErrNotFound},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+				_, err := transaction.Tunnels().UpdateName(
+					context.Background(), test.tunnelID, test.tunnelName, test.expectedVersion, test.updatedAt,
+				)
+				return err
+			})
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("UpdateName() error = %v, want %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestTunnelRepositoryDeleteUsesAggregateCAS(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		return transaction.Tunnels().Create(context.Background(), testTunnel())
+	}); err != nil {
+		t.Fatalf("seed Tunnel error = %v", err)
+	}
+
+	err = store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		return transaction.Tunnels().Delete(context.Background(), repositoryTestTunnelID, 2)
+	})
+	if !errors.Is(err, repository.ErrVersionConflict) {
+		t.Fatalf("Delete(stale) error = %v, want ErrVersionConflict", err)
+	}
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		return transaction.Tunnels().Delete(context.Background(), repositoryTestTunnelID, 1)
+	}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		_, err := view.Tunnels().Get(context.Background(), repositoryTestTunnelID)
+		return err
+	}); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("Get(deleted) error = %v, want ErrNotFound", err)
+	}
+	err = store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		return transaction.Tunnels().Delete(context.Background(), repositoryTestTunnelID, 1)
+	})
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("Delete(missing) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestTunnelRepositoryDeleteDoesNotCascadeService(t *testing.T) {
+	store, err := Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		if err := transaction.Tunnels().Create(context.Background(), testTunnel()); err != nil {
+			return err
+		}
+		return transaction.Services().Create(
+			context.Background(), testService(serviceTestIDOne, repositoryTestTunnelID),
+		)
+	}); err != nil {
+		t.Fatalf("seed Tunnel and Service error = %v", err)
+	}
+
+	err = store.WithTx(context.Background(), func(transaction repository.TxStore) error {
+		return transaction.Tunnels().Delete(context.Background(), repositoryTestTunnelID, 1)
+	})
+	if err == nil {
+		t.Fatal("Delete(Tunnel with Service) error = nil")
+	}
+	if err := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		if _, err := view.Tunnels().Get(context.Background(), repositoryTestTunnelID); err != nil {
+			return err
+		}
+		_, err := view.Services().Get(context.Background(), repositoryTestTunnelID, serviceTestIDOne)
+		return err
+	}); err != nil {
+		t.Fatalf("failed Delete removed Tunnel or Service: %v", err)
 	}
 }
 

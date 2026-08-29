@@ -37,6 +37,16 @@ func TestConnectionTokenIssueCurrentAndVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(issued token) error = %v", err)
 	}
+	tunnelID, err := service.TunnelID(issued.Token)
+	if err != nil {
+		t.Fatalf("TunnelID() error = %v", err)
+	}
+	if tunnelID != applicationTestTunnelID {
+		t.Fatalf("TunnelID() = %q, want %q", tunnelID, applicationTestTunnelID)
+	}
+	if _, err := service.TunnelID("xta_invalid"); !errors.Is(err, ErrConnectionTokenInvalid) {
+		t.Fatalf("TunnelID(invalid) error = %v, want ErrConnectionTokenInvalid", err)
+	}
 
 	// 两次获取模拟为同一 Tunnel 添加两个 Connector；它们必须得到完全相同的 Token。
 	for connectorIndex := 0; connectorIndex < 2; connectorIndex++ {

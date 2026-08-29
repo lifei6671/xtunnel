@@ -124,7 +124,10 @@ func (token TunnelToken) Validate() error {
 type TunnelRepository interface {
 	Create(context.Context, Tunnel) error
 	Get(context.Context, string) (Tunnel, error)
+	Count(context.Context) (int64, error)
 	List(context.Context) ([]Tunnel, error)
+	UpdateName(context.Context, string, string, int64, int64) (Tunnel, error)
+	Delete(context.Context, string, int64) error
 	AdvanceVersion(context.Context, string, int64, int64) (Tunnel, error)
 	AdvanceDesiredRevision(context.Context, string, int64, int64, int64) (Tunnel, error)
 	MarkFirstAuthenticated(context.Context, string, int64) error

@@ -60,6 +60,14 @@ type ConnectionTokenResult struct {
 	Token        string
 }
 
+// preparedConnectionToken 是尚未写入 Repository 的首次 Credential。
+// 随机数、编码与加密在事务外完成，调用方随后把 Tunnel 与本对象放入同一个
+// SQLite 写事务，避免持锁执行加密，同时保证不会留下无 Token 的半成品 Tunnel。
+type preparedConnectionToken struct {
+	result   ConnectionTokenResult
+	metadata repository.TunnelToken
+}
+
 // VerifiedConnectionToken 是认证后可安全使用的 Credential 身份，不包含 Secret。
 type VerifiedConnectionToken struct {
 	TunnelID     string
@@ -79,6 +87,21 @@ type ConnectionTokenService struct {
 	now       func() time.Time
 }
 
+// TunnelID 严格解析 Connection Token 并只返回准入栅栏需要的 Tunnel 身份。
+// 解析产生的 Secret 字节在返回前清零；完整持久化校验仍由 Verify 负责。
+func (service *ConnectionTokenService) TunnelID(encoded string) (string, error) {
+	if service == nil {
+		return "", ErrConnectionTokenInput
+	}
+	parsed, err := token.Parse(encoded)
+	if err != nil {
+		return "", fmt.Errorf("%w: parse", ErrConnectionTokenInvalid)
+	}
+	defer clear(parsed.AuthenticationSecret)
+	defer clear(parsed.IntegrityTag)
+	return parsed.GetTunnelId(), nil
+}
+
 // NewConnectionTokenService 返回使用 crypto/rand.Reader 的生产 Token 服务。
 // protector 的 32 字节主密钥生命周期由 Server Bootstrap 管理。
 func NewConnectionTokenService(store repository.Store, protector TokenProtector) *ConnectionTokenService {
@@ -95,20 +118,36 @@ func newConnectionTokenService(store repository.Store, protector TokenProtector,
 // 完整 Token 经保护器加密后入库，使后续 Connector 可获取相同 Token；认证 Secret
 // 仍单独保存 SHA-256 摘要，认证热路径不需要解密。
 func (service *ConnectionTokenService) Issue(ctx context.Context, input IssueConnectionTokenInput) (ConnectionTokenResult, error) {
+	prepared, err := service.prepareIssue(input)
+	if err != nil {
+		return ConnectionTokenResult{}, err
+	}
+	defer clear(prepared.metadata.TokenCiphertext)
+	if err := service.store.WithTx(ctx, func(transaction repository.TxStore) error {
+		return service.persistPrepared(ctx, transaction, prepared)
+	}); err != nil {
+		return ConnectionTokenResult{}, err
+	}
+	return prepared.result, nil
+}
+
+// prepareIssue 在事务外生成、编码并加密首次 Credential。只有 Application 包内
+// 的聚合 Owner 可以取得该中间态，HTTP Handler 不能绕过持久化边界拿到 Secret。
+func (service *ConnectionTokenService) prepareIssue(input IssueConnectionTokenInput) (preparedConnectionToken, error) {
 	if service == nil || service.store == nil || service.protector == nil || service.random == nil || service.now == nil ||
 		!validate.ValidID(input.TunnelID, "tun_") || input.Endpoint == nil || input.TLSTrust == nil {
-		return ConnectionTokenResult{}, ErrConnectionTokenInput
+		return preparedConnectionToken{}, ErrConnectionTokenInput
 	}
 
 	secret, err := randomSecret(service.random)
 	if err != nil {
-		return ConnectionTokenResult{}, err
+		return preparedConnectionToken{}, err
 	}
 	defer clear(secret[:])
 	issuedAt := service.now().UTC()
 	tokenID, err := newTokenID(issuedAt, service.random)
 	if err != nil {
-		return ConnectionTokenResult{}, err
+		return preparedConnectionToken{}, err
 	}
 	connectionToken := &protocolv1.ConnectionToken{
 		FormatVersion:        token.FormatVersionV1,
@@ -121,53 +160,67 @@ func (service *ConnectionTokenService) Issue(ctx context.Context, input IssueCon
 	}
 	encoded, err := token.Encode(connectionToken)
 	if err != nil {
-		return ConnectionTokenResult{}, fmt.Errorf("%w: connection description", ErrConnectionTokenInput)
+		return preparedConnectionToken{}, fmt.Errorf("%w: connection description", ErrConnectionTokenInput)
 	}
 
 	protectionContext := TokenProtectionContext{TunnelID: input.TunnelID, TokenID: tokenID, Version: initialConnectionTokenVersion}
 	ciphertext, err := service.protector.Seal([]byte(encoded), protectionContext)
 	if err != nil {
-		return ConnectionTokenResult{}, fmt.Errorf("%w: seal", ErrConnectionTokenUnavailable)
+		return preparedConnectionToken{}, fmt.Errorf("%w: seal", ErrConnectionTokenUnavailable)
 	}
-	defer clear(ciphertext)
 	createdAt := issuedAt.Unix()
 	if createdAt <= 0 {
-		return ConnectionTokenResult{}, ErrConnectionTokenInput
+		clear(ciphertext)
+		return preparedConnectionToken{}, ErrConnectionTokenInput
 	}
 	metadata := repository.TunnelToken{
 		ID: tokenID, TunnelID: input.TunnelID, SecretHash: sha256.Sum256(secret[:]),
 		TokenCiphertext: ciphertext, Version: initialConnectionTokenVersion,
 		Status: repository.TunnelTokenStatusActive, CreatedAt: createdAt,
 	}
-	if err := service.store.WithTx(ctx, func(transaction repository.TxStore) error {
-		tunnelRecord, err := transaction.Tunnels().Get(ctx, input.TunnelID)
-		if err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return ErrConnectionTokenTunnelUnavailable
-			}
-			return fmt.Errorf("load tunnel for connection token: %w", err)
-		}
-		if tunnelRecord.RevokedAt != nil {
+	return preparedConnectionToken{
+		result: ConnectionTokenResult{
+			TunnelID: input.TunnelID, TokenID: tokenID,
+			TokenVersion: initialConnectionTokenVersion, Token: encoded,
+		},
+		metadata: metadata,
+	}, nil
+}
+
+// persistPrepared 把预生成的首次 Credential 写入调用方事务。Tunnel 必须已经在
+// 同一事务中存在；ACTIVE/版本唯一性也在该线性化点检查。
+func (service *ConnectionTokenService) persistPrepared(
+	ctx context.Context,
+	transaction repository.TxStore,
+	prepared preparedConnectionToken,
+) error {
+	if service == nil || transaction == nil || prepared.result.TunnelID == "" || prepared.metadata.TunnelID != prepared.result.TunnelID {
+		return ErrConnectionTokenInput
+	}
+	tunnelRecord, err := transaction.Tunnels().Get(ctx, prepared.result.TunnelID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
 			return ErrConnectionTokenTunnelUnavailable
 		}
-		if _, err := transaction.TunnelTokens().GetActiveByTunnel(ctx, input.TunnelID); err == nil {
-			return ErrConnectionTokenAlreadyActive
-		} else if !errors.Is(err, repository.ErrNotFound) {
-			return fmt.Errorf("check active connection token: %w", err)
-		}
-		if _, err := transaction.TunnelTokens().GetByTunnelVersion(ctx, input.TunnelID, initialConnectionTokenVersion); err == nil {
-			return ErrConnectionTokenVersionExists
-		} else if !errors.Is(err, repository.ErrNotFound) {
-			return fmt.Errorf("check initial connection token version: %w", err)
-		}
-		if err := transaction.TunnelTokens().Create(ctx, metadata); err != nil {
-			return fmt.Errorf("create connection token metadata: %w", err)
-		}
-		return nil
-	}); err != nil {
-		return ConnectionTokenResult{}, err
+		return fmt.Errorf("load tunnel for connection token: %w", err)
 	}
-	return ConnectionTokenResult{TunnelID: input.TunnelID, TokenID: tokenID, TokenVersion: initialConnectionTokenVersion, Token: encoded}, nil
+	if tunnelRecord.RevokedAt != nil {
+		return ErrConnectionTokenTunnelUnavailable
+	}
+	if _, err := transaction.TunnelTokens().GetActiveByTunnel(ctx, prepared.result.TunnelID); err == nil {
+		return ErrConnectionTokenAlreadyActive
+	} else if !errors.Is(err, repository.ErrNotFound) {
+		return fmt.Errorf("check active connection token: %w", err)
+	}
+	if _, err := transaction.TunnelTokens().GetByTunnelVersion(ctx, prepared.result.TunnelID, initialConnectionTokenVersion); err == nil {
+		return ErrConnectionTokenVersionExists
+	} else if !errors.Is(err, repository.ErrNotFound) {
+		return fmt.Errorf("check initial connection token version: %w", err)
+	}
+	if err := transaction.TunnelTokens().Create(ctx, prepared.metadata); err != nil {
+		return fmt.Errorf("create connection token metadata: %w", err)
+	}
+	return nil
 }
 
 // current 仅供需要自行建立更强事务边界的 Application Service 使用。

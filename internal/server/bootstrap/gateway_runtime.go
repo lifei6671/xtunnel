@@ -15,6 +15,7 @@ import (
 
 	"github.com/lifei6671/xtunnel/internal/application"
 	"github.com/lifei6671/xtunnel/internal/healthbudget"
+	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
 	"github.com/lifei6671/xtunnel/internal/safego"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
@@ -57,6 +58,60 @@ const (
 	serverDrainTimeout = 30 * time.Second
 )
 
+func loadGatewayIdentity(config serverconfig.Config, resources *serverStorage) (gateway.Identity, error) {
+	var (
+		identity gateway.Identity
+		err      error
+	)
+	switch config.AgentGateway.TLS.Mode {
+	case gateway.PinnedMode:
+		identity, err = gateway.LoadOrCreatePinnedIdentity(
+			config.Server.DataDir,
+			config.AgentGateway.PublicHostname,
+			!resources.databaseExisted,
+			time.Now(),
+		)
+	case gateway.PublicMode:
+		identity, err = gateway.LoadPublicIdentity(config.AgentGateway.TLS.CertFile, config.AgentGateway.TLS.KeyFile)
+	default:
+		return gateway.Identity{}, fmt.Errorf("unsupported gateway TLS mode %q", config.AgentGateway.TLS.Mode)
+	}
+	if err != nil {
+		return gateway.Identity{}, fmt.Errorf("load gateway TLS identity: %w", err)
+	}
+	return identity, nil
+}
+
+// managementGatewayConnectionDescription 把当前 Gateway 身份冻结为 Connection Token
+// 描述。Public 模式信任系统 CA；Pinned 模式只发布当前身份的 SPKI SHA-256。
+func managementGatewayConnectionDescription(
+	config serverconfig.Config,
+	identity gateway.Identity,
+) (*protocolv1.GatewayEndpoint, *protocolv1.TlsTrustDescriptor, error) {
+	_, portText, err := net.SplitHostPort(config.AgentGateway.Listen)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse agent gateway listen: %w", err)
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		return nil, nil, errors.New("agent gateway public port is invalid")
+	}
+	endpoint := &protocolv1.GatewayEndpoint{Host: config.AgentGateway.PublicHostname, Port: uint32(port)}
+	trust := &protocolv1.TlsTrustDescriptor{}
+	switch config.AgentGateway.TLS.Mode {
+	case gateway.PublicMode:
+		trust.Mode = &protocolv1.TlsTrustDescriptor_PublicCa{PublicCa: &protocolv1.PublicCATrust{}}
+	case gateway.PinnedMode:
+		hash := identity.SPKIHash()
+		trust.Mode = &protocolv1.TlsTrustDescriptor_PinnedSpkiSha256{
+			PinnedSpkiSha256: &protocolv1.PinnedSPKITrust{SpkiSha256: append([]byte(nil), hash[:]...)},
+		}
+	default:
+		return nil, nil, fmt.Errorf("unsupported gateway TLS mode %q", config.AgentGateway.TLS.Mode)
+	}
+	return endpoint, trust, nil
+}
+
 // openGatewayLifecycle 在 Server 已持有 External Lock 且 SQLite 已完成 Migration 后加载身份。
 // 它只装配 Listener，不在这里监听；首个 Admin 成功前不得调用 Start。
 func openGatewayLifecycle(
@@ -65,9 +120,14 @@ func openGatewayLifecycle(
 	logger *slog.Logger,
 	reportRuntimeError func(error),
 	healthBudget *healthbudget.Manager,
+	identity gateway.Identity,
+	tokenService *application.ConnectionTokenService,
 ) (*gateway.Server, *sessionruntime.Manager, *tunnel.Proxy, *serverlimits.Manager, error) {
 	if healthBudget == nil {
 		return nil, nil, nil, nil, errors.New("health target budget manager is required")
+	}
+	if tokenService == nil || identity.Leaf() == nil {
+		return nil, nil, nil, nil, errors.New("gateway identity and token service are required")
 	}
 	serverResources, ok := resources.(*serverStorage)
 	if !ok {
@@ -97,31 +157,6 @@ func openGatewayLifecycle(
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("construct server resource limit manager: %w", err)
 	}
-	var (
-		identity    gateway.Identity
-		identityErr error
-	)
-	switch config.AgentGateway.TLS.Mode {
-	case gateway.PinnedMode:
-		identity, identityErr = gateway.LoadOrCreatePinnedIdentity(
-			config.Server.DataDir,
-			config.AgentGateway.PublicHostname,
-			!serverResources.databaseExisted,
-			time.Now(),
-		)
-	case gateway.PublicMode:
-		identity, identityErr = gateway.LoadPublicIdentity(config.AgentGateway.TLS.CertFile, config.AgentGateway.TLS.KeyFile)
-	default:
-		return nil, nil, nil, nil, fmt.Errorf("unsupported gateway TLS mode %q", config.AgentGateway.TLS.Mode)
-	}
-	if identityErr != nil {
-		return nil, nil, nil, nil, fmt.Errorf("load gateway TLS identity: %w", identityErr)
-	}
-	protector, err := application.NewAES256GCMTokenProtector(serverResources.tokenMasterKey[:])
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("construct Tunnel Token protector for gateway authentication: %w", err)
-	}
-	tokenService := application.NewConnectionTokenService(serverResources.database, protector)
 	snapshotBuilder, err := snapshot.New(snapshot.Config{
 		ProtocolVersion:      snapshotProtocolVersion,
 		MaxServices:          config.Limits.MaxServicesPerTunnel,
@@ -157,8 +192,9 @@ func openGatewayLifecycle(
 		return nil, nil, nil, nil, fmt.Errorf("construct gateway Session runtime: %w", err)
 	}
 	controlAuthenticator, err := servercontrolauth.New(tokenService, registry, servercontrolauth.Options{
-		AuthenticationRecorder: serverResources.database,
-		ReadTimeout:            controlAuthReadTimeout, WriteTimeout: controlAuthWriteTimeout,
+		AuthenticationRecorder:    serverResources.database,
+		TunnelAdmissionController: sessions,
+		ReadTimeout:               controlAuthReadTimeout, WriteTimeout: controlAuthWriteTimeout,
 		HeartbeatInterval: config.ConnectorRuntime.HeartbeatInterval.Duration,
 		RetryAfter:        controlAuthRetryAfter,
 		MaxFrameBytes:     uint64(config.Limits.MaxAuthFrameBytes),
@@ -490,6 +526,20 @@ func openGatewayAndBootstrapWith(
 	if err != nil {
 		return nil, fmt.Errorf("initialize stored state before gateway startup: %w", err)
 	}
+	// Gateway 身份文件仍必须晚于全部只读启动 Gate；避免 FD 预算已知不满足时
+	// 在 Data Directory 留下本可避免的新身份。Lifecycle 内保留同一检查作为防线。
+	if err := checkServerFDBudget(config, tcpListenerFDReserve(config.TCPIngress)); err != nil {
+		return nil, fmt.Errorf("validate startup file descriptor budget: %w", err)
+	}
+	identity, err := loadGatewayIdentity(config, serverResources)
+	if err != nil {
+		return nil, err
+	}
+	protector, err := application.NewAES256GCMTokenProtector(serverResources.tokenMasterKey[:])
+	if err != nil {
+		return nil, fmt.Errorf("construct Tunnel Token protector for gateway authentication: %w", err)
+	}
+	tokenService := application.NewConnectionTokenService(serverResources.database, protector)
 	runtimeErrors := make(chan error, 1)
 	reportRuntimeError := func(err error) {
 		select {
@@ -498,7 +548,7 @@ func openGatewayAndBootstrapWith(
 		}
 	}
 	gatewayServer, sessions, tunnelProxy, limitManager, err := openGatewayLifecycle(
-		config, resources, logger, reportRuntimeError, healthBudget,
+		config, resources, logger, reportRuntimeError, healthBudget, identity, tokenService,
 	)
 	if err != nil {
 		return nil, err
@@ -547,10 +597,27 @@ func openGatewayAndBootstrapWith(
 		routes.Wait()
 		return nil, errors.Join(fmt.Errorf("construct HTTP ingress listener: %w", err), tcpIngress.Close(), gatewayServer.Close())
 	}
+	endpoint, tlsTrust, err := managementGatewayConnectionDescription(config, identity)
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("construct management gateway connection description: %w", err),
+			httpIngress.Close(),
+			tcpIngress.Close(),
+			gatewayServer.Close(),
+		)
+	}
+	auditWriter := application.NewSecurityAuditWriter(serverResources.database, logger)
 	managementHandler, err := servermanagementapi.NewHandler(servermanagementapi.HandlerOptions{
 		Management: config.Management,
 		Store:      serverResources.database,
-		Logger:     logger,
+		Tunnels: application.NewTunnelManagementService(
+			serverResources.database, tokenService, sessions, endpoint, tlsTrust, config.Limits.MaxTunnels,
+		),
+		Credentials:     application.NewCredentialLifecycleService(tokenService, auditWriter),
+		TunnelLifecycle: application.NewTunnelLifecycleService(serverResources.database, auditWriter, sessions),
+		Logger:          logger,
 	})
 	if err != nil {
 		cancelRoutes()

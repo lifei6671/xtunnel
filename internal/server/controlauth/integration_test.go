@@ -68,8 +68,9 @@ func TestConnectorAuthenticationWithPersistentTunnelToken(t *testing.T) {
 
 	registry := serverruntime.NewRegistry()
 	serverHandler, err := servercontrolauth.New(tokenService, registry, servercontrolauth.Options{
-		AuthenticationRecorder: store,
-		ReadTimeout:            2 * time.Second, WriteTimeout: 2 * time.Second,
+		AuthenticationRecorder:    store,
+		TunnelAdmissionController: integrationAdmission{},
+		ReadTimeout:               2 * time.Second, WriteTimeout: 2 * time.Second,
 		HeartbeatInterval: 10 * time.Second, RetryAfter: time.Second,
 	})
 	if err != nil {
@@ -154,6 +155,12 @@ func TestConnectorAuthenticationWithPersistentTunnelToken(t *testing.T) {
 	if reopenedFirstAuthenticatedAt == nil || *reopenedFirstAuthenticatedAt != firstAuthenticatedAt {
 		t.Fatalf("FirstAuthenticatedAt after restart = %v, want %d", reopenedFirstAuthenticatedAt, firstAuthenticatedAt)
 	}
+}
+
+type integrationAdmission struct{}
+
+func (integrationAdmission) BeginTunnelAdmission(string) (func(), error) {
+	return func() {}, nil
 }
 
 func authenticatePair(

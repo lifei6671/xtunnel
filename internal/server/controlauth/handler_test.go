@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +34,8 @@ var errTestRandom = errors.New("test random source failed")
 
 type verifierFunc func(context.Context, string) (application.VerifiedConnectionToken, error)
 
+func (verify verifierFunc) TunnelID(string) (string, error) { return testTunnelID, nil }
+
 func (verify verifierFunc) Verify(ctx context.Context, token string) (application.VerifiedConnectionToken, error) {
 	return verify(ctx, token)
 }
@@ -41,6 +44,12 @@ type recorderFunc func(context.Context, string, int64) error
 
 func (record recorderFunc) MarkFirstAuthenticated(ctx context.Context, tunnelID string, authenticatedAt int64) error {
 	return record(ctx, tunnelID, authenticatedAt)
+}
+
+type admissionFunc func(string) (func(), error)
+
+func (admit admissionFunc) BeginTunnelAdmission(tunnelID string) (func(), error) {
+	return admit(tunnelID)
 }
 
 type handleOutcome struct {
@@ -119,6 +128,93 @@ func TestHandlePersistsFirstAuthenticationAfterSuccessFlush(t *testing.T) {
 	if got.tunnelID != testTunnelID || got.authenticatedAt != authenticatedAt {
 		t.Fatalf("recorded authentication = %#v, want tunnel=%s at=%d", got, testTunnelID, authenticatedAt)
 	}
+}
+
+func TestHandleHoldsTunnelAdmissionThroughPostFlushPersistence(t *testing.T) {
+	var admissionActive atomic.Bool
+	var admittedTunnel string
+	options := testOptions()
+	options.TunnelAdmissionController = admissionFunc(func(tunnelID string) (func(), error) {
+		admittedTunnel = tunnelID
+		if !admissionActive.CompareAndSwap(false, true) {
+			return nil, errors.New("test admission overlap")
+		}
+		return func() { admissionActive.Store(false) }, nil
+	})
+	admissionObserved := make(chan bool, 1)
+	verifyObserved := make(chan bool, 1)
+	options.AuthenticationRecorder = recorderFunc(func(context.Context, string, int64) error {
+		admissionObserved <- admissionActive.Load()
+		return nil
+	})
+	verifier := verifierFunc(func(_ context.Context, token string) (application.VerifiedConnectionToken, error) {
+		verifyObserved <- admissionActive.Load()
+		if token != testToken {
+			return application.VerifiedConnectionToken{}, application.ErrConnectionTokenInvalid
+		}
+		return application.VerifiedConnectionToken{
+			TunnelID: testTunnelID, TokenID: "tok_01J00000000000000000000000", TokenVersion: 1, DesiredRevision: 7,
+		}, nil
+	})
+	handler, err := newHandler(
+		verifier, serverruntime.NewRegistry(), options,
+		bytes.NewReader(bytes.Repeat([]byte{0x5c}, 64)), time.Now,
+	)
+	if err != nil {
+		t.Fatalf("newHandler() error = %v", err)
+	}
+	response, outcome := exchange(t, handler, validRequest(testConnectorID))
+	if response.GetSuccess() == nil || outcome.err != nil {
+		t.Fatalf("Handle() response=%#v error=%v, want Success", response, outcome.err)
+	}
+	if admittedTunnel != testTunnelID {
+		t.Fatalf("BeginTunnelAdmission() tunnel = %q, want %q", admittedTunnel, testTunnelID)
+	}
+	if !<-admissionObserved {
+		t.Fatal("Tunnel admission was released before post-flush persistence")
+	}
+	if !<-verifyObserved {
+		t.Fatal("Tunnel admission was not established before persistent Token Verify")
+	}
+	if !admissionActive.Load() {
+		t.Fatal("Tunnel admission was released before Session startup ownership transfer")
+	}
+	outcome.established.ReleaseTunnelAdmission()
+	if admissionActive.Load() {
+		t.Fatal("Tunnel admission remained held after Session owner released it")
+	}
+}
+
+func TestHandleRejectsTunnelWhenAdmissionIsFenced(t *testing.T) {
+	options := testOptions()
+	options.TunnelAdmissionController = admissionFunc(func(string) (func(), error) {
+		return nil, serverruntime.ErrTunnelRuntimeRevoked
+	})
+	handler, err := newHandler(
+		successfulVerifier(), serverruntime.NewRegistry(), options,
+		bytes.NewReader(bytes.Repeat([]byte{0x5d}, 64)), time.Now,
+	)
+	if err != nil {
+		t.Fatalf("newHandler() error = %v", err)
+	}
+	response, outcome := exchange(t, handler, validRequest(testConnectorID))
+	assertFailure(t, response, outcome.err, protocolv1.ErrorCode_ERROR_CODE_TUNNEL_REVOKED, 0)
+}
+
+func TestHandleRejectsAdmissionWithoutRelease(t *testing.T) {
+	options := testOptions()
+	options.TunnelAdmissionController = admissionFunc(func(string) (func(), error) {
+		return nil, nil
+	})
+	handler, err := newHandler(
+		successfulVerifier(), serverruntime.NewRegistry(), options,
+		bytes.NewReader(bytes.Repeat([]byte{0x5e}, 64)), time.Now,
+	)
+	if err != nil {
+		t.Fatalf("newHandler() error = %v", err)
+	}
+	response, outcome := exchange(t, handler, validRequest(testConnectorID))
+	assertFailure(t, response, outcome.err, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR, 1_500)
 }
 
 func TestHandleConnectorCapacityRejectsBeforeSuccessAndAllowsReplacement(t *testing.T) {
@@ -717,6 +813,7 @@ func TestNewRejectsInvalidOptions(t *testing.T) {
 		mutate func(*Options)
 	}{
 		{name: "authentication recorder", mutate: func(options *Options) { options.AuthenticationRecorder = nil }},
+		{name: "tunnel admission controller", mutate: func(options *Options) { options.TunnelAdmissionController = nil }},
 		{name: "read timeout", mutate: func(options *Options) { options.ReadTimeout = 0 }},
 		{name: "write timeout", mutate: func(options *Options) { options.WriteTimeout = 0 }},
 		{name: "auth frame above protocol", mutate: func(options *Options) { options.MaxFrameBytes = frame.MaxAuthFrameSize + 1 }},
@@ -763,7 +860,10 @@ func testHandler(t *testing.T, registry *serverruntime.Registry, verifier TokenV
 func testOptions() Options {
 	return Options{
 		AuthenticationRecorder: recorderFunc(func(context.Context, string, int64) error { return nil }),
-		ReadTimeout:            2 * time.Second, WriteTimeout: 2 * time.Second,
+		TunnelAdmissionController: admissionFunc(func(string) (func(), error) {
+			return func() {}, nil
+		}),
+		ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second,
 		HeartbeatInterval: 10 * time.Second, RetryAfter: 1500 * time.Millisecond,
 	}
 }

@@ -58,6 +58,10 @@ func TestNewID(t *testing.T) {
 }
 
 func TestConnectorAndSessionIdentity(t *testing.T) {
+	tunnelID, err := NewTunnelID()
+	if err != nil || !ValidTunnelID(tunnelID) {
+		t.Fatalf("NewTunnelID() = %q, %v, want tun_ ULID", tunnelID, err)
+	}
 	serviceID, err := NewServiceID()
 	if err != nil || !ValidServiceID(serviceID) {
 		t.Fatalf("NewServiceID() = %q, %v, want svc_ ULID", serviceID, err)

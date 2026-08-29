@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/application"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/safego"
+	servercontrolauth "github.com/lifei6671/xtunnel/internal/server/controlauth"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 )
 
@@ -162,7 +164,7 @@ func TestRevokeTunnelFencesLateServeAndCleansRunningSession(t *testing.T) {
 }
 
 func TestConvergenceWaitsForStartedOwnerBeforeInstall(t *testing.T) {
-	for _, operation := range []string{"revoke", "shutdown"} {
+	for _, operation := range []string{"delete", "revoke", "shutdown"} {
 		t.Run(operation, func(t *testing.T) {
 			registry := serverruntime.NewRegistry()
 			manager := newTestManager(t, registry)
@@ -198,6 +200,14 @@ func TestConvergenceWaitsForStartedOwnerBeforeInstall(t *testing.T) {
 
 			operationResult := make(chan error, 1)
 			switch operation {
+			case "delete":
+				go func() { operationResult <- manager.DeleteTunnel(testTunnelID) }()
+				waitFor(t, func() bool {
+					manager.mu.Lock()
+					_, deleting := manager.deletingTunnels[testTunnelID]
+					manager.mu.Unlock()
+					return deleting
+				})
 			case "revoke":
 				go func() { operationResult <- manager.RevokeTunnel(testTunnelID) }()
 				waitFor(t, func() bool {
@@ -247,7 +257,7 @@ func TestConvergenceWaitsForStartedOwnerBeforeInstall(t *testing.T) {
 			select {
 			case err := <-serveResult:
 				want := ErrSessionUnavailable
-				if operation == "revoke" {
+				if operation == "revoke" || operation == "delete" {
 					want = serverruntime.ErrTunnelRuntimeRevoked
 				}
 				if !errors.Is(err, want) {
@@ -265,6 +275,232 @@ func TestConvergenceWaitsForStartedOwnerBeforeInstall(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeleteTunnelWaitsForAdmissionAndClearsTemporaryFence(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	manager := newTestManager(t, registry)
+	if _, err := registry.Tunnel(testTunnelID); err != nil {
+		t.Fatalf("Tunnel() error = %v", err)
+	}
+	releaseAdmission, err := manager.BeginTunnelAdmission(testTunnelID)
+	if err != nil {
+		t.Fatalf("BeginTunnelAdmission() error = %v", err)
+	}
+
+	deleteResult := make(chan error, 1)
+	go func() { deleteResult <- manager.DeleteTunnel(testTunnelID) }()
+	waitFor(t, func() bool {
+		manager.mu.Lock()
+		_, deleting := manager.deletingTunnels[testTunnelID]
+		manager.mu.Unlock()
+		return deleting
+	})
+	if _, err := manager.BeginTunnelAdmission(testTunnelID); !errors.Is(err, serverruntime.ErrTunnelRuntimeRevoked) {
+		t.Fatalf("BeginTunnelAdmission(during delete) error = %v, want ErrTunnelRuntimeRevoked", err)
+	}
+	select {
+	case err := <-deleteResult:
+		t.Fatalf("DeleteTunnel() returned before admission release: %v", err)
+	default:
+	}
+
+	releaseAdmission()
+	select {
+	case err := <-deleteResult:
+		if err != nil {
+			t.Fatalf("DeleteTunnel() error = %v", err)
+		}
+	case <-time.After(testWait):
+		t.Fatal("DeleteTunnel() did not finish after admission release")
+	}
+	releaseAfterDelete, err := manager.BeginTunnelAdmission(testTunnelID)
+	if err != nil {
+		t.Fatalf("BeginTunnelAdmission(after delete) error = %v", err)
+	}
+	releaseAfterDelete()
+	pending, err := registry.ReserveAuthenticated(testTunnelID, testConnectorID)
+	if err != nil {
+		t.Fatalf("ReserveAuthenticated(after delete) error = %v", err)
+	}
+	if !registry.CancelAuthenticated(pending) {
+		t.Fatal("CancelAuthenticated(after delete) = false")
+	}
+}
+
+func TestDeleteTunnelCannotCrossAuthenticationToSessionStartupHandoff(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	manager := newTestManager(t, registry)
+	handler, err := servercontrolauth.New(handoffTokenVerifier{}, registry, servercontrolauth.Options{
+		AuthenticationRecorder:    handoffAuthenticationRecorder{},
+		TunnelAdmissionController: manager,
+		ReadTimeout:               testWriteTimeout,
+		WriteTimeout:              testWriteTimeout,
+		HeartbeatInterval:         10 * time.Second,
+		RetryAfter:                time.Second,
+	})
+	if err != nil {
+		t.Fatalf("controlauth.New() error = %v", err)
+	}
+
+	serverConnection, clientConnection := net.Pipe()
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var releaseCloseOnce sync.Once
+	unblockClose := func() { releaseCloseOnce.Do(func() { close(releaseClose) }) }
+	t.Cleanup(unblockClose)
+	blockingControl := &blockingCloseConn{
+		Conn: serverConnection, started: closeStarted, release: releaseClose,
+	}
+	t.Cleanup(func() {
+		_ = blockingControl.Close()
+		_ = clientConnection.Close()
+	})
+	authResult := make(chan struct {
+		established servercontrolauth.Established
+		err         error
+	}, 1)
+	go func() {
+		established, handleErr := handler.Handle(context.Background(), blockingControl)
+		authResult <- struct {
+			established servercontrolauth.Established
+			err         error
+		}{established: established, err: handleErr}
+	}()
+	if err := frame.WriteAuth(clientConnection, &protocolv1.ConnectorAuthRequest{
+		ConnectionToken: "xta_handoff", ConnectorId: testConnectorID,
+		Hostname: "connector.example.test", Version: "v0.1.0", Os: "linux", Arch: "amd64",
+		MinProtocol: 1, MaxProtocol: 1, Capabilities: []string{"tcp"},
+	}); err != nil {
+		t.Fatalf("WriteAuth() error = %v", err)
+	}
+	response := &protocolv1.ConnectorAuthResult{}
+	if err := frame.ReadAuth(clientConnection, response); err != nil {
+		t.Fatalf("ReadAuth() error = %v", err)
+	}
+	if response.GetSuccess() == nil {
+		t.Fatalf("ConnectorAuthResult = %#v, want success", response)
+	}
+	authenticated := <-authResult
+	if authenticated.err != nil {
+		t.Fatalf("Handle() error = %v", authenticated.err)
+	}
+
+	deleteResult := make(chan error, 1)
+	go func() { deleteResult <- manager.DeleteTunnel(testTunnelID) }()
+	waitFor(t, func() bool {
+		manager.mu.Lock()
+		_, deleting := manager.deletingTunnels[testTunnelID]
+		manager.mu.Unlock()
+		return deleting
+	})
+	select {
+	case err := <-deleteResult:
+		t.Fatalf("DeleteTunnel() crossed AUTH-to-startup handoff: %v", err)
+	default:
+	}
+
+	serveResult := make(chan error, 1)
+	go func() {
+		serveResult <- manager.Serve(context.Background(), blockingControl, &authenticated.established)
+	}()
+	select {
+	case <-closeStarted:
+	case <-time.After(testWait):
+		t.Fatal("rejected Session startup did not reach Control connection cleanup")
+	}
+	select {
+	case err := <-deleteResult:
+		t.Fatalf("DeleteTunnel() returned before rejected startup cleanup completed: %v", err)
+	default:
+	}
+	unblockClose()
+	select {
+	case err := <-serveResult:
+		if !errors.Is(err, serverruntime.ErrTunnelRuntimeRevoked) {
+			t.Fatalf("Serve() error = %v, want ErrTunnelRuntimeRevoked", err)
+		}
+	case <-time.After(testWait):
+		t.Fatal("Serve() did not finish after Control connection cleanup")
+	}
+	select {
+	case err := <-deleteResult:
+		if err != nil {
+			t.Fatalf("DeleteTunnel() error = %v", err)
+		}
+	case <-time.After(testWait):
+		t.Fatal("DeleteTunnel() did not finish after Session startup rejected the handoff")
+	}
+	if snapshots := registry.ConnectorSnapshots(); len(snapshots) != 0 {
+		t.Fatalf("Registry snapshots after handoff delete = %#v", snapshots)
+	}
+}
+
+type handoffTokenVerifier struct{}
+
+func (handoffTokenVerifier) TunnelID(string) (string, error) {
+	return testTunnelID, nil
+}
+
+func (handoffTokenVerifier) Verify(context.Context, string) (application.VerifiedConnectionToken, error) {
+	return application.VerifiedConnectionToken{
+		TunnelID: testTunnelID, TokenID: "tok_01J00000000000000000000000", TokenVersion: 1,
+	}, nil
+}
+
+type handoffAuthenticationRecorder struct{}
+
+func (handoffAuthenticationRecorder) MarkFirstAuthenticated(context.Context, string, int64) error {
+	return nil
+}
+
+func TestDeleteTunnelFailureKeepsAdmissionFence(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	session := commitSession(t, registry, testTunnelID, testConnectorID)
+	lease, err := registry.AcquireConnector(testTunnelID)
+	if err != nil {
+		t.Fatalf("AcquireConnector() error = %v", err)
+	}
+	runtime, err := registry.Tunnel(testTunnelID)
+	if err != nil {
+		t.Fatalf("Tunnel() error = %v", err)
+	}
+	workServer, workClient := net.Pipe()
+	peerServer, peerClient := net.Pipe()
+	t.Cleanup(func() {
+		_ = workClient.Close()
+		_ = peerClient.Close()
+	})
+	_, cancel := context.WithCancel(context.Background())
+	closeErr := errors.New("injected delete convergence failure")
+	if _, err := runtime.RegisterActiveWork(serverruntime.ActiveWorkSpec{
+		Session: session, WorkID: "work_01J00000000000000000000098", ConnectionID: "conn_01J00000000000000000000098",
+		Cancel: cancel, WorkConn: &closeErrorConn{Conn: workServer, err: closeErr}, PeerConn: peerServer, Lease: lease,
+	}); err != nil {
+		lease.Release()
+		cancel()
+		t.Fatalf("RegisterActiveWork() error = %v", err)
+	}
+	manager := newTestManager(t, registry)
+	if err := manager.DeleteTunnel(testTunnelID); !errors.Is(err, closeErr) {
+		t.Fatalf("DeleteTunnel() error = %v, want %v", err, closeErr)
+	}
+	if _, err := manager.BeginTunnelAdmission(testTunnelID); !errors.Is(err, serverruntime.ErrTunnelRuntimeRevoked) {
+		t.Fatalf("BeginTunnelAdmission(after failed delete) error = %v, want ErrTunnelRuntimeRevoked", err)
+	}
+	if _, err := registry.ReserveAuthenticated(testTunnelID, testConnectorID); !errors.Is(err, serverruntime.ErrTunnelRuntimeRevoked) {
+		t.Fatalf("ReserveAuthenticated(after failed delete) error = %v, want ErrTunnelRuntimeRevoked", err)
+	}
+}
+
+type closeErrorConn struct {
+	net.Conn
+	err error
+}
+
+func (connection *closeErrorConn) Close() error {
+	_ = connection.Conn.Close()
+	return connection.err
 }
 
 func TestConvergenceFreezesLifecycleReasonBeforeUnlock(t *testing.T) {

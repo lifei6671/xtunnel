@@ -53,6 +53,7 @@ var (
 // TokenVerifier 是 Control AUTH 唯一需要的长期 Credential 校验能力。
 // application.ConnectionTokenService 直接满足本接口。
 type TokenVerifier interface {
+	TunnelID(string) (string, error)
 	Verify(context.Context, string) (application.VerifiedConnectionToken, error)
 }
 
@@ -64,10 +65,21 @@ type AuthenticationRecorder interface {
 	MarkFirstAuthenticated(context.Context, string, int64) error
 }
 
+// TunnelAdmissionController 根据已完成格式校验的 Token 身份，把持久化校验及后续
+// AUTH 事务纳入 Session Runtime 的 per-Tunnel 生命周期栅栏。返回的 release 必须
+// 跨越 Handle 到 Session startup 的所有权交接且只调用一次；这样删除可以在锁外
+// 等待已经获准的 AUTH 完成，同时拒绝新的 AUTH。
+type TunnelAdmissionController interface {
+	BeginTunnelAdmission(string) (release func(), err error)
+}
+
 // Options 固定一次 AUTH 的有界 IO 和成功响应参数。
 type Options struct {
 	// AuthenticationRecorder 是跨 Server 重启区分 PENDING/OFFLINE 的耐久写入口。
 	AuthenticationRecorder AuthenticationRecorder
+	// TunnelAdmissionController 与后续 Control Session 使用同一个 Session Manager，
+	// 用于关闭 Token Verify 到 Session startup 之间的删除竞争窗。
+	TunnelAdmissionController TunnelAdmissionController
 	// ReadTimeout 限制完整 ConnectorAuthRequest Frame 的读取时间。
 	ReadTimeout time.Duration
 	// WriteTimeout 限制完整 ConnectorAuthResult Frame 的写出时间。
@@ -97,6 +109,20 @@ type Established struct {
 	HeartbeatInterval time.Duration
 	// Control 已在成功 Frame 写出后进入 ESTABLISHED，可移交给单 Owner。
 	Control *state.Control
+	// releaseAdmission 由成功 Handle 转交给 Session Manager；它必须一直持有到
+	// startup reservation 已登记，关闭 AUTH 返回到 Serve 之间的删除竞争窗。
+	releaseAdmission func()
+}
+
+// ReleaseTunnelAdmission exactly-once 释放随认证成功结果转移的准入 lease。
+// 只有接管 Established 的 Session Manager 应在 startup 已登记或交接失败时调用。
+func (established *Established) ReleaseTunnelAdmission() {
+	if established == nil || established.releaseAdmission == nil {
+		return
+	}
+	release := established.releaseAdmission
+	established.releaseAdmission = nil
+	release()
 }
 
 // HandleError 描述认证连接为何关闭。Error 文本只包含稳定错误码，故上层可以安全
@@ -140,6 +166,7 @@ func (err *HandleError) FailureSent() bool {
 type Handler struct {
 	verifier   TokenVerifier
 	recorder   AuthenticationRecorder
+	admission  TunnelAdmissionController
 	registry   *serverruntime.Registry
 	options    Options
 	random     io.Reader
@@ -160,12 +187,13 @@ func newHandler(verifier TokenVerifier, registry *serverruntime.Registry, option
 	}
 	heartbeat, heartbeatOK := durationMilliseconds(options.HeartbeatInterval, false)
 	retryAfter, retryOK := durationMilliseconds(options.RetryAfter, true)
-	if verifier == nil || options.AuthenticationRecorder == nil || registry == nil || random == nil || now == nil || options.ReadTimeout <= 0 ||
+	if verifier == nil || options.AuthenticationRecorder == nil || options.TunnelAdmissionController == nil || registry == nil || random == nil || now == nil || options.ReadTimeout <= 0 ||
 		options.WriteTimeout <= 0 || options.MaxFrameBytes > frame.MaxAuthFrameSize || !heartbeatOK || !retryOK {
 		return nil, ErrInvalidOptions
 	}
 	return &Handler{
-		verifier: verifier, recorder: options.AuthenticationRecorder, registry: registry, options: options,
+		verifier: verifier, recorder: options.AuthenticationRecorder, admission: options.TunnelAdmissionController,
+		registry: registry, options: options,
 		random: random, now: now, retryAfter: retryAfter, heartbeat: heartbeat,
 	}, nil
 }
@@ -209,11 +237,38 @@ func (handler *Handler) Handle(ctx context.Context, connection net.Conn) (Establ
 	// 并确保后续错误、结果和 Runtime 对象都不保存该长期 Credential。
 	encodedToken := request.GetConnectionToken()
 	request.ConnectionToken = ""
+	tunnelID, identityErr := handler.verifier.TunnelID(encodedToken)
+	if identityErr != nil {
+		encodedToken = ""
+		code, retryAfter := handler.classifyVerificationError(identityErr)
+		return Established{}, handler.fail(ctx, connection, control, code, retryAfter, identityErr)
+	}
+	releaseAdmission, admissionErr := handler.admission.BeginTunnelAdmission(tunnelID)
+	if admissionErr != nil {
+		encodedToken = ""
+		if errors.Is(admissionErr, serverruntime.ErrTunnelRuntimeRevoked) {
+			return Established{}, handler.fail(ctx, connection, control, protocolv1.ErrorCode_ERROR_CODE_TUNNEL_REVOKED, 0, admissionErr)
+		}
+		return Established{}, handler.fail(ctx, connection, control, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR, handler.retryAfter, admissionErr)
+	}
+	if releaseAdmission == nil {
+		encodedToken = ""
+		return Established{}, handler.fail(ctx, connection, control, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR, handler.retryAfter, errors.New("tunnel admission controller returned no release"))
+	}
+	admissionTransferred := false
+	defer func() {
+		if !admissionTransferred {
+			releaseAdmission()
+		}
+	}()
 	verified, verifyErr := handler.verifier.Verify(ctx, encodedToken)
 	encodedToken = ""
 	if verifyErr != nil {
 		code, retryAfter := handler.classifyVerificationError(verifyErr)
 		return Established{}, handler.fail(ctx, connection, control, code, retryAfter, verifyErr)
+	}
+	if verified.TunnelID != tunnelID {
+		return Established{}, handler.fail(ctx, connection, control, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR, handler.retryAfter, application.ErrConnectionTokenIdentityMismatch)
 	}
 	if verified.DesiredRevision < 0 {
 		return Established{}, handler.fail(ctx, connection, control, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR, handler.retryAfter, errors.New("negative tunnel desired revision"))
@@ -327,15 +382,17 @@ func (handler *Handler) Handle(ctx context.Context, connection net.Conn) (Establ
 	}
 	sessionEstablished = true
 	committed = true
-	return Established{
+	established := Established{
 		Session: session,
 		ConnectorMetadata: serverruntime.ConnectorMetadata{
 			Hostname: request.GetHostname(), OS: request.GetOs(), Arch: request.GetArch(), Version: request.GetVersion(),
 		},
 		SessionSecret: sessionSecret, ProtocolVersion: negotiated,
 		DesiredRevision: uint64(verified.DesiredRevision), HeartbeatInterval: handler.options.HeartbeatInterval,
-		Control: control,
-	}, nil
+		Control: control, releaseAdmission: releaseAdmission,
+	}
+	admissionTransferred = true
+	return established, nil
 }
 
 // fail 在协议状态允许时发送一个有界 ConnectorAuthFailure，并始终关闭连接。

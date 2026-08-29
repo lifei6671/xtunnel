@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -293,6 +294,15 @@ func (store tunnelRepository) Get(ctx context.Context, id string) (repository.Tu
 	return record.toDomain(), nil
 }
 
+// Count 返回当前视图中的持久化 Tunnel 总数，不加载聚合行。
+func (store tunnelRepository) Count(ctx context.Context) (int64, error) {
+	var count int64
+	if err := store.database.WithContext(ctx).Model(&tunnelRecord{}).Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("count tunnels: %w", err)
+	}
+	return count, nil
+}
+
 // List 按 Tunnel ID 升序返回当前视图中的全部持久化 Tunnel。
 func (store tunnelRepository) List(ctx context.Context) ([]repository.Tunnel, error) {
 	var records []tunnelRecord
@@ -310,6 +320,64 @@ func (store tunnelRepository) List(ctx context.Context) ([]repository.Tunnel, er
 		tunnels = append(tunnels, tunnel)
 	}
 	return tunnels, nil
+}
+
+// UpdateName 以 Tunnel aggregate version 为 CAS 条件更新展示名称并推进版本。
+func (store tunnelRepository) UpdateName(
+	ctx context.Context,
+	id, name string,
+	expectedVersion, updatedAt int64,
+) (repository.Tunnel, error) {
+	if store.readOnly {
+		return repository.Tunnel{}, errRepositoryWriteOutsideTransaction
+	}
+	if !validate.ValidID(id, "tun_") || strings.TrimSpace(name) == "" ||
+		expectedVersion < 1 || expectedVersion == math.MaxInt64 || updatedAt <= 0 {
+		return repository.Tunnel{}, repository.ErrInvalidTunnel
+	}
+	result := store.database.WithContext(ctx).Model(&tunnelRecord{}).
+		Where(TunnelColumns.ID+" = ?", id).
+		Where(TunnelColumns.Version+" = ?", expectedVersion).
+		Updates(map[string]any{
+			TunnelColumns.Name:      name,
+			TunnelColumns.Version:   expectedVersion + 1,
+			TunnelColumns.UpdatedAt: updatedAt,
+		})
+	if result.Error != nil {
+		return repository.Tunnel{}, fmt.Errorf("update tunnel name: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		if _, err := store.Get(ctx, id); err != nil {
+			return repository.Tunnel{}, err
+		}
+		return repository.Tunnel{}, repository.ErrVersionConflict
+	}
+	return store.Get(ctx, id)
+}
+
+// Delete 仅按 Tunnel aggregate version 删除当前聚合；Service 引用检查与事务编排
+// 由 Application 层负责，Repository 不删除 Service 或 Route。
+func (store tunnelRepository) Delete(ctx context.Context, id string, expectedVersion int64) error {
+	if store.readOnly {
+		return errRepositoryWriteOutsideTransaction
+	}
+	if !validate.ValidID(id, "tun_") || expectedVersion < 1 {
+		return repository.ErrInvalidTunnel
+	}
+	result := store.database.WithContext(ctx).
+		Where(TunnelColumns.ID+" = ?", id).
+		Where(TunnelColumns.Version+" = ?", expectedVersion).
+		Delete(&tunnelRecord{})
+	if result.Error != nil {
+		return fmt.Errorf("delete tunnel: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		if _, err := store.Get(ctx, id); err != nil {
+			return err
+		}
+		return repository.ErrVersionConflict
+	}
+	return nil
 }
 
 // AdvanceVersion 以 Tunnel aggregate version 为唯一 CAS 条件推进一次管理面变更。
