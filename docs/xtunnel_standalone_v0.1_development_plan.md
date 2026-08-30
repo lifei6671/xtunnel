@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-01 全链路 JSON Logging · IN_PROGRESS（本地实现与定向验证完成，等待提升权限 Windows CI 真实 Event Log 补证）
+> **当前阶段**：M6-01 全链路 JSON Logging · REVIEW（实现、本地验收、独立复审与精确 CI 已齐备，等待用户阶段复审）
 >
-> **当前结论**：用户已明确确认 M6-01 审计范围。共享日志已补齐稳定事件与真实关联字段，Management/HTTP Ingress/Tunnel/Agent 已形成请求至连接终态日志链；Windows SCM 使用受管 `XTunnelAgent` Application Event Log Source 持久写入同一 JSON，并由扩展 Smoke 验证 Source、事件 JSON、Token 不泄漏和卸载清理。本地 Go Test/Race/Vet、Windows amd64 测试、Windows arm64/Linux amd64 编译及 PowerShell Parser/ASCII 检查通过；当前会话非提升权限，真实 SCM/Event Log Smoke 等待 CI，因此 M6-01 保持 `IN_PROGRESS`，M6 与全局完成数仍为 `0/7`、`75/95`。
+> **当前结论**：用户已明确确认 M6-01 审计范围。共享日志已补齐稳定事件与真实关联字段，Management/HTTP Ingress/Tunnel/Agent 已形成请求至连接终态日志链；Windows SCM 使用受管 `XTunnelAgent` Application Event Log Source 持久写入同一 JSON，并由扩展 Smoke 验证 Source、事件 JSON、Token 不泄漏和卸载清理。本地 Go Test/Race/Vet、Windows amd64 测试、Windows arm64/Linux amd64 编译及 PowerShell Parser/ASCII 检查通过；实现提交 `eb8a88c25149ca83b0df58680c812474e5a88d09` 的精确 CI `#33296214987` 进一步通过 Linux amd64/arm64 全矩阵和提升权限 Windows SCM/Event Log 真实 Smoke。M6-01 进入 `REVIEW` 等待用户阶段复审，M6 与全局完成数仍为 `0/7`、`75/95`。
 
 ---
 
@@ -372,7 +372,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `IN_PROGRESS` |
+| M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `REVIEW` |
 | M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `NOT_STARTED` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `NOT_STARTED` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `NOT_STARTED` |
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11` 已完成。当前待办为：
 
-1. `M6-01` — 全链路 JSON Logging 已完成本地实现、定向 Test/Race/Vet、跨架构编译与 Windows Smoke 静态验证；等待提升权限 Windows CI 查询真实 Application Event 后进入 `REVIEW`。
+1. `M6-01` — 全链路 JSON Logging 已完成实现、本地验收、独立复审与精确 CI；Linux 双架构矩阵和提升权限 Windows SCM/Event Log 真实 Smoke 均已通过，当前等待用户阶段复审。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4 与 M5 已完成；M6-01 等待精确 CI 补证。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4 与 M5 已完成；M6-01 已进入 `REVIEW`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
 
 推进规则：
 
@@ -1474,3 +1474,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - Windows Sink：`service install` 注册 `XTunnelAgent` Application Event Source，并以既有 managed marker 和标准注册表值共同确认归属；外来或被修改的同名 Source 拒绝覆盖/删除，本次新建 Source 的标准值或 marker 任一步失败均回滚。SCM 服务把共享 JSON Handler 的完整单行记录按级别写入 Event Log；Writer 另向 SCM owner 发布运行期首个写失败，owner 取消 Agent、有界等待并返回非零 Service Exit，Source 缺失、被修改、打开或写入失败均不得回退 stderr。卸载清理受管 Source 并保留 DPAPI Credential。`deploy/windows/smoke.ps1` 新增真实 Source 契约、Application Event JSON 全量 Token Sentinel 与卸载清理检查。
 - 本地验证：`go1.27.0` / `GOTOOLCHAIN=local` 与 `go mod verify` 通过；全仓 `go test -count=1 ./...`、`go vet ./...`、`go test -race -count=1 ./...` 通过；Windows amd64 Service 测试、Windows arm64 Agent/Bootstrap/Service 编译，以及 Linux amd64 Agent/Server Bootstrap/Integration 编译通过；Windows PowerShell 5.1 与 PowerShell 7 Parser、ASCII-only、`git diff --check` 通过。当前进程不是提升权限 Administrator，Harness 按设计不能在本机执行真实 SCM/Event Log Smoke，该项等待 Windows CI。
 - 状态与文档：M6-01 从 `BLOCKED` 转为 `IN_PROGRESS`，M6 更新为 `IN_PROGRESS`，完成数仍为 M6 `0/7`、全局 `75/95`；M6 Gate Checklist 全部保持未勾选。总技术方案、README 与本计划已同步，CI Workflow 无需修改，因为既有 Windows Agent Service Job 已执行同一个 Smoke 入口。
+
+## 2026-08-30 · M6-01 精确 CI 证据 · REVIEW
+
+- 提交与 CI：全链路 JSON Logging、有限 `error_code`、真实关联字段、受管 Windows Event Log Source、SCM JSON Sink、运行期写失败收敛和扩展 Smoke 共同提交并推送为 `eb8a88c25149ca83b0df58680c812474e5a88d09`。精确绑定该 SHA 的 [CI #33296214987](https://github.com/lifei6671/xtunnel/actions/runs/33296214987) 从 2026-08-30 14:08:17 至 14:14:18（Asia/Shanghai）运行约 6 分 1 秒，结论为 `success`。
+- 三路作业：Linux amd64 用时 5 分 57 秒，Playwright Chromium 锁定安装、Web Check/Build、全仓 Go Test/Vet/Build、M4 E2E、1 GiB Streaming、Caddy/Nginx HTTPS 与真实 Browser E2E、OCI/systemd Smoke 和生成物清洁检查全部成功；Linux arm64 用时 4 分 26 秒，除按设计跳过 amd64-only Browser 步骤外，其余双架构 Gate 全部成功。Windows Agent Service 用时 3 分 8 秒，Go 1.27.0 固定工具链、全仓测试与 Agent 构建、Windows arm64 交叉构建、工作树清洁检查全部成功。
+- Windows 真实 Smoke：提升权限 `windows-2022` Runner 执行 `deploy/windows/smoke.ps1`，`Run Windows Service smoke` 步骤从 14:11:11 至 14:11:24 成功并输出 `[OK] Windows Agent service smoke passed`。该入口真实安装/启动/停止/卸载 SCM 服务，查询 Application Event，逐条解析必需 JSON 字段并扫描全部返回记录的 Token Sentinel，同时验证受管 Source 注册表契约和卸载清理；不再以本机 Parser 或静态检查替代真实 Event Log 证据。
+- 状态与 Gate：M6-01 已具备最终实现、关键失败分支、本地 Test/Race/Vet、跨架构验证、三轮独立复审与精确 CI，进入 `REVIEW` 等待用户阶段复审；未将“继续”替代“通过”。M6 保持 `0/7`、全局保持 `75/95`，M6-02 不自动开工，M6 Gate Checklist 全部保持未勾选，本次不把任何产品任务提前标记为 `DONE`。
+- 文档同步：根 README 与本开发计划同步 M6-01 的精确 CI 证据和 `REVIEW` 边界。总技术方案、OpenAPI/生成物、Proto、Server Schema、Migration、第三方依赖/Lockfile、CI/CD、权限模型与 `AGENTS.md` 无需再改，因为本轮只闭环既有实现与 CI 证据，没有改变机器权威、用户命令或已冻结日志契约。
