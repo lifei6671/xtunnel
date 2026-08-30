@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-04 Usage Aggregation · REVIEW（实现、本地/WSL Linux 验证与实现提交的精确 CI 均完成，等待用户阶段复审）
+> **当前阶段**：M6-05 Error/Status Observability · BLOCKED（范围审计完成，等待公共 API 行为与 CI 变更确认）
 >
-> **当前结论**：M6-03 已经用户阶段复审转为 `DONE`，M6 与全局完成数保持 `3/7`、`78/95`。用户已明确确认 M6-04 范围；`000011` minute/hour/day Migration、Usage Repository、单 Owner 60 秒 Flush/Rollup、7 日 Retention、有界 Incremental Vacuum、Tunnel/Bootstrap 生命周期、Service/Dashboard `AVAILABLE` Read Model 和真实 Linux Server→Agent→Origin 黑盒均已落地。本机定向 Race、全仓受控并行 Test/Vet、Module/Web 检查、WSL Linux 稳定性验证、安全/生命周期/API-E2E-CI 三路独立复审，以及实现提交 `a1e9c22de27a4453e1ffb4a52521a8d3ae570f41` 的 Linux amd64/arm64 与 Windows 精确 CI 均通过；任务继续处于 `REVIEW`，仅等待用户阶段复审，M6 Gate Checklist 继续全部未勾选。
+> **当前结论**：用户已确认 M6-04 阶段复审通过；实现提交 `a1e9c22de27a4453e1ffb4a52521a8d3ae570f41`、证据提交 `0bc59cd731d4930dbef9a22fef979d300f17ddc6` 及各自精确 CI 均为 `success`，M6-04 转为 `DONE`，M6 与全局完成数更新为 `4/7`、`79/95`。M6-05 的权威契约、代码缺口与安全/测试边界已完成三路只读审计；推荐以五类有限诊断码、进程内固定五槽 Latest Projection、既有 Dashboard API/Web 和真实 Linux 双架构故障黑盒完成类别级诊断，不做资源级下钻。因范围包含 OpenAPI 行为/枚举、生成物与 CI Workflow 变更，M6-05 当前标记 `BLOCKED`，等待用户明确确认；M6 Gate Checklist 继续全部未勾选。
 
 ---
 
@@ -110,9 +110,9 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M3 Config/Health | 13 | 13 | `DONE` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
-| M6 Observability | 7 | 3 | `IN_PROGRESS` | M5-11 | M6-07 |
+| M6 Observability | 7 | 4 | `IN_PROGRESS` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **78** |  |  |  |
+| **合计** | **95** | **79** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -375,8 +375,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `DONE` |
 | M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `DONE` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `DONE` |
-| M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `REVIEW` |
-| M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `NOT_STARTED` |
+| M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `DONE` |
+| M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `BLOCKED` |
 | M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard + Agent Connectivity Diag | Diag 复用生产 Token Parser、Endpoint/DNS、Dialer、TLS Builder、Pin Verifier 和 ALPN，覆盖 DNS/TCP/TLS/Pin/ALPN/Auth/Snapshot Receive；不得复制宽松连接栈，也不得把完整 Token 写入 argv 作为唯一入口；输出 PASS/WARNING/FAIL 与 READY 变体；覆盖证书 30/7/1 天告警、Audit 查询/导出、Linux systemd 与 Windows SCM 的启动失败、恢复重启和 30s Stop/Shutdown 超时诊断 | `NOT_STARTED` |
 | M6-07 | M6 Gate | M6-01至 M6-06 | Observability 验收证据 | 故障注入下五类核心问题均可唯一定位 | `NOT_STARTED` |
 
@@ -424,13 +424,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-03` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-04` 已完成。当前待办为：
 
-1. `M6-04` — 实现、本地/WSL Linux 证据及实现提交的 Linux amd64/arm64 与 Windows 精确 CI 已完成，等待用户阶段复审；复审通过前不转 `DONE`。
+1. `M6-05` — 三路范围审计已完成，等待用户确认五类诊断码、固定五槽内存投影、既有 Dashboard 行为切换、生成契约与 Linux 双架构 CI 范围；确认前不修改实现。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 至 M6-03 已完成；M6-04 当前为 `REVIEW`，完成数仍保持 `78/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次进度同步自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 至 M6-04 已完成；M6-05 当前为 `BLOCKED`，完成数更新为 `79/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次进度同步自动转为 `DONE`。
 
 推进规则：
 
@@ -1551,3 +1551,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 本地证据：Go `1.27.0`、`GOTOOLCHAIN=local` 下，七个相关包定向 Race、全仓 `go test -p 2 -count=1 -timeout 300s ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff`、Web Check/Build 均通过。默认并行全仓首轮唯一失败是 `internal/buildinfo` 自编译子进程撞到固定 30 秒墙钟，单包复跑 `0.513s` 通过，受控并行全仓通过。WSL Linux amd64 真实 `TestUsageAggregationEndToEnd` 通过，并与 `TestProductDataPlaneEndToEnd` 联合连续 10 轮通过，覆盖非对称双向字节、Half-Close、Service/Dashboard API、失败 OPEN、最终 Flush、全 Server 重启与无重复入账。
 - 独立复审：安全/持久化、并发/生命周期、API/E2E/CI 三路最终复审均为 `APPROVED`，无 P0/P1/P2。补充压力验证包含 `ReadConsistent` 取消回归 100 次、Owner/OPEN/RAW 关键测试重复 50 次，以及相关 Test/Race/Vet 与 Diff Check。
 - 精确 CI 与状态：实现提交 `a1e9c22de27a4453e1ffb4a52521a8d3ae570f41` 的 [CI #33306427567](https://github.com/lifei6671/xtunnel/actions/runs/33306427567) 整体 `success`。Linux amd64/arm64 的 `Run native M6 Usage aggregation blackbox`、全仓 Test/Race/Vet、Proto/OpenAPI/生成物清洁、OCI/systemd 均通过；Linux amd64 的真实 Browser E2E 与 Windows Agent Service 也通过。旧库首次升级 v11 会执行一次完整 `VACUUM` 以转换 Incremental Auto Vacuum，失败不记录版本，但大型旧库的启动耗时仍是已知运维风险。M6-04 继续保持 `REVIEW` 等待用户阶段复审，M6 保持 `3/7`、全局保持 `78/95`，M6 Gate Checklist 全部未勾选。
+
+## 2026-08-30 · M6-04 用户阶段复审与 M6-05 范围审计 · BLOCKED
+
+- M6-04 复审与状态：用户明确确认 M6-04 阶段复审通过。实现提交 `a1e9c22de27a4453e1ffb4a52521a8d3ae570f41` 的 [CI #33306427567](https://github.com/lifei6671/xtunnel/actions/runs/33306427567) 与证据提交 `0bc59cd731d4930dbef9a22fef979d300f17ddc6` 的最终 Head [CI #33306754790](https://github.com/lifei6671/xtunnel/actions/runs/33306754790) 均整体 `success`，两次都通过 Linux amd64/arm64 Usage 黑盒、全仓 Test/Race/Vet、Proto/OpenAPI/生成物清洁、OCI/systemd、Linux amd64 Browser E2E 和 Windows Agent Service。M6-04 从 `REVIEW` 转为 `DONE`，M6 从 `3/7` 更新为 `4/7`，全局从 `78/95` 更新为 `79/95`；M6 Gate Checklist 继续全部未勾选。
+- M6-05 当前事实：`GET /dashboard` 与 `RecentError{code,message,occurred_at,request_id}`、最多 20 项的 Wire Shape 已存在，Web 也已有 `AVAILABLE`/空列表/非空列表展示骨架；但 Application 仍固定返回 `UNAVAILABLE + []`，`services_error` 只统计 `APPLY_FAILED`。`internal/server/status` 已能区分 `TUNNEL_OFFLINE`、`ORIGIN_UNHEALTHY` 与 `NO_CAPACITY`；断开的 Connector 会从 Current Snapshot 移除，必须消费 generation-fenced `connector_disconnected` 事件；最终逻辑 OPEN 已有 Protocol v1 有限错误归一，但 Metrics/日志不能反向解析为 Dashboard 时间线。
+- 推荐诊断契约：把 `RecentError.code` 在 OpenAPI 冻结为 `TUNNEL_OFFLINE`、`CONNECTOR_OFFLINE`、`ORIGIN_DOWN`、`NO_CAPACITY`、`PROTOCOL_ERROR` 五值枚举，并通过 Wrapper 更新 Go/TypeScript 生成物；`message` 只使用 Server 固定中文文案，`occurred_at` 固定 UTC，`request_id` 仅在真实关联值存在时返回。`VERSION_UNSUPPORTED`、认证失败、配置同步、取消和 `INTERNAL_ERROR` 不进入这五类 Dashboard；`OPEN_DRAINING` 只作为内部重选信号，绝不单独形成诊断事件。
+- 推荐投影与状态语义：新增进程内线程安全的固定五槽 Latest Projection，每类只保留最新不可变记录，Snapshot 按时间倒序深拷贝，重启后为空但返回 `AVAILABLE`；它不是队列，不需要 Drop Metric，也不写 SQLite/Security Audit/Usage。Tunnel/Service 异常只消费权威状态转换边沿，Connector Offline 只消费完成 generation fencing 且非预期关停/撤销/替换的断开事件，Origin/Capacity/Protocol 只消费最终逻辑 OPEN 或权威 Health/Capacity 转换，内部 Failover 不重复。`services_error` 统计 `APPLY_FAILED`、`TUNNEL_OFFLINE`、`ORIGIN_UNHEALTHY`、`NO_CAPACITY`，不把 `DISABLED` 或暂态 `CONFIG_SYNCING` 算作错误。
+- Web 与下钻边界：现有 Dashboard 最近错误区改为五类稳定中文标签并展示可选 `request_id`，修复相同时间/类别的 React Key 冲突；浏览器不重算状态、不解析 `message`、不使用 HTML 注入。当前 Wire 没有 Tunnel/Service/Connector/Trace ID，本轮不增加资源 ID、详情 URL 或点击跳转，因此交付是“类别级诊断”而非“资源级下钻”；若要求点击定位具体资源，必须另行确认 OpenAPI 结构化可空 ID 扩展，禁止把 ID 拼进 message。
+- 测试与 CI：单元/Race 覆盖五类映射、状态边沿去重、旧 generation、内部 Failover、固定五槽、并发发布/快照、UTC、可空 request ID、返回副本和 Secret/Origin/Header/IP/底层错误 Sentinel；Management Contract 覆盖 `AVAILABLE` 空/非空与最大项数；Linux amd64/arm64 新增明确命名的 M6-05 Server→Agent→Origin 五类故障黑盒；Linux amd64 复用现有 Caddy/Nginx Chromium Gate 验证真实页面类别、空态、刷新与敏感数据不进入 DOM/URL/Storage，不新增 Playwright 依赖或 Lockfile 变更。
+- 授权与状态：上述范围会修改 OpenAPI `RecentError.code` 行为/枚举及 Go/TypeScript 生成物、Dashboard Application/API/Web、Tunnel/Session/Health/Capacity 观察接线、测试与 CI Workflow，属于需确认变更；不新增 REST Path、第三方依赖、Lockfile、Database Schema/Migration、Server 配置、Proto、生产权限或资源级下钻字段，也不改变既有日志字段/级别。三路只读审计均确认类别级方案可实施；用户明确确认前 M6-05 标记 `BLOCKED`，M6 Gate Checklist 全部未勾选。
