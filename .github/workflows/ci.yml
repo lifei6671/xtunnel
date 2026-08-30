@@ -16,8 +16,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
-      XTUNNEL_CADDY_IMAGE: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
-      XTUNNEL_NGINX_IMAGE: nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
+      BROWSER_E2E_CADDY_IMAGE: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+      BROWSER_E2E_NGINX_IMAGE: nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
     strategy:
       fail-fast: false
       matrix:
@@ -153,10 +153,10 @@ jobs:
           XTUNNEL_RUN_FRONT_PROXY_E2E: '1'
         run: |
           set -euo pipefail
-          docker pull "$XTUNNEL_CADDY_IMAGE"
-          docker pull "$XTUNNEL_NGINX_IMAGE"
-          test "$(docker image inspect --format '{{.Architecture}}' "$XTUNNEL_CADDY_IMAGE")" = '${{ matrix.arch }}'
-          test "$(docker image inspect --format '{{.Architecture}}' "$XTUNNEL_NGINX_IMAGE")" = '${{ matrix.arch }}'
+          docker pull "$BROWSER_E2E_CADDY_IMAGE"
+          docker pull "$BROWSER_E2E_NGINX_IMAGE"
+          test "$(docker image inspect --format '{{.Architecture}}' "$BROWSER_E2E_CADDY_IMAGE")" = '${{ matrix.arch }}'
+          test "$(docker image inspect --format '{{.Architecture}}' "$BROWSER_E2E_NGINX_IMAGE")" = '${{ matrix.arch }}'
           go test -count=1 -timeout 180s ./internal/server/httpingress \
             -run '^TestFrontProxyHTTPSAndWebSocketE2E$'
 
@@ -172,7 +172,9 @@ jobs:
             sudo rmdir "$runtime_dir"
           }
           trap cleanup_runtime_dir EXIT
-          npm --prefix web run test:e2e
+          XTUNNEL_CADDY_IMAGE="$BROWSER_E2E_CADDY_IMAGE" \
+            XTUNNEL_NGINX_IMAGE="$BROWSER_E2E_NGINX_IMAGE" \
+            npm --prefix web run test:e2e
 
       - name: Run native OCI smoke tests
         shell: bash
