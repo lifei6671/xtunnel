@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -140,11 +141,21 @@ func TestErrorStatusObservabilityEndToEnd(t *testing.T) {
 	}
 	finishProductGateTCP(t, active, activeEchoDone, "Diagnostics capacity holder")
 
-	// 取消首个正常 Agent 让 Session Manager 完成 generation fencing。Bridge 从
-	// 同一 connector_disconnected 事实发布 CONNECTOR_OFFLINE，并在确认 Tunnel
-	// 已无 Current Connector 后发布 TUNNEL_OFFLINE；没有额外公网 OPEN 参与转换。
+	// 正常 Agent 取消会先完成 Drain，必须证明该预期关闭不会制造离线诊断。
 	stopAgent()
 	agentStopped = true
+	waitForUsageAgentOffline(t, runtime)
+	afterDrain, afterDrainBody := readDiagnosticsDashboard(t, client, runtime, cookie)
+	if len(afterDrain.RecentErrors.Items) != 1 || afterDrain.RecentErrors.Items[0].Code != "NO_CAPACITY" {
+		t.Fatalf("graceful Agent Drain produced Diagnostics: %+v; body=%s", afterDrain.RecentErrors, afterDrainBody)
+	}
+
+	// 另起一条已认证 Control Session，不发送 Drain 而直接关闭底层 Session，模拟
+	// 进程崩溃/网络中断。Bridge 从同一 generation-fenced connector_disconnected
+	// 事实发布 CONNECTOR_OFFLINE，并在 Tunnel 已无 Current Connector 时发布
+	// TUNNEL_OFFLINE；没有额外公网 OPEN 参与转换。
+	abruptAgent := startDiagnosticsAbruptAgent(t, issuedToken, runtime)
+	abruptAgent.crash(t)
 	waitForUsageAgentOffline(t, runtime)
 	waitForDiagnosticsCodes(
 		t, client, runtime, cookie,
@@ -374,16 +385,68 @@ type diagnosticsProtocolAgent struct {
 	done        chan error
 }
 
-func startDiagnosticsProtocolAgent(t *testing.T, connectionToken string) *diagnosticsProtocolAgent {
+type diagnosticsAbruptAgent struct {
+	session     *agentsession.Session
+	inboundDone chan error
+	crashOnce   sync.Once
+}
+
+func startDiagnosticsAbruptAgent(
+	t *testing.T,
+	connectionToken string,
+	runtime *gatewayBootstrapCloser,
+) *diagnosticsAbruptAgent {
 	t.Helper()
 	connector, err := identity.NewConnector()
 	if err != nil {
-		t.Fatalf("create Diagnostics protocol Connector identity: %v", err)
+		t.Fatalf("create Diagnostics abrupt Connector identity: %v", err)
 	}
-	runner, err := agentsession.NewRunner(agentsession.Config{
+	runner, err := newDiagnosticsSessionRunner(connectionToken, connector, "diagnostics-abrupt-agent.test")
+	if err != nil {
+		t.Fatalf("construct Diagnostics abrupt Agent session: %v", err)
+	}
+	session, err := runner.Start(t.Context())
+	if err != nil {
+		t.Fatalf("start Diagnostics abrupt Control Session: %v", err)
+	}
+	agent := &diagnosticsAbruptAgent{session: session, inboundDone: make(chan error, 1)}
+	go func() { agent.inboundDone <- acknowledgeDiagnosticsSnapshots(t.Context(), session) }()
+	t.Cleanup(func() { agent.crash(t) })
+
+	deadline := time.NewTimer(8 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		for _, snapshot := range runtime.sessions.RuntimeStatusSnapshots() {
+			if snapshot.TunnelID == productGateTunnelID && snapshot.CurrentControlSession &&
+				snapshot.Config.ConfigReady && snapshot.Config.HasObserved &&
+				snapshot.Config.ObservedRevision == 1 {
+				return agent
+			}
+		}
+		select {
+		case runErr := <-agent.inboundDone:
+			agent.session.Close()
+			_ = agent.session.Wait()
+			t.Fatalf("Diagnostics abrupt Agent stopped before ready: %v", runErr)
+		case <-deadline.C:
+			agent.crash(t)
+			t.Fatal("Diagnostics abrupt Agent did not publish a ready Snapshot")
+		case <-ticker.C:
+		}
+	}
+}
+
+func newDiagnosticsSessionRunner(
+	connectionToken string,
+	connector identity.Connector,
+	hostname string,
+) (*agentsession.Runner, error) {
+	return agentsession.NewRunner(agentsession.Config{
 		ConnectionToken:  connectionToken,
 		Connector:        connector,
-		Hostname:         "diagnostics-protocol-agent.test",
+		Hostname:         hostname,
 		Version:          "v0.1.0-m6-diagnostics-gate",
 		OS:               "linux",
 		Arch:             "test",
@@ -397,6 +460,62 @@ func startDiagnosticsProtocolAgent(t *testing.T, connectionToken string) *diagno
 			WriteTimeout:         2 * time.Second,
 		},
 	})
+}
+
+func acknowledgeDiagnosticsSnapshots(ctx context.Context, session *agentsession.Session) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case inbound, ok := <-session.Inbound():
+			if !ok {
+				return nil
+			}
+			envelope := inbound.Envelope
+			snapshot := envelope.GetConfigSnapshot()
+			if snapshot == nil {
+				continue
+			}
+			if err := session.Enqueue(&protocolv1.ControlEnvelope{
+				ProtocolVersion: envelope.GetProtocolVersion(),
+				Payload: &protocolv1.ControlEnvelope_ConfigAck{ConfigAck: &protocolv1.ConfigAck{
+					ObservedRevision: snapshot.GetRevision(),
+					ApplyStatus:      protocolv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED,
+					ErrorCode:        protocolv1.ErrorCode_ERROR_CODE_OK,
+				}},
+			}); err != nil {
+				return fmt.Errorf("ack Diagnostics abrupt Snapshot: %w", err)
+			}
+		}
+	}
+}
+
+func (agent *diagnosticsAbruptAgent) crash(t *testing.T) {
+	t.Helper()
+	agent.crashOnce.Do(func() {
+		agent.session.Close()
+		waitErr := agent.session.Wait()
+		select {
+		case inboundErr := <-agent.inboundDone:
+			if inboundErr != nil && !errors.Is(inboundErr, context.Canceled) && !errors.Is(inboundErr, net.ErrClosed) {
+				t.Errorf("stop Diagnostics abrupt inbound owner: %v", inboundErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("Diagnostics abrupt inbound owner did not stop")
+		}
+		if waitErr != nil && !errors.Is(waitErr, context.Canceled) && !errors.Is(waitErr, net.ErrClosed) {
+			t.Errorf("stop Diagnostics abrupt Control Session: %v", waitErr)
+		}
+	})
+}
+
+func startDiagnosticsProtocolAgent(t *testing.T, connectionToken string) *diagnosticsProtocolAgent {
+	t.Helper()
+	connector, err := identity.NewConnector()
+	if err != nil {
+		t.Fatalf("create Diagnostics protocol Connector identity: %v", err)
+	}
+	runner, err := newDiagnosticsSessionRunner(connectionToken, connector, "diagnostics-protocol-agent.test")
 	if err != nil {
 		t.Fatalf("construct Diagnostics protocol Agent session: %v", err)
 	}
