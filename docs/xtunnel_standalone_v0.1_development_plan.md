@@ -1411,3 +1411,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 二轮提交与 CI：环境变量隔离修复提交并推送为 `11338d4b935156573b6eed81a448af62d4f8a81b`。精确绑定该 SHA 的 [CI #33289102867](https://github.com/lifei6671/xtunnel/actions/runs/33289102867) 中 Windows Agent Service 成功，Linux amd64 的 OpenAPI、Web Build、全仓 Go Test/Vet/Build、M4 Product Data Plane、1 GiB Streaming 与原生 Caddy/Nginx HTTPS Ingress E2E 均成功，随后真实 Browser E2E 在启动器提升 `nofile` 时因 Runner 当前 shell 无权越过 hard limit 而失败；Chromium 测试尚未启动，本轮不记录为 Browser Gate 通过。
 - 根因与修复：Server 默认 FD 预算要求进程 `nofile` 至少为 `137192`，Browser 启动器继续固定并验证 `1048576`，不能降低门槛规避失败。最小 CI 修复在已经创建隔离 Runtime Directory 后，通过 Runner 的 `sudo prlimit --pid "$$" --nofile=1048576:1048576` 只提升当前 Browser step shell 的 soft/hard limit，后续 Server 和 Chromium 子进程继承该上限；应用配置、FD Budget Manager、OCI/systemd 基线与其他 CI 步骤均不改变。
 - 状态与 Gate：真实 Chromium 经 Caddy/Nginx 的两轮工作流仍需修复提交后的精确 CI 补证。M5-10 继续保持 `IN_PROGRESS`，M5 保持 `9/11`、全局保持 `73/95`，M5-11 继续等待，M5 Gate Checklist 六项全部保持未勾选。
+
+## 2026-08-30 · M5-10 Browser 启动器环境隔离修复 · IN_PROGRESS
+
+- 三轮提交与 CI：FD 上限修复提交并推送为 `9316ee002bb95c612430e028ede7c12469611256`。精确绑定该 SHA 的 [CI #33289335871](https://github.com/lifei6671/xtunnel/actions/runs/33289335871) 证明 `sudo prlimit` 与启动器的 `ulimit` 验证均已通过；Windows Agent Service 和 Linux arm64 全部成功，Linux amd64 的 Browser step 完成 Web/Server 构建后，在创建临时管理员时被 Server 配置边界拒绝继承的 `XTUNNEL_NGINX_IMAGE`，Chromium 仍未启动，因此本轮不记录为 Browser Gate 通过。
+- 根因与修复：CI 对单条 npm 命令设置的镜像变量会被启动器及其全部子进程继承。启动器原本只校验镜像摘要和本地架构，没有在调用真实 Server 前移除产品保留前缀。最小修复在校验通过后将两个镜像引用复制到不导出的脚本内部变量，并立即 `unset XTUNNEL_CADDY_IMAGE XTUNNEL_NGINX_IMAGE`；Docker Proxy 继续使用同一精确摘要，Admin CLI、Server 与 Playwright 不再继承测试编排变量，产品的未知 `XTUNNEL_` 快速失败边界保持不变。
+- 状态与 Gate：修复仍须精确 GitHub CI 证明真实 Chromium 分别经 Caddy、Nginx 完成完整管理工作流。M5-10 继续保持 `IN_PROGRESS`，M5 Gate Checklist 六项全部保持未勾选，本次未勾选任何产品任务。

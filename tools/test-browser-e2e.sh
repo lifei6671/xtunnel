@@ -136,7 +136,7 @@ start_proxy() {
         --volume "$caddy_config:/etc/caddy/Caddyfile:ro" \
         --volume "$cert_file:/etc/xtunnel/tls/loopback.crt:ro" \
         --volume "$key_file:/etc/xtunnel/tls/loopback.key:ro" \
-        "$XTUNNEL_CADDY_IMAGE" run --config /etc/caddy/Caddyfile --adapter caddyfile \
+        "$caddy_image" run --config /etc/caddy/Caddyfile --adapter caddyfile \
         >"$proxy_log" 2>&1 &
       ;;
     nginx)
@@ -144,7 +144,7 @@ start_proxy() {
         --volume "$nginx_config:/etc/nginx/nginx.conf:ro" \
         --volume "$cert_file:/etc/xtunnel/tls/loopback.crt:ro" \
         --volume "$key_file:/etc/xtunnel/tls/loopback.key:ro" \
-        "$XTUNNEL_NGINX_IMAGE" nginx -c /etc/nginx/nginx.conf -g 'daemon off;' \
+        "$nginx_image" nginx -c /etc/nginx/nginx.conf -g 'daemon off;' \
         >"$proxy_log" 2>&1 &
       ;;
     *)
@@ -219,6 +219,11 @@ XTUNNEL_NGINX_IMAGE=${XTUNNEL_NGINX_IMAGE:-}
 [ -n "$XTUNNEL_NGINX_IMAGE" ] || fail "XTUNNEL_NGINX_IMAGE is required."
 validate_image "$XTUNNEL_CADDY_IMAGE" XTUNNEL_CADDY_IMAGE
 validate_image "$XTUNNEL_NGINX_IMAGE" XTUNNEL_NGINX_IMAGE
+# 镜像变量属于测试编排输入；校验后改存为非导出变量，避免 Server 将它们
+# 误判为未知产品配置。代理仍由当前 shell 使用同一精确摘要启动。
+caddy_image=$XTUNNEL_CADDY_IMAGE
+nginx_image=$XTUNNEL_NGINX_IMAGE
+unset XTUNNEL_CADDY_IMAGE XTUNNEL_NGINX_IMAGE
 
 umask 077
 temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/xtunnel-browser-e2e.XXXXXX")
