@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-01 全链路 JSON Logging · REVIEW（实现、本地验收、独立复审与精确 CI 已齐备，等待用户阶段复审）
+> **当前阶段**：M6-02 Prometheus Metrics · BLOCKED（范围审计完成，等待依赖、指标契约、监听面与 Agent 指标延期授权）
 >
-> **当前结论**：用户已明确确认 M6-01 审计范围。共享日志已补齐稳定事件与真实关联字段，Management/HTTP Ingress/Tunnel/Agent 已形成请求至连接终态日志链；Windows SCM 使用受管 `XTunnelAgent` Application Event Log Source 持久写入同一 JSON，并由扩展 Smoke 验证 Source、事件 JSON、Token 不泄漏和卸载清理。本地 Go Test/Race/Vet、Windows amd64 测试、Windows arm64/Linux amd64 编译及 PowerShell Parser/ASCII 检查通过；实现提交 `eb8a88c25149ca83b0df58680c812474e5a88d09` 的精确 CI `#33296214987` 进一步通过 Linux amd64/arm64 全矩阵和提升权限 Windows SCM/Event Log 真实 Smoke。M6-01 进入 `REVIEW` 等待用户阶段复审，M6 与全局完成数仍为 `0/7`、`75/95`。
+> **当前结论**：用户已明确确认 M6-01 阶段复审通过。实现提交 `eb8a88c25149ca83b0df58680c812474e5a88d09`、证据提交 `56cbb306dc04630b5e7c137a32deeb9bf18fae96` 及各自精确 CI `#33296214987`、`#33296545473` 均成功，M6-01 转为 `DONE`。M6-02 只读审计确认 Server 配置和五项无 Label Runtime Gauge Source 已存在，但仓库尚无 Prometheus 依赖，公开 Metric 类型/Label/Bucket/error_code 语义未完整冻结，方案所列 Agent 八项指标也没有抓取端点或上报协议。M6-02 在用户确认推荐边界前保持 `BLOCKED`；M6 与全局完成数更新为 `1/7`、`76/95`。
 
 ---
 
@@ -110,9 +110,9 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M3 Config/Health | 13 | 13 | `DONE` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
-| M6 Observability | 7 | 0 | `IN_PROGRESS` | M5-11 | M6-07 |
+| M6 Observability | 7 | 1 | `IN_PROGRESS` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **75** |  |  |  |
+| **合计** | **95** | **76** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -372,8 +372,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `REVIEW` |
-| M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `NOT_STARTED` |
+| M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `DONE` |
+| M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `BLOCKED` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `NOT_STARTED` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `NOT_STARTED` |
 | M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `NOT_STARTED` |
@@ -424,13 +424,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 已完成。当前待办为：
 
-1. `M6-01` — 全链路 JSON Logging 已完成实现、本地验收、独立复审与精确 CI；Linux 双架构矩阵和提升权限 Windows SCM/Event Log 真实 Smoke 均已通过，当前等待用户阶段复审。
+1. `M6-02` — Prometheus Metrics 范围审计已完成；等待用户确认官方依赖与 Lockfile、Server Metric Contract、现有可配置监听语义，以及 Agent 八项无暴露契约指标从 V0.1 本任务延期的边界。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4 与 M5 已完成；M6-01 已进入 `REVIEW`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 已完成；M6-02 等待范围授权。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
 
 推进规则：
 
@@ -1482,3 +1482,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - Windows 真实 Smoke：提升权限 `windows-2022` Runner 执行 `deploy/windows/smoke.ps1`，`Run Windows Service smoke` 步骤从 14:11:11 至 14:11:24 成功并输出 `[OK] Windows Agent service smoke passed`。该入口真实安装/启动/停止/卸载 SCM 服务，查询 Application Event，逐条解析必需 JSON 字段并扫描全部返回记录的 Token Sentinel，同时验证受管 Source 注册表契约和卸载清理；不再以本机 Parser 或静态检查替代真实 Event Log 证据。
 - 状态与 Gate：M6-01 已具备最终实现、关键失败分支、本地 Test/Race/Vet、跨架构验证、三轮独立复审与精确 CI，进入 `REVIEW` 等待用户阶段复审；未将“继续”替代“通过”。M6 保持 `0/7`、全局保持 `75/95`，M6-02 不自动开工，M6 Gate Checklist 全部保持未勾选，本次不把任何产品任务提前标记为 `DONE`。
 - 文档同步：根 README 与本开发计划同步 M6-01 的精确 CI 证据和 `REVIEW` 边界。总技术方案、OpenAPI/生成物、Proto、Server Schema、Migration、第三方依赖/Lockfile、CI/CD、权限模型与 `AGENTS.md` 无需再改，因为本轮只闭环既有实现与 CI 证据，没有改变机器权威、用户命令或已冻结日志契约。
+
+## 2026-08-30 · M6-01 用户阶段复审与 M6-02 范围审计 · BLOCKED
+
+- M6-01 用户复审与状态：用户明确确认 M6-01 阶段复审通过。实现提交 `eb8a88c25149ca83b0df58680c812474e5a88d09` 的精确 [CI #33296214987](https://github.com/lifei6671/xtunnel/actions/runs/33296214987)，以及证据提交 `56cbb306dc04630b5e7c137a32deeb9bf18fae96` 的最终 Head 精确 [CI #33296545473](https://github.com/lifei6671/xtunnel/actions/runs/33296545473) 均为 `success`；后者再次通过 Linux amd64/arm64 全矩阵和提升权限 Windows SCM/Event Log 真实 Smoke。M6-01 从 `REVIEW` 转为 `DONE`，M6 从 `0/7` 更新为 `1/7`，全局从 `75/95` 更新为 `76/95`；M6 Gate Checklist 继续全部未勾选。
+- M6-02 当前事实：Server Schema 与 Go Config 已冻结 `metrics.listen/path`，默认 `127.0.0.1:9090/metrics`；FD Budget 已预留 Metrics Listener，Session Runtime 已提供五项无 Label 唯一 Gauge Source。仓库没有 `/metrics` Server、Metric Registry 或 Prometheus 依赖；Limit/Health 现有全量快照包含高基数 Map，必须由各 owner 新增 O(1) 聚合快照。Metrics 端口尚未进入 TCP Route 保留，Gateway Certificate Gauge 必须读取热续签后的当前 Identity，OPEN 只能在逻辑请求外层 exactly-once 计数。
+- 推荐授权边界：新增官方 `github.com/prometheus/client_golang` `v1.24.1`，由 Go 工具更新 `go.mod/go.sum`，使用私有 Registry 与独立 ServeMux；保留 Schema 已允许非 loopback 的可配置监听语义且不增加认证，由操作者负责网络隔离。M6-02 只实现方案已列的 20 项 Server 指标：Gauge 读取唯一聚合快照，Counter 只使用有限 `error_code`，Open/Origin/Reconcile P50/P99 由固定 Bucket Histogram 经 PromQL 计算；Origin Duration 读取既有 `OpenResponse.origin_connect_latency_ms`，不修改 Proto；`xtunnel_route_snapshot_routes` 统计确定性 Route Snapshot 的实际 Route 数，不把计划中的“Service Count”解释为所有 Service。所有 agent/instance/tunnel/service/connector/connection/request/trace ID 和 raw path/IP/error 禁止作为 Label。进程累计字节不是 M6-04 Usage 权威。
+- Agent 契约缺口：总方案另列八项 Agent 指标，但没有 Agent 监听地址、端口、认证、多实例或部署抓取契约；固定端口会产生冲突，新增本地配置会破坏 token-only Bootstrap，经 Control Session 上传则要求 Protocol Review。建议从 V0.1 的 M6-02 范围明确延期这八项 Agent 指标，不新增 Agent Listener、Config、Proto 或本地业务状态；若用户要求本任务实现 Agent 指标，必须先单独冻结完整暴露契约。
+- 验收边界：新增 Metric Contract/Cardinality/Collector 与 owner 定向测试，真实 Bootstrap 使用动态 loopback 端口抓取 Prometheus 文本，覆盖非目标路径 404、绑定失败、启动回滚、优雅关闭、端口释放、重复 Registry、并发抓取与高基数 Sentinel；Linux amd64/arm64 CI 增加明确命名的 M6-02 黑盒步骤。Go 1.27 固定工具链下必须通过定向 Test/Race/Vet、全仓 Test/Vet、Module Verify/Tidy Diff 和精确 CI；M6-03 Trace、M6-04 Usage、M6-05 Dashboard、M6-06 告警/Runbook 均不在本任务范围。
+- 状态与阻塞：三路只读审计均确认 Server 侧可实施，但依赖/Lockfile、公开 Metric Contract、监听面安全语义、CI Workflow 和 Agent 指标延期都属于 Ask First。当前未修改代码、总技术方案、Schema、OpenAPI、Proto、依赖、Lockfile 或 CI；M6-02 标记 `BLOCKED`，解除条件是用户明确确认上述推荐范围。本轮 CodeGraph 两次返回 `Transport closed`，结构核查已降级为 `rg/Get-Content`，不把该工具故障写成实现阻塞。
