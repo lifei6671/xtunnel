@@ -3,6 +3,7 @@ package logging
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -11,20 +12,20 @@ import (
 
 func TestNewWritesStableJSONFields(t *testing.T) {
 	var output bytes.Buffer
-	logger, err := New(&output, Options{Level: "info", Format: "json", Component: "server"})
+	logger, err := New(&output, Options{Level: LevelInfo, Format: "json", Component: "server"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	WithCorrelation(logger, "req_123", "trace_456").Info("process_started",
-		slog.String("error_code", "TEST_ERROR"),
+	WithCorrelation(logger, "req_123", "trace_456").Info(EventProcessStarted,
+		slog.String(ErrorCodeKey, "TEST_ERROR"),
 	)
 
 	record := decodeRecord(t, output.String())
-	if record["level"] != "info" || record["component"] != "server" || record["event"] != "process_started" {
+	if record[LevelKey] != LevelInfo || record[ComponentKey] != "server" || record[EventKey] != EventProcessStarted {
 		t.Fatalf("stable fields = %#v", record)
 	}
-	if record[RequestIDKey] != "req_123" || record[TraceIDKey] != "trace_456" || record["error_code"] != "TEST_ERROR" {
+	if record[RequestIDKey] != "req_123" || record[TraceIDKey] != "trace_456" || record[ErrorCodeKey] != "TEST_ERROR" {
 		t.Fatalf("correlation fields = %#v", record)
 	}
 	if _, exists := record[slog.TimeKey]; exists {
@@ -34,9 +35,9 @@ func TestNewWritesStableJSONFields(t *testing.T) {
 		t.Fatalf("record contains legacy %q field: %#v", slog.MessageKey, record)
 	}
 
-	timestamp, ok := record["timestamp"].(string)
+	timestamp, ok := record[TimestampKey].(string)
 	if !ok {
-		t.Fatalf("timestamp = %#v, want string", record["timestamp"])
+		t.Fatalf("timestamp = %#v, want string", record[TimestampKey])
 	}
 	parsed, err := time.Parse(time.RFC3339Nano, timestamp)
 	if err != nil {
@@ -52,10 +53,10 @@ func TestNewAppliesConfiguredLevel(t *testing.T) {
 		level      string
 		wantEvents []string
 	}{
-		{level: "debug", wantEvents: []string{"debug", "info", "warn", "error"}},
-		{level: "info", wantEvents: []string{"info", "warn", "error"}},
-		{level: "warn", wantEvents: []string{"warn", "error"}},
-		{level: "error", wantEvents: []string{"error"}},
+		{level: LevelDebug, wantEvents: []string{LevelDebug, LevelInfo, LevelWarn, LevelError}},
+		{level: LevelInfo, wantEvents: []string{LevelInfo, LevelWarn, LevelError}},
+		{level: LevelWarn, wantEvents: []string{LevelWarn, LevelError}},
+		{level: LevelError, wantEvents: []string{LevelError}},
 	}
 
 	for _, test := range tests {
@@ -77,7 +78,7 @@ func TestNewAppliesConfiguredLevel(t *testing.T) {
 			}
 			for index, line := range lines {
 				record := decodeRecord(t, line)
-				if record["event"] != test.wantEvents[index] || record["level"] != test.wantEvents[index] {
+				if record[EventKey] != test.wantEvents[index] || record[LevelKey] != test.wantEvents[index] {
 					t.Fatalf("record %d = %#v", index, record)
 				}
 			}
@@ -87,7 +88,7 @@ func TestNewAppliesConfiguredLevel(t *testing.T) {
 
 func TestNewRedactsSecretAttributes(t *testing.T) {
 	var output bytes.Buffer
-	logger, err := New(&output, Options{Level: "info", Format: "json", Component: "server"})
+	logger, err := New(&output, Options{Level: LevelInfo, Format: "json", Component: "server"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -95,13 +96,23 @@ func TestNewRedactsSecretAttributes(t *testing.T) {
 	secret := "unique-secret-sentinel"
 	logger.Info("credentials_rejected",
 		slog.String("agent_token", secret),
+		slog.String("connection_token", secret),
+		slog.String("tunnel_token", secret),
+		slog.String("token", secret),
 		slog.String("admin_password", secret),
+		slog.String("password", secret),
 		slog.String("session_cookie", secret),
+		slog.String("cookie", secret),
+		slog.String("set_cookie", secret),
 		slog.String("tls_private_key", secret),
+		slog.String("private_key", secret),
 		slog.String("Authorization", secret),
 		slog.String("authorization_header", secret),
 		slog.String("config_signing_private_key", secret),
-		slog.Group("session", slog.String("session_secret", secret)),
+		slog.Group("session",
+			slog.String("session_secret", secret),
+			slog.String("CSRF_TOKEN", secret),
+		),
 		slog.String("token_file", "/run/secrets/agent-token"),
 	)
 
@@ -123,12 +134,12 @@ func TestNewRedactsSecretAttributes(t *testing.T) {
 
 func TestWithCorrelationOmitsMissingIDs(t *testing.T) {
 	var output bytes.Buffer
-	logger, err := New(&output, Options{Level: "info", Format: "json", Component: "agent"})
+	logger, err := New(&output, Options{Level: LevelInfo, Format: "json", Component: "agent"})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	WithCorrelation(logger, "", "").Info("process_started")
+	WithCorrelationFields(logger, Correlation{}).Info(EventProcessStarted)
 	record := decodeRecord(t, output.String())
 	if _, exists := record[RequestIDKey]; exists {
 		t.Fatalf("record contains empty %q: %#v", RequestIDKey, record)
@@ -136,17 +147,60 @@ func TestWithCorrelationOmitsMissingIDs(t *testing.T) {
 	if _, exists := record[TraceIDKey]; exists {
 		t.Fatalf("record contains empty %q: %#v", TraceIDKey, record)
 	}
+	for _, key := range []string{TunnelIDKey, ConnectorIDKey, SessionIDKey, ServiceIDKey, ConnectionIDKey, GenerationKey} {
+		if _, exists := record[key]; exists {
+			t.Fatalf("record contains empty %q: %#v", key, record)
+		}
+	}
+}
+
+func TestWithCorrelationFieldsWritesRealBusinessIDs(t *testing.T) {
+	var output bytes.Buffer
+	logger, err := New(&output, Options{Level: LevelInfo, Format: "json", Component: "server"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	correlation := Correlation{
+		RequestID: "req_123", TraceID: "0123456789abcdef", TunnelID: "tun_123",
+		ConnectorID: "con_123", SessionID: "ses_123", ServiceID: "svc_123",
+		ConnectionID: "conn_123", Generation: 7,
+	}
+	WithCorrelationFields(logger, correlation).Info(EventConnectorConnected)
+	record := decodeRecord(t, output.String())
+
+	want := map[string]any{
+		RequestIDKey: correlation.RequestID, TraceIDKey: correlation.TraceID,
+		TunnelIDKey: correlation.TunnelID, ConnectorIDKey: correlation.ConnectorID,
+		SessionIDKey: correlation.SessionID, ServiceIDKey: correlation.ServiceID,
+		ConnectionIDKey: correlation.ConnectionID, GenerationKey: float64(correlation.Generation),
+	}
+	for key, value := range want {
+		if record[key] != value {
+			t.Fatalf("record[%q] = %#v, want %#v; record = %#v", key, record[key], value, record)
+		}
+	}
 }
 
 func TestNewRejectsUnsupportedOptions(t *testing.T) {
-	tests := []Options{
-		{Level: "notice", Format: "json", Component: "server"},
-		{Level: "info", Format: "text", Component: "server"},
+	tests := []struct {
+		name    string
+		writer  io.Writer
+		options Options
+	}{
+		{name: "missing writer", options: Options{Level: LevelInfo, Format: "json", Component: "server"}},
+		{name: "unknown level", writer: &bytes.Buffer{}, options: Options{Level: "notice", Format: "json", Component: "server"}},
+		{name: "non JSON format", writer: &bytes.Buffer{}, options: Options{Level: LevelInfo, Format: "text", Component: "server"}},
+		{name: "empty component", writer: &bytes.Buffer{}, options: Options{Level: LevelInfo, Format: "json"}},
+		{name: "blank component", writer: &bytes.Buffer{}, options: Options{Level: LevelInfo, Format: "json", Component: " \t"}},
+		{name: "padded component", writer: &bytes.Buffer{}, options: Options{Level: LevelInfo, Format: "json", Component: " server "}},
 	}
-	for _, options := range tests {
-		if _, err := New(&bytes.Buffer{}, options); err == nil {
-			t.Fatalf("New(%#v) error = nil", options)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := New(test.writer, test.options); err == nil {
+				t.Fatalf("New(%#v) error = nil", test.options)
+			}
+		})
 	}
 }
 

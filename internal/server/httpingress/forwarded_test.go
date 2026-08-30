@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -232,6 +233,7 @@ func TestNewHandlerRejectsInvalidTrustedProxyCIDR(t *testing.T) {
 	})
 	if _, err := NewHandler(HandlerOptions{
 		Routes: manager, Dialer: dialer, TrustedProxies: []string{"not-a-cidr"},
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Limits: newTestLimitManager(t, serverlimits.Options{
 			MaxConnectors: 1, MaxConnectorsPerTunnel: 1,
 			MaxWorkConnections: 1, MaxIdleWorkConnections: 1,

@@ -3,6 +3,8 @@ package connector
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -628,6 +630,7 @@ func TestHostConfigCreatesEphemeralConnectorAndUnobservedOriginFailsClosed(t *te
 	if err != nil {
 		t.Fatalf("HostConfig() error = %v", err)
 	}
+	config.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	if err := identity.ValidateConnectorID(config.Connector.ID()); err != nil {
 		t.Fatalf("HostConfig() connector id error = %v", err)
 	}

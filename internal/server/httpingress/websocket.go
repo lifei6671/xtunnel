@@ -123,6 +123,16 @@ func (connection *webSocketActivityConn) CloseWrite() error {
 	return closeWriter.CloseWrite()
 }
 
+// ConnectionID 保留 Tunnel 连接的只读关联身份，使 httptrace.GotConn 在
+// WebSocket Dial 包装后仍能观察真实 connection_id。
+func (connection *webSocketActivityConn) ConnectionID() string {
+	identified, ok := connection.Conn.(interface{ ConnectionID() string })
+	if !ok {
+		return ""
+	}
+	return identified.ConnectionID()
+}
+
 // webSocketResponseWriter 在 ReverseProxy Hijack 时接管客户端连接；Unwrap 保留
 // 普通错误响应需要的可选 ResponseWriter 能力，Hijack 则返回带 activity tracking
 // 的 net.Conn，使前后端共用同一个 idle owner。

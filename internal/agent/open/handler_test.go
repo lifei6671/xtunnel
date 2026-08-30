@@ -3,13 +3,17 @@ package open
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/agent/workauth"
+	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
@@ -135,6 +139,58 @@ func TestHandleReturnsExplicitOriginFailure(t *testing.T) {
 	}
 }
 
+func TestHandleLogsOriginFailureWithValidatedCorrelation(t *testing.T) {
+	const secret = "origin-dial-secret-must-not-be-logged"
+	var output bytes.Buffer
+	logger, err := logging.New(&output, logging.Options{
+		Level: logging.LevelDebug, Format: "json", Component: "agent",
+	})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
+	handler, err := NewHandler(Options{
+		ReadTimeout: time.Second, WriteTimeout: time.Second, Logger: logger,
+		Dialer: OriginDialerFunc(func(context.Context, string) (net.Conn, protocolv1.ErrorCode, error) {
+			return nil, protocolv1.ErrorCode_ERROR_CODE_ORIGIN_REFUSED, errors.New(secret)
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+	agentConnection, serverConnection := net.Pipe()
+	defer serverConnection.Close()
+	ready := idleReady(t)
+	result := make(chan error, 1)
+	go func() { result <- handler.Handle(context.Background(), agentConnection, ready) }()
+
+	request := validOpenRequest()
+	request.TraceId = "trace-01J00000000000000000000000"
+	if err := frame.WriteWork(serverConnection, request); err != nil {
+		t.Fatalf("write OpenRequest: %v", err)
+	}
+	if err := frame.ReadWork(serverConnection, &protocolv1.OpenResponse{}); err != nil {
+		t.Fatalf("read OpenResponse: %v", err)
+	}
+	if err := <-result; !errors.Is(err, ErrOrigin) {
+		t.Fatalf("Handle() error = %v, want ErrOrigin", err)
+	}
+
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
+		t.Fatalf("decode log %q: %v", output.String(), err)
+	}
+	if record[logging.EventKey] != logging.EventAgentOriginConnectionFailed ||
+		record[logging.ErrorCodeKey] != "ORIGIN_REFUSED" ||
+		record[logging.TraceIDKey] != request.TraceId ||
+		record[logging.ServiceIDKey] != testServiceID ||
+		record[logging.ConnectionIDKey] != testConnectionID {
+		t.Fatalf("origin failure log = %#v", record)
+	}
+	if strings.Contains(output.String(), secret) {
+		t.Fatalf("origin failure log leaked error detail: %q", output.String())
+	}
+}
+
 func TestHandleRejectsUnknownOpenRequestWithoutDial(t *testing.T) {
 	agentConnection, serverConnection := net.Pipe()
 	defer serverConnection.Close()
@@ -169,6 +225,7 @@ func newTestHandler(t *testing.T, dialer OriginDialer, rawProxy RawProxy) *Handl
 	handler, err := NewHandler(Options{
 		ReadTimeout: time.Second, WriteTimeout: time.Second,
 		Dialer: dialer, Proxy: rawProxy,
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)

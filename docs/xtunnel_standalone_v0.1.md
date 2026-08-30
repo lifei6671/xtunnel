@@ -5996,10 +5996,12 @@ Create/Replace ProgramData DPAPI Machine-scope Credential
  ↓
 Create/Update managed XTunnelAgent SCM Service as LocalService
  ↓
+Register managed XTunnelAgent Application Event Log Source
+ ↓
 Start/Restart + Query Running
 ```
 
-Windows SCM 的 Stop/Shutdown 最多等待 30 秒；Agent 运行回调异常必须返回非零 Service Exit，SCM 同时为 non-crash failure 配置恢复重启，避免错误退出被伪装成成功。当前尚未注册 Windows Event Log Source，SCM 模式下的 JSON stderr 不保证持久可见；M6-01 必须补齐可持久检索的 Windows Service 日志入口，当前状态不得视为生产可观测性 Gate 已通过。
+Windows SCM 的 Stop/Shutdown 最多等待 30 秒；Agent 运行回调异常必须返回非零 Service Exit，SCM 同时为 non-crash failure 配置恢复重启，避免错误退出被伪装成成功。`service install` 在 `Application` 日志下注册唯一 `XTunnelAgent` Event Source，并用与 SCM Service 相同的 managed marker 证明归属；同名 Source 缺失 marker、标准值被修改或不受管理时拒绝覆盖/删除。SCM 模式把共享 JSON Handler 的完整单行记录按 `debug/info→Information`、`warn→Warning`、`error→Error` 映射到该 Source；Source 缺失、被修改、打不开或写入失败时服务启动/运行必须失败，不得静默退回 stderr。`service uninstall` 只删除确认受管的 Source，Windows Smoke 必须查询真实 Application Event、解析 JSON 固定字段并确认 Token 未出现。
 
 Linux `service uninstall` 只在 Unit 带匹配 managed marker 时停止、禁用并删除 Unit 与 `/usr/local/bin/xtunnel-agent`；Windows `service uninstall` 只在 `XTunnelAgent` 带匹配 Description marker 时停止并删除 SCM Service。Windows 随后删除 `%ProgramFiles%\XTunnel\xtunnel-agent.exe`；若卸载命令正由该已安装 EXE 自身执行，文件锁导致无法立即删除时，必须使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排在下次系统重启删除，不能虚假报告已即时消失。未知或人工管理的同名 Unit/Service 必须拒绝删除。两端卸载都保留平台 Credential；Linux 另保留 `xtunnel-agent` 用户/组，Windows 继续使用内建 `NT AUTHORITY\LocalService`。Server Shell 包装及其资产不受影响。
 
@@ -6552,6 +6554,8 @@ service_id
 
 connection_id
 
+generation
+
 trace_id
 
 event
@@ -6563,6 +6567,36 @@ error_code
 使用 UTC RFC3339Nano，`level` 使用 `debug/info/warn/error` 小写值。`request_id`、
 `trace_id` 及各业务 ID 只在真实上下文存在时写入，不输出空值，也不在日志层生成
 替代 ID。标准 JSON 日志不保留 `slog` 默认的 `time` 和 `msg` 字段。
+
+M6-01 冻结以下跨 Server/Agent 的运行事件；生命周期只记录已经验证并真实存在的
+关联 ID：
+
+```text
+management_request_completed
+http_ingress_request_completed
+tunnel_connection_opened
+tunnel_connection_failed
+tunnel_connection_closed
+agent_origin_connection_failed
+agent_connection_failed
+agent_connection_opened
+agent_connection_closed
+windows_service_starting
+windows_service_running
+windows_service_stop_requested
+windows_service_stopped
+windows_service_failed
+```
+
+Management 与公网 HTTP 请求分别记录 `method/status_code/duration_ms` 和
+`method/status_code`；HTTP KeepAlive 通过实际取得的后端连接关联 `connection_id`，不能
+把首个请求的连接上下文伪造给后续请求。Tunnel OPEN/终止记录 Tunnel、Service、
+Connector、Session、Connection 与 generation；Agent 只在 OpenRequest 通过协议校验并
+提交 OPENING 后绑定 `service_id/connection_id/trace_id`。成功生命周期使用 `info`，
+客户端或容量等可恢复失败使用 `warn`，取消使用 `debug`，协议/内部错误和无法继续的
+Windows Service 失败使用 `error`。失败日志只写有限 `error_code`，不得写底层错误文本；
+M6-01 只承接已存在 `trace_id` 的注入和关联，不创建 Span，也不传播 W3C Trace Context，
+该职责仍属于 M6-03。
 
 ---
 

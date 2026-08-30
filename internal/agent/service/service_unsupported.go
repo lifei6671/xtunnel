@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"io"
 	"os"
 )
 
@@ -19,7 +20,7 @@ func platformName() string {
 	return "xtunnel-agent"
 }
 
-func runIfManagedService(func(context.Context, string) error) (bool, error) {
+func runIfManagedService(func(context.Context, string, io.Writer) error) (bool, error) {
 	return false, nil
 }
 

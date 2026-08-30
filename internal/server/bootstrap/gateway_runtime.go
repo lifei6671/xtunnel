@@ -224,6 +224,7 @@ func openGatewayLifecycle(
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler,
 		AcquireTimeout: config.Transport.TCP.WorkAcquireTimeout.Duration,
 		LimitManager:   limitManager,
+		Logger:         logger,
 	})
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("construct Tunnel data-plane proxy: %w", err)
@@ -600,7 +601,7 @@ func openGatewayAndBootstrapWithStartedAt(
 	}
 	httpHandler, err := serverhttpingress.NewHandler(serverhttpingress.HandlerOptions{
 		Routes: routes, Dialer: tunnelProxy, TrustedProxies: config.HTTPIngress.TrustedProxies,
-		Limits: limitManager, MaxBodyBytes: config.Limits.MaxHTTPBodyBytes,
+		Limits: limitManager, MaxBodyBytes: config.Limits.MaxHTTPBodyBytes, Logger: logger,
 	})
 	if err != nil {
 		cancelRoutes()

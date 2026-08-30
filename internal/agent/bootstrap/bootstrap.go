@@ -248,12 +248,12 @@ func runWithTokenSource(
 	if lifecycle == nil {
 		return errors.New("Agent lifecycle runner must not be nil")
 	}
-	handled, err := service.RunIfManagedService(func(serviceContext context.Context, token string) error {
+	handled, err := service.RunIfManagedService(func(serviceContext context.Context, token string, writer io.Writer) error {
 		validatedToken, err := validateToken(token)
 		if err != nil {
 			return fmt.Errorf("validate Windows service credential: %w", err)
 		}
-		return lifecycle(serviceContext, validatedToken, stderr)
+		return lifecycle(serviceContext, validatedToken, writer)
 	})
 	if err != nil {
 		return fmt.Errorf("run Agent as native service: %w", err)
@@ -285,6 +285,7 @@ func runLifecycle(ctx context.Context, token string, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("create ephemeral Connector identity: %w", err)
 	}
+	config.Logger = logger
 	runtime, err := connector.New(config)
 	if err != nil {
 		return fmt.Errorf("initialize Connector runtime: %w", err)

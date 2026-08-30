@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"runtime"
@@ -156,6 +157,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create Agent host config: %v", err)
 	}
+	agentConfig.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	agentRuntime, err := connector.New(agentConfig)
 	if err != nil {
 		t.Fatalf("create Agent runtime: %v", err)
@@ -172,7 +174,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	}
 	tunnelProxy, err := tunnel.NewProxy(tunnel.Options{
 		Registry: registry, Sessions: sessions, OpenHandler: serverOpen, AcquireTimeout: 2 * time.Second,
-		LimitManager: limitManager,
+		LimitManager: limitManager, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("create Tunnel proxy: %v", err)
@@ -278,6 +280,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		blockedProxy, err := tunnel.NewProxy(tunnel.Options{
 			Registry: registry, Sessions: sessions, OpenHandler: serverOpen,
 			AcquireTimeout: 100 * time.Millisecond, LimitManager: limitManager,
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		})
 		if err != nil {
 			t.Fatalf("create blocked-state Tunnel proxy: %v", err)

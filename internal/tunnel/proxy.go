@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/identity"
+	"github.com/lifei6671/xtunnel/internal/logging"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
 	"github.com/lifei6671/xtunnel/internal/proxy"
@@ -37,6 +40,7 @@ type Options struct {
 	Sessions       *sessionruntime.Manager
 	OpenHandler    *serveropen.Handler
 	AcquireTimeout time.Duration
+	Logger         *slog.Logger
 	// LimitManager 为 nil 时保留纯单元测试的无限预算路径；生产装配和 M1 集成测试
 	// 必须传共享 Manager，使 PendingOpen 与 ACTIVE 多维限制作用于真实公网连接。
 	LimitManager *serverlimits.Manager
@@ -51,6 +55,8 @@ type DialRequest struct {
 	RequiredRevision uint64
 	Ingress          protocolv1.IngressType
 	ClientAddr       string
+	RequestID        string
+	TraceID          string
 }
 
 // Proxy 使用 Route 已解析出的 Tunnel/Service 身份，把一个公网连接交给默认负载选择的
@@ -86,7 +92,8 @@ type pendingMembership struct {
 
 // NewProxy 创建与具体 TCP/HTTP Listener 无关的数据面。
 func NewProxy(options Options) (*Proxy, error) {
-	if options.Registry == nil || options.Sessions == nil || options.OpenHandler == nil || options.AcquireTimeout <= 0 {
+	if options.Registry == nil || options.Sessions == nil || options.OpenHandler == nil ||
+		options.AcquireTimeout <= 0 || options.Logger == nil {
 		return nil, ErrInvalidOptions
 	}
 	return &Proxy{
@@ -240,13 +247,42 @@ func (tunnelProxy *Proxy) openConnection(
 	if err != nil {
 		return nil, err
 	}
+	startedAt := time.Now()
+	var session serverruntime.Session
+	opened := false
+	defer func() {
+		if resultErr == nil || opened {
+			return
+		}
+		correlation := logging.Correlation{
+			RequestID: request.RequestID, TraceID: request.TraceID,
+			TunnelID: request.TunnelID, ServiceID: request.ServiceID, ConnectionID: connectionID,
+			ConnectorID: session.ConnectorID, SessionID: session.SessionID, Generation: session.Generation,
+		}
+		logger := logging.WithCorrelationFields(tunnelProxy.options.Logger, correlation)
+		code := tunnelFailureCode(resultErr)
+		attributes := []any{
+			logging.ErrorCodeKey, code,
+			"ingress_type", request.Ingress.String(),
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		}
+		switch code {
+		case "CANCELED":
+			logger.DebugContext(openContext, logging.EventTunnelConnectionFailed, attributes...)
+		case "PROTOCOL_ERROR", "INTERNAL_ERROR":
+			logger.ErrorContext(openContext, logging.EventTunnelConnectionFailed, attributes...)
+		default:
+			logger.WarnContext(openContext, logging.EventTunnelConnectionFailed, attributes...)
+		}
+	}()
 
-	connectorLease, session, pool, selectedWork, err := tunnelProxy.acquireWork(
+	connectorLease, selectedSession, pool, selectedWork, err := tunnelProxy.acquireWork(
 		openContext, request.TunnelID, request.ServiceID, requiredRevision,
 	)
 	if err != nil {
 		return nil, err
 	}
+	session = selectedSession
 	leaseOwnedByActive := false
 	defer func() {
 		if connectorLease != nil && !leaseOwnedByActive {
@@ -272,7 +308,7 @@ func (tunnelProxy *Proxy) openConnection(
 		openRequest := &protocolv1.OpenRequest{
 			ProtocolVersion: 1, ConnectionId: connectionID, ServiceId: request.ServiceID,
 			ClientAddr: request.ClientAddr, TimestampMs: uint64(time.Now().UnixMilli()),
-			IngressType: request.Ingress,
+			IngressType: request.Ingress, TraceId: request.TraceID,
 		}
 		active, openErr := tunnelProxy.options.OpenHandler.Handle(openContext, work.Conn(), idle, openRequest)
 		if openErr != nil {
@@ -364,6 +400,12 @@ func (tunnelProxy *Proxy) openConnection(
 	if err := openContext.Err(); err != nil {
 		return nil, err
 	}
+	correlation := logging.Correlation{
+		RequestID: request.RequestID, TraceID: request.TraceID,
+		TunnelID: request.TunnelID, ServiceID: request.ServiceID, ConnectionID: connectionID,
+		ConnectorID: session.ConnectorID, SessionID: session.SessionID, Generation: session.Generation,
+	}
+	connectionLogger := logging.WithCorrelationFields(tunnelProxy.options.Logger, correlation)
 	// OPEN_OK 已把 Work 协议切入 RAW。TCP 必须先提交公网 ACTIVE 多维配额再发布；
 	// HTTP 的请求级 ACTIVE 已由 Handler 持有，这里只结束新建 WorkConn 的 Pending，
 	// 避免池化连接把首个来源的 Source 配额错误延续给后续请求。
@@ -380,7 +422,10 @@ func (tunnelProxy *Proxy) openConnection(
 	// OPEN 与 ACTIVE 使用分离的 Context：TCP Serve 在 OPEN 后恢复
 	// Listener 生命周期，HTTP Dial 则使用脱离单请求取消的池化生命周期。
 	lifecycleContext, cancelWork := context.WithCancel(lifecycleParent)
-	pooled := &pooledConnection{Conn: active.Connection, work: selectedWork, openLease: openLease}
+	pooled := &pooledConnection{
+		Conn: active.Connection, work: selectedWork, openLease: openLease,
+		logger: connectionLogger, startedAt: startedAt,
+	}
 	activeWork, err := tunnelRuntime.RegisterActiveWork(serverruntime.ActiveWorkSpec{
 		Session: session, WorkID: active.Identity.WorkID, ConnectionID: connectionID,
 		Cancel: cancelWork, WorkConn: pooled, PeerConn: peer, Lease: connectorLease,
@@ -398,6 +443,11 @@ func (tunnelProxy *Proxy) openConnection(
 	if err := openContext.Err(); err != nil {
 		return nil, errors.Join(err, connection.Close())
 	}
+	opened = true
+	connectionLogger.InfoContext(openContext, logging.EventTunnelConnectionOpened,
+		"ingress_type", request.Ingress.String(),
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+	)
 	return connection, nil
 }
 
@@ -408,6 +458,8 @@ type pooledConnection struct {
 	net.Conn
 	work      *serverworkpool.Work
 	openLease *serverlimits.OpenLease
+	logger    *slog.Logger
+	startedAt time.Time
 
 	closeOnce sync.Once
 	closeErr  error
@@ -418,6 +470,13 @@ func (connection *pooledConnection) Close() error {
 		connection.closeErr = connection.work.Close()
 		if connection.openLease != nil {
 			connection.openLease.Release()
+		}
+		attributes := []any{"duration_ms", time.Since(connection.startedAt).Milliseconds()}
+		if connection.closeErr != nil {
+			attributes = append(attributes, logging.ErrorCodeKey, "INTERNAL_ERROR")
+			connection.logger.Error(logging.EventTunnelConnectionClosed, attributes...)
+		} else {
+			connection.logger.Info(logging.EventTunnelConnectionClosed, attributes...)
 		}
 	})
 	return connection.closeErr
@@ -455,6 +514,47 @@ func (connection *managedConnection) CloseWrite() error {
 
 func (connection *managedConnection) CloseRead() error {
 	return connection.Conn.(interface{ CloseRead() error }).CloseRead()
+}
+
+// ConnectionID 返回这条已发布 ACTIVE Work 的真实关联身份，供 HTTP Transport
+// 在新建和 KeepAlive 复用时把公网 request_id 关联回同一条 Tunnel 连接。
+func (connection *managedConnection) ConnectionID() string {
+	if connection == nil || connection.activeWork == nil {
+		return ""
+	}
+	return connection.activeWork.Identity().ConnectionID
+}
+
+// tunnelFailureCode 只把类型化失败映射为有限枚举，禁止把可能包含 Origin
+// 地址或协议内容的底层错误文本写入结构化日志。
+func tunnelFailureCode(err error) string {
+	var rejected *serveropen.Rejected
+	if errors.As(err, &rejected) {
+		if name, known := protocolv1.ErrorCode_name[int32(rejected.Code)]; known &&
+			rejected.Code != protocolv1.ErrorCode_ERROR_CODE_OK {
+			return strings.TrimPrefix(name, "ERROR_CODE_")
+		}
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "CANCELED"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, serverworkpool.ErrAcquireTimeout):
+		return "OPEN_TIMEOUT"
+	case errors.Is(err, serveropen.ErrProtocol):
+		return "PROTOCOL_ERROR"
+	case errors.Is(err, serverlimits.ErrPendingOpenCapacity),
+		errors.Is(err, serverlimits.ErrActiveConnectionCapacity),
+		errors.Is(err, serverlimits.ErrWorkCapacity),
+		errors.Is(err, serverlimits.ErrConnectingWorkCapacity),
+		errors.Is(err, serverlimits.ErrIdleWorkCapacity),
+		errors.Is(err, serverworkpool.ErrPoolCapacity),
+		errors.Is(err, serverworkpool.ErrConnectingCapacity):
+		return "WORK_POOL_EXHAUSTED"
+	case errors.Is(err, serverruntime.ErrNoAvailableConnector):
+		return "TUNNEL_OFFLINE"
+	default:
+		return "INTERNAL_ERROR"
+	}
 }
 
 func validDialInput(

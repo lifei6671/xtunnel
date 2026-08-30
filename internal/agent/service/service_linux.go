@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -24,7 +25,7 @@ func platformName() string {
 	return UnitName
 }
 
-func runIfManagedService(func(context.Context, string) error) (bool, error) {
+func runIfManagedService(func(context.Context, string, io.Writer) error) (bool, error) {
 	return false, nil
 }
 

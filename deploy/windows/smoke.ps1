@@ -9,6 +9,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $serviceName = 'XTunnelAgent'
+$eventSourceName = 'XTunnelAgent'
+$eventSourceRegistryPath = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EventLog\Application\XTunnelAgent'
+$managedMarker = 'Managed by xtunnel-agent service install'
 $installDirectory = Join-Path $env:ProgramFiles 'XTunnel'
 $installedBinary = Join-Path $installDirectory 'xtunnel-agent.exe'
 $productDataDirectory = Join-Path $env:ProgramData 'XTunnel'
@@ -20,6 +23,7 @@ $installAttempted = $false
 $uninstallCompleted = $false
 $primaryFailure = $null
 $cleanupFailures = New-Object System.Collections.Generic.List[string]
+$eventQueryStart = [DateTime]::UtcNow.AddSeconds(-2)
 
 function Get-AgentService {
     Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
@@ -86,8 +90,8 @@ function Invoke-Agent {
 }
 
 function New-SmokeToken {
-    # Connection Token Wire 归 Go Protocol Package 所有。这里复用生产编码器，
-    # 不在 PowerShell 中复制 Protobuf、HMAC 或 Base64URL 规则。
+    # The Go protocol package owns the Connection Token wire format. Reuse its
+    # production encoder instead of duplicating Protobuf, HMAC, or Base64URL here.
     $token = & go -C $repositoryRoot run ./deploy/smoketoken
     if ($LASTEXITCODE -ne 0) {
         throw "failed to generate Windows smoke Connection Token (exit code $LASTEXITCODE)"
@@ -117,6 +121,73 @@ function Assert-ServiceContract {
     if (($service.PathName -match '--token') -or ($service.PathName -match 'xta_')) {
         throw "service $serviceName command must not contain a Token"
     }
+}
+
+function Assert-EventSourceContract {
+    if (-not (Test-Path -LiteralPath $eventSourceRegistryPath)) {
+        throw "Windows Event Log Source $eventSourceName is missing"
+    }
+    $source = Get-ItemProperty -LiteralPath $eventSourceRegistryPath
+    if ($source.XTunnelManaged -ne $managedMarker) {
+        throw "Windows Event Log Source $eventSourceName has an unexpected managed marker"
+    }
+    if ([int]$source.CustomSource -ne 1) {
+        throw "Windows Event Log Source $eventSourceName is not a custom source"
+    }
+    if ([int]$source.TypesSupported -ne 7) {
+        throw "Windows Event Log Source $eventSourceName has unexpected supported event types"
+    }
+}
+
+function Assert-EventLogContract {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$ForbiddenValues,
+
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $lifecycleFound = $false
+        $records = @(Get-WinEvent -FilterHashtable @{
+                LogName      = 'Application'
+                ProviderName = $eventSourceName
+                StartTime    = $eventQueryStart
+            } -ErrorAction SilentlyContinue)
+        foreach ($record in $records) {
+            $message = $record.Message
+            if ([string]::IsNullOrWhiteSpace($message)) {
+                continue
+            }
+            foreach ($forbidden in $ForbiddenValues) {
+                if ((-not [string]::IsNullOrEmpty($forbidden)) -and $message.Contains($forbidden)) {
+                    throw 'Windows Event Log contains a plaintext Connection Token'
+                }
+            }
+            try {
+                $payload = $message | ConvertFrom-Json
+            }
+            catch {
+                continue
+            }
+            $propertyNames = @($payload.PSObject.Properties.Name)
+            foreach ($required in @('timestamp', 'level', 'component', 'event')) {
+                if ($propertyNames -notcontains $required) {
+                    throw "Windows Event Log JSON is missing required field $required"
+                }
+            }
+            if (($payload.component -eq 'agent') -and
+                ($payload.event -in @('windows_service_running', 'process_started'))) {
+                $lifecycleFound = $true
+            }
+        }
+        if ($lifecycleFound) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw 'Windows Event Log did not contain a valid Agent lifecycle JSON record'
 }
 
 function Assert-CredentialProtected {
@@ -202,6 +273,9 @@ if (-not $principal.IsInRole($administrator)) {
 if ($null -ne (Get-AgentService)) {
     throw "refusing to overwrite existing service $serviceName"
 }
+if (Test-Path -LiteralPath $eventSourceRegistryPath) {
+    throw "refusing to overwrite existing Windows Event Log Source $eventSourceName"
+}
 if ((Test-Path -LiteralPath $installDirectory) -or (Test-Path -LiteralPath $productDataDirectory)) {
     throw 'refusing to overwrite an existing XTunnel install or data path'
 }
@@ -213,6 +287,7 @@ try {
     Wait-AgentServiceStatus -Status 'Running'
     Assert-AgentServiceStable
     Assert-ServiceContract
+    Assert-EventSourceContract
     Assert-CredentialProtected -PlaintextToken $firstToken
     Assert-RestrictedAcl -LiteralPath $credentialDirectory
     Assert-RestrictedAcl -LiteralPath $credentialPath
@@ -238,6 +313,8 @@ try {
     if ($firstCredentialHash -eq $secondCredentialHash) {
         throw 'reinstall did not replace the protected Agent credential'
     }
+    Assert-EventSourceContract
+    Assert-EventLogContract -ForbiddenValues @($firstToken, $secondToken)
 
     Stop-Service -Name $serviceName
     Wait-AgentServiceStatus -Status 'Stopped'
@@ -253,6 +330,9 @@ try {
     }
     if (-not (Test-Path -LiteralPath $credentialPath -PathType Leaf)) {
         throw 'uninstall must preserve the protected Agent credential'
+    }
+    if (Test-Path -LiteralPath $eventSourceRegistryPath) {
+        throw 'managed Windows Event Log Source still exists after uninstall'
     }
 }
 catch {
@@ -290,6 +370,21 @@ finally {
         }
         else {
             $cleanupFailures.Add('refusing to remove service with an unexpected executable command')
+        }
+    }
+
+    if (Test-Path -LiteralPath $eventSourceRegistryPath) {
+        try {
+            $source = Get-ItemProperty -LiteralPath $eventSourceRegistryPath
+            if ($installAttempted -and ($source.XTunnelManaged -eq $managedMarker)) {
+                Remove-Item -LiteralPath $eventSourceRegistryPath -Force
+            }
+            else {
+                $cleanupFailures.Add('refusing to remove an unmanaged Windows Event Log Source')
+            }
+        }
+        catch {
+            $cleanupFailures.Add("Event Log Source cleanup failed: $($_.Exception.Message)")
         }
     }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -15,6 +16,7 @@ import (
 
 	"golang.org/x/net/http/httpguts"
 
+	"github.com/lifei6671/xtunnel/internal/identity"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
@@ -53,6 +55,7 @@ type ServiceConfigObserver interface {
 type HandlerOptions struct {
 	Routes         RouteSource
 	Dialer         TunnelDialer
+	Logger         *slog.Logger
 	TrustedProxies []string
 	Limits         *serverlimits.Manager
 	MaxBodyBytes   int64
@@ -67,13 +70,15 @@ type Handler struct {
 	observer             ServiceConfigObserver
 	trustedProxies       trustedProxySet
 	limits               *serverlimits.Manager
+	logger               *slog.Logger
+	newRequestID         func() (string, error)
 	maxBodyBytes         int64
 	webSocketIdleTimeout time.Duration
 }
 
 // NewHandler 创建尚未绑定 Listener 的 HTTP Ingress Handler。
 func NewHandler(options HandlerOptions) (*Handler, error) {
-	if options.Routes == nil || options.Dialer == nil || options.Limits == nil || options.MaxBodyBytes <= 0 {
+	if options.Routes == nil || options.Dialer == nil || options.Logger == nil || options.Limits == nil || options.MaxBodyBytes <= 0 {
 		return nil, ErrInvalidOptions
 	}
 	proxySet, err := newTrustedProxySet(options.TrustedProxies)
@@ -83,7 +88,8 @@ func NewHandler(options HandlerOptions) (*Handler, error) {
 	observer, _ := options.Dialer.(ServiceConfigObserver)
 	return &Handler{
 		routes: options.Routes, pools: newTransportPool(options.Dialer), observer: observer,
-		trustedProxies: proxySet, limits: options.Limits, maxBodyBytes: options.MaxBodyBytes,
+		trustedProxies: proxySet, limits: options.Limits, logger: options.Logger,
+		newRequestID: identity.NewRequestID, maxBodyBytes: options.MaxBodyBytes,
 		webSocketIdleTimeout: webSocketIdleTimeout,
 	}, nil
 }
@@ -92,10 +98,25 @@ func NewHandler(options HandlerOptions) (*Handler, error) {
 // Transport 参数。新 Snapshot 会作用于后续请求，已经进入 Origin 的请求继续排空。
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if handler == nil || handler.routes == nil || handler.pools == nil || handler.limits == nil ||
-		handler.maxBodyBytes <= 0 || request == nil {
+		handler.logger == nil || handler.newRequestID == nil || handler.maxBodyBytes <= 0 || request == nil {
 		writeError(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE")
 		return
 	}
+	requestID, err := handler.newRequestID()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "INTERNAL_ERROR")
+		handler.logRequestCompleted(request.Context(), request.Method, "", requestLogSnapshot{
+			status: http.StatusInternalServerError, errorCode: "INTERNAL_ERROR",
+		})
+		return
+	}
+	observation := newRequestLogObservation(requestID)
+	observedWriter := newRequestLogResponseWriter(writer, observation)
+	writer = observedWriter
+	defer func() {
+		handler.logRequestCompleted(request.Context(), request.Method, requestID, observation.snapshot(observedWriter.statusCode()))
+	}()
+
 	forwarded, err := handler.trustedProxies.normalizeForwarded(request)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, "INVALID_FORWARDED_HEADER")
@@ -182,7 +203,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	} else {
 		transport = handler.pools.transport(snapshot.Generation(), match.Route)
 	}
-	requestContext := context.WithValue(request.Context(), clientAddressKey{}, forwarded.clientIP.String())
+	transport = observeRequestConnections(transport)
+	requestContext := context.WithValue(request.Context(), requestLogContextKey{}, observation)
+	requestContext = context.WithValue(requestContext, clientAddressKey{}, forwarded.clientIP.String())
 	// net/http.Transport 允许请求取消后继续完成一条可能供后续请求复用的 Dial。
 	// Tunnel OPEN 会占用 WorkConn/限额，不能沿用该默认；把原始请求 Context 作为
 	// 不透明值传到 DialContext，使获取/OPEN 始终随触发它的请求取消。
@@ -349,6 +372,7 @@ func writeError(writer http.ResponseWriter, status int, code string) {
 	if writer == nil {
 		return
 	}
+	setRequestLogErrorCode(writer, code)
 	http.Error(writer, code, status)
 }
 

@@ -19,6 +19,7 @@ import (
 
 	"github.com/lifei6671/xtunnel/internal/application"
 	"github.com/lifei6671/xtunnel/internal/identity"
+	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	webui "github.com/lifei6671/xtunnel/web"
@@ -51,6 +52,38 @@ type authenticatedManagementRequest struct {
 type managementValidationError struct{ message string }
 
 func (err *managementValidationError) Error() string { return err.message }
+
+// managementResponseWriter 只观察最终 HTTP 状态，不改变 Header 与 Body 写入。
+// Unwrap 让 http.ResponseController 继续访问底层 Writer 的可选能力。
+type managementResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (writer *managementResponseWriter) WriteHeader(statusCode int) {
+	if writer.statusCode == 0 {
+		writer.statusCode = statusCode
+	}
+	writer.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (writer *managementResponseWriter) Write(body []byte) (int, error) {
+	if writer.statusCode == 0 {
+		writer.statusCode = http.StatusOK
+	}
+	return writer.ResponseWriter.Write(body)
+}
+
+func (writer *managementResponseWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func (writer *managementResponseWriter) finalStatusCode() int {
+	if writer.statusCode == 0 {
+		return http.StatusOK
+	}
+	return writer.statusCode
+}
 
 // HandlerOptions 是 Management Handler 的固定生产依赖。认证状态只来自 SQLite，
 // Host、Origin 与 Client IP 只来自同一份 Management Security Policy。
@@ -150,10 +183,19 @@ func NewHandler(options HandlerOptions) (*ManagementHandler, error) {
 func (handler *ManagementHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	requestID, err := identity.NewRequestID()
 	if err != nil {
-		handler.logger.ErrorContext(request.Context(), "management_request_id_failed", "error", err)
+		handler.logger.ErrorContext(request.Context(), "management_request_id_failed", logging.ErrorCodeKey, "INTERNAL_ERROR")
 		http.Error(writer, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
+	startedAt := time.Now()
+	responseWriter := &managementResponseWriter{ResponseWriter: writer}
+	defer func() {
+		handler.logRequestCompleted(
+			request.Context(), requestID, request.Method, request.URL.Path,
+			responseWriter.finalStatusCode(), time.Since(startedAt),
+		)
+	}()
+	writer = responseWriter
 	metadata, err := handler.security.metadata(request)
 	if err != nil {
 		handler.writeError(writer, request, http.StatusBadRequest, APIErrorCodeINVALIDREQUEST, "请求 Host 或代理元数据无效", requestID)
@@ -204,6 +246,31 @@ func (handler *ManagementHandler) ServeHTTP(writer http.ResponseWriter, request 
 		handler.writeError(writer, request, http.StatusInternalServerError, APIErrorCodeINTERNALERROR, "接口尚未实现", requestID)
 	default:
 		handler.serveWeb(writer, request)
+	}
+}
+
+func (handler *ManagementHandler) logRequestCompleted(
+	ctx context.Context,
+	requestID string,
+	method string,
+	path string,
+	status int,
+	duration time.Duration,
+) {
+	attributes := []any{
+		"method", method,
+		"path", path,
+		"status_code", status,
+		"duration_ms", duration.Milliseconds(),
+	}
+	logger := logging.WithCorrelationFields(handler.logger, logging.Correlation{RequestID: requestID})
+	switch {
+	case status >= http.StatusInternalServerError:
+		logger.ErrorContext(ctx, logging.EventManagementRequestCompleted, attributes...)
+	case status >= http.StatusBadRequest:
+		logger.WarnContext(ctx, logging.EventManagementRequestCompleted, attributes...)
+	default:
+		logger.InfoContext(ctx, logging.EventManagementRequestCompleted, attributes...)
 	}
 }
 
@@ -719,22 +786,25 @@ func (handler *ManagementHandler) writeGeneratedResponseError(writer http.Respon
 	handler.writeError(writer, request, http.StatusInternalServerError, APIErrorCodeINTERNALERROR, "服务器内部错误", requestID)
 }
 
-func (handler *ManagementHandler) logInternalError(ctx context.Context, requestID, event string, err error) {
-	handler.logger.ErrorContext(ctx, event, "request_id", requestID, "error", err)
+func (handler *ManagementHandler) logInternalError(ctx context.Context, requestID, event string, _ error) {
+	logging.WithCorrelationFields(handler.logger, logging.Correlation{RequestID: requestID}).ErrorContext(
+		ctx, event, logging.ErrorCodeKey, "INTERNAL_ERROR",
+	)
 }
 
 func (handler *ManagementHandler) writeError(writer http.ResponseWriter, request *http.Request, status int, code APIErrorCode, message, requestID string) {
 	writer.Header().Set("Cache-Control", "no-store")
-	handler.writeJSON(writer, status, ErrorResponse{Error: APIError{
+	handler.writeJSON(writer, request, status, ErrorResponse{Error: APIError{
 		Code: code, Message: message, RequestId: requestID,
 	}})
 }
 
-func (handler *ManagementHandler) writeJSON(writer http.ResponseWriter, status int, value any) {
+func (handler *ManagementHandler) writeJSON(writer http.ResponseWriter, request *http.Request, status int, value any) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	if err := json.NewEncoder(writer).Encode(value); err != nil {
-		handler.logger.Error("management_response_encode_failed", "error", err)
+		requestContext := managementRequestContextFrom(request.Context())
+		handler.logInternalError(request.Context(), requestIDFromContext(requestContext), "management_response_encode_failed", err)
 	}
 }
 

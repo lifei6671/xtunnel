@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,8 +18,10 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
@@ -113,7 +117,7 @@ func replaceFile(source, destination string) error {
 	)
 }
 
-func install(ctx context.Context, token string) error {
+func install(ctx context.Context, token string) (resultErr error) {
 	if err := requireAdministrator(); err != nil {
 		return err
 	}
@@ -141,6 +145,22 @@ func install(ctx context.Context, token string) error {
 		if !isExpectedManagedWindowsService(config, paths.binary) {
 			return errors.New("refusing to overwrite an unmanaged or modified XTunnelAgent service")
 		}
+	}
+	eventSourceCreated, err := ensureWindowsEventSource(registryWindowsEventSourceStore{})
+	if err != nil {
+		return err
+	}
+	keepEventSource := serviceExists
+	defer func() {
+		if resultErr == nil || !eventSourceCreated || keepEventSource {
+			return
+		}
+		resultErr = errors.Join(
+			resultErr,
+			removeManagedWindowsEventSource(registryWindowsEventSourceStore{}),
+		)
+	}()
+	if serviceExists {
 		if err := stopWindowsService(ctx, installedService); err != nil {
 			return err
 		}
@@ -179,6 +199,7 @@ func install(ctx context.Context, token string) error {
 		if err != nil {
 			return fmt.Errorf("create Windows service: %w", err)
 		}
+		keepEventSource = true
 		defer installedService.Close()
 	} else if err := installedService.UpdateConfig(expectedWindowsConfig(paths.binary)); err != nil {
 		return fmt.Errorf("update Windows service configuration: %w", err)
@@ -214,7 +235,7 @@ func uninstall(ctx context.Context) (UninstallResult, error) {
 
 	installedService, err := manager.OpenService(windowsServiceName)
 	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-		return UninstallResult{}, nil
+		return UninstallResult{}, removeManagedWindowsEventSource(registryWindowsEventSourceStore{})
 	}
 	if err != nil {
 		return UninstallResult{}, fmt.Errorf("open Windows service: %w", err)
@@ -233,11 +254,9 @@ func uninstall(ctx context.Context) (UninstallResult, error) {
 	if err := installedService.Delete(); err != nil {
 		return UninstallResult{}, fmt.Errorf("delete Windows service: %w", err)
 	}
+	eventSourceErr := removeManagedWindowsEventSource(registryWindowsEventSourceStore{})
 	scheduledForReboot, err := removeWindowsInstalledBinary(paths.binary)
-	if err != nil {
-		return UninstallResult{}, err
-	}
-	return UninstallResult{BinaryRemovalPendingReboot: scheduledForReboot}, nil
+	return UninstallResult{BinaryRemovalPendingReboot: scheduledForReboot}, errors.Join(eventSourceErr, err)
 }
 
 func removeWindowsInstalledBinary(path string) (scheduledForReboot bool, err error) {
@@ -461,10 +480,41 @@ func startWindowsService(ctx context.Context, installedService *mgr.Service) err
 }
 
 type windowsServiceHandler struct {
-	callback func(context.Context, string) error
+	callback func(context.Context, string, io.Writer) error
 	load     func() (string, error)
 	stopWait time.Duration
+	writer   io.Writer
+	logger   *slog.Logger
+	failures <-chan error
 	err      error
+}
+
+func (handler *windowsServiceHandler) eventLogFailure() error {
+	if handler.failures == nil {
+		return nil
+	}
+	select {
+	case err := <-handler.failures:
+		return err
+	default:
+		return nil
+	}
+}
+
+func (handler *windowsServiceHandler) writeEvent(
+	ctx context.Context,
+	level slog.Level,
+	event string,
+	errorCode string,
+) error {
+	record := slog.NewRecord(time.Now(), level, event, 0)
+	if errorCode != "" {
+		record.AddAttrs(slog.String(logging.ErrorCodeKey, errorCode))
+	}
+	if err := handler.logger.Handler().Handle(ctx, record); err != nil {
+		return fmt.Errorf("write %s Windows service event: %w", event, err)
+	}
+	return nil
 }
 
 func (handler *windowsServiceHandler) Execute(
@@ -473,9 +523,16 @@ func (handler *windowsServiceHandler) Execute(
 	changes chan<- svc.Status,
 ) (bool, uint32) {
 	changes <- svc.Status{State: svc.StartPending}
+	if err := handler.writeEvent(context.Background(), slog.LevelInfo, logging.EventWindowsServiceStarting, ""); err != nil {
+		handler.err = err
+		return true, 1
+	}
 	token, err := handler.load()
 	if err != nil {
-		handler.err = err
+		handler.err = errors.Join(
+			err,
+			handler.writeEvent(context.Background(), slog.LevelError, logging.EventWindowsServiceFailed, "CREDENTIAL_LOAD_FAILED"),
+		)
 		return true, 1
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -484,18 +541,46 @@ func (handler *windowsServiceHandler) Execute(
 	safego.Go(func(err error) {
 		done <- fmt.Errorf("run Agent Windows service callback: %w", err)
 	}, nil, func() {
-		done <- handler.callback(ctx, token)
+		done <- handler.callback(ctx, token, handler.writer)
 	})
+	if err := handler.writeEvent(ctx, slog.LevelInfo, logging.EventWindowsServiceRunning, ""); err != nil {
+		cancel()
+		select {
+		case callbackErr := <-done:
+			handler.err = errors.Join(err, callbackErr)
+		case <-time.After(handler.stopWait):
+			handler.err = errors.Join(err, errors.New("Agent runtime did not stop after Event Log failure"))
+		}
+		return true, 1
+	}
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 
 	for {
 		select {
 		case err := <-done:
+			writerErr := handler.eventLogFailure()
 			if err == nil {
 				err = errors.New("Agent runtime exited before a service stop request")
 			}
-			handler.err = err
+			handler.err = errors.Join(
+				err,
+				writerErr,
+				handler.writeEvent(ctx, slog.LevelError, logging.EventWindowsServiceFailed, "RUNTIME_FAILED"),
+			)
 			changes <- svc.Status{State: svc.StopPending}
+			return true, 1
+		case writerErr := <-handler.failures:
+			changes <- svc.Status{State: svc.StopPending}
+			cancel()
+			select {
+			case callbackErr := <-done:
+				handler.err = errors.Join(writerErr, callbackErr)
+			case <-time.After(handler.stopWait):
+				handler.err = errors.Join(
+					writerErr,
+					errors.New("Agent runtime did not stop after Windows Event Log failure"),
+				)
+			}
 			return true, 1
 		case request := <-requests:
 			switch request.Cmd {
@@ -503,15 +588,39 @@ func (handler *windowsServiceHandler) Execute(
 				changes <- request.CurrentStatus
 			case svc.Stop, svc.Shutdown:
 				changes <- svc.Status{State: svc.StopPending}
+				requestLogErr := handler.writeEvent(ctx, slog.LevelInfo, logging.EventWindowsServiceStopRequested, "")
 				cancel()
 				select {
-				case handler.err = <-done:
+				case callbackErr := <-done:
+					writerErr := handler.eventLogFailure()
+					if callbackErr != nil {
+						handler.err = errors.Join(
+							callbackErr,
+							writerErr,
+							requestLogErr,
+							handler.writeEvent(ctx, slog.LevelError, logging.EventWindowsServiceFailed, "RUNTIME_FAILED"),
+						)
+						return true, 1
+					}
+					if writerErr != nil {
+						handler.err = errors.Join(writerErr, requestLogErr)
+						return true, 1
+					}
+					handler.err = errors.Join(
+						requestLogErr,
+						handler.writeEvent(context.Background(), slog.LevelInfo, logging.EventWindowsServiceStopped, ""),
+					)
 					if handler.err != nil {
 						return true, 1
 					}
 					return false, 0
 				case <-time.After(handler.stopWait):
-					handler.err = errors.New("Agent runtime did not stop before the Windows service deadline")
+					timeoutErr := errors.New("Agent runtime did not stop before the Windows service deadline")
+					handler.err = errors.Join(
+						timeoutErr,
+						requestLogErr,
+						handler.writeEvent(context.Background(), slog.LevelError, logging.EventWindowsServiceFailed, "STOP_TIMEOUT"),
+					)
 					return true, 1
 				}
 			}
@@ -519,7 +628,7 @@ func (handler *windowsServiceHandler) Execute(
 	}
 }
 
-func runIfManagedService(callback func(context.Context, string) error) (bool, error) {
+func runIfManagedService(callback func(context.Context, string, io.Writer) error) (handled bool, resultErr error) {
 	isService, err := svc.IsWindowsService()
 	if err != nil {
 		return false, fmt.Errorf("detect Windows service context: %w", err)
@@ -527,13 +636,40 @@ func runIfManagedService(callback func(context.Context, string) error) (bool, er
 	if !isService {
 		return false, nil
 	}
+	if err := requireManagedWindowsEventSource(registryWindowsEventSourceStore{}); err != nil {
+		return true, fmt.Errorf("validate Windows Event Log Source: %w", err)
+	}
+	eventWriter, err := openWindowsEventLogWriter(windowsEventLogSource, func(source string) (windowsEventLogger, error) {
+		return eventlog.Open(source)
+	})
+	if err != nil {
+		return true, err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, eventWriter.Close())
+	}()
+	logger, err := logging.New(eventWriter, logging.Options{
+		Level:     "info",
+		Format:    "json",
+		Component: "agent",
+	})
+	if err != nil {
+		return true, fmt.Errorf("initialize Windows service Event Log: %w", err)
+	}
 	handler := &windowsServiceHandler{
 		callback: callback,
 		load:     loadWindowsCredential,
 		stopWait: windowsStateLimit,
+		writer:   eventWriter,
+		logger:   logger,
+		failures: eventWriter.Failures(),
 	}
 	if err := svc.Run(windowsServiceName, handler); err != nil {
-		return true, fmt.Errorf("run Windows service dispatcher: %w", err)
+		dispatchErr := fmt.Errorf("run Windows service dispatcher: %w", err)
+		return true, errors.Join(
+			dispatchErr,
+			handler.writeEvent(context.Background(), slog.LevelError, logging.EventWindowsServiceFailed, "DISPATCHER_FAILED"),
+		)
 	}
 	return true, handler.err
 }

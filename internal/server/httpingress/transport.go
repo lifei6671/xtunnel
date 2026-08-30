@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
 	"time"
 
@@ -90,12 +91,17 @@ func (pool *transportPool) newTransport(route serverroute.HTTPRoute) *http.Trans
 				dialContext = requestContext
 			}
 			clientAddr, _ := dialContext.Value(clientAddressKey{}).(string)
+			requestID := ""
+			if observation := requestLogObservationFrom(dialContext); observation != nil {
+				requestID = observation.requestID
+			}
 			return pool.dialer.Dial(dialContext, tunnel.DialRequest{
 				TunnelID:         route.TunnelID,
 				ServiceID:        route.ServiceID,
 				RequiredRevision: uint64(route.RequiredRevision),
 				Ingress:          protocolv1.IngressType_INGRESS_TYPE_HTTP,
 				ClientAddr:       clientAddr,
+				RequestID:        requestID,
 			})
 		},
 		// Origin TLS 在 Agent 端完成，且每个隔离键只有一个虚拟 authority；禁用
@@ -106,6 +112,35 @@ func (pool *transportPool) newTransport(route serverroute.HTTPRoute) *http.Trans
 		MaxIdleConnsPerHost: int(route.ProxyOptions.MaxIdleConnections),
 		IdleConnTimeout:     time.Duration(route.ProxyOptions.IdleConnectionTimeoutMS) * time.Millisecond,
 	}
+}
+
+type requestObservedTransport struct {
+	next http.RoundTripper
+}
+
+// observeRequestConnections 用标准库 GotConn 观察本次请求最终取得的连接。
+// 该回调对新 Dial 与 KeepAlive 复用都会触发，因此不会把后续请求错误关联到空连接。
+func observeRequestConnections(next http.RoundTripper) http.RoundTripper {
+	return &requestObservedTransport{next: next}
+}
+
+func (transport *requestObservedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if transport == nil || transport.next == nil || request == nil {
+		return nil, ErrInvalidOptions
+	}
+	observation := requestLogObservationFrom(request.Context())
+	if observation == nil {
+		return transport.next.RoundTrip(request)
+	}
+	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		identified, ok := info.Conn.(interface{ ConnectionID() string })
+		if !ok {
+			return
+		}
+		observation.observeConnection(identified.ConnectionID())
+	}}
+	request = request.Clone(httptrace.WithClientTrace(request.Context(), trace))
+	return transport.next.RoundTrip(request)
 }
 
 // webSocketTransport 为一次 Upgrade 创建 fresh Transport。WebSocket 握手一旦写入

@@ -5,12 +5,15 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/safego"
 
 	"golang.org/x/sys/windows"
@@ -141,9 +144,14 @@ func TestWindowsServiceHandlerCancelsOnStop(t *testing.T) {
 	handler := &windowsServiceHandler{
 		load:     func() (string, error) { return token, nil },
 		stopWait: time.Second,
-		callback: func(ctx context.Context, got string) error {
+		writer:   io.Discard,
+		logger:   newTestWindowsServiceLogger(t),
+		callback: func(ctx context.Context, got string, writer io.Writer) error {
 			if got != token {
 				t.Errorf("callback Token was not loaded from protected credential")
+			}
+			if writer != io.Discard {
+				t.Error("callback did not receive the managed service log writer")
 			}
 			close(started)
 			<-ctx.Done()
@@ -189,7 +197,9 @@ func TestWindowsServiceHandlerFailsWhenRuntimeDoesNotStop(t *testing.T) {
 	handler := &windowsServiceHandler{
 		load:     func() (string, error) { return "xta_timeout_secret", nil },
 		stopWait: 20 * time.Millisecond,
-		callback: func(context.Context, string) error {
+		writer:   io.Discard,
+		logger:   newTestWindowsServiceLogger(t),
+		callback: func(context.Context, string, io.Writer) error {
 			<-release
 			return nil
 		},
@@ -226,7 +236,9 @@ func TestWindowsServiceHandlerReportsRuntimeFailure(t *testing.T) {
 	handler := &windowsServiceHandler{
 		load:     func() (string, error) { return "xta_failure_secret", nil },
 		stopWait: time.Second,
-		callback: func(context.Context, string) error {
+		writer:   io.Discard,
+		logger:   newTestWindowsServiceLogger(t),
+		callback: func(context.Context, string, io.Writer) error {
 			<-fail
 			return context.Canceled
 		},
@@ -262,7 +274,9 @@ func TestWindowsServiceHandlerReportsRuntimePanic(t *testing.T) {
 	handler := &windowsServiceHandler{
 		load:     func() (string, error) { return "xta_panic_secret", nil },
 		stopWait: time.Second,
-		callback: func(context.Context, string) error {
+		writer:   io.Discard,
+		logger:   newTestWindowsServiceLogger(t),
+		callback: func(context.Context, string, io.Writer) error {
 			panic("service callback panic must not escape its goroutine")
 		},
 	}
@@ -298,6 +312,106 @@ func TestWindowsServiceHandlerReportsRuntimePanic(t *testing.T) {
 	}
 }
 
+func TestWindowsServiceHandlerFailsBeforeCredentialLoadWhenEventLogWriteFails(t *testing.T) {
+	writeFailure := errors.New("event log unavailable")
+	logger, err := logging.New(errorWriter{err: writeFailure}, logging.Options{
+		Level: "info", Format: "json", Component: "agent",
+	})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
+	loadCalled := false
+	handler := &windowsServiceHandler{
+		load: func() (string, error) {
+			loadCalled = true
+			return "xta_must_not_be_loaded", nil
+		},
+		stopWait: time.Second,
+		writer:   errorWriter{err: writeFailure},
+		logger:   logger,
+		callback: func(context.Context, string, io.Writer) error {
+			t.Fatal("callback ran after Event Log failure")
+			return nil
+		},
+	}
+	changes := make(chan svc.Status, 1)
+	serviceSpecific, exitCode := handler.Execute(nil, make(chan svc.ChangeRequest), changes)
+	if !serviceSpecific || exitCode == 0 || !errors.Is(handler.err, writeFailure) {
+		t.Fatalf("Execute() = (%t, %d), error=%v; want Event Log failure", serviceSpecific, exitCode, handler.err)
+	}
+	if loadCalled {
+		t.Fatal("credential was loaded after Event Log failure")
+	}
+}
+
+func TestWindowsServiceHandlerStopsWhenRuntimeSlogWriteFails(t *testing.T) {
+	writeFailure := errors.New("runtime Event Log write failed")
+	eventLogger := &fakeWindowsEventLogger{writeErr: writeFailure, failAt: 3}
+	eventWriter, err := openWindowsEventLogWriter(windowsEventLogSource, func(string) (windowsEventLogger, error) {
+		return eventLogger, nil
+	})
+	if err != nil {
+		t.Fatalf("openWindowsEventLogWriter() error = %v", err)
+	}
+	serviceLogger, err := logging.New(eventWriter, logging.Options{
+		Level: "info", Format: "json", Component: "agent",
+	})
+	if err != nil {
+		t.Fatalf("logging.New(service) error = %v", err)
+	}
+	emitRuntimeLog := make(chan struct{})
+	handler := &windowsServiceHandler{
+		load:     func() (string, error) { return "xta_runtime_log_failure", nil },
+		stopWait: time.Second,
+		writer:   eventWriter,
+		logger:   serviceLogger,
+		failures: eventWriter.Failures(),
+		callback: func(ctx context.Context, _ string, writer io.Writer) error {
+			runtimeLogger, err := logging.New(writer, logging.Options{
+				Level: "info", Format: "json", Component: "agent",
+			})
+			if err != nil {
+				return err
+			}
+			<-emitRuntimeLog
+			runtimeLogger.Info("runtime_log_after_running")
+			<-ctx.Done()
+			return nil
+		},
+	}
+	requests := make(chan svc.ChangeRequest)
+	changes := make(chan svc.Status)
+	result := make(chan struct {
+		serviceSpecific bool
+		exitCode        uint32
+	}, 1)
+	go func() {
+		serviceSpecific, exitCode := handler.Execute(nil, requests, changes)
+		result <- struct {
+			serviceSpecific bool
+			exitCode        uint32
+		}{serviceSpecific, exitCode}
+	}()
+	if state := receiveWindowsServiceState(t, changes); state != svc.StartPending {
+		t.Fatalf("first state = %d, want StartPending", state)
+	}
+	if state := receiveWindowsServiceState(t, changes); state != svc.Running {
+		t.Fatalf("second state = %d, want Running", state)
+	}
+	close(emitRuntimeLog)
+	if state := receiveWindowsServiceState(t, changes); state != svc.StopPending {
+		t.Fatalf("third state = %d, want StopPending", state)
+	}
+	select {
+	case got := <-result:
+		if !got.serviceSpecific || got.exitCode == 0 || !errors.Is(handler.err, writeFailure) {
+			t.Fatalf("Execute() = (%t, %d), error=%v; want Event Log service failure", got.serviceSpecific, got.exitCode, handler.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service handler did not stop after runtime Event Log failure")
+	}
+}
+
 func TestRemoveWindowsBinarySchedulesRunningExecutableForReboot(t *testing.T) {
 	const binary = `C:\Program Files\XTunnel\xtunnel-agent.exe`
 	delayed := ""
@@ -322,4 +436,19 @@ func receiveWindowsServiceState(t *testing.T, changes <-chan svc.Status) svc.Sta
 		t.Fatal("timed out waiting for Windows service state")
 		return 0
 	}
+}
+
+func newTestWindowsServiceLogger(t *testing.T) *slog.Logger {
+	t.Helper()
+	logger, err := logging.New(io.Discard, logging.Options{Level: "info", Format: "json", Component: "agent"})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
+	return logger
+}
+
+type errorWriter struct{ err error }
+
+func (writer errorWriter) Write([]byte) (int, error) {
+	return 0, writer.err
 }

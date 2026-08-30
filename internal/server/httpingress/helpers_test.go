@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/identity"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
@@ -129,6 +131,8 @@ type tunnelDialCall struct {
 	RequiredRevision uint64
 	Ingress          protocolv1.IngressType
 	Client           string
+	RequestID        string
+	ConnectionID     string
 }
 
 type dialerFunc func(context.Context, tunnel.DialRequest) (net.Conn, error)
@@ -178,12 +182,19 @@ func (dialer *loopOriginDialer) Dial(
 		return nil, err
 	}
 	server, peer := net.Pipe()
+	connectionID, err := identity.NewConnectionID()
+	if err != nil {
+		_ = server.Close()
+		_ = peer.Close()
+		return nil, err
+	}
 	dialer.mu.Lock()
 	index := len(dialer.calls) + 1
 	dialer.calls = append(dialer.calls, tunnelDialCall{
 		TunnelID: request.TunnelID, ServiceID: request.ServiceID,
 		RequiredRevision: request.RequiredRevision,
 		Ingress:          request.Ingress, Client: request.ClientAddr,
+		RequestID: request.RequestID, ConnectionID: connectionID,
 	})
 	dialer.servers = append(dialer.servers, server)
 	dialer.peers = append(dialer.peers, peer)
@@ -225,8 +236,15 @@ func (dialer *loopOriginDialer) Dial(
 			}
 		}
 	}()
-	return server, nil
+	return &identifiedTestConnection{Conn: server, id: connectionID}, nil
 }
+
+type identifiedTestConnection struct {
+	net.Conn
+	id string
+}
+
+func (connection *identifiedTestConnection) ConnectionID() string { return connection.id }
 
 func (dialer *loopOriginDialer) Calls() []tunnelDialCall {
 	dialer.mu.Lock()
@@ -307,10 +325,25 @@ func newTestHandlerWithLimits(
 	limitManager *serverlimits.Manager,
 	maxBodyBytes int64,
 ) *Handler {
+	return newTestHandlerWithLimitsAndLogger(
+		t, manager, dialer, trustedProxies, limitManager, maxBodyBytes,
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	)
+}
+
+func newTestHandlerWithLimitsAndLogger(
+	t *testing.T,
+	manager *route.Manager,
+	dialer TunnelDialer,
+	trustedProxies []string,
+	limitManager *serverlimits.Manager,
+	maxBodyBytes int64,
+	logger *slog.Logger,
+) *Handler {
 	t.Helper()
 	handler, err := NewHandler(HandlerOptions{
 		Routes: manager, Dialer: dialer, TrustedProxies: trustedProxies,
-		Limits: limitManager, MaxBodyBytes: maxBodyBytes,
+		Limits: limitManager, MaxBodyBytes: maxBodyBytes, Logger: logger,
 	})
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)

@@ -319,6 +319,7 @@ func startProductGateAgent(
 	if err != nil {
 		t.Fatalf("build Product Gate Agent config: %v", err)
 	}
+	agentConfig.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	agentRuntime, err := connector.New(agentConfig)
 	if err != nil {
 		t.Fatalf("construct Product Gate Agent runtime: %v", err)

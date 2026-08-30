@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-01 全链路 JSON Logging · BLOCKED（等待日志契约、Windows Event Log Source 生命周期与 Windows Smoke 修改授权）
+> **当前阶段**：M6-01 全链路 JSON Logging · IN_PROGRESS（本地实现与定向验证完成，等待提升权限 Windows CI 真实 Event Log 补证）
 >
-> **当前结论**：用户已明确确认 M5-11 总 Gate 阶段复审通过。结合六项已勾选 Checklist、提交 `fbb3274a690f75550116f3c718b7a125fb114697` 与精确 CI #33293330203 三个 Job 全部成功，M5-11 转为 `DONE`，M5 更新为 `11/11` 并完成，全局任务更新为 `75/95`。M6-01 依赖已闭环，但实现会改变稳定日志事件/级别、内部跨包 Logger 接线、Windows Event Log Source 注册与卸载清理行为；按项目 Ask First 边界，在取得明确授权前标记为 `BLOCKED`，未修改代码、依赖、系统权限或 CI。
+> **当前结论**：用户已明确确认 M6-01 审计范围。共享日志已补齐稳定事件与真实关联字段，Management/HTTP Ingress/Tunnel/Agent 已形成请求至连接终态日志链；Windows SCM 使用受管 `XTunnelAgent` Application Event Log Source 持久写入同一 JSON，并由扩展 Smoke 验证 Source、事件 JSON、Token 不泄漏和卸载清理。本地 Go Test/Race/Vet、Windows amd64 测试、Windows arm64/Linux amd64 编译及 PowerShell Parser/ASCII 检查通过；当前会话非提升权限，真实 SCM/Event Log Smoke 等待 CI，因此 M6-01 保持 `IN_PROGRESS`，M6 与全局完成数仍为 `0/7`、`75/95`。
 
 ---
 
@@ -110,7 +110,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M3 Config/Health | 13 | 13 | `DONE` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
-| M6 Observability | 7 | 0 | `BLOCKED` | M5-11 | M6-07 |
+| M6 Observability | 7 | 0 | `IN_PROGRESS` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
 | **合计** | **95** | **75** |  |  |  |
 
@@ -372,7 +372,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `BLOCKED` |
+| M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `IN_PROGRESS` |
 | M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `NOT_STARTED` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `NOT_STARTED` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `NOT_STARTED` |
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11` 已完成。当前待办为：
 
-1. `M6-01` — 全链路 JSON Logging 依赖已闭环并完成三路范围审计；日志事件/级别、内部跨包 Logger 接线、Windows Event Log Source 注册/清理与 Windows Smoke 属 Ask First，等待用户明确授权后开始实现。
+1. `M6-01` — 全链路 JSON Logging 已完成本地实现、定向 Test/Race/Vet、跨架构编译与 Windows Smoke 静态验证；等待提升权限 Windows CI 查询真实 Application Event 后进入 `REVIEW`。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4 与 M5 已完成；M6-01 等待明确授权。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4 与 M5 已完成；M6-01 等待精确 CI 补证。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
 
 推进规则：
 
@@ -1466,3 +1466,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 不在范围：M6-01 不引入 OpenTelemetry 依赖、Metrics/Drop Metric、Usage、Dashboard Error 聚合、诊断 Runbook、完整 Audit 文件导出，也不修改 Proto、OpenAPI、Server Schema、Migration、第三方依赖或 Lockfile。M6 Gate Checklist 继续全部未勾选。
 - 当前验证：Go 1.27.0 与 `GOTOOLCHAIN=local` 检查通过；三路只读审计分别覆盖日志链路、Windows Sink 和验收边界，均确认技术上可实施但必须先授权。当前未写代码、未改系统权限、未改 CI；M6-01 标记 `BLOCKED`，解除条件是用户明确确认上述日志契约与 Windows Event Source/Smoke 范围。
 - 文档同步：根 README 与本开发计划同步 M5-11 用户复审、M5/M6 状态、计数、队列和阻塞边界。总技术方案、日志契约正文、代码、OpenAPI/生成物、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署资产与 `AGENTS.md` 均未修改，因为用户尚未授权 M6-01 的行为变更。
+
+## 2026-08-30 · M6-01 用户授权与本地实现 · IN_PROGRESS
+
+- 授权与边界：用户明确确认上一轮审计的 M6-01 范围。实现只冻结全链路 JSON 事件、有限 `error_code`、真实关联字段和 Windows Event Log Sink；不创建 OpenTelemetry Span、不传播 W3C Context，不新增 Metrics/Usage/Dashboard/Runbook/Audit 导出，不修改 Proto、OpenAPI、Server Schema、Migration、第三方依赖或 Lockfile。
+- 日志链路：共享 `internal/logging` 增加值型 Correlation 与稳定事件常量，空 ID 不输出。Management 记录真实 `request_id`、路径、状态和耗时；公网 HTTP 每个请求生成独立 Request ID，并通过 `httptrace.GotConn` 同时覆盖新建与 KeepAlive 后端连接；Tunnel OPEN/失败/关闭关联 Tunnel、Service、Connector、Session、Connection 与 generation；Agent 在 OpenRequest 校验并提交 OPENING 后记录 Origin、RAW 打开与关闭。内部失败只写有限 `error_code`，不把底层错误文本写入运行日志。
+- Windows Sink：`service install` 注册 `XTunnelAgent` Application Event Source，并以既有 managed marker 和标准注册表值共同确认归属；外来或被修改的同名 Source 拒绝覆盖/删除，本次新建 Source 的标准值或 marker 任一步失败均回滚。SCM 服务把共享 JSON Handler 的完整单行记录按级别写入 Event Log；Writer 另向 SCM owner 发布运行期首个写失败，owner 取消 Agent、有界等待并返回非零 Service Exit，Source 缺失、被修改、打开或写入失败均不得回退 stderr。卸载清理受管 Source 并保留 DPAPI Credential。`deploy/windows/smoke.ps1` 新增真实 Source 契约、Application Event JSON 全量 Token Sentinel 与卸载清理检查。
+- 本地验证：`go1.27.0` / `GOTOOLCHAIN=local` 与 `go mod verify` 通过；全仓 `go test -count=1 ./...`、`go vet ./...`、`go test -race -count=1 ./...` 通过；Windows amd64 Service 测试、Windows arm64 Agent/Bootstrap/Service 编译，以及 Linux amd64 Agent/Server Bootstrap/Integration 编译通过；Windows PowerShell 5.1 与 PowerShell 7 Parser、ASCII-only、`git diff --check` 通过。当前进程不是提升权限 Administrator，Harness 按设计不能在本机执行真实 SCM/Event Log Smoke，该项等待 Windows CI。
+- 状态与文档：M6-01 从 `BLOCKED` 转为 `IN_PROGRESS`，M6 更新为 `IN_PROGRESS`，完成数仍为 M6 `0/7`、全局 `75/95`；M6 Gate Checklist 全部保持未勾选。总技术方案、README 与本计划已同步，CI Workflow 无需修改，因为既有 Windows Agent Service Job 已执行同一个 Smoke 入口。

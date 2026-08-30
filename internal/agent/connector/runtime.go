@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	agentworkpool "github.com/lifei6671/xtunnel/internal/agent/workpool"
 	"github.com/lifei6671/xtunnel/internal/controlsession"
 	"github.com/lifei6671/xtunnel/internal/identity"
+	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/safego"
@@ -62,6 +64,7 @@ type Config struct {
 	Version         string
 	OS              string
 	Arch            string
+	Logger          *slog.Logger
 }
 
 // Runtime 持有一个进程内固定 Connector 身份及其可重连 Control Runner。
@@ -74,6 +77,7 @@ type Runtime struct {
 	newDrainID         func() (string, error)
 	drainTimeout       time.Duration
 	health             healthRuntime
+	logger             *slog.Logger
 
 	retiredMu    sync.Mutex
 	retiredNext  uint64
@@ -116,7 +120,7 @@ type healthRuntime interface {
 // New 创建生产 Connector Runtime，但不会立即建立网络连接。
 func New(config Config) (*Runtime, error) {
 	if config.ConnectionToken == "" || config.Connector.ID() == "" || config.Hostname == "" ||
-		config.Version == "" || config.OS == "" || config.Arch == "" {
+		config.Version == "" || config.OS == "" || config.Arch == "" || config.Logger == nil {
 		return nil, ErrInvalidConfig
 	}
 	runner, err := agentsession.NewRunner(agentsession.Config{
@@ -146,6 +150,7 @@ func New(config Config) (*Runtime, error) {
 		token:  config.ConnectionToken,
 		origin: originResolver,
 		health: healthManager,
+		logger: config.Logger,
 		runControlSessions: func(ctx context.Context, handler reconnect.SessionHandler[*agentsession.Session]) error {
 			return reconnect.Run(ctx, runner, handler, reconnect.Options{
 				InitialBackoff: reconnectInitial,
@@ -282,6 +287,10 @@ func (runtime *Runtime) handleSession(
 	openHandler, err := open.NewHandler(open.Options{
 		ReadTimeout: openReadTimeout, WriteTimeout: openWriteTimeout,
 		Dialer: runtime.origin,
+		Logger: logging.WithCorrelationFields(runtime.logger, logging.Correlation{
+			TunnelID: authentication.TunnelID, ConnectorID: authentication.ConnectorID,
+			SessionID: authentication.SessionID,
+		}),
 	})
 	if err != nil {
 		clear(authentication.SessionSecret[:])

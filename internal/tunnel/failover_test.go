@@ -778,7 +778,7 @@ func newFailoverFixtureWithLimits(
 	}
 	fixture.proxy, err = NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler,
-		AcquireTimeout: time.Second, LimitManager: limits,
+		AcquireTimeout: time.Second, LimitManager: limits, Logger: testTunnelLogger(),
 	})
 	if err != nil {
 		t.Fatalf("NewProxy() error = %v", err)

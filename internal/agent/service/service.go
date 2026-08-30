@@ -196,7 +196,9 @@ func Name() string {
 }
 
 // RunIfManagedService runs callback under the native service dispatcher when
-// the current process was started by it. Foreground processes return handled=false.
-func RunIfManagedService(callback func(context.Context, string) error) (handled bool, err error) {
+// the current process was started by it. The callback receives the platform's
+// persistent service log writer. Foreground processes return handled=false without
+// invoking the callback.
+func RunIfManagedService(callback func(context.Context, string, io.Writer) error) (handled bool, err error) {
 	return runIfManagedService(callback)
 }

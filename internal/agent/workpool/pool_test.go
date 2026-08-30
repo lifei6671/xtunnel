@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -471,6 +472,7 @@ func TestPoolObservesOpenPhasesRefillsActiveAndTrimsOnlyIdle(t *testing.T) {
 	openHandler, err := agentopen.NewHandler(agentopen.Options{
 		ReadTimeout:  time.Second,
 		WriteTimeout: time.Second,
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Dialer: agentopen.OriginDialerFunc(func(ctx context.Context, serviceID string) (net.Conn, protocolv1.ErrorCode, error) {
 			if serviceID != testServiceID {
 				return nil, protocolv1.ErrorCode_ERROR_CODE_SERVICE_NOT_FOUND, errors.New("unexpected service id")

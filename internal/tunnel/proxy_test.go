@@ -3,14 +3,17 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/identity"
+	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
@@ -114,8 +117,10 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open.NewHandler() error = %v", err)
 	}
+	var logOutput bytes.Buffer
 	tunnelProxy, err := NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler, AcquireTimeout: time.Second,
+		Logger: testTunnelLoggerTo(&logOutput),
 	})
 	if err != nil {
 		t.Fatalf("NewProxy() error = %v", err)
@@ -123,8 +128,11 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	serverPeer, publicClient := tcpPair(t)
 	defer publicClient.Close()
 	proxyResult := make(chan error, 1)
+	request := testTCPDialRequest()
+	request.RequestID = "req_01J00000000000000000000000"
+	request.TraceID = "trace-01J00000000000000000000000"
 	go func() {
-		proxyResult <- tunnelProxy.Serve(context.Background(), testTCPDialRequest(), serverPeer)
+		proxyResult <- tunnelProxy.Serve(context.Background(), request, serverPeer)
 	}()
 
 	payload := bytes.Repeat([]byte("xtunnel-echo-"), 1024)
@@ -157,12 +165,45 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	case <-time.After(testTimeout):
 		t.Fatal("echo Connector did not finish")
 	}
+	assertTunnelLifecycleLogs(t, logOutput.String(), request, session)
 
 	_ = controlAgent.Close()
 	select {
 	case <-controlResult:
 	case <-time.After(testTimeout):
 		t.Fatal("Control Session did not finish")
+	}
+}
+
+func assertTunnelLifecycleLogs(t *testing.T, output string, request DialRequest, session serverruntime.Session) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Tunnel lifecycle log count = %d, want 2; output=%q", len(lines), output)
+	}
+	wantEvents := []string{logging.EventTunnelConnectionOpened, logging.EventTunnelConnectionClosed}
+	for index, line := range lines {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode Tunnel log %q: %v", line, err)
+		}
+		if record[logging.EventKey] != wantEvents[index] ||
+			record[logging.RequestIDKey] != request.RequestID ||
+			record[logging.TraceIDKey] != request.TraceID ||
+			record[logging.TunnelIDKey] != request.TunnelID ||
+			record[logging.ServiceIDKey] != request.ServiceID ||
+			record[logging.ConnectorIDKey] != session.ConnectorID ||
+			record[logging.SessionIDKey] != session.SessionID ||
+			record[logging.GenerationKey] != float64(session.Generation) {
+			t.Fatalf("Tunnel lifecycle record %d = %#v", index, record)
+		}
+		connectionID, _ := record[logging.ConnectionIDKey].(string)
+		if !strings.HasPrefix(connectionID, "conn_") {
+			t.Fatalf("Tunnel lifecycle connection_id = %q", connectionID)
+		}
+		if _, exists := record[logging.ErrorCodeKey]; exists {
+			t.Fatalf("successful Tunnel lifecycle contains error_code: %#v", record)
+		}
 	}
 }
 
@@ -456,7 +497,7 @@ func TestProxyAggregatesConcurrentPendingOpensAndRefillsBeyondInitialDemand(t *t
 	}
 	tunnelProxy, err := NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler,
-		AcquireTimeout: time.Second, LimitManager: limits,
+		AcquireTimeout: time.Second, LimitManager: limits, Logger: testTunnelLogger(),
 	})
 	if err != nil {
 		t.Fatalf("NewProxy() error = %v", err)
@@ -604,6 +645,7 @@ func TestProxySelectsOnlyConnectorHealthyForService(t *testing.T) {
 	}
 	tunnelProxy, err := NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler, AcquireTimeout: time.Second,
+		Logger: testTunnelLogger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -683,7 +725,7 @@ func TestAcquireWorkReselectsWhenPendingSessionBecomesUnhealthy(t *testing.T) {
 	}
 	tunnelProxy, err := NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler,
-		AcquireTimeout: 2 * time.Second, LimitManager: limits,
+		AcquireTimeout: 2 * time.Second, LimitManager: limits, Logger: testTunnelLogger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -817,6 +859,7 @@ func TestAcquirePendingWorkReselectsAfterHealthTTLExpires(t *testing.T) {
 	}
 	tunnelProxy, err := NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler, AcquireTimeout: time.Second,
+		Logger: testTunnelLogger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -920,6 +963,7 @@ func TestPendingGroupsAggregateCountsAcrossServicesPerSession(t *testing.T) {
 	}
 	tunnelProxy, err := NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler, AcquireTimeout: time.Second,
+		Logger: testTunnelLogger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1023,6 +1067,7 @@ func TestPendingGroupSerializesServicesWithDisjointEligibleConnectors(t *testing
 	}
 	tunnelProxy, err := NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler, AcquireTimeout: time.Second,
+		Logger: testTunnelLogger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1121,7 +1166,7 @@ func TestProxyPendingOpenTimeoutAndCancelReleaseQuota(t *testing.T) {
 			}
 			tunnelProxy, err := NewProxy(Options{
 				Registry: registry, Sessions: sessions, OpenHandler: openHandler,
-				AcquireTimeout: 80 * time.Millisecond, LimitManager: limits,
+				AcquireTimeout: 80 * time.Millisecond, LimitManager: limits, Logger: testTunnelLogger(),
 			})
 			if err != nil {
 				t.Fatalf("NewProxy() error = %v", err)
@@ -1205,7 +1250,7 @@ func TestProxyPendingGroupReselectsWhenSelectedSessionDrains(t *testing.T) {
 	}
 	tunnelProxy, err := NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler,
-		AcquireTimeout: time.Second, LimitManager: limits,
+		AcquireTimeout: time.Second, LimitManager: limits, Logger: testTunnelLogger(),
 	})
 	if err != nil {
 		t.Fatalf("NewProxy() error = %v", err)
@@ -1335,7 +1380,7 @@ func TestAcquireWorkRetriesStalePendingSessionAfterGenerationReplacement(t *test
 	}
 	tunnelProxy, err := NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler,
-		AcquireTimeout: time.Second, LimitManager: limits,
+		AcquireTimeout: time.Second, LimitManager: limits, Logger: testTunnelLogger(),
 	})
 	if err != nil {
 		t.Fatalf("NewProxy() error = %v", err)

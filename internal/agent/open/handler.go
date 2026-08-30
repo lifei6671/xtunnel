@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/agent/workauth"
+	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
@@ -49,6 +52,7 @@ type Options struct {
 	WriteTimeout time.Duration
 	Dialer       OriginDialer
 	Proxy        RawProxy
+	Logger       *slog.Logger
 }
 
 // Handler 处理一个已经通过 WorkHello、处于 IDLE 的 WorkConn。
@@ -58,7 +62,7 @@ type Handler struct {
 
 // NewHandler 创建生产 OPEN Handler；Proxy 为空时使用统一双向 RAW 实现。
 func NewHandler(options Options) (*Handler, error) {
-	if options.ReadTimeout <= 0 || options.WriteTimeout <= 0 || !validDialer(options.Dialer) {
+	if options.ReadTimeout <= 0 || options.WriteTimeout <= 0 || !validDialer(options.Dialer) || options.Logger == nil {
 		return nil, ErrInvalidOptions
 	}
 	if options.Proxy == nil {
@@ -108,6 +112,41 @@ func (handler *Handler) handle(
 		}
 		return ErrInvalidOptions
 	}
+	connectionStartedAt := time.Now()
+	connectionLogger := handler.options.Logger
+	opened := false
+	originFailureCode := ""
+	defer func() {
+		attributes := []any{"duration_ms", time.Since(connectionStartedAt).Milliseconds()}
+		if opened {
+			if resultErr == nil || errors.Is(resultErr, context.Canceled) {
+				connectionLogger.InfoContext(ctx, logging.EventAgentConnectionClosed, attributes...)
+				return
+			}
+			attributes = append(attributes, logging.ErrorCodeKey, "RAW_PROXY_FAILED")
+			connectionLogger.WarnContext(ctx, logging.EventAgentConnectionClosed, attributes...)
+			return
+		}
+		if resultErr == nil {
+			return
+		}
+		if originFailureCode != "" {
+			attributes = append(attributes, logging.ErrorCodeKey, originFailureCode)
+			connectionLogger.WarnContext(ctx, logging.EventAgentOriginConnectionFailed, attributes...)
+			return
+		}
+		if errors.Is(resultErr, context.Canceled) {
+			attributes = append(attributes, logging.ErrorCodeKey, "CANCELED")
+			connectionLogger.DebugContext(ctx, logging.EventAgentConnectionFailed, attributes...)
+			return
+		}
+		code := "INTERNAL_ERROR"
+		if errors.Is(resultErr, ErrProtocol) {
+			code = "PROTOCOL_ERROR"
+		}
+		attributes = append(attributes, logging.ErrorCodeKey, code)
+		connectionLogger.ErrorContext(ctx, logging.EventAgentConnectionFailed, attributes...)
+	}()
 	defer func() {
 		ready.State.Close()
 		if err := workConnection.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -134,10 +173,13 @@ func (handler *Handler) handle(
 	if err := commitTransition(transition, state.WorkOpening, commitOpening); err != nil {
 		return fmt.Errorf("%w: accept OpenRequest: %v", ErrProtocol, err)
 	}
+	connectionLogger = logging.WithCorrelationFields(handler.options.Logger, logging.Correlation{
+		TraceID: request.GetTraceId(), ServiceID: request.GetServiceId(), ConnectionID: request.GetConnectionId(),
+	})
 
-	startedAt := time.Now()
+	originStartedAt := time.Now()
 	origin, code, dialErr := handler.options.Dialer.DialOrigin(ctx, request.GetServiceId())
-	latency := time.Since(startedAt)
+	latency := time.Since(originStartedAt)
 	if dialErr != nil {
 		if code == protocolv1.ErrorCode_ERROR_CODE_OK {
 			code = protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE
@@ -147,8 +189,10 @@ func (handler *Handler) handle(
 			ErrorCode: code, OriginConnectLatencyMs: durationMilliseconds(latency),
 		}
 		if err := handler.writeResponse(ctx, workConnection, ready.State, response, transition); err != nil {
+			originFailureCode = strings.TrimPrefix(code.String(), "ERROR_CODE_")
 			return errors.Join(fmt.Errorf("%w: code=%s", ErrOrigin, code.String()), err)
 		}
+		originFailureCode = strings.TrimPrefix(code.String(), "ERROR_CODE_")
 		return fmt.Errorf("%w: code=%s", ErrOrigin, code.String())
 	}
 	if origin == nil {
@@ -173,6 +217,10 @@ func (handler *Handler) handle(
 	if err := workConnection.SetDeadline(time.Time{}); err != nil {
 		return fmt.Errorf("clear Agent WorkConn OPEN deadline: %w", err)
 	}
+	opened = true
+	connectionLogger.InfoContext(ctx, logging.EventAgentConnectionOpened,
+		"origin_connect_latency_ms", durationMilliseconds(latency),
+	)
 	// frame.ReadWork 精确停在 OpenRequest Frame 边界；若同一次底层 Read 中已经到达
 	// 后续 RAW 字节，它们仍留在 socket 中，由统一 Proxy 原样读取，不会丢失或重复。
 	return handler.options.Proxy(ctx, workConnection, origin)
