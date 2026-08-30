@@ -1405,3 +1405,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 首轮提交与 CI：M5-10 实现提交并推送为 `f438a8be0ed295de4caba8075ef905189654e201`。精确绑定该 SHA 的 [CI #33288936289](https://github.com/lifei6671/xtunnel/actions/runs/33288936289) 中 Windows Agent Service 成功，但 Linux amd64/arm64 均在 `Test Go modules and build both processes` 失败，Browser Gate 尚未运行；本轮不记录为产品 Gate 通过。
 - 根因与修复：两个锁定代理镜像原以 `XTUNNEL_CADDY_IMAGE`/`XTUNNEL_NGINX_IMAGE` 放入整个 Linux Job 环境，Server 的配置安全边界按设计拒绝未知 `XTUNNEL_` 变量，`TestProcessExitsOnSIGTERM` 因子进程先返回 `unknown XTUNNEL environment variable` 而失败。最小修复将 Job 级变量改为非产品前缀 `BROWSER_E2E_*`，只在 Browser 命令前临时映射为启动器要求的 `XTUNNEL_*` 输入，不再污染任何 Go Test、Server 或其他 CI 步骤。
 - 本地验证与边界：带 `BROWSER_E2E_*` 环境运行 `go test ./internal/server/config ./internal/server/bootstrap` 通过，CI YAML 解析、Job 环境无 `XTUNNEL_` 前缀断言与 `git diff --check` 通过。Windows 不编译 `process_unix_test.go`，因此 Linux 原生回归仍须由修复提交后的精确 CI 补证。M5-10 继续保持 `IN_PROGRESS`，M5 Gate Checklist 六项全部未勾选，本次未勾选任何产品任务。
+
+## 2026-08-30 · M5-10 Browser CI FD 上限修复 · IN_PROGRESS
+
+- 二轮提交与 CI：环境变量隔离修复提交并推送为 `11338d4b935156573b6eed81a448af62d4f8a81b`。精确绑定该 SHA 的 [CI #33289102867](https://github.com/lifei6671/xtunnel/actions/runs/33289102867) 中 Windows Agent Service 成功，Linux amd64 的 OpenAPI、Web Build、全仓 Go Test/Vet/Build、M4 Product Data Plane、1 GiB Streaming 与原生 Caddy/Nginx HTTPS Ingress E2E 均成功，随后真实 Browser E2E 在启动器提升 `nofile` 时因 Runner 当前 shell 无权越过 hard limit 而失败；Chromium 测试尚未启动，本轮不记录为 Browser Gate 通过。
+- 根因与修复：Server 默认 FD 预算要求进程 `nofile` 至少为 `137192`，Browser 启动器继续固定并验证 `1048576`，不能降低门槛规避失败。最小 CI 修复在已经创建隔离 Runtime Directory 后，通过 Runner 的 `sudo prlimit --pid "$$" --nofile=1048576:1048576` 只提升当前 Browser step shell 的 soft/hard limit，后续 Server 和 Chromium 子进程继承该上限；应用配置、FD Budget Manager、OCI/systemd 基线与其他 CI 步骤均不改变。
+- 状态与 Gate：真实 Chromium 经 Caddy/Nginx 的两轮工作流仍需修复提交后的精确 CI 补证。M5-10 继续保持 `IN_PROGRESS`，M5 保持 `9/11`、全局保持 `73/95`，M5-11 继续等待，M5 Gate Checklist 六项全部保持未勾选。

@@ -172,6 +172,7 @@ jobs:
             sudo rmdir "$runtime_dir"
           }
           trap cleanup_runtime_dir EXIT
+          sudo prlimit --pid "$$" --nofile=1048576:1048576
           XTUNNEL_CADDY_IMAGE="$BROWSER_E2E_CADDY_IMAGE" \
             XTUNNEL_NGINX_IMAGE="$BROWSER_E2E_NGINX_IMAGE" \
             npm --prefix web run test:e2e
