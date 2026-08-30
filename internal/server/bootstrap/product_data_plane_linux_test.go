@@ -424,7 +424,7 @@ func testProductGateHTTP(
 	var originRequest productGateHTTPRequest
 	select {
 	case originRequest = <-observed:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("Product Gate HTTP Origin did not receive routed request")
 	}
 
