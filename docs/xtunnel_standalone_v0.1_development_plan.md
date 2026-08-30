@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M5-10 Contract/E2E Test Suite · IN_PROGRESS（M2、M3、M4、M5-01 至 M5-09 均已 `DONE`）
+> **当前阶段**：M5-10 Contract/E2E Test Suite · REVIEW（M2、M3、M4、M5-01 至 M5-09 均已 `DONE`）
 >
-> **当前结论**：用户已明确确认 M5-09 阶段复审通过，M5-09 转为 `DONE`，M5 更新为 `9/11`、全局更新为 `73/95`。M5-10 已落地 25/25 Operation 实际响应 Contract、全 Mutation CSRF、23/23 错误码分类，以及真实 Server/临时 SQLite 分别经 Caddy、Nginx HTTPS 的 Chromium 工作流；第六轮精确 CI 已进入真实 Chromium/Caddy 工作流，并暴露在线创建 Tunnel 后未注册 Health Budget 基线的产品缺陷，当前正在修复和补回归证据，因此 M5-10 继续保持 `IN_PROGRESS`，M5 Gate Checklist 六项继续全部未通过。
+> **当前结论**：用户已明确确认 M5-09 阶段复审通过，M5-09 转为 `DONE`，M5 更新为 `9/11`、全局更新为 `73/95`。M5-10 已落地 25/25 Operation 实际响应 Contract、全 Mutation CSRF、23/23 错误码分类，以及真实 Server/临时 SQLite 分别经 Caddy、Nginx HTTPS 的 Chromium 工作流；在线 Tunnel Health Budget 缺口已修复，最终源码提交 `a49fdf7eeafdcade6db34ede4380785881da9255` 的精确 CI #33291075112 三个 Job 全部成功，Caddy/Nginx Browser E2E 各 `1 passed`。M5-10 进入 `REVIEW` 等待用户阶段复审，M5 Gate Checklist 六项继续全部未通过。
 
 ---
 
@@ -352,7 +352,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M5-07 | Settings/Read-only Runtime/Audit API | M5-02 | Settings/Audit Handler | 只返回允许公开的有效配置；Audit Query 只读且分页稳定；敏感字段永不返回，不泄露 Secret | `DONE` |
 | M5-08 | Dashboard/Status UI | M5-02、M5-04、M5-05 | React Pages | 直接渲染 Server Status；不在前端重算状态 | `DONE` |
 | M5-09 | Tunnel/Connector/Service 管理 UI | M5-03至 M5-08 | Tunnel CRUD/Token/Connector View/Service CRUD | 日常操作无需 SQLite 或手改 Agent Service Config | `DONE` |
-| M5-10 | Contract/E2E Test Suite | M5-02至 M5-09 | API Contract + Browser E2E | 错误码、并发 PATCH、CSRF、Token no-store、生成漂移全覆盖 | `IN_PROGRESS` |
+| M5-10 | Contract/E2E Test Suite | M5-02至 M5-09 | API Contract + Browser E2E | 错误码、并发 PATCH、CSRF、Token no-store、生成漂移全覆盖 | `REVIEW` |
 | M5-11 | M5 Gate | M5-01至 M5-10 | M5 验收证据 | 下方 Checklist 全部通过 | `NOT_STARTED` |
 
 ## 11.3 M5 Gate Checklist
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-09` 已完成。当前待办为：
 
-1. `M5-10` — Contract/E2E Test Suite 已进入 `IN_PROGRESS`；覆盖实际响应与 OpenAPI、错误码、并发 PATCH、全 Mutation CSRF、Secret no-store，以及真实 Server/SQLite/HTTPS/Chromium 管理工作流。
+1. `M5-10` — Contract/E2E Test Suite 已进入 `REVIEW`；实现、独立复审、本地验证和精确 CI 已齐备，等待用户阶段复审。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-09 已完成；M5-10 正在实现，M5-11 继续等待其 `DONE`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-09 已完成；M5-10 等待用户阶段复审，M5-11 继续等待其 `DONE`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
 
 推进规则：
 
@@ -1439,3 +1439,10 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 最小修复：Tunnel Management Application owner 在创建事务确认已提交后、向客户端返回一次性 Credential 前，显式注册新 Tunnel 的空 Health Budget 基线；初始化失败保留“已提交”结果并返回独立 Runtime Initialization 收敛错误，不能被 `ErrPostCommitCleanup` 路径静默忽略。Management API 使用既有 `RUNTIME_CONVERGENCE_FAILED` 错误码，不修改 OpenAPI Wire Contract。回归测试直接断言在线 Tunnel 创建后首次 Service Revision 可立即预留，并移除 Service Handler Fixture 中掩盖该缺口的手工初始化。
 - 本地验证：Go 1.27.0 定向 Application、Health Budget、Management API 与 Bootstrap 测试通过。修复后的 Linux amd64 Server 在 WSL2 从空数据目录启动，经 root-only Bootstrap Socket 在线创建管理员后，真实 API 先创建 Tunnel 返回 `201`，紧接着创建首个 Service 也返回 `201` 且 `required_revision=1`；原 `500` 已无法复现。进程、Socket、临时数据库与交叉构建产物均已清理。
 - 状态与 Gate：修复仍须新提交的精确 GitHub CI 证明 Caddy、Nginx 两轮 Chromium 全部完成。M5-10 继续保持 `IN_PROGRESS`，M5 保持 `9/11`、全局保持 `73/95`，M5-11 继续等待，M5 Gate Checklist 六项全部保持未勾选。
+
+## 2026-08-30 · M5-10 精确 CI 证据闭环 · REVIEW
+
+- 提交与 CI：在线 Tunnel Health Budget 修复、回归测试与失败证据记录共同提交并推送为 `a49fdf7eeafdcade6db34ede4380785881da9255`。精确绑定该 SHA 的 [CI #33291075112](https://github.com/lifei6671/xtunnel/actions/runs/33291075112) 从 2026-08-30 11:47:47 至 11:54:07（Asia/Shanghai）运行 6 分 20 秒；Windows Agent Service、Linux amd64 与 Linux arm64 三个 Job 全部成功。
+- Browser Gate：Linux amd64 通过本地锁定的 Playwright CLI 安装 Chromium 和系统依赖，`Run real Caddy and Nginx Browser E2E` 步骤成功。日志逐项显示真实管理链路用例先经 Caddy 运行并 `1 passed (4.1s)`，再经 Nginx 运行并 `1 passed (3.8s)`；同一 Job 后续 OCI Smoke、systemd Packaging Smoke 与 Generated/Working Tree 清洁检查继续通过，证明 Browser 清理没有污染后续 Gate。arm64 按设计跳过仅限 amd64 Chromium 的 Browser Step，其余双架构验证全部成功。
+- 状态与 Gate：M5-10 已具备实现提交、本地验证、独立复审和精确 CI，进入 `REVIEW` 等待用户阶段复审；未将“继续”替代“通过”。M5 继续保持 `9/11`、全局继续保持 `73/95`，M5-11 等待 M5-10 `DONE`；M5 Gate Checklist 六项全部保持未勾选，本次不把任何产品任务提前标记为 `DONE`。
+- 文档同步：根 README 与本开发计划同步 M5-10 的真实 Browser Gate 证据和 `REVIEW` 边界。总技术方案、OpenAPI/生成物、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署配置、权限、日志契约与 `AGENTS.md` 无需再改，因为本轮只闭环既有实现与 CI 证据，没有改变机器权威或用户命令。
