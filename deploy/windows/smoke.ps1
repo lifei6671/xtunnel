@@ -115,10 +115,16 @@ function Set-AgentServiceCommand {
         [string]$CommandLine
     )
 
-    $output = & sc.exe config $serviceName 'binPath=' $CommandLine 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
-        throw "sc.exe config failed with exit code $LASTEXITCODE`: $message"
+    $service = Get-AgentService
+    if ($null -eq $service) {
+        throw "service $serviceName is missing"
+    }
+    # Windows PowerShell 5.1 cannot reliably preserve the embedded quotes in a
+    # service ImagePath when forwarding a string argument through sc.exe.
+    $change = Invoke-CimMethod -InputObject $service -MethodName Change `
+        -Arguments @{ PathName = $CommandLine }
+    if ($change.ReturnValue -ne 0) {
+        throw "Win32_Service.Change failed with return value $($change.ReturnValue)"
     }
 
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
