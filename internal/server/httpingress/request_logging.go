@@ -8,6 +8,7 @@ import (
 
 	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
+	internaltracing "github.com/lifei6671/xtunnel/internal/tracing"
 )
 
 type requestLogContextKey struct{}
@@ -144,7 +145,7 @@ func (handler *Handler) logRequestCompleted(
 		slog.Int("status_code", snapshot.status),
 	}
 	logger := logging.WithCorrelationFields(handler.logger, logging.Correlation{
-		RequestID: requestID, ConnectionID: snapshot.connectionID,
+		RequestID: requestID, TraceID: internaltracing.TraceID(ctx), ConnectionID: snapshot.connectionID,
 	})
 	if snapshot.errorCode != "" {
 		attributes = append(attributes, slog.String(logging.ErrorCodeKey, snapshot.errorCode))

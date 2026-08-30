@@ -23,6 +23,11 @@ import (
 	"github.com/lifei6671/xtunnel/internal/server/sessionruntime"
 	serverworkauth "github.com/lifei6671/xtunnel/internal/server/workauth"
 	serverworkpool "github.com/lifei6671/xtunnel/internal/server/workpool"
+	internaltracing "github.com/lifei6671/xtunnel/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -44,6 +49,9 @@ type Options struct {
 	// Metrics 接收逻辑 OPEN 与成功进入 RAW 后的进程级遥测。实现必须并发安全且
 	// 不得阻塞数据面；nil 保留不采集遥测的现有行为。
 	Metrics Metrics
+	// Tracing 为 Server 数据面的显式进程级 Trace Runtime。nil 保留不采集、
+	// 不传播 Trace Context 的单元测试与禁用配置行为。
+	Tracing *internaltracing.Runtime
 	// LimitManager 为 nil 时保留纯单元测试的无限预算路径；生产装配和 M1 集成测试
 	// 必须传共享 Manager，使 PendingOpen 与 ACTIVE 多维限制作用于真实公网连接。
 	LimitManager *serverlimits.Manager
@@ -70,7 +78,6 @@ type DialRequest struct {
 	Ingress          protocolv1.IngressType
 	ClientAddr       string
 	RequestID        string
-	TraceID          string
 }
 
 // Proxy 使用 Route 已解析出的 Tunnel/Service 身份，把一个公网连接交给默认负载选择的
@@ -219,6 +226,22 @@ func (tunnelProxy *Proxy) openConnection(
 	clientNetworkAddr net.Addr,
 	peer net.Conn,
 ) (_ *managedConnection, resultErr error) {
+	if tunnelProxy.options.Tracing != nil {
+		var tunnelSpan trace.Span
+		openContext, tunnelSpan = tunnelProxy.options.Tracing.Tracer("xtunnel/server/tunnel").Start(
+			openContext,
+			"tunnel.DialContext",
+			trace.WithAttributes(attribute.String(internaltracing.AttributeIngressType, request.Ingress.String())),
+		)
+		defer func() {
+			if resultErr != nil {
+				code := tunnelFailureCode(resultErr)
+				tunnelSpan.SetAttributes(attribute.String(internaltracing.AttributeErrorCode, code))
+				tunnelSpan.SetStatus(codes.Error, code)
+			}
+			tunnelSpan.End()
+		}()
+	}
 	startedAt := time.Now()
 	var finalOriginConnectLatencyMS uint32
 	// Serve 与 Dial 只在这里提交一次公网逻辑 OPEN。内部 Work 重试和跨 Connector
@@ -293,7 +316,7 @@ func (tunnelProxy *Proxy) openConnection(
 			return
 		}
 		correlation := logging.Correlation{
-			RequestID: request.RequestID, TraceID: request.TraceID,
+			RequestID: request.RequestID, TraceID: internaltracing.TraceID(openContext),
 			TunnelID: request.TunnelID, ServiceID: request.ServiceID, ConnectionID: connectionID,
 			ConnectorID: session.ConnectorID, SessionID: session.SessionID, Generation: session.Generation,
 		}
@@ -314,9 +337,24 @@ func (tunnelProxy *Proxy) openConnection(
 		}
 	}()
 
+	acquireContext := openContext
+	var acquireSpan trace.Span
+	if tunnelProxy.options.Tracing != nil {
+		acquireContext, acquireSpan = tunnelProxy.options.Tracing.Tracer("xtunnel/server/transport").Start(
+			openContext, "transport.Acquire",
+		)
+	}
 	connectorLease, selectedSession, pool, selectedWork, err := tunnelProxy.acquireWork(
-		openContext, request.TunnelID, request.ServiceID, requiredRevision,
+		acquireContext, request.TunnelID, request.ServiceID, requiredRevision,
 	)
+	if acquireSpan != nil {
+		if err != nil {
+			code := tunnelFailureCode(err)
+			acquireSpan.SetAttributes(attribute.String(internaltracing.AttributeErrorCode, code))
+			acquireSpan.SetStatus(codes.Error, code)
+		}
+		acquireSpan.End()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -346,9 +384,16 @@ func (tunnelProxy *Proxy) openConnection(
 		openRequest := &protocolv1.OpenRequest{
 			ProtocolVersion: 1, ConnectionId: connectionID, ServiceId: request.ServiceID,
 			ClientAddr: request.ClientAddr, TimestampMs: uint64(time.Now().UnixMilli()),
-			IngressType: request.Ingress, TraceId: request.TraceID,
+			IngressType: request.Ingress,
 		}
-		active, openErr := tunnelProxy.options.OpenHandler.Handle(openContext, work.Conn(), idle, openRequest)
+		if tunnelProxy.options.Tracing != nil {
+			carrier := propagation.MapCarrier{}
+			tunnelProxy.options.Tracing.Inject(acquireContext, carrier)
+			openRequest.TraceId = internaltracing.TraceID(acquireContext)
+			openRequest.Traceparent = carrier.Get("traceparent")
+			openRequest.Tracestate = carrier.Get("tracestate")
+		}
+		active, openErr := tunnelProxy.options.OpenHandler.Handle(acquireContext, work.Conn(), idle, openRequest)
 		if openErr != nil {
 			return nil, openErr
 		}
@@ -440,7 +485,7 @@ func (tunnelProxy *Proxy) openConnection(
 		return nil, err
 	}
 	correlation := logging.Correlation{
-		RequestID: request.RequestID, TraceID: request.TraceID,
+		RequestID: request.RequestID, TraceID: internaltracing.TraceID(openContext),
 		TunnelID: request.TunnelID, ServiceID: request.ServiceID, ConnectionID: connectionID,
 		ConnectorID: session.ConnectorID, SessionID: session.SessionID, Generation: session.Generation,
 	}

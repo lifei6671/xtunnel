@@ -24,6 +24,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/safego"
+	"github.com/lifei6671/xtunnel/internal/tracing"
 )
 
 const (
@@ -65,6 +66,7 @@ type Config struct {
 	OS              string
 	Arch            string
 	Logger          *slog.Logger
+	Tracing         *tracing.Runtime
 }
 
 // Runtime 持有一个进程内固定 Connector 身份及其可重连 Control Runner。
@@ -78,6 +80,7 @@ type Runtime struct {
 	drainTimeout       time.Duration
 	health             healthRuntime
 	logger             *slog.Logger
+	tracing            *tracing.Runtime
 
 	retiredMu    sync.Mutex
 	retiredNext  uint64
@@ -147,10 +150,11 @@ func New(config Config) (*Runtime, error) {
 	originResolver := agentorigin.New()
 	healthManager := agenthealth.New()
 	return &Runtime{
-		token:  config.ConnectionToken,
-		origin: originResolver,
-		health: healthManager,
-		logger: config.Logger,
+		token:   config.ConnectionToken,
+		origin:  originResolver,
+		health:  healthManager,
+		logger:  config.Logger,
+		tracing: config.Tracing,
 		runControlSessions: func(ctx context.Context, handler reconnect.SessionHandler[*agentsession.Session]) error {
 			return reconnect.Run(ctx, runner, handler, reconnect.Options{
 				InitialBackoff: reconnectInitial,
@@ -286,7 +290,8 @@ func (runtime *Runtime) handleSession(
 
 	openHandler, err := open.NewHandler(open.Options{
 		ReadTimeout: openReadTimeout, WriteTimeout: openWriteTimeout,
-		Dialer: runtime.origin,
+		Dialer:  runtime.origin,
+		Tracing: runtime.tracing,
 		Logger: logging.WithCorrelationFields(runtime.logger, logging.Correlation{
 			TunnelID: authentication.TunnelID, ConnectorID: authentication.ConnectorID,
 			SessionID: authentication.SessionID,

@@ -15,6 +15,11 @@ import (
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
+	internaltracing "github.com/lifei6671/xtunnel/internal/tracing"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const testDialClientAddr = "192.0.2.10:54321"
@@ -232,6 +237,91 @@ func TestProxyDialSucceedsAndRequestCancellationDoesNotPoisonConnection(t *testi
 		t.Fatalf("HTTP Tunnel traffic metrics = ingress:%d egress:%d, want %d each",
 			metricSnapshot.ingressBytes, metricSnapshot.egressBytes, len(payload))
 	}
+}
+
+func TestProxyDialCreatesServerSpanTopologyAndInjectsWireContext(t *testing.T) {
+	fixture := newFailoverFixture(t, testConnectorID)
+	defer cleanupDialFixture(t, fixture)
+	traceRuntime, recorder := newTunnelTraceRuntime(t)
+	fixture.proxy.options.Tracing = traceRuntime
+	agent := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], nil)
+	requests := make(chan *protocolv1.OpenRequest, 1)
+	agentResult := make(chan error, 1)
+	go func() { agentResult <- runDialEchoConnector(agent, requests) }()
+
+	ingressContext, ingressSpan := traceRuntime.Tracer("xtunnel/server/httpingress").Start(
+		context.Background(), "ingress.Accept",
+	)
+	connection, err := fixture.proxy.Dial(
+		ingressContext, testHTTPDialRequest(0, testDialClientAddr),
+	)
+	if err != nil {
+		ingressSpan.End()
+		t.Fatalf("Dial() error = %v", err)
+	}
+	request := <-requests
+	if err := connection.Close(); err != nil {
+		ingressSpan.End()
+		t.Fatalf("Close() error = %v", err)
+	}
+	waitDialAgent(t, agentResult)
+	ingressSpan.End()
+
+	spans := recorder.Ended()
+	if len(spans) != 3 {
+		t.Fatalf("ended spans = %d, want ingress, tunnel and acquire", len(spans))
+	}
+	byName := make(map[string]sdktrace.ReadOnlySpan, len(spans))
+	for _, span := range spans {
+		byName[span.Name()] = span
+	}
+	ingress := byName["ingress.Accept"]
+	tunnelSpan := byName["tunnel.DialContext"]
+	acquire := byName["transport.Acquire"]
+	if ingress == nil || tunnelSpan == nil || acquire == nil {
+		t.Fatalf("span names = %#v, want exact M6-03 topology", byName)
+	}
+	if tunnelSpan.Parent().SpanID() != ingress.SpanContext().SpanID() ||
+		acquire.Parent().SpanID() != tunnelSpan.SpanContext().SpanID() {
+		t.Fatalf("span topology ingress=%s tunnel parent=%s acquire parent=%s",
+			ingress.SpanContext().SpanID(), tunnelSpan.Parent().SpanID(), acquire.Parent().SpanID())
+	}
+	carrier := propagation.MapCarrier{
+		"traceparent": request.GetTraceparent(),
+		"tracestate":  request.GetTracestate(),
+	}
+	remote := traceRuntime.Extract(context.Background(), carrier)
+	remoteContext := trace.SpanContextFromContext(remote)
+	if !remoteContext.IsValid() || !remoteContext.IsRemote() {
+		t.Fatalf("OpenRequest Trace Context = %v, want valid remote parent", remoteContext)
+	}
+	if got, want := request.GetTraceId(), acquire.SpanContext().TraceID().String(); got != want {
+		t.Fatalf("OpenRequest trace_id = %q, want %q", got, want)
+	}
+	if remoteContext.TraceID() != acquire.SpanContext().TraceID() ||
+		remoteContext.SpanID() != acquire.SpanContext().SpanID() {
+		t.Fatalf("OpenRequest traceparent = %q, want acquire span %s/%s",
+			request.GetTraceparent(), acquire.SpanContext().TraceID(), acquire.SpanContext().SpanID())
+	}
+}
+
+func newTunnelTraceRuntime(t *testing.T) (*internaltracing.Runtime, *tracetest.SpanRecorder) {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	runtime, err := internaltracing.New(t.Context(), internaltracing.Config{
+		ServiceName: "xtunnel-server", ServiceVersion: "test",
+		TracerProvider: provider, ProviderShutdown: provider.Shutdown,
+	})
+	if err != nil {
+		t.Fatalf("tracing.New() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runtime.Shutdown(context.Background()); err != nil {
+			t.Errorf("tracing Runtime Shutdown() error = %v", err)
+		}
+	})
+	return runtime, recorder
 }
 
 func TestProxyDialCancellationDuringOpenClosesWorkAndReleasesLimits(t *testing.T) {

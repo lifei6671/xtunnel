@@ -13,10 +13,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/buildinfo"
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	"github.com/lifei6671/xtunnel/internal/logging"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	"github.com/lifei6671/xtunnel/internal/server/externallock"
+	"github.com/lifei6671/xtunnel/internal/tracing"
 )
 
 // Execute 把操作系统输入和信号接入 Server 生命周期，并返回进程退出码。
@@ -25,8 +27,8 @@ func Execute(program string, args, environ []string, stderr io.Writer) int {
 	return executeWithRun(program, args, environ, stderr, func(ctx context.Context, options baseconfig.Options, stderr io.Writer) error {
 		return runWithStorageAndBootstrapOptions(ctx, options, stderr, func(ctx context.Context, dataDir string) (storage, error) {
 			return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
-		}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
-			return openGatewayAndBootstrapAt(ctx, config, resources, logger, startedAt)
+		}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger, traceRuntime *tracing.Runtime) (io.Closer, error) {
+			return openGatewayAndBootstrapAtTracing(ctx, config, resources, logger, startedAt, traceRuntime)
 		})
 	})
 }
@@ -61,8 +63,8 @@ func run(ctx context.Context, program string, args, environ []string, stderr io.
 	startedAt := time.Now()
 	return runWithStorageAndBootstrap(ctx, program, args, environ, stderr, func(ctx context.Context, dataDir string) (storage, error) {
 		return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
-	}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
-		return openGatewayAndBootstrapAt(ctx, config, resources, logger, startedAt)
+	}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger, traceRuntime *tracing.Runtime) (io.Closer, error) {
+		return openGatewayAndBootstrapAtTracing(ctx, config, resources, logger, startedAt, traceRuntime)
 	})
 }
 
@@ -80,7 +82,7 @@ func runWithStorageAndBootstrap(
 	args, environ []string,
 	stderr io.Writer,
 	openStorage func(context.Context, string) (storage, error),
-	openBootstrap func(context.Context, serverconfig.Config, storage, *slog.Logger) (io.Closer, error),
+	openBootstrap func(context.Context, serverconfig.Config, storage, *slog.Logger, *tracing.Runtime) (io.Closer, error),
 ) error {
 	options, err := parseConfigOptions(program, args, environ, stderr)
 	if err != nil {
@@ -94,8 +96,8 @@ func runWithStorageAndBootstrapOptions(
 	options baseconfig.Options,
 	stderr io.Writer,
 	openStorage func(context.Context, string) (storage, error),
-	openBootstrap func(context.Context, serverconfig.Config, storage, *slog.Logger) (io.Closer, error),
-) error {
+	openBootstrap func(context.Context, serverconfig.Config, storage, *slog.Logger, *tracing.Runtime) (io.Closer, error),
+) (resultErr error) {
 	config, err := serverconfig.Load(options)
 	if err != nil {
 		return fmt.Errorf("load server config: %w", err)
@@ -107,6 +109,24 @@ func runWithStorageAndBootstrapOptions(
 	})
 	if err != nil {
 		return fmt.Errorf("initialize server logging: %w", err)
+	}
+	var traceRuntime *tracing.Runtime
+	if openBootstrap != nil {
+		traceRuntime, err = tracing.New(ctx, tracing.Config{
+			ServiceName:    "xtunnel-server",
+			ServiceVersion: buildinfo.Version(),
+			ReportExportFailure: func() {
+				logger.Warn("tracing_export_failed", logging.ErrorCodeKey, "EXPORT_FAILED")
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("initialize server tracing: %w", err)
+		}
+		// 数据面 owner 的 Close/Wait 先于本函数返回；最后再用不继承进程取消的
+		// 有界 Context Flush，避免丢失收敛阶段 Span，也不让 Collector 阻塞退出。
+		defer func() {
+			resultErr = errors.Join(resultErr, traceRuntime.Shutdown(context.WithoutCancel(ctx)))
+		}()
 	}
 	if err := validateEmbeddedWeb(); err != nil {
 		return fmt.Errorf("initialize embedded web: %w", err)
@@ -122,7 +142,7 @@ func runWithStorageAndBootstrapOptions(
 	}
 	var bootstrapSocket io.Closer
 	if openBootstrap != nil {
-		bootstrapSocket, err = openBootstrap(ctx, config, resources, logger)
+		bootstrapSocket, err = openBootstrap(ctx, config, resources, logger, traceRuntime)
 		if err != nil {
 			return errors.Join(fmt.Errorf("initialize admin bootstrap socket: %w", err), resources.Close())
 		}

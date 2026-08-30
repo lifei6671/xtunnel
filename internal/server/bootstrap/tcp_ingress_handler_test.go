@@ -20,7 +20,11 @@ import (
 	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	serverworkpool "github.com/lifei6671/xtunnel/internal/server/workpool"
+	internaltracing "github.com/lifei6671/xtunnel/internal/tracing"
 	"github.com/lifei6671/xtunnel/internal/tunnel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -145,7 +149,8 @@ func TestTCPIngressHandlerLogsOnlyStableFailureCode(t *testing.T) {
 	}
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, nil))
-	handler, err := newTCPIngressHandler(dialer, logger)
+	traceRuntime, recorder := newTCPIngressTraceRuntime(t)
+	handler, err := newTCPIngressHandler(dialer, logger, traceRuntime)
 	if err != nil {
 		t.Fatalf("newTCPIngressHandler() error = %v", err)
 	}
@@ -154,14 +159,23 @@ func TestTCPIngressHandlerLogsOnlyStableFailureCode(t *testing.T) {
 		PublicPort: 22023, RequiredRevision: 18,
 	}
 	handler(context.Background(), publicPeer, route)
-	receiveTCPDialCall(t, dialer.calls)
+	call := receiveTCPDialCall(t, dialer.calls)
 	logLine := output.String()
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "ingress.Accept" || spans[0].Parent().IsValid() {
+		t.Fatalf("TCP ingress spans = %#v, want one local root ingress.Accept", spans)
+	}
+	traceID := spans[0].SpanContext().TraceID()
+	if got := trace.SpanContextFromContext(call.ctx).TraceID(); got != traceID {
+		t.Fatalf("Tunnel context TraceID = %s, want %s", got, traceID)
+	}
 	for _, want := range []string{
 		`"msg":"tcp_ingress_connection_failed"`,
 		`"error_code":"ORIGIN_TIMEOUT"`,
 		`"tunnel_id":"` + tcpHandlerTunnelID + `"`,
 		`"service_id":"` + tcpHandlerServiceID + `"`,
 		`"public_port":22023`,
+		`"trace_id":"` + traceID.String() + `"`,
 	} {
 		if !strings.Contains(logLine, want) {
 			t.Errorf("log = %q, want %q", logLine, want)
@@ -170,6 +184,25 @@ func TestTCPIngressHandlerLogsOnlyStableFailureCode(t *testing.T) {
 	if strings.Contains(logLine, secret) || strings.Contains(logLine, "origin-secret.internal") {
 		t.Fatalf("log leaked Origin or underlying error text: %q", logLine)
 	}
+}
+
+func newTCPIngressTraceRuntime(t *testing.T) (*internaltracing.Runtime, *tracetest.SpanRecorder) {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	runtime, err := internaltracing.New(t.Context(), internaltracing.Config{
+		ServiceName: "xtunnel-server", ServiceVersion: "test",
+		TracerProvider: provider, ProviderShutdown: provider.Shutdown,
+	})
+	if err != nil {
+		t.Fatalf("tracing.New() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runtime.Shutdown(context.Background()); err != nil {
+			t.Errorf("tracing Runtime Shutdown() error = %v", err)
+		}
+	})
+	return runtime, recorder
 }
 
 func TestTCPIngressErrorCode(t *testing.T) {
@@ -265,10 +298,10 @@ func TestServeTCPRouteRejectsInvalidBoundary(t *testing.T) {
 	}
 	receiveTCPDialCall(t, nilBackend.calls)
 
-	if _, err := newTCPIngressHandler(nil, slog.Default()); !errors.Is(err, errInvalidTCPIngressConnection) {
+	if _, err := newTCPIngressHandler(nil, slog.Default(), nil); !errors.Is(err, errInvalidTCPIngressConnection) {
 		t.Fatalf("newTCPIngressHandler(nil dialer) error = %v, want errInvalidTCPIngressConnection", err)
 	}
-	if _, err := newTCPIngressHandler(dialer, nil); !errors.Is(err, errInvalidTCPIngressConnection) {
+	if _, err := newTCPIngressHandler(dialer, nil, nil); !errors.Is(err, errInvalidTCPIngressConnection) {
 		t.Fatalf("newTCPIngressHandler(nil logger) error = %v, want errInvalidTCPIngressConnection", err)
 	}
 }

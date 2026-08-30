@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/lifei6671/xtunnel/internal/logging"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
@@ -14,7 +15,11 @@ import (
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	servertcpingress "github.com/lifei6671/xtunnel/internal/server/tcpingress"
 	serverworkpool "github.com/lifei6671/xtunnel/internal/server/workpool"
+	internaltracing "github.com/lifei6671/xtunnel/internal/tracing"
 	"github.com/lifei6671/xtunnel/internal/tunnel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var errInvalidTCPIngressConnection = errors.New("TCP ingress connection is invalid")
@@ -26,11 +31,22 @@ type tcpTunnelProxy interface {
 	ServiceConfigObserved(string, string, int64) bool
 }
 
-func newTCPIngressHandler(dialer tcpTunnelProxy, logger *slog.Logger) (servertcpingress.Handler, error) {
+func newTCPIngressHandler(
+	dialer tcpTunnelProxy,
+	logger *slog.Logger,
+	traceRuntime *internaltracing.Runtime,
+) (servertcpingress.Handler, error) {
 	if dialer == nil || logger == nil {
 		return nil, errInvalidTCPIngressConnection
 	}
 	return func(ctx context.Context, peer net.Conn, route serverroute.TCPRoute) {
+		if traceRuntime != nil && ctx != nil {
+			var ingressSpan trace.Span
+			ctx, ingressSpan = traceRuntime.Tracer("xtunnel/server/tcpingress").Start(
+				ctx, "ingress.Accept", trace.WithNewRoot(),
+			)
+			defer ingressSpan.End()
+		}
 		if err := serveTCPRoute(ctx, dialer, peer, route); err != nil {
 			// Raw TCP 没有安全的带内错误响应；Manager 会在 Handler 返回后
 			// 关闭公网连接。日志只记录 Proto 稳定码与路由标识，底层错误可能
@@ -38,10 +54,21 @@ func newTCPIngressHandler(dialer tcpTunnelProxy, logger *slog.Logger) (servertcp
 			if ctx != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 				return
 			}
-			logger.WarnContext(
+			code := tcpIngressErrorCode(dialer, route, err)
+			if span := trace.SpanFromContext(ctx); span.IsRecording() {
+				span.SetAttributes(
+					attribute.String(internaltracing.AttributeErrorCode, code),
+					attribute.Int("server.port", int(route.PublicPort)),
+				)
+				span.SetStatus(codes.Error, code)
+			}
+			correlatedLogger := logging.WithCorrelationFields(logger, logging.Correlation{
+				TraceID: internaltracing.TraceID(ctx),
+			})
+			correlatedLogger.WarnContext(
 				ctx,
 				"tcp_ingress_connection_failed",
-				"error_code", tcpIngressErrorCode(dialer, route, err),
+				"error_code", code,
 				"tunnel_id", route.TunnelID,
 				"service_id", route.ServiceID,
 				"public_port", route.PublicPort,

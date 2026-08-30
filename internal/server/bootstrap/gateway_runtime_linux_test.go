@@ -26,6 +26,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/server/datadir"
 	"github.com/lifei6671/xtunnel/internal/server/externallock"
 	"github.com/lifei6671/xtunnel/internal/server/gateway"
+	"github.com/lifei6671/xtunnel/internal/tracing"
 )
 
 const gatewayLockHelperEnvironment = "XTUNNEL_GATEWAY_ROTATE_LOCK_HELPER"
@@ -64,7 +65,7 @@ func TestServerStartupReconcilesGatewayRotationAuditBeforeBootstrap(t *testing.T
 		func(ctx context.Context, dataDir string) (storage, error) {
 			return openServerStorage(ctx, dataDir, runtimeDir)
 		},
-		func(context.Context, serverconfig.Config, storage, *slog.Logger) (io.Closer, error) {
+		func(context.Context, serverconfig.Config, storage, *slog.Logger, *tracing.Runtime) (io.Closer, error) {
 			bootstrapCalled = true
 			if _, exists, err := gateway.PendingRotationAuditEvent(dataDir); err != nil || exists {
 				t.Fatalf("PendingRotationAuditEvent() in bootstrap = exists %t, error %v", exists, err)
@@ -326,7 +327,7 @@ func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
 			func(ctx context.Context, dataDir string) (storage, error) {
 				return openServerStorage(ctx, dataDir, runtimeDir)
 			},
-			func(ctx context.Context, _ serverconfig.Config, resources storage, logger *slog.Logger) (io.Closer, error) {
+			func(ctx context.Context, _ serverconfig.Config, resources storage, logger *slog.Logger, _ *tracing.Runtime) (io.Closer, error) {
 				return openGatewayAndBootstrapWith(
 					ctx,
 					gatewayConfig,

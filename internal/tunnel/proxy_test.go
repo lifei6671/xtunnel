@@ -131,7 +131,6 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 	proxyResult := make(chan error, 1)
 	request := testTCPDialRequest()
 	request.RequestID = "req_01J00000000000000000000000"
-	request.TraceID = "trace-01J00000000000000000000000"
 	go func() {
 		proxyResult <- tunnelProxy.Serve(context.Background(), request, serverPeer)
 	}()
@@ -195,13 +194,15 @@ func assertTunnelLifecycleLogs(t *testing.T, output string, request DialRequest,
 		}
 		if record[logging.EventKey] != wantEvents[index] ||
 			record[logging.RequestIDKey] != request.RequestID ||
-			record[logging.TraceIDKey] != request.TraceID ||
 			record[logging.TunnelIDKey] != request.TunnelID ||
 			record[logging.ServiceIDKey] != request.ServiceID ||
 			record[logging.ConnectorIDKey] != session.ConnectorID ||
 			record[logging.SessionIDKey] != session.SessionID ||
 			record[logging.GenerationKey] != float64(session.Generation) {
 			t.Fatalf("Tunnel lifecycle record %d = %#v", index, record)
+		}
+		if _, exists := record[logging.TraceIDKey]; exists {
+			t.Fatalf("Tunnel lifecycle record %d contains trace_id without tracing runtime: %#v", index, record)
 		}
 		connectionID, _ := record[logging.ConnectionIDKey].(string)
 		if !strings.HasPrefix(connectionID, "conn_") {
@@ -1141,6 +1142,7 @@ func TestProxyPendingOpenTimeoutAndCancelReleaseQuota(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			traceRuntime, recorder := newTunnelTraceRuntime(t)
 			registry := serverruntime.NewRegistry()
 			pending, err := registry.ReserveAuthenticated(testTunnelID, testConnectorID)
 			if err != nil {
@@ -1173,6 +1175,7 @@ func TestProxyPendingOpenTimeoutAndCancelReleaseQuota(t *testing.T) {
 			tunnelProxy, err := NewProxy(Options{
 				Registry: registry, Sessions: sessions, OpenHandler: openHandler,
 				AcquireTimeout: 80 * time.Millisecond, LimitManager: limits, Logger: testTunnelLogger(),
+				Tracing: traceRuntime,
 			})
 			if err != nil {
 				t.Fatalf("NewProxy() error = %v", err)
@@ -1204,6 +1207,13 @@ func TestProxyPendingOpenTimeoutAndCancelReleaseQuota(t *testing.T) {
 			tunnelProxy.pendingMu.Unlock()
 			if groups != 0 {
 				t.Fatalf("Pending groups = %d after %s, want zero", groups, test.name)
+			}
+			spanCounts := map[string]int{}
+			for _, span := range recorder.Ended() {
+				spanCounts[span.Name()]++
+			}
+			if spanCounts["tunnel.DialContext"] != 1 || spanCounts["transport.Acquire"] != 1 {
+				t.Fatalf("%s span counts = %#v, want exactly one tunnel and acquire span", test.name, spanCounts)
 			}
 			_ = controlAgent.Close()
 			select {

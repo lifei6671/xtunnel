@@ -18,6 +18,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/agent/service"
 	"github.com/lifei6671/xtunnel/internal/buildinfo"
 	"github.com/lifei6671/xtunnel/internal/logging"
+	"github.com/lifei6671/xtunnel/internal/tracing"
 )
 
 const (
@@ -268,7 +269,7 @@ func runWithTokenSource(
 	return lifecycle(ctx, token, stderr)
 }
 
-func runLifecycle(ctx context.Context, token string, stderr io.Writer) error {
+func runLifecycle(ctx context.Context, token string, stderr io.Writer) (resultErr error) {
 	logger, err := logging.New(stderr, logging.Options{
 		Level:     "info",
 		Format:    "json",
@@ -277,6 +278,21 @@ func runLifecycle(ctx context.Context, token string, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("initialize agent logging: %w", err)
 	}
+	traceRuntime, err := tracing.New(ctx, tracing.Config{
+		ServiceName:    "xtunnel-agent",
+		ServiceVersion: buildinfo.Version(),
+		ReportExportFailure: func() {
+			logger.Warn("tracing_export_failed", logging.ErrorCodeKey, "EXPORT_FAILED")
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("initialize agent tracing: %w", err)
+	}
+	// Connector.Run 已经完成 Session、WorkConn、Origin 与健康 owner 的 Drain/Wait；
+	// 最后以不继承进程取消的有界 Context Flush，避免 Collector 影响退出上限。
+	defer func() {
+		resultErr = errors.Join(resultErr, traceRuntime.Shutdown(context.WithoutCancel(ctx)))
+	}()
 
 	logger.InfoContext(ctx, "process_started")
 	defer logger.Info("process_stopped")
@@ -286,6 +302,7 @@ func runLifecycle(ctx context.Context, token string, stderr io.Writer) error {
 		return fmt.Errorf("create ephemeral Connector identity: %w", err)
 	}
 	config.Logger = logger
+	config.Tracing = traceRuntime
 	runtime, err := connector.New(config)
 	if err != nil {
 		return fmt.Errorf("initialize Connector runtime: %w", err)

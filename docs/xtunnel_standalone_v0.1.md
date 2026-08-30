@@ -6781,6 +6781,41 @@ proxy.Bidirectional
 
 Span 命名采用 `<package>.<FuncName>`。Server 将 W3C `traceparent`、`tracestate` 放入 OpenRequest，Agent 恢复远端 Context 并创建子 Span；日志中的 `trace_id` 必须来自同一 Trace Context，禁止自行生成一条无法关联的平行 ID。
 
+M6-03 使用官方 OpenTelemetry Go `v1.46.0`，Server 与 Agent 分别持有进程私有的
+TracerProvider 和 W3C Trace Context Propagator，不写入 OTel 全局状态。公网 HTTP/TCP
+入口一律以 `trace.WithNewRoot()` 创建本地 Root，不提取或信任客户端 `traceparent`；
+HTTP KeepAlive 上的每个请求也分别创建 Root。Server→Agent 只复用既有
+`OpenRequest.trace_id/traceparent/tracestate`，不新增 Wire 字段。三字段全空时保持禁用兼容；
+只要任一字段非空，`trace_id` 与 `traceparent` 必须同时存在并指向同一个合法 Trace，
+`tracestate` 必须可解析，否则 Agent 在 Origin Dial 前按 `PROTOCOL_ERROR` 终止 WorkConn。
+
+Trace 导出只由进程启动环境启用：
+
+```text
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+OTEL_EXPORTER_OTLP_ENDPOINT
+OTEL_EXPORTER_OTLP_TRACES_HEADERS / OTEL_EXPORTER_OTLP_HEADERS
+OTEL_EXPORTER_OTLP_TRACES_TIMEOUT / OTEL_EXPORTER_OTLP_TIMEOUT
+OTEL_EXPORTER_OTLP_TRACES_COMPRESSION / OTEL_EXPORTER_OTLP_COMPRESSION
+OTEL_EXPORTER_OTLP_TRACES_PROTOCOL / OTEL_EXPORTER_OTLP_PROTOCOL
+OTEL_EXPORTER_OTLP_TRACES_INSECURE / OTEL_EXPORTER_OTLP_INSECURE
+```
+
+未配置 Endpoint 时使用 no-op Provider，不导出 Span。Trace-specific 值优先于 Base 值；
+Base Endpoint 自动追加 `/v1/traces`。协议固定为 `http/protobuf`，生产 Endpoint 必须使用
+HTTPS，HTTP 只允许 `localhost` 或 Loopback IP；`INSECURE=true` 不能把 HTTPS 降级。
+Headers、Endpoint 与配置错误绝不回显原值，文件型 CA、Client Certificate 和 Client Key
+环境变量在 V0.1 明确拒绝，避免证书/私钥路径和上游 Parser 错误进入全局 Logger。自定义
+CA/mTLS 由前置 Collector 或代理终止。
+
+BatchSpanProcessor 使用固定 2048 有界队列、512 Batch，不启用阻塞入队；Batch、Export 与
+Shutdown 上限均为 5 秒。Collector/网络错误由本地 Exporter Wrapper 截断，只通过项目
+JSON Logger 最多报告一次 `event=tracing_export_failed error_code=EXPORT_FAILED`，不记录
+Endpoint、Header 或底层错误文本。Server 在 Ingress/Gateway/Session/Route/SQLite 收敛后
+Flush，Agent 在 Connector/WorkConn/Origin/Health Owner 收敛后 Flush；两者都不让 Collector
+阻塞数据面或无限延长退出。Root 默认全采样，容量与比例采样留待 M6 Gate 压测后冻结，
+V0.1 不增加 Server Schema、Agent 本地业务配置或第二套 Trace 配置入口。
+
 ---
 
 # 161. Prometheus Cardinality

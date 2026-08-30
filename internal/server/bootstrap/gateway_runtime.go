@@ -35,6 +35,7 @@ import (
 	servertcpingress "github.com/lifei6671/xtunnel/internal/server/tcpingress"
 	serverworkauth "github.com/lifei6671/xtunnel/internal/server/workauth"
 	"github.com/lifei6671/xtunnel/internal/tcpport"
+	"github.com/lifei6671/xtunnel/internal/tracing"
 	"github.com/lifei6671/xtunnel/internal/tunnel"
 )
 
@@ -126,6 +127,7 @@ func openGatewayLifecycle(
 	identity gateway.Identity,
 	tokenService *application.ConnectionTokenService,
 	metricsBridge *serverMetricsBridge,
+	traceRuntime *tracing.Runtime,
 ) (*gateway.Server, *sessionruntime.Manager, *tunnel.Proxy, *serverlimits.Manager, error) {
 	if metricsBridge == nil {
 		return nil, nil, nil, nil, errors.New("server metrics bridge is required")
@@ -232,6 +234,7 @@ func openGatewayLifecycle(
 		LimitManager:   limitManager,
 		Metrics:        metricsBridge,
 		Logger:         logger,
+		Tracing:        traceRuntime,
 	})
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("construct Tunnel data-plane proxy: %w", err)
@@ -571,9 +574,20 @@ func openGatewayAndBootstrapAt(
 	logger *slog.Logger,
 	startedAt time.Time,
 ) (io.Closer, error) {
-	lifecycle, err := openGatewayAndBootstrapWithStartedAt(ctx, config, resources, logger, startedAt, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
+	return openGatewayAndBootstrapAtTracing(ctx, config, resources, logger, startedAt, nil)
+}
+
+func openGatewayAndBootstrapAtTracing(
+	ctx context.Context,
+	config serverconfig.Config,
+	resources storage,
+	logger *slog.Logger,
+	startedAt time.Time,
+	traceRuntime *tracing.Runtime,
+) (io.Closer, error) {
+	lifecycle, err := openGatewayAndBootstrapWithStartedAtTracing(ctx, config, resources, logger, startedAt, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
 		return openAdminBootstrapSocketAfter(ctx, runtimeDir, targetHash, store, afterCreate, reportRuntimeError)
-	})
+	}, traceRuntime)
 	if err != nil {
 		return nil, err
 	}
@@ -627,6 +641,21 @@ func openGatewayAndBootstrapWithStartedAt(
 	runtimeDir string,
 	openBootstrapSocket func(context.Context, string, string, *sqlite.Store, func() error, func(error)) (io.Closer, error),
 ) (io.Closer, error) {
+	return openGatewayAndBootstrapWithStartedAtTracing(
+		ctx, config, resources, logger, startedAt, runtimeDir, openBootstrapSocket, nil,
+	)
+}
+
+func openGatewayAndBootstrapWithStartedAtTracing(
+	ctx context.Context,
+	config serverconfig.Config,
+	resources storage,
+	logger *slog.Logger,
+	startedAt time.Time,
+	runtimeDir string,
+	openBootstrapSocket func(context.Context, string, string, *sqlite.Store, func() error, func(error)) (io.Closer, error),
+	traceRuntime *tracing.Runtime,
+) (io.Closer, error) {
 	serverResources, ok := resources.(*serverStorage)
 	if !ok {
 		return nil, errors.New("unexpected server storage implementation")
@@ -661,7 +690,7 @@ func openGatewayAndBootstrapWithStartedAt(
 	}
 	metricsBridge := &serverMetricsBridge{}
 	gatewayServer, sessions, tunnelProxy, limitManager, err := openGatewayLifecycle(
-		config, resources, logger, reportRuntimeError, healthBudget, identity, tokenService, metricsBridge,
+		config, resources, logger, reportRuntimeError, healthBudget, identity, tokenService, metricsBridge, traceRuntime,
 	)
 	if err != nil {
 		return nil, err
@@ -689,7 +718,7 @@ func openGatewayAndBootstrapWithStartedAt(
 		return nil, errors.Join(fmt.Errorf("load immutable route snapshot before listener startup: %w", err), gatewayServer.Close())
 	}
 	tcpIngress, err := newTCPIngressManager(
-		config, routes, tunnelProxy, limitManager, logger, reportRuntimeError,
+		config, routes, tunnelProxy, limitManager, logger, reportRuntimeError, traceRuntime,
 	)
 	if err != nil {
 		cancelRoutes()
@@ -699,6 +728,7 @@ func openGatewayAndBootstrapWithStartedAt(
 	httpHandler, err := serverhttpingress.NewHandler(serverhttpingress.HandlerOptions{
 		Routes: routes, Dialer: tunnelProxy, TrustedProxies: config.HTTPIngress.TrustedProxies,
 		Limits: limitManager, MaxBodyBytes: config.Limits.MaxHTTPBodyBytes, Logger: logger,
+		Tracing: traceRuntime,
 	})
 	if err != nil {
 		cancelRoutes()
@@ -972,6 +1002,7 @@ func newTCPIngressManager(
 	limitManager *serverlimits.Manager,
 	logger *slog.Logger,
 	reportRuntimeError func(error),
+	traceRuntime *tracing.Runtime,
 ) (*servertcpingress.Manager, error) {
 	if limitManager == nil {
 		return nil, errors.New("TCP ingress source limit manager is required")
@@ -984,7 +1015,7 @@ func newTCPIngressManager(
 	if err != nil {
 		return nil, err
 	}
-	handler, err := newTCPIngressHandler(tunnelDialer, logger)
+	handler, err := newTCPIngressHandler(tunnelDialer, logger, traceRuntime)
 	if err != nil {
 		return nil, fmt.Errorf("construct TCP ingress data-plane handler: %w", err)
 	}

@@ -17,7 +17,53 @@ import (
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 	"github.com/lifei6671/xtunnel/internal/server/route"
+	internaltracing "github.com/lifei6671/xtunnel/internal/tracing"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+func TestHandlerCreatesIndependentRootTraceForKeepAliveRequests(t *testing.T) {
+	manager, _ := startRouteManager(t, baseHTTPRouteState(1))
+	origin := newLoopOriginDialer(t)
+	var output bytes.Buffer
+	traceRuntime, recorder := newHTTPIngressTraceRuntime(t)
+	handler := newLoggingTracingTestHandler(t, manager, origin, &output, traceRuntime)
+
+	const untrustedTraceparent = "00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01"
+	for _, path := range []string{"/first", "/second"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Host = "public.example.com"
+		request.Header.Set("traceparent", untrustedTraceparent)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s response status = %d, want 200", path, response.Code)
+		}
+	}
+
+	records := decodeRequestLogRecords(t, output.String())
+	spans := recorder.Ended()
+	if len(records) != 2 || len(spans) != 2 {
+		t.Fatalf("request records/spans = %d/%d, want 2/2", len(records), len(spans))
+	}
+	if len(origin.Calls()) != 1 {
+		t.Fatalf("Tunnel Dial calls = %d, want one KeepAlive connection", len(origin.Calls()))
+	}
+	for index, span := range spans {
+		if span.Name() != "ingress.Accept" || span.Parent().IsValid() {
+			t.Fatalf("span %d = %q parent=%v, want local root ingress.Accept", index, span.Name(), span.Parent())
+		}
+		if got := records[index][logging.TraceIDKey]; got != span.SpanContext().TraceID().String() {
+			t.Fatalf("record %d trace_id = %#v, want %s", index, got, span.SpanContext().TraceID())
+		}
+		if span.SpanContext().TraceID().String() == "0102030405060708090a0b0c0d0e0f10" {
+			t.Fatalf("span %d trusted public traceparent", index)
+		}
+	}
+	if spans[0].SpanContext().TraceID() == spans[1].SpanContext().TraceID() {
+		t.Fatal("KeepAlive requests reused one root TraceID")
+	}
+}
 
 func TestHandlerLogsActualConnectionAcrossKeepAliveRequests(t *testing.T) {
 	manager, _ := startRouteManager(t, baseHTTPRouteState(1))
@@ -205,6 +251,57 @@ func newLoggingTestHandler(
 	return newTestHandlerWithLimitsAndLogger(
 		t, manager, dialer, []string{"127.0.0.1/32", "::1/128"}, limits, 2<<30, logger,
 	)
+}
+
+func newLoggingTracingTestHandler(
+	t *testing.T,
+	manager *route.Manager,
+	dialer TunnelDialer,
+	output io.Writer,
+	traceRuntime *internaltracing.Runtime,
+) *Handler {
+	t.Helper()
+	logger, err := logging.New(output, logging.Options{Level: "debug", Format: "json", Component: "server"})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
+	limits := newTestLimitManager(t, serverlimits.Options{
+		MaxConnectors: 1_024, MaxConnectorsPerTunnel: 1_024,
+		MaxWorkConnections: 1_024, MaxIdleWorkConnections: 1_024,
+		MaxConnectingWorkConnections: 1_024, MaxPendingOpens: 1_024,
+		MaxActiveConnections: 1_024, MaxConnectionsPerTunnel: 1_024,
+		MaxConnectionsPerService: 1_024, MaxConnectionsPerSourceIP: 1_024,
+		MaxOpenRatePerSourceIP: 100_000, MaxOpenBurstPerSourceIP: 100_000,
+		MaxHTTPRequestsPerSourceIPPerSecond: 100_000,
+	})
+	handler, err := NewHandler(HandlerOptions{
+		Routes: manager, Dialer: dialer, TrustedProxies: []string{"127.0.0.1/32", "::1/128"},
+		Limits: limits, MaxBodyBytes: 2 << 30, Logger: logger, Tracing: traceRuntime,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+	t.Cleanup(handler.CloseIdleConnections)
+	return handler
+}
+
+func newHTTPIngressTraceRuntime(t *testing.T) (*internaltracing.Runtime, *tracetest.SpanRecorder) {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	runtime, err := internaltracing.New(t.Context(), internaltracing.Config{
+		ServiceName: "xtunnel-server", ServiceVersion: "test",
+		TracerProvider: provider, ProviderShutdown: provider.Shutdown,
+	})
+	if err != nil {
+		t.Fatalf("tracing.New() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runtime.Shutdown(context.Background()); err != nil {
+			t.Errorf("tracing Runtime Shutdown() error = %v", err)
+		}
+	})
+	return runtime, recorder
 }
 
 func decodeRequestLogRecords(t *testing.T, output string) []map[string]any {

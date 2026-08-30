@@ -18,6 +18,11 @@ import (
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
 	"github.com/lifei6671/xtunnel/internal/protocol/validate"
 	"github.com/lifei6671/xtunnel/internal/proxy"
+	"github.com/lifei6671/xtunnel/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -53,11 +58,14 @@ type Options struct {
 	Dialer       OriginDialer
 	Proxy        RawProxy
 	Logger       *slog.Logger
+	Tracing      *tracing.Runtime
 }
 
 // Handler 处理一个已经通过 WorkHello、处于 IDLE 的 WorkConn。
 type Handler struct {
-	options Options
+	options    Options
+	tracer     trace.Tracer
+	propagator propagation.TextMapPropagator
 }
 
 // NewHandler 创建生产 OPEN Handler；Proxy 为空时使用统一双向 RAW 实现。
@@ -68,7 +76,16 @@ func NewHandler(options Options) (*Handler, error) {
 	if options.Proxy == nil {
 		options.Proxy = proxy.ProxyBidirectional
 	}
-	return &Handler{options: options}, nil
+	provider := trace.NewNoopTracerProvider()
+	propagator := propagation.TextMapPropagator(propagation.TraceContext{})
+	if options.Tracing != nil {
+		provider = options.Tracing.TracerProvider()
+		propagator = options.Tracing.Propagator()
+	}
+	return &Handler{
+		options: options, tracer: provider.Tracer("github.com/lifei6671/xtunnel/internal/agent/open"),
+		propagator: propagator,
+	}, nil
 }
 
 // Handle 读取唯一 OpenRequest，连接 service_id 对应 Origin，完整写出 OpenResponse，
@@ -173,17 +190,25 @@ func (handler *Handler) handle(
 	if err := commitTransition(transition, state.WorkOpening, commitOpening); err != nil {
 		return fmt.Errorf("%w: accept OpenRequest: %v", ErrProtocol, err)
 	}
+	traceContext, err := handler.extractTraceContext(ctx, request)
+	if err != nil {
+		return err
+	}
+	ctx = traceContext
 	connectionLogger = logging.WithCorrelationFields(handler.options.Logger, logging.Correlation{
-		TraceID: request.GetTraceId(), ServiceID: request.GetServiceId(), ConnectionID: request.GetConnectionId(),
+		TraceID: tracing.TraceID(ctx), ServiceID: request.GetServiceId(), ConnectionID: request.GetConnectionId(),
 	})
 
 	originStartedAt := time.Now()
-	origin, code, dialErr := handler.options.Dialer.DialOrigin(ctx, request.GetServiceId())
+	originContext, originSpan := handler.tracer.Start(ctx, "origin.Dial")
+	origin, code, dialErr := handler.options.Dialer.DialOrigin(originContext, request.GetServiceId())
 	latency := time.Since(originStartedAt)
 	if dialErr != nil {
 		if code == protocolv1.ErrorCode_ERROR_CODE_OK {
 			code = protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE
 		}
+		recordSpanFailure(originSpan, strings.TrimPrefix(code.String(), "ERROR_CODE_"))
+		originSpan.End()
 		response := &protocolv1.OpenResponse{
 			ConnectionId: request.GetConnectionId(), Status: protocolv1.OpenStatus_OPEN_STATUS_ERROR,
 			ErrorCode: code, OriginConnectLatencyMs: durationMilliseconds(latency),
@@ -196,8 +221,11 @@ func (handler *Handler) handle(
 		return fmt.Errorf("%w: code=%s", ErrOrigin, code.String())
 	}
 	if origin == nil {
+		recordSpanFailure(originSpan, "ORIGIN_UNREACHABLE")
+		originSpan.End()
 		return fmt.Errorf("%w: DialOrigin returned nil connection", ErrOrigin)
 	}
+	originSpan.End()
 	defer func() {
 		if err := origin.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			resultErr = errors.Join(resultErr, fmt.Errorf("close Agent Origin connection: %w", err))
@@ -223,7 +251,51 @@ func (handler *Handler) handle(
 	)
 	// frame.ReadWork 精确停在 OpenRequest Frame 边界；若同一次底层 Read 中已经到达
 	// 后续 RAW 字节，它们仍留在 socket 中，由统一 Proxy 原样读取，不会丢失或重复。
-	return handler.options.Proxy(ctx, workConnection, origin)
+	proxyContext, proxySpan := handler.tracer.Start(originContext, "proxy.Bidirectional")
+	proxyErr := handler.options.Proxy(proxyContext, workConnection, origin)
+	if proxyErr != nil && !errors.Is(proxyErr, context.Canceled) {
+		recordSpanFailure(proxySpan, "INTERNAL_ERROR")
+	}
+	proxySpan.End()
+	return proxyErr
+}
+
+// extractTraceContext 在 OPENING 提交后验证 Server 传来的唯一 Trace Context。
+// 三个字段全空时保留调用链原 Context；否则 trace_id 与 traceparent
+// 必须同时存在且指向同一 Trace，tracestate 也只能依附于合法 Parent。
+func (handler *Handler) extractTraceContext(ctx context.Context, request *protocolv1.OpenRequest) (context.Context, error) {
+	traceID := request.GetTraceId()
+	traceparent := request.GetTraceparent()
+	tracestate := request.GetTracestate()
+	if traceID == "" && traceparent == "" && tracestate == "" {
+		return ctx, nil
+	}
+	if traceID == "" || traceparent == "" {
+		return nil, fmt.Errorf("%w: incomplete OpenRequest trace context", ErrProtocol)
+	}
+	if _, err := trace.ParseTraceState(tracestate); err != nil {
+		return nil, fmt.Errorf("%w: invalid OpenRequest tracestate", ErrProtocol)
+	}
+
+	// 提取基底保留原 Context 的取消、Deadline 和值，但先清除可能存在的
+	// 本地 SpanContext。否则非法 traceparent 被 Propagator 忽略时，不能误把
+	// 调用方 Context 中的旧 Parent 当成本次 Wire 输入已验证。
+	extractionBase := trace.ContextWithSpanContext(ctx, trace.SpanContext{})
+	extracted := handler.propagator.Extract(extractionBase, propagation.MapCarrier{
+		"traceparent": traceparent,
+		"tracestate":  tracestate,
+	})
+	spanContext := trace.SpanContextFromContext(extracted)
+	parsedTraceID, err := trace.TraceIDFromHex(traceID)
+	if err != nil || !spanContext.IsValid() || !spanContext.IsRemote() || spanContext.TraceID() != parsedTraceID {
+		return nil, fmt.Errorf("%w: invalid OpenRequest trace context", ErrProtocol)
+	}
+	return extracted, nil
+}
+
+func recordSpanFailure(span trace.Span, errorCode string) {
+	span.SetAttributes(attribute.String(tracing.AttributeErrorCode, errorCode))
+	span.SetStatus(codes.Error, "")
 }
 
 func (handler *Handler) writeResponse(

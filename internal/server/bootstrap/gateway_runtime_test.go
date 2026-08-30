@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewTCPIngressManagerRequiresSourceLimitManager(t *testing.T) {
-	manager, err := newTCPIngressManager(serverconfig.Config{}, nil, nil, nil, nil, nil)
+	manager, err := newTCPIngressManager(serverconfig.Config{}, nil, nil, nil, nil, nil, nil)
 	if manager != nil || err == nil {
 		t.Fatalf("newTCPIngressManager() = %#v, %v, want a required limiter error", manager, err)
 	}

@@ -17,6 +17,7 @@ import (
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
+	"github.com/lifei6671/xtunnel/internal/tracing"
 )
 
 func TestParseConfigOptions(t *testing.T) {
@@ -298,7 +299,7 @@ agent_gateway:
 		nil,
 		&bytes.Buffer{},
 		func(context.Context, string) (storage, error) { return resources, nil },
-		func(context.Context, serverconfig.Config, storage, *slog.Logger) (io.Closer, error) {
+		func(context.Context, serverconfig.Config, storage, *slog.Logger, *tracing.Runtime) (io.Closer, error) {
 			return nil, wantErr
 		},
 	)
@@ -329,7 +330,7 @@ agent_gateway:
 		nil,
 		&stderr,
 		func(context.Context, string) (storage, error) { return resources, nil },
-		func(_ context.Context, _ serverconfig.Config, _ storage, logger *slog.Logger) (io.Closer, error) {
+		func(_ context.Context, _ serverconfig.Config, _ storage, logger *slog.Logger, _ *tracing.Runtime) (io.Closer, error) {
 			if logger == nil {
 				t.Fatal("bootstrap received a nil production Logger")
 			}

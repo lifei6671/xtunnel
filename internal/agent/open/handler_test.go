@@ -17,6 +17,10 @@ import (
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/protocol/state"
+	internaltracing "github.com/lifei6671/xtunnel/internal/tracing"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -24,6 +28,9 @@ const (
 	testWorkID       = "work_01J00000000000000000000000"
 	testConnectionID = "conn_01J00000000000000000000000"
 	testServiceID    = "svc_01J00000000000000000000000"
+	testTraceID      = "0102030405060708090a0b0c0d0e0f10"
+	testTraceparent  = "00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01"
+	testTracestate   = "vendor=value"
 	testTimeout      = 2 * time.Second
 )
 
@@ -164,7 +171,9 @@ func TestHandleLogsOriginFailureWithValidatedCorrelation(t *testing.T) {
 	go func() { result <- handler.Handle(context.Background(), agentConnection, ready) }()
 
 	request := validOpenRequest()
-	request.TraceId = "trace-01J00000000000000000000000"
+	request.TraceId = testTraceID
+	request.Traceparent = testTraceparent
+	request.Tracestate = testTracestate
 	if err := frame.WriteWork(serverConnection, request); err != nil {
 		t.Fatalf("write OpenRequest: %v", err)
 	}
@@ -220,6 +229,264 @@ func TestHandleRejectsUnknownOpenRequestWithoutDial(t *testing.T) {
 	}
 }
 
+func TestHandleRejectsInvalidTraceContextWithoutDial(t *testing.T) {
+	tests := []struct {
+		name           string
+		traceID        string
+		traceparent    string
+		tracestate     string
+		existingParent bool
+	}{
+		{name: "trace id without parent", traceID: testTraceID},
+		{name: "parent without trace id", traceparent: testTraceparent},
+		{name: "tracestate without parent", tracestate: testTracestate},
+		{
+			name: "malformed parent does not reuse caller parent", traceID: testTraceID,
+			traceparent: "00-invalid-parent-01", existingParent: true,
+		},
+		{
+			name:        "mismatched trace id",
+			traceID:     "101112131415161718191a1b1c1d1e1f",
+			traceparent: testTraceparent,
+		},
+		{name: "invalid tracestate", traceID: testTraceID, traceparent: testTraceparent, tracestate: "bad state"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agentConnection, serverConnection := net.Pipe()
+			defer serverConnection.Close()
+			dialed := false
+			handler := newTestHandler(t, OriginDialerFunc(func(context.Context, string) (net.Conn, protocolv1.ErrorCode, error) {
+				dialed = true
+				return nil, protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE, errors.New("must not run")
+			}), nil)
+			ready := idleReady(t)
+			result := make(chan error, 1)
+			handleContext := context.Background()
+			if test.existingParent {
+				traceID, err := trace.TraceIDFromHex(testTraceID)
+				if err != nil {
+					t.Fatalf("TraceIDFromHex() error = %v", err)
+				}
+				spanID, err := trace.SpanIDFromHex("1112131415161718")
+				if err != nil {
+					t.Fatalf("SpanIDFromHex() error = %v", err)
+				}
+				handleContext = trace.ContextWithRemoteSpanContext(handleContext, trace.NewSpanContext(trace.SpanContextConfig{
+					TraceID: traceID, SpanID: spanID, Remote: true,
+				}))
+			}
+			go func() { result <- handler.Handle(handleContext, agentConnection, ready) }()
+
+			request := validOpenRequest()
+			request.TraceId = test.traceID
+			request.Traceparent = test.traceparent
+			request.Tracestate = test.tracestate
+			if err := frame.WriteWork(serverConnection, request); err != nil {
+				t.Fatalf("write OpenRequest: %v", err)
+			}
+			select {
+			case err := <-result:
+				if !errors.Is(err, ErrProtocol) {
+					t.Fatalf("Handle() error = %v, want ErrProtocol", err)
+				}
+			case <-time.After(testTimeout):
+				t.Fatal("Handle() did not reject invalid trace context")
+			}
+			if dialed {
+				t.Fatal("Origin Dialer was called for invalid trace context")
+			}
+			if ready.State.Phase() != state.WorkClosed {
+				t.Fatalf("Work phase = %v, want closed", ready.State.Phase())
+			}
+		})
+	}
+}
+
+func TestHandleRestoresRemoteParentAndCreatesStrictSpanChain(t *testing.T) {
+	type contextKey struct{}
+	traceRuntime, exporter := newTestTraceRuntime(t)
+	agentConnection, serverConnection := net.Pipe()
+	originConnection, originPeer := net.Pipe()
+	defer serverConnection.Close()
+	defer originPeer.Close()
+	dialContext := make(chan trace.SpanContext, 1)
+	dialPreserved := make(chan bool, 1)
+	proxyContext := make(chan trace.SpanContext, 1)
+	proxyPhase := make(chan state.WorkPhase, 1)
+	ready := idleReady(t)
+	handler, err := NewHandler(Options{
+		ReadTimeout: time.Second, WriteTimeout: time.Second,
+		Dialer: OriginDialerFunc(func(ctx context.Context, _ string) (net.Conn, protocolv1.ErrorCode, error) {
+			dialContext <- trace.SpanContextFromContext(ctx)
+			_, hasDeadline := ctx.Deadline()
+			dialPreserved <- hasDeadline && ctx.Value(contextKey{}) == "preserved"
+			return originConnection, protocolv1.ErrorCode_ERROR_CODE_OK, nil
+		}),
+		Proxy: func(ctx context.Context, _, _ net.Conn) error {
+			proxyContext <- trace.SpanContextFromContext(ctx)
+			proxyPhase <- ready.State.Phase()
+			return nil
+		},
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Tracing: traceRuntime,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+	result := make(chan error, 1)
+	handleContext, cancelHandle := context.WithTimeout(
+		context.WithValue(context.Background(), contextKey{}, "preserved"), testTimeout,
+	)
+	defer cancelHandle()
+	go func() { result <- handler.Handle(handleContext, agentConnection, ready) }()
+
+	if err := frame.WriteWork(serverConnection, validTracedOpenRequest()); err != nil {
+		t.Fatalf("write OpenRequest: %v", err)
+	}
+	response := &protocolv1.OpenResponse{}
+	if err := frame.ReadWork(serverConnection, response); err != nil {
+		t.Fatalf("read OpenResponse: %v", err)
+	}
+	if response.GetStatus() != protocolv1.OpenStatus_OPEN_STATUS_OK {
+		t.Fatalf("OpenResponse status = %s, want OPEN_STATUS_OK", response.GetStatus())
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	dialSpanContext := <-dialContext
+	if preserved := <-dialPreserved; !preserved {
+		t.Fatal("restored trace context discarded caller cancellation, deadline, or values")
+	}
+	proxySpanContext := <-proxyContext
+	if phase := <-proxyPhase; phase != state.WorkActive {
+		t.Fatalf("Proxy phase = %v, want ACTIVE", phase)
+	}
+	wantTraceID, err := trace.TraceIDFromHex(testTraceID)
+	if err != nil {
+		t.Fatalf("TraceIDFromHex() error = %v", err)
+	}
+	if dialSpanContext.TraceID() != wantTraceID || proxySpanContext.TraceID() != wantTraceID {
+		t.Fatalf("Span TraceIDs = %s/%s, want %s", dialSpanContext.TraceID(), proxySpanContext.TraceID(), wantTraceID)
+	}
+
+	spans := exporter.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("exported spans = %d, want 2", len(spans))
+	}
+	var originSpan, proxySpan tracetest.SpanStub
+	for _, span := range spans {
+		switch span.Name {
+		case "origin.Dial":
+			originSpan = span
+		case "proxy.Bidirectional":
+			proxySpan = span
+		}
+	}
+	wantRemoteSpanID, err := trace.SpanIDFromHex("1112131415161718")
+	if err != nil {
+		t.Fatalf("SpanIDFromHex() error = %v", err)
+	}
+	if originSpan.Name == "" || !originSpan.Parent.IsRemote() || !originSpan.Parent.IsSampled() ||
+		originSpan.Parent.SpanID() != wantRemoteSpanID {
+		t.Fatalf("origin parent = %#v, want remote span %s", originSpan.Parent, wantRemoteSpanID)
+	}
+	if proxySpan.Name == "" || proxySpan.Parent.TraceID() != originSpan.SpanContext.TraceID() ||
+		proxySpan.Parent.SpanID() != originSpan.SpanContext.SpanID() || proxySpan.Parent.IsRemote() {
+		t.Fatalf("proxy parent = %#v, want local origin span %#v", proxySpan.Parent, originSpan.SpanContext)
+	}
+}
+
+func TestHandleEndsTraceSpansExactlyOnceOnFailure(t *testing.T) {
+	proxyFailure := errors.New("proxy failed")
+	tests := []struct {
+		name       string
+		dialError  error
+		proxyError error
+		wantError  error
+		wantSpans  int
+	}{
+		{name: "origin failure", dialError: errors.New("origin unavailable"), wantError: ErrOrigin, wantSpans: 1},
+		{name: "proxy canceled", proxyError: context.Canceled, wantError: context.Canceled, wantSpans: 2},
+		{name: "proxy failure", proxyError: proxyFailure, wantError: proxyFailure, wantSpans: 2},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			traceRuntime, exporter := newTestTraceRuntime(t)
+			agentConnection, serverConnection := net.Pipe()
+			originConnection, originPeer := net.Pipe()
+			defer serverConnection.Close()
+			defer originPeer.Close()
+			handler, err := NewHandler(Options{
+				ReadTimeout: time.Second, WriteTimeout: time.Second,
+				Dialer: OriginDialerFunc(func(context.Context, string) (net.Conn, protocolv1.ErrorCode, error) {
+					if test.dialError != nil {
+						return nil, protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE, test.dialError
+					}
+					return originConnection, protocolv1.ErrorCode_ERROR_CODE_OK, nil
+				}),
+				Proxy:   func(context.Context, net.Conn, net.Conn) error { return test.proxyError },
+				Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				Tracing: traceRuntime,
+			})
+			if err != nil {
+				t.Fatalf("NewHandler() error = %v", err)
+			}
+			ready := idleReady(t)
+			result := make(chan error, 1)
+			go func() { result <- handler.Handle(context.Background(), agentConnection, ready) }()
+			if err := frame.WriteWork(serverConnection, validTracedOpenRequest()); err != nil {
+				t.Fatalf("write OpenRequest: %v", err)
+			}
+			if err := frame.ReadWork(serverConnection, &protocolv1.OpenResponse{}); err != nil {
+				t.Fatalf("read OpenResponse: %v", err)
+			}
+			if err := <-result; !errors.Is(err, test.wantError) {
+				t.Fatalf("Handle() error = %v, want %v", err, test.wantError)
+			}
+			if spans := exporter.GetSpans(); len(spans) != test.wantSpans {
+				t.Fatalf("exported spans = %d, want %d", len(spans), test.wantSpans)
+			} else {
+				if test.dialError != nil {
+					if len(spans[0].Attributes) != 1 || string(spans[0].Attributes[0].Key) != internaltracing.AttributeErrorCode ||
+						spans[0].Attributes[0].Value.AsString() != "ORIGIN_UNREACHABLE" {
+						t.Fatalf("origin failure attributes = %#v, want only bounded error_code", spans[0].Attributes)
+					}
+				}
+				if test.proxyError != nil && !errors.Is(test.proxyError, context.Canceled) {
+					proxyAttributes := spans[len(spans)-1].Attributes
+					if len(proxyAttributes) != 1 || string(proxyAttributes[0].Key) != internaltracing.AttributeErrorCode ||
+						proxyAttributes[0].Value.AsString() != "INTERNAL_ERROR" {
+						t.Fatalf("proxy failure attributes = %#v, want only bounded error_code", proxyAttributes)
+					}
+				}
+			}
+		})
+	}
+}
+
+func newTestTraceRuntime(t *testing.T) (*internaltracing.Runtime, *tracetest.InMemoryExporter) {
+	t.Helper()
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	runtime, err := internaltracing.New(context.Background(), internaltracing.Config{
+		ServiceName: "xtunnel-agent", ServiceVersion: "test", TracerProvider: provider,
+		ProviderShutdown: provider.Shutdown,
+	})
+	if err != nil {
+		t.Fatalf("tracing.New() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runtime.Shutdown(context.Background()); err != nil {
+			t.Errorf("Tracing Shutdown() error = %v", err)
+		}
+	})
+	return runtime, exporter
+}
+
 func newTestHandler(t *testing.T, dialer OriginDialer, rawProxy RawProxy) *Handler {
 	t.Helper()
 	handler, err := NewHandler(Options{
@@ -262,4 +529,12 @@ func validOpenRequest() *protocolv1.OpenRequest {
 		ProtocolVersion: 1, ConnectionId: testConnectionID, ServiceId: testServiceID,
 		IngressType: protocolv1.IngressType_INGRESS_TYPE_TCP,
 	}
+}
+
+func validTracedOpenRequest() *protocolv1.OpenRequest {
+	request := validOpenRequest()
+	request.TraceId = testTraceID
+	request.Traceparent = testTraceparent
+	request.Tracestate = testTracestate
+	return request
 }

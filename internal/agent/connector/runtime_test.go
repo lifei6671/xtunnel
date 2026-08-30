@@ -22,6 +22,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/safego"
+	internaltracing "github.com/lifei6671/xtunnel/internal/tracing"
 )
 
 const (
@@ -631,6 +632,8 @@ func TestHostConfigCreatesEphemeralConnectorAndUnobservedOriginFailsClosed(t *te
 		t.Fatalf("HostConfig() error = %v", err)
 	}
 	config.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	traceRuntime := new(internaltracing.Runtime)
+	config.Tracing = traceRuntime
 	if err := identity.ValidateConnectorID(config.Connector.ID()); err != nil {
 		t.Fatalf("HostConfig() connector id error = %v", err)
 	}
@@ -644,6 +647,9 @@ func TestHostConfigCreatesEphemeralConnectorAndUnobservedOriginFailsClosed(t *te
 	}
 	if runtime.health == nil {
 		t.Fatal("New() did not install the production Health runtime")
+	}
+	if runtime.tracing != traceRuntime {
+		t.Fatal("New() did not retain the process tracing runtime for OPEN handlers")
 	}
 	connection, code, err := runtime.origin.DialOrigin(context.Background(), "svc_01J00000000000000000000000")
 	if connection != nil || code != protocolv1.ErrorCode_ERROR_CODE_SERVICE_CONFIG_NOT_OBSERVED ||

@@ -24,7 +24,11 @@ import (
 	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	serverworkpool "github.com/lifei6671/xtunnel/internal/server/workpool"
+	internaltracing "github.com/lifei6671/xtunnel/internal/tracing"
 	"github.com/lifei6671/xtunnel/internal/tunnel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const flushInterval = 100 * time.Millisecond
@@ -58,6 +62,7 @@ type HandlerOptions struct {
 	Logger         *slog.Logger
 	TrustedProxies []string
 	Limits         *serverlimits.Manager
+	Tracing        *internaltracing.Runtime
 	MaxBodyBytes   int64
 }
 
@@ -71,6 +76,7 @@ type Handler struct {
 	trustedProxies       trustedProxySet
 	limits               *serverlimits.Manager
 	logger               *slog.Logger
+	tracing              *internaltracing.Runtime
 	newRequestID         func() (string, error)
 	maxBodyBytes         int64
 	webSocketIdleTimeout time.Duration
@@ -89,6 +95,7 @@ func NewHandler(options HandlerOptions) (*Handler, error) {
 	return &Handler{
 		routes: options.Routes, pools: newTransportPool(options.Dialer), observer: observer,
 		trustedProxies: proxySet, limits: options.Limits, logger: options.Logger,
+		tracing:      options.Tracing,
 		newRequestID: identity.NewRequestID, maxBodyBytes: options.MaxBodyBytes,
 		webSocketIdleTimeout: webSocketIdleTimeout,
 	}, nil
@@ -102,9 +109,26 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE")
 		return
 	}
+	// 公网 HTTP Header 不属于已认证控制边界。每次 ServeHTTP 都从本地创建新 Root，
+	// 即使同一客户端 KeepAlive 连接承载后续请求，也不会继承上一请求或客户端伪造的
+	// traceparent。这个 Context 会继续传给 Tunnel Dial 和结构化日志。
+	if handler.tracing != nil {
+		requestContext, ingressSpan := handler.tracing.Tracer("xtunnel/server/httpingress").Start(
+			request.Context(), "ingress.Accept", trace.WithNewRoot(),
+		)
+		request = request.WithContext(requestContext)
+		defer ingressSpan.End()
+	}
 	requestID, err := handler.newRequestID()
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "INTERNAL_ERROR")
+		if span := trace.SpanFromContext(request.Context()); span.IsRecording() {
+			span.SetAttributes(
+				attribute.Int("http.response.status_code", http.StatusInternalServerError),
+				attribute.String(internaltracing.AttributeErrorCode, "INTERNAL_ERROR"),
+			)
+			span.SetStatus(codes.Error, "INTERNAL_ERROR")
+		}
 		handler.logRequestCompleted(request.Context(), request.Method, "", requestLogSnapshot{
 			status: http.StatusInternalServerError, errorCode: "INTERNAL_ERROR",
 		})
@@ -114,7 +138,15 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	observedWriter := newRequestLogResponseWriter(writer, observation)
 	writer = observedWriter
 	defer func() {
-		handler.logRequestCompleted(request.Context(), request.Method, requestID, observation.snapshot(observedWriter.statusCode()))
+		snapshot := observation.snapshot(observedWriter.statusCode())
+		if span := trace.SpanFromContext(request.Context()); span.IsRecording() {
+			span.SetAttributes(attribute.Int("http.response.status_code", snapshot.status))
+			if snapshot.errorCode != "" {
+				span.SetAttributes(attribute.String(internaltracing.AttributeErrorCode, snapshot.errorCode))
+				span.SetStatus(codes.Error, snapshot.errorCode)
+			}
+		}
+		handler.logRequestCompleted(request.Context(), request.Method, requestID, snapshot)
 	}()
 
 	forwarded, err := handler.trustedProxies.normalizeForwarded(request)
