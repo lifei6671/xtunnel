@@ -6887,8 +6887,9 @@ Server 在发送响应前同时固定 SQLite append 序号上界与 `(occurred_a
 不得伪造完整文件或追加 JSON/500；客户端只可在完整下载成功后原子发布候选文件。
 
 Linux systemd 与 Windows SCM 的 M6-06 Smoke 必须在隔离 Runner 中验证真实启动失败、
-持久日志/退出状态和恢复重启。systemd 以运行时 drop-in 缩短 Stop 超时并用 `SIGSTOP`
-制造超时诊断，退出后恢复环境；生产 Unit 不预先修改 `TimeoutStopSec`。Windows 通过
+持久日志/退出状态和恢复重启。systemd 以运行时 drop-in 缩短 Stop 超时，并把测试时
+`KillSignal` 改为不终止进程的 `SIGCONT` 来制造超时诊断，退出后恢复环境；生产 Unit
+不预先修改 `TimeoutStopSec` 或 `KillSignal`。Windows 通过
 隔离 DPAPI Credential 副本验证 `CREDENTIAL_LOAD_FAILED` 和恢复后的新进程；30 秒
 `STOP_TIMEOUT` 分支由 Handler 单元测试锁定，不能冒充真实卡死 Smoke。具体处置命令与
 证据边界以 `docs/operations_runbook.md` 为准。

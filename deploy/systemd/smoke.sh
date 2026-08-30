@@ -367,7 +367,8 @@ wait_for_journal_pattern "$server_unit" "$recovery_since" 'process_started'
 printf '%s\n' "systemd restart recovery diagnostics passed"
 
 # 先记录生产 Unit 的真实 Stop 上限；这里只用 runtime drop-in 把隔离测试压缩到 2 秒，
-# 再 SIGSTOP 制造可恢复的无进展进程。测试结束后恢复原 Unit，不预改 TimeoutStopSec。
+# 并把停止信号改为不终止进程的 SIGCONT。systemd 会在超时后发送 SIGKILL，测试结束后
+# 恢复原 Unit，不预改生产 TimeoutStopSec 或 KillSignal。
 production_stop_timeout=$(systemctl show --property=TimeoutStopUSec --value "$server_unit")
 case "$production_stop_timeout" in
 	''|0|infinity)
@@ -381,6 +382,7 @@ cat >"$server_dropin/m6-06.conf" <<'EOF'
 [Service]
 Restart=no
 TimeoutStopSec=2s
+KillSignal=SIGCONT
 EOF
 systemctl daemon-reload
 systemctl start "$server_unit"
@@ -392,7 +394,6 @@ case "$server_timeout_pid" in
 		;;
 esac
 timeout_since=$(date +%s)
-kill -STOP "$server_timeout_pid"
 set +e
 systemctl stop "$server_unit"
 stop_command_status=$?

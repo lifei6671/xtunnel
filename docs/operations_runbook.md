@@ -123,8 +123,8 @@ journalctl -u xtunnel-server.service -u xtunnel-agent.service \
 
 仓库的 systemd Smoke 只允许在没有既有 XTunnel 路径、Unit 或服务身份的隔离 Runner
 运行。它用无效配置验证启动失败，用 `SIGKILL` 验证恢复重启，并以临时 runtime drop-in
-和 `SIGSTOP` 验证 systemd 超时诊断；退出时删除该 drop-in 并恢复正常服务。生产 Unit
-文件不因此改变 `TimeoutStopSec`。
+把 `KillSignal` 改为不终止进程的 `SIGCONT`，验证 systemd 超时诊断；退出时删除该
+drop-in 并恢复正常服务。生产 Unit 文件不因此改变 `TimeoutStopSec` 或 `KillSignal`。
 
 ## 5. Windows SCM
 
