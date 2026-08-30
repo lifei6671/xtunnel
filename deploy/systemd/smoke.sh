@@ -150,6 +150,23 @@ wait_for_restarted_pid() {
 	return 1
 }
 
+wait_for_journal_text() {
+	unit=$1
+	since=$2
+	text=$3
+	deadline=$(( $(date +%s) + 10 ))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		if journalctl -u "$unit" --since "@$since" --no-pager | grep -F "$text" >/dev/null; then
+			return 0
+		fi
+		sleep 1
+	done
+	printf '%s journal did not contain expected text: %s\n' "$unit" "$text" >&2
+	systemctl show --property=ActiveState,SubState,Result,ExecMainStatus,NRestarts "$unit" >&2 || true
+	journalctl -u "$unit" --since "@$since" --no-pager -n 50 >&2 || true
+	return 1
+}
+
 umask 077
 cat >"$temp_dir/server.yaml" <<'EOF'
 management:
@@ -295,7 +312,7 @@ case "$server_exit_status" in
 		exit 1
 		;;
 esac
-journalctl -u "$server_unit" --since "@$startup_failure_since" --no-pager | grep -F 'load server config' >/dev/null
+wait_for_journal_text "$server_unit" "$startup_failure_since" 'load server config'
 cp "$temp_dir/server.valid.yaml" /etc/xtunnel/server.yaml
 rm -f -- "$server_dropin/m6-06.conf"
 rmdir "$server_dropin"
@@ -327,7 +344,7 @@ if [ "$restart_count_after" -le "$restart_count_before" ]; then
 	printf 'Server NRestarts did not increase: before=%s after=%s\n' "$restart_count_before" "$restart_count_after" >&2
 	exit 1
 fi
-journalctl -u "$server_unit" --since "@$recovery_since" --no-pager | grep -F 'process_started' >/dev/null
+wait_for_journal_text "$server_unit" "$recovery_since" 'process_started'
 
 # 先记录生产 Unit 的真实 Stop 上限；这里只用 runtime drop-in 把隔离测试压缩到 2 秒，
 # 再 SIGSTOP 制造可恢复的无进展进程。测试结束后恢复原 Unit，不预改 TimeoutStopSec。

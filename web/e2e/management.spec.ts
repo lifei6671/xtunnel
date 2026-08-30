@@ -248,7 +248,7 @@ test("Web-only mock 验证概览页五类最近错误渲染", async ({ page }) =
 
   await page.getByRole("button", { name: "安全审计" }).click();
   await expect(page.getByRole("heading", { name: "安全审计" })).toBeVisible();
-  await expect(page.getByText("Gateway 身份轮换", { exact: true })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "Gateway 身份轮换", exact: true })).toBeVisible();
   await expect(page.getByText("<img src=x onerror=alert('audit-unsafe')>", { exact: true })).toBeVisible();
   await expect(page.locator(".audit-results img")).toHaveCount(0);
 
@@ -437,6 +437,13 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   expect(page.url().includes(firstToken)).toBe(false);
   expect(await page.locator("body").evaluate((body, token) => !body.textContent?.includes(token), firstToken)).toBe(true);
   expect(await browserStorageIsEmpty(page, firstToken)).toBe(true);
+
+  // 首次签发不属于敏感读取审计；先通过真实 Reveal 产生一条已提交事件，再验证
+  // 查询、筛选与导出，避免用空列表冒充浏览器链路覆盖。
+  const auditSeed = await browserRequest(page, `/api/v1/tunnels/${tunnelID}/token`);
+  expect(auditSeed.status).toBe(200);
+  await expectNoStore(auditSeed.headers);
+  expect(auditSeed.body?.connection_token === firstToken).toBe(true);
 
   const initialAuditResponsePromise = page.waitForResponse((response) => {
     const requestURL = new URL(response.url());
