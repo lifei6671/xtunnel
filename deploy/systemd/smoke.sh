@@ -150,20 +150,37 @@ wait_for_restarted_pid() {
 	return 1
 }
 
-wait_for_journal_text() {
+wait_for_journal_pattern() {
 	unit=$1
 	since=$2
-	text=$3
+	pattern=$3
 	deadline=$(( $(date +%s) + 10 ))
 	while [ "$(date +%s)" -lt "$deadline" ]; do
-		if journalctl -u "$unit" --since "@$since" --no-pager | grep -F "$text" >/dev/null; then
+		if journalctl -u "$unit" --since "@$since" --no-pager | grep -E "$pattern" >/dev/null; then
 			return 0
 		fi
 		sleep 1
 	done
-	printf '%s journal did not contain expected text: %s\n' "$unit" "$text" >&2
+	printf '%s journal did not match expected pattern: %s\n' "$unit" "$pattern" >&2
 	systemctl show --property=ActiveState,SubState,Result,ExecMainStatus,NRestarts "$unit" >&2 || true
 	journalctl -u "$unit" --since "@$since" --no-pager -n 50 >&2 || true
+	return 1
+}
+
+wait_for_unit_property() {
+	unit=$1
+	property=$2
+	want=$3
+	deadline=$(( $(date +%s) + 10 ))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		actual=$(systemctl show --property="$property" --value "$unit")
+		if [ "$actual" = "$want" ]; then
+			return 0
+		fi
+		sleep 1
+	done
+	printf '%s property %s=%s, want %s\n' "$unit" "$property" "$actual" "$want" >&2
+	systemctl show --property=ActiveState,SubState,Result,ExecMainStatus,NRestarts,TimeoutStopUSec "$unit" >&2 || true
 	return 1
 }
 
@@ -278,6 +295,7 @@ credentials_directory=/run/credentials/xtunnel-agent.service
 runtime_credential="/proc/$agent_pid/root$credentials_directory/xtunnel-agent.token"
 test -r "$runtime_credential"
 test "$(cat "$runtime_credential")" = "$smoke_agent_token"
+printf '%s\n' "systemd packaging baseline passed"
 
 # 启动失败使用 runtime-only Restart=no，避免无效配置形成无限重启；恢复后立即删除
 # drop-in。Journal、Result 和退出码共同证明故障可定位，生产 Unit 不被改写。
@@ -304,7 +322,7 @@ case "$startup_command_status" in
 		;;
 esac
 wait_for_unit_state "$server_unit" failed
-test "$(systemctl show --property=Result --value "$server_unit")" = exit-code
+wait_for_unit_property "$server_unit" Result exit-code
 server_exit_status=$(systemctl show --property=ExecMainStatus --value "$server_unit")
 case "$server_exit_status" in
 	''|*[!0-9]*|0)
@@ -312,7 +330,8 @@ case "$server_exit_status" in
 		exit 1
 		;;
 esac
-wait_for_journal_text "$server_unit" "$startup_failure_since" 'load server config'
+wait_for_journal_pattern "$server_unit" "$startup_failure_since" 'load server config'
+printf '%s\n' "systemd startup failure diagnostics passed"
 cp "$temp_dir/server.valid.yaml" /etc/xtunnel/server.yaml
 rm -f -- "$server_dropin/m6-06.conf"
 rmdir "$server_dropin"
@@ -344,7 +363,8 @@ if [ "$restart_count_after" -le "$restart_count_before" ]; then
 	printf 'Server NRestarts did not increase: before=%s after=%s\n' "$restart_count_before" "$restart_count_after" >&2
 	exit 1
 fi
-wait_for_journal_text "$server_unit" "$recovery_since" 'process_started'
+wait_for_journal_pattern "$server_unit" "$recovery_since" 'process_started'
+printf '%s\n' "systemd restart recovery diagnostics passed"
 
 # 先记录生产 Unit 的真实 Stop 上限；这里只用 runtime drop-in 把隔离测试压缩到 2 秒，
 # 再 SIGSTOP 制造可恢复的无进展进程。测试结束后恢复原 Unit，不预改 TimeoutStopSec。
@@ -383,8 +403,9 @@ case "$stop_command_status" in
 		exit 1
 		;;
 esac
-test "$(systemctl show --property=Result --value "$server_unit")" = timeout
-journalctl -u "$server_unit" --since "@$timeout_since" --no-pager | grep -E 'stop-sigterm.*timed out' >/dev/null
+wait_for_unit_property "$server_unit" Result timeout
+wait_for_journal_pattern "$server_unit" "$timeout_since" 'stop-sigterm.*timed out'
+printf '%s\n' "systemd stop timeout diagnostics passed"
 rm -f -- "$server_dropin/m6-06.conf"
 rmdir "$server_dropin"
 systemctl daemon-reload

@@ -96,6 +96,7 @@ func TestFlushBuildsSortedMinuteDeltas(t *testing.T) {
 func TestConcurrentAddIsExactlyCounted(t *testing.T) {
 	repository := &fakeRepository{}
 	owner := newTestOwner(t, repository)
+	owner.now = func() time.Time { return time.Date(2026, 8, 30, 12, 34, 56, 0, time.UTC) }
 	const goroutines = 24
 	const increments = 2_000
 	var wait sync.WaitGroup
@@ -127,7 +128,11 @@ func TestConcurrentAddIsExactlyCounted(t *testing.T) {
 	if err := owner.Flush(t.Context()); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
-	delta := repository.lastBatch(t)[0]
+	batch := repository.lastBatch(t)
+	if len(batch) != 1 {
+		t.Fatalf("batch length = %d, want 1", len(batch))
+	}
+	delta := batch[0]
 	want := uint64(goroutines * increments)
 	if delta.Connections != want || delta.IngressBytes != want*2 || delta.EgressBytes != want*3 || delta.Errors != want {
 		t.Fatalf("concurrent delta = %#v, want base %d", delta, want)
