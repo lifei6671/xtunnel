@@ -137,7 +137,7 @@ start_proxy() {
         --volume "$caddy_config:/etc/caddy/Caddyfile:ro" \
         --volume "$cert_file:/etc/xtunnel/tls/loopback.crt:ro" \
         --volume "$key_file:/etc/xtunnel/tls/loopback.key:ro" \
-        "$caddy_image" run --config /etc/caddy/Caddyfile --adapter caddyfile \
+        "$caddy_image" caddy run --config /etc/caddy/Caddyfile --adapter caddyfile \
         >"$proxy_log" 2>&1 &
       ;;
     nginx)

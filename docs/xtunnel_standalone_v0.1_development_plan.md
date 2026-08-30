@@ -1425,3 +1425,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 最小修复：按冻结生产生命周期改为先启动真实 Server，等待其 root-only Admin Bootstrap Socket，再由 CI 的 passwordless `sudo -n` 在线提交首个管理员；Server 因空数据目录先创建 pinned Gateway 身份，管理员事务成功后按既有回调启动 HTTP Ingress、Agent Gateway 和 Snapshot Reconciler。随后继续等待 `/auth/me` 返回 `401` 才运行 Caddy/Nginx Browser Suite；密码仍只经权限受限文件和单次 Playwright 环境传递，原始 Server/Proxy 日志继续不回显。
 - 本地验证：修复后以同一交叉构建 Linux Server 在 WSL2 从空目录启动，确认 Bootstrap Socket 出现后由 root 客户端在线创建管理员，随后 `/api/v1/auth/me` 返回预期 `401`；发送中断后 Server 进程和 Bootstrap Socket 均已清理。该验证证明首次身份与管理员生命周期可达，但不含 Docker Proxy/Chromium，不能替代精确 CI Browser Gate。
 - 状态与 Gate：重排后的首次启动、两轮真实 Chromium 管理工作流及严格清理仍须精确 GitHub CI 补证。M5-10 继续保持 `IN_PROGRESS`，M5 保持 `9/11`、全局保持 `73/95`，M5-11 继续等待，M5 Gate Checklist 六项全部保持未勾选。
+
+## 2026-08-30 · M5-10 Caddy Browser 容器入口修复 · IN_PROGRESS
+
+- 五轮提交与 CI：首次启动生命周期修复提交并推送为 `5b73566b278d619a29be2ff02e74e033e0971627`。精确绑定该 SHA 的 [CI #33290019375](https://github.com/lifei6671/xtunnel/actions/runs/33290019375) 中 Windows Agent Service 和 Linux arm64 全部成功；Linux amd64 的 Browser step 已完成 FD 提升、镜像环境隔离、Web/Server 构建、首次 Gateway 身份生成、在线管理员 Bootstrap 和 Management readiness，随后 Caddy 容器在 HTTPS readiness 前退出，Chromium 尚未启动，本轮不记录为 Browser Gate 通过。
+- 根因与修复：同一 CI Job 中已经通过的原生 Front Proxy E2E 使用锁定 Caddy 镜像的正式命令 `caddy run --config ... --adapter caddyfile`。Browser 启动器向镜像只传了 `run --config ...`，缺少容器内可执行文件名，导致容器入口立即失败。最小修复只补齐 `caddy`，不改变镜像摘要、Caddyfile、TLS、Host Network、Secret 策略或 Nginx 路径。
+- 状态与 Gate：Caddy/Nginx 两轮 Chromium 仍须修复提交后的精确 CI 补证。M5-10 继续保持 `IN_PROGRESS`，M5 Gate Checklist 六项全部保持未勾选，本次未勾选任何产品任务。
