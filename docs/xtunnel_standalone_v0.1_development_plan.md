@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-05 Error/Status Observability · REVIEW（实现、本地验收与独立复审完成，等待精确 CI 与用户阶段复审）
+> **当前阶段**：M6-05 Error/Status Observability · REVIEW（实现、本地验收、独立复审与精确 CI 完成，等待用户阶段复审）
 >
-> **当前结论**：用户已确认 M6-05 范围；五类有限诊断码、进程内固定五槽 Latest Projection、最终逻辑 OPEN 与 generation-fenced Connector/Tunnel 生命周期接线、Dashboard API/Web、真实 Linux 双架构五故障黑盒及 Caddy/Nginx Browser E2E 均已实现。本地 Go/Web/OpenAPI/生成漂移、Race、Module 与 Shell 验证通过，安全/生命周期复审最终 `APPROVED`；M6-05 进入 `REVIEW`，等待实现提交的精确 CI 与用户阶段复审。M6 与全局完成数仍为 `4/7`、`79/95`，M6 Gate Checklist 继续全部未勾选。
+> **当前结论**：用户已确认 M6-05 范围；五类有限诊断码、进程内固定五槽 Latest Projection、最终逻辑 OPEN 与 generation-fenced Connector/Tunnel 生命周期接线、Dashboard API/Web、真实 Linux 双架构五故障黑盒及 Caddy/Nginx Browser E2E 均已实现。本地 Go/Web/OpenAPI/生成漂移、Race、Module 与 Shell 验证通过，安全/生命周期与 E2E 复审最终 `APPROVED`；实现提交 `65674c1be8a69054585e3dc6438093bc7426eee1` 暴露的错误测试故障模型已由修正提交 `3ca0c8508eab849aa227ff63ea2d46fe00570207` 收敛，后者的精确 [CI #33309924709](https://github.com/lifei6671/xtunnel/actions/runs/33309924709) 整体 `success`。M6-05 保持 `REVIEW` 等待用户阶段复审；M6 与全局完成数仍为 `4/7`、`79/95`，M6 Gate Checklist 继续全部未勾选。
 
 ---
 
@@ -426,7 +426,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-04` 已完成。当前待办为：
 
-1. `M6-05` — 五类诊断码、固定五槽内存投影、Dashboard、真实 Linux 双架构五故障黑盒与 Caddy/Nginx Browser E2E 已实现并通过本地验收、独立复审；等待精确 CI 与用户阶段复审。
+1. `M6-05` — 五类诊断码、固定五槽内存投影、Dashboard、真实 Linux 双架构五故障黑盒与 Caddy/Nginx Browser E2E 已实现，并通过本地验收、独立复审与精确 CI；等待用户阶段复审。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
@@ -1569,5 +1569,6 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - OPEN 与生命周期：Tunnel 外层 defer 只在一次最终逻辑 OPEN 收敛后观察有限 Protocol Error Code，内部 Work 重试、Connector Failover、`OPEN_DRAINING`、认证/配置/取消/版本/Internal 分支不重复或误发。Connector 断开先在 `TunnelRuntime` 锁内完成 generation fencing，再冻结 `WasDraining` 与 `TunnelBecameOffline` 两个 O(1) 事件事实；Bridge 不反向扫描 Session Manager。Server Shutdown、Revoke、Delete、Replacement 与正常 Drain 均被过滤，包含 Draining 但仍有 Active Work、Snapshot 转 Tombstone 的竞态边界。
 - Web 与真实浏览器：概览页以生成枚举的穷尽映射展示五类中文标签和可选请求 ID，修复同时间/类别 Key 冲突，不解析固定 message、不使用 HTML 注入。Web-only 类型化 Fixture 覆盖五类、空态、`UNAVAILABLE`、XSS 字符串与 Storage；现有 Linux Caddy/Nginx Chromium Gate 构建真实 Agent，Token 仅经子进程环境传递，以 `SIGKILL` 注入非预期断线，再从真实 `/dashboard` 与刷新后的 Overview 验证 Connector/Tunnel Offline、空请求 ID及 Token 不进入 DOM、URL、LocalStorage 或 SessionStorage。
 - 故障黑盒与 CI：新增 Linux 原生 Server→Agent→Origin 五类故障黑盒。`NO_CAPACITY` 使用真实 Work Pool 容量竞争，`ORIGIN_DOWN` 关闭真实 Origin，Connector/Tunnel Offline 先证明正常 Agent Drain 不产生诊断，再由已认证 Control Session 不发送 Drain 的强制断开触发 generation fencing；`PROTOCOL_ERROR` 使用已认证测试 Agent 返回非法 `OPEN_OK + PROTOCOL_ERROR`。Dashboard 断言五槽恰好五项、UTC、真实/空 request ID 与敏感 Sentinel 不泄漏；CI 的 Linux amd64/arm64 Matrix 新增精确命名步骤 `Run native M6 Error status observability blackbox`，Linux amd64 Browser Gate 同时执行真实 Agent 流程。
-- 本地证据与复审：Go `1.27.0`、`GOTOOLCHAIN=local` 下，全仓 `go test ./...`、`go vet ./...`、相关五包 Race、`go mod verify`、`go mod tidy -diff` 通过；Web Check/Build、OpenAPI Validate/Breaking `100/100`、Generate Check、Contract Test、Shell 语法与 `git diff --check` 通过。首版 Linux amd64 黑盒单次及连续 10 次虽通过，但实现提交的精确 [CI #33309482495](https://github.com/lifei6671/xtunnel/actions/runs/33309482495) 证明 `cancel Agent context` 实际会先完成正常 Drain，不能作为 Offline 故障；测试已改为先断言正常 Drain 无诊断，再强制关闭未发送 Drain 的已认证 Control Session，修正版 Linux amd64 原生黑盒连续 20 次、相关三包 Race 与 Bootstrap Vet、Windows 包级测试、Linux amd64 交叉编译均通过。安全/生命周期与 E2E 复审最终均 `APPROVED`，无剩余 P0/P1/P2；真实 Agent+Caddy/Nginx Browser 流程等待下一次精确 CI。
-- 状态与文档：M6-05 进入 `REVIEW`，等待实现提交的精确 CI 与用户阶段复审，不标记 `DONE`；M6 保持 `4/7`、全局保持 `79/95`，M6 Gate Checklist 全部未勾选。根 README、总技术方案和本开发计划已同步；Proto、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、部署配置、权限模型、日志契约与 `AGENTS.md` 无需更新。
+- 本地证据与复审：Go `1.27.0`、`GOTOOLCHAIN=local` 下，全仓 `go test ./...`、`go vet ./...`、相关五包 Race、`go mod verify`、`go mod tidy -diff` 通过；Web Check/Build、OpenAPI Validate/Breaking `100/100`、Generate Check、Contract Test、Shell 语法与 `git diff --check` 通过。首版 Linux amd64 黑盒单次及连续 10 次虽通过，但实现提交的精确 [CI #33309482495](https://github.com/lifei6671/xtunnel/actions/runs/33309482495) 证明 `cancel Agent context` 实际会先完成正常 Drain，不能作为 Offline 故障；测试已改为先断言正常 Drain 无诊断，再强制关闭未发送 Drain 的已认证 Control Session，修正版 Linux amd64 原生黑盒连续 20 次、相关三包 Race 与 Bootstrap Vet、Windows 包级测试、Linux amd64 交叉编译均通过。安全/生命周期与 E2E 复审最终均 `APPROVED`，无剩余 P0/P1/P2。
+- 精确 CI 与状态：实现提交 `65674c1be8a69054585e3dc6438093bc7426eee1` 的 [CI #33309482495](https://github.com/lifei6671/xtunnel/actions/runs/33309482495) 在双架构全仓测试中准确拒绝了错误的 Offline 故障模型；修正提交 `3ca0c8508eab849aa227ff63ea2d46fe00570207` 的 [CI #33309924709](https://github.com/lifei6671/xtunnel/actions/runs/33309924709) 整体 `success`。Linux amd64/arm64 的 `Run native M6 Error status observability blackbox`、全仓 Test/Race/Vet、Proto/OpenAPI/生成物清洁、OCI/systemd 均通过；Linux amd64 真实 Agent+Caddy/Nginx Browser E2E 与 Windows Agent Service 也通过。M6-05 保持 `REVIEW` 等待用户阶段复审，不标记 `DONE`；M6 保持 `4/7`、全局保持 `79/95`，M6 Gate Checklist 全部未勾选。
+- 文档同步：根 README、总技术方案和本开发计划已同步；Proto、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、部署配置、权限模型、日志契约与 `AGENTS.md` 无需更新。
