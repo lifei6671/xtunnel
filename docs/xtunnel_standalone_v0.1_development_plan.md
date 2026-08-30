@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-06 运维诊断流程 · REVIEW（实现、独立复审与三平台精确 CI 已齐备，等待用户阶段复审）
+> **当前阶段**：M6-07 Observability Gate · IN_PROGRESS（M6-06 用户阶段复审已通过，正在审计六项 Gate 证据）
 >
-> **当前结论**：M6-06 推荐范围已完成实现、本地验收和独立复审。最终 Head `c65560e268d82e760bc10525f004fa545ce9c9b5` 的 [CI #33315450173](https://github.com/lifei6671/xtunnel/actions/runs/33315450173) 整体成功：Windows Agent Service、Linux amd64/arm64、真实 Caddy/Nginx Chromium、Agent Connectivity Diagnostic、OCI 与双架构 systemd 故障诊断全部通过。任务转为 `REVIEW` 等待用户阶段复审；尚不标记 `DONE`，完成数保持 `80/95`，M6 Gate Checklist 继续全部未勾选。
+> **当前结论**：用户明确确认 M6-06 阶段复审通过。最终证据提交 `6da646c33f772f5fbf847c44a2c870384aba2596` 的 [CI #33315994274](https://github.com/lifei6671/xtunnel/actions/runs/33315994274) 整体成功，Windows Agent Service、Linux amd64/arm64、真实 Caddy/Nginx Chromium、Agent Connectivity Diagnostic、OCI 与双架构 systemd 故障诊断全部通过。M6-06 转为 `DONE`，M6 更新为 `6/7`、全局更新为 `81/95`；M6-07 进入 `IN_PROGRESS`，六项 Gate 在证据审计完成前继续全部未勾选。
 
 ---
 
@@ -110,9 +110,9 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M3 Config/Health | 13 | 13 | `DONE` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
-| M6 Observability | 7 | 5 | `IN_PROGRESS` | M5-11 | M6-07 |
+| M6 Observability | 7 | 6 | `IN_PROGRESS` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **80** |  |  |  |
+| **合计** | **95** | **81** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -377,8 +377,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `DONE` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `DONE` |
 | M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `DONE` |
-| M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard + Agent Connectivity Diag | Diag 复用生产 Token Parser、Endpoint/DNS、Dialer、TLS Builder、Pin Verifier 和 ALPN，覆盖 Token/Endpoint/DNS/TCP/TLS/Pin/ALPN；默认 Precheck 不执行 Auth/Snapshot，未来真实诊断须先冻结无污染协议语义；不得复制宽松连接栈，也不得把完整 Token 写入 argv 作为唯一入口；输出 PASS/WARNING/FAIL 与 READY 变体；覆盖证书 30/7/1 天告警、Audit 查询/固定边界流式导出、Linux systemd 与 Windows SCM 的启动失败、恢复重启和 Stop/Shutdown 超时诊断 | `REVIEW` |
-| M6-07 | M6 Gate | M6-01至 M6-06 | Observability 验收证据 | 故障注入下五类核心问题均可唯一定位 | `NOT_STARTED` |
+| M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard + Agent Connectivity Diag | Diag 复用生产 Token Parser、Endpoint/DNS、Dialer、TLS Builder、Pin Verifier 和 ALPN，覆盖 Token/Endpoint/DNS/TCP/TLS/Pin/ALPN；默认 Precheck 不执行 Auth/Snapshot，未来真实诊断须先冻结无污染协议语义；不得复制宽松连接栈，也不得把完整 Token 写入 argv 作为唯一入口；输出 PASS/WARNING/FAIL 与 READY 变体；覆盖证书 30/7/1 天告警、Audit 查询/固定边界流式导出、Linux systemd 与 Windows SCM 的启动失败、恢复重启和 Stop/Shutdown 超时诊断 | `DONE` |
+| M6-07 | M6 Gate | M6-01至 M6-06 | Observability 验收证据 | 故障注入下五类核心问题均可唯一定位 | `IN_PROGRESS` |
 
 ## 12.2 M6 Gate Checklist
 
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-05` 已完成。当前待办为：
 
-1. `M6-06` — 实现、独立复审与最终 Head 精确 CI 已齐备，当前等待用户阶段复审。真实 Auth/Snapshot 诊断因缺少不污染在线 Session 的独立协议语义不纳入 V0.1 默认 Precheck。
+1. `M6-07` — 审计六项 Observability Gate 证据，补齐真实故障注入下状态、日志、Metric、Trace 一致性和 Windows 持久日志定位缺口后进入复审。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 至 M6-05 已完成；M6-06 当前为 `REVIEW`，完成数保持 `80/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次进度同步自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 至 M6-06 已完成；M6-07 当前为 `IN_PROGRESS`，完成数为 `81/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次进度同步自动转为 `DONE`。
 
 推进规则：
 
@@ -1600,3 +1600,10 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 最终精确 CI：最终 Head `c65560e268d82e760bc10525f004fa545ce9c9b5` 的 [CI #33315450173](https://github.com/lifei6671/xtunnel/actions/runs/33315450173) 整体 `success`。Windows Agent Service 的固定 Go 工具链、Build、arm64 Cross-build、Stop Timeout Unit Gate、真实 SCM Credential 故障与恢复 Smoke、工作树清洁全部通过；Linux amd64/arm64 的 Proto/OpenAPI/生成物、Web、全仓 Test/Race/Vet/Build、M4/M6 黑盒、Agent Connectivity Diagnostic、1 GiB、Caddy/Nginx、OCI、双架构 systemd 故障诊断与工作树清洁全部通过；amd64 真实 Caddy/Nginx Chromium 同时通过 Dashboard 证书、Audit 筛选/分页/下载和敏感信息边界。
 - 状态与边界：M6-06 已具备产物、失败分支、本地验收、独立复审、提交 SHA 与精确 CI，现从 `IN_PROGRESS` 转为 `REVIEW` 等待用户阶段复审。当前不标记 `DONE`，M6 保持 `5/7`、全局保持 `80/95`，M6-07 继续 `NOT_STARTED`，M6 Gate Checklist 全部未勾选。
 - 文档同步：根 README 与本开发计划同步最终提交、CI、状态、仪表盘和队列；总技术方案、Runbook 已与最终 `KillSignal=SIGCONT` 故障注入语义一致。Proto、OpenAPI/生成物、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、生产 Unit、权限模型、日志契约与 `AGENTS.md` 无需再改。
+
+## 2026-08-30 · M6-06 用户阶段复审与 M6-07 启动 · IN_PROGRESS
+
+- M6-06 复审与状态：用户明确确认阶段复审通过。最终证据提交 `6da646c33f772f5fbf847c44a2c870384aba2596` 的 [CI #33315994274](https://github.com/lifei6671/xtunnel/actions/runs/33315994274) 为 `completed/success`，Head SHA 精确匹配；Windows Agent Service、Linux amd64/arm64 全矩阵、真实 Caddy/Nginx Chromium、Agent Connectivity Diagnostic、OCI、双架构 systemd 故障诊断与工作树清洁均成功。结合既有实现、失败分支、本地验收和独立复审，M6-06 从 `REVIEW` 转为 `DONE`，M6 从 `5/7` 更新为 `6/7`，全局从 `80/95` 更新为 `81/95`。
+- M6-07 启动边界：用户同时确认继续，M6-07 依赖已闭环并进入 `IN_PROGRESS`。本轮先逐项审计 Span 命名、跨边界 Trace Context、日志与 Trace 关联、Metric Label 基数、四类故障的状态/日志/Metric/Trace 一致性，以及 Windows SCM 持久日志定位六项证据；只有真实缺口完成实现、验证、独立复审与精确 CI 后才能勾选 Checklist 或转为 `REVIEW`。
+- 状态与 Gate：M6 Gate Checklist 暂时六项全部未勾选，M6-07 不因前序任务分别通过而自动完成；M7 继续 `NOT_STARTED`。本次仅闭环 M6-06 产品任务，并启动 M6-07 证据审计。
+- 文档同步：根 README 与本开发计划同步 M6-06 用户复审、最终证据、任务状态、仪表盘和队列。总技术方案、Proto、OpenAPI/生成物、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、部署、权限模型、日志契约与 `AGENTS.md` 暂无需更新；M6-07 审计若发现真实契约或可执行 Gate 缺口，再按其所有权最小同步。
