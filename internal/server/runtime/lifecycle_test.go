@@ -75,7 +75,8 @@ func TestConnectorLifecycleDisconnectUsesActiveWorkTombstoneUntilFinish(t *testi
 		t.Fatalf("RegisterActiveWork() error = %v", err)
 	}
 	event, cleared := fixture.registry.DisconnectIfCurrent(fixture.session, "control_session_closed")
-	if !cleared || event.Name != ConnectorEventDisconnected || !event.Snapshot.Tombstone || event.Snapshot.ActiveWork != 1 {
+	if !cleared || event.Name != ConnectorEventDisconnected || !event.Snapshot.Tombstone ||
+		event.Snapshot.ActiveWork != 1 || !event.TunnelBecameOffline {
 		t.Fatalf("DisconnectIfCurrent() = %#v, %v", event, cleared)
 	}
 	snapshots := fixture.registry.ConnectorSnapshots()
@@ -90,6 +91,53 @@ func TestConnectorLifecycleDisconnectUsesActiveWorkTombstoneUntilFinish(t *testi
 	}
 	if snapshots := fixture.registry.ConnectorSnapshots(); len(snapshots) != 0 {
 		t.Fatalf("ConnectorSnapshots() after final Active = %#v", snapshots)
+	}
+}
+
+func TestConnectorLifecycleDisconnectFreezesDrainingBeforeActiveWorkTombstone(t *testing.T) {
+	fixture := newActiveWorkFixture(t, runtimeTunnelID, runtimeConnectorID)
+	if _, observed := fixture.registry.ObserveConnected(fixture.session, ConnectorMetadata{Hostname: "edge-a"}); !observed {
+		t.Fatal("ObserveConnected() = false")
+	}
+	work, err := fixture.tunnel.RegisterActiveWork(fixture.spec(runtimeWorkID, runtimeConnectionID))
+	if err != nil {
+		t.Fatalf("RegisterActiveWork() error = %v", err)
+	}
+	if _, changed := fixture.registry.ObserveDraining(fixture.session); !changed {
+		t.Fatal("ObserveDraining() = false")
+	}
+	event, disconnected := fixture.registry.DisconnectIfCurrent(fixture.session, "control_session_closed")
+	if !disconnected || !event.WasDraining || !event.Snapshot.Tombstone ||
+		event.Snapshot.Status != "" || event.Snapshot.ActiveWork != 1 {
+		t.Fatalf("DisconnectIfCurrent() = %#v/%t, want frozen Draining Active Work Tombstone", event, disconnected)
+	}
+	if err := work.Finish(); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+}
+
+func TestDisconnectEventFreezesLastCurrentConnectorTransition(t *testing.T) {
+	registry := newRegistry(sessionGenerator(1))
+	first, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := installAuthenticated(registry, runtimeTunnelID, runtimeConnectorIDTwo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range []Session{first, second} {
+		if _, observed := registry.ObserveConnected(session, ConnectorMetadata{}); !observed {
+			t.Fatalf("ObserveConnected(%s) = false", session.ConnectorID)
+		}
+	}
+	firstEvent, disconnected := registry.DisconnectIfCurrent(first, "control_session_closed")
+	if !disconnected || firstEvent.Name != ConnectorEventDisconnected || firstEvent.TunnelBecameOffline {
+		t.Fatalf("first DisconnectIfCurrent() = %#v/%t, want Tunnel still online", firstEvent, disconnected)
+	}
+	secondEvent, disconnected := registry.DisconnectIfCurrent(second, "control_session_closed")
+	if !disconnected || secondEvent.Name != ConnectorEventDisconnected || !secondEvent.TunnelBecameOffline {
+		t.Fatalf("second DisconnectIfCurrent() = %#v/%t, want frozen Tunnel offline edge", secondEvent, disconnected)
 	}
 }
 

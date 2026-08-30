@@ -1177,7 +1177,10 @@ components:
       additionalProperties: false
       required: [code, message, occurred_at]
       properties:
-        code: { type: string, minLength: 1, maxLength: 64 }
+        code:
+          type: string
+          enum: [TUNNEL_OFFLINE, CONNECTOR_OFFLINE, ORIGIN_DOWN, NO_CAPACITY, PROTOCOL_ERROR]
+          description: M6-05 Dashboard 使用的五类冻结诊断码。
         message: { type: string, minLength: 1 }
         occurred_at: { $ref: '#/components/schemas/DateTime' }
         request_id: { oneOf: [{ $ref: '#/components/schemas/RequestID' }, { type: 'null' }] }
@@ -1185,7 +1188,7 @@ components:
       type: object
       additionalProperties: false
       required: [availability, items]
-      description: M6 Error Read Model 未就绪时返回 UNAVAILABLE 和空 items。
+      description: M6-05 Error Read Model 就绪后返回 AVAILABLE；没有最近错误时 items 为空。UNAVAILABLE 只表示该 Read Model 尚不可用。
       if:
         properties: { availability: { const: UNAVAILABLE } }
         required: [availability]

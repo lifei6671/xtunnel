@@ -1,5 +1,14 @@
+import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
+
+import type { components } from "../src/api/schema.gen";
+
+type AuthSession = components["schemas"]["AuthSession"];
+type Dashboard = components["schemas"]["Dashboard"];
+type Tunnel = components["schemas"]["Tunnel"];
 
 type JSONRecord = Record<string, unknown>;
 
@@ -57,11 +66,126 @@ async function expectNoStore(headers: Record<string, string>) {
   expect(headers.pragma).toBe("no-cache");
 }
 
+type AgentExit = { code: number | null; signal: NodeJS.Signals | null };
+
+async function waitForAgentExit(exited: Promise<AgentExit>, timeout: number): Promise<AgentExit> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      exited,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Agent did not exit before timeout")), timeout);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function killAgent(agent: ChildProcess, exited: Promise<AgentExit>, verifyUnexpectedExit: boolean) {
+  if (agent.exitCode === null && agent.signalCode === null && !agent.kill("SIGKILL")) {
+    throw new Error("Could not send SIGKILL to Agent");
+  }
+  let result: AgentExit;
+  try {
+    result = await waitForAgentExit(exited, 10_000);
+  } catch (error) {
+    if (agent.exitCode === null && agent.signalCode === null) {
+      agent.kill("SIGKILL");
+      await waitForAgentExit(exited, 2_000).catch(() => undefined);
+    }
+    throw error;
+  }
+  if (verifyUnexpectedExit && (result.code !== null || result.signal !== "SIGKILL")) {
+    throw new Error(`Agent did not preserve the injected failure: code=${String(result.code)} signal=${String(result.signal)}`);
+  }
+}
+
 const proxyKind = process.env.XTUNNEL_E2E_PROXY_KIND;
+
+test("Web-only mock 验证概览页五类最近错误渲染", async ({ page }) => {
+  const sensitiveRequestID = "req_dashboard_sensitive_marker";
+  const occurredAt = "2026-08-30T01:02:03Z";
+  const consoleErrors: string[] = [];
+  const items = [
+    { code: "TUNNEL_OFFLINE", message: "当前没有可用 Tunnel。", occurred_at: occurredAt, request_id: sensitiveRequestID },
+    { code: "CONNECTOR_OFFLINE", message: "Connector 已断开。", occurred_at: occurredAt, request_id: null },
+    { code: "ORIGIN_DOWN", message: "源站当前不可用。", occurred_at: occurredAt, request_id: null },
+    { code: "NO_CAPACITY", message: "当前没有可用容量。", occurred_at: occurredAt, request_id: null },
+    { code: "PROTOCOL_ERROR", message: "<img src=x onerror=alert('unsafe')>", occurred_at: occurredAt, request_id: null },
+    { code: "PROTOCOL_ERROR", message: "第二条同时协议错误。", occurred_at: occurredAt, request_id: null },
+  ] satisfies Dashboard["recent_errors"]["items"];
+  const session = {
+    admin: { id: "adm_01J00000000000000000000000", username: "dashboard-admin" },
+    csrf_token: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    expires_at: "2026-08-31T01:02:03Z",
+  } satisfies AuthSession;
+  let recentErrors: Dashboard["recent_errors"] = { availability: "AVAILABLE", items };
+
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  await page.route("**/api/v1/auth/me", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(session),
+    });
+  });
+  await page.route("**/api/v1/dashboard", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        server_status: "READY",
+        counts: {
+          tunnels_total: 0,
+          tunnels_online: 0,
+          tunnels_offline: 0,
+          connectors_online: 0,
+          services_total: 0,
+          services_ready: 0,
+          services_error: 0,
+          active_connections: 0,
+        },
+        traffic: {
+          availability: "AVAILABLE",
+          connections_today: 0,
+          ingress_bytes_today: 0,
+          egress_bytes_today: 0,
+        },
+        recent_errors: recentErrors,
+        generated_at: "2026-08-30T01:02:04Z",
+      } satisfies Dashboard),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("dashboard-admin", { exact: true })).toBeVisible();
+  await expect(page.locator(".error-list li")).toHaveCount(6);
+  for (const label of ["Tunnel 离线", "Connector 离线", "源站异常", "容量不足"] as const) {
+    await expect(page.getByText(label, { exact: true })).toBeVisible();
+  }
+  await expect(page.getByText("协议错误", { exact: true })).toHaveCount(2);
+  await expect(page.getByText(`当前没有可用 Tunnel。 · 请求 ${sensitiveRequestID}`, { exact: true })).toBeVisible();
+  await expect(page.getByText("<img src=x onerror=alert('unsafe')>", { exact: true })).toBeVisible();
+  await expect(page.locator(".error-list img")).toHaveCount(0);
+  expect(page.url().includes(sensitiveRequestID)).toBe(false);
+  expect(await browserStorageIsEmpty(page, sensitiveRequestID)).toBe(true);
+  expect(consoleErrors.some((message) => message.includes("same key"))).toBe(false);
+
+  recentErrors = { availability: "AVAILABLE", items: [] };
+  await page.getByRole("button", { name: "刷新运行状态" }).click();
+  await expect(page.getByText("当前快照没有最近错误。", { exact: true })).toBeVisible();
+
+  recentErrors = { availability: "UNAVAILABLE", items: [] };
+  await page.getByRole("button", { name: "刷新运行状态" }).click();
+  await expect(page.getByText("M6 Error Read Model 尚未接入。", { exact: true })).toBeVisible();
+});
 
 test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${proxyKind ?? "unknown"}）`, async ({ page, context }) => {
   const password = process.env.XTUNNEL_E2E_PASSWORD;
+  const agentBinary = process.env.XTUNNEL_E2E_AGENT_BINARY;
   if (!password) throw new Error("XTUNNEL_E2E_PASSWORD is required");
+  if (!agentBinary) throw new Error("XTUNNEL_E2E_AGENT_BINARY is required");
   if (proxyKind !== "caddy" && proxyKind !== "nginx") {
     throw new Error("XTUNNEL_E2E_PROXY_KIND must be caddy or nginx");
   }
@@ -143,6 +267,62 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   expect(await browserStorageIsEmpty(page, firstToken)).toBe(true);
 
   const tunnelPath = `/api/v1/tunnels/${tunnelID}`;
+  let agentSpawnError: Error | undefined;
+  // Token 只进入 Agent 子进程环境，argv 和标准流都不承载 Secret。
+  const agent = spawn(agentBinary, ["run"], {
+    env: { XTUNNEL_TOKEN: firstToken },
+    stdio: "ignore",
+  });
+  agent.once("error", (error) => {
+    agentSpawnError = error;
+  });
+  const agentExited = new Promise<AgentExit>((resolve) => {
+    agent.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  try {
+    await expect.poll(async () => {
+      if (agentSpawnError) throw agentSpawnError;
+      if (agent.exitCode !== null || agent.signalCode !== null) return -1;
+      const result = await browserRequest(page, tunnelPath);
+      if (result.status !== 200) return -1;
+      return Number((result.body as Tunnel | undefined)?.connectors_online ?? -1);
+    }, { timeout: 20_000 }).toBe(1);
+    // SIGTERM 会先进入 DRAINING，属于预期关闭；只有强制终止才能注入真实意外断线。
+    await killAgent(agent, agentExited, true);
+  } finally {
+    if (agent.exitCode === null && agent.signalCode === null) {
+      await killAgent(agent, agentExited, false).catch(() => undefined);
+    }
+  }
+
+  await expect.poll(async () => {
+    const result = await browserRequest(page, "/api/v1/dashboard");
+    if (result.status !== 200) return false;
+    const recentErrors = result.body?.recent_errors as JSONRecord | undefined;
+    const dashboardItems = Array.isArray(recentErrors?.items) ? recentErrors.items : [];
+    const codes = dashboardItems.map((item) =>
+      typeof item === "object" && item !== null && "code" in item ? String(item.code) : "",
+    );
+    return recentErrors?.availability === "AVAILABLE" &&
+      codes.includes("CONNECTOR_OFFLINE") && codes.includes("TUNNEL_OFFLINE");
+  }, { timeout: 20_000 }).toBe(true);
+
+  await page.getByRole("button", { name: "概览" }).click();
+  await page.getByRole("button", { name: "刷新运行状态" }).click();
+  const recentErrorsPanel = page.locator(".recent-errors");
+  await expect(recentErrorsPanel.getByText("AVAILABLE", { exact: true })).toBeVisible();
+  const connectorOffline = recentErrorsPanel.locator("li").filter({ hasText: "Connector 离线" });
+  const tunnelOffline = recentErrorsPanel.locator("li").filter({ hasText: "Tunnel 离线" });
+  await expect(connectorOffline).toBeVisible();
+  await expect(tunnelOffline).toBeVisible();
+  await expect(connectorOffline).not.toContainText("请求");
+  await expect(tunnelOffline).not.toContainText("请求");
+  expect(page.url().includes(firstToken)).toBe(false);
+  expect(await page.locator("body").evaluate((body, token) => !body.textContent?.includes(token), firstToken)).toBe(true);
+  expect(await browserStorageIsEmpty(page, firstToken)).toBe(true);
+
+  await page.getByRole("button", { name: "服务与隧道" }).click();
+  await expect(page.getByRole("heading", { name: "browser-e2e" })).toBeVisible();
   const tunnelBefore = await browserRequest(page, tunnelPath);
   expect(tunnelBefore.status).toBe(200);
   const tunnelETag = tunnelBefore.headers.etag;

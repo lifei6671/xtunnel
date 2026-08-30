@@ -180,6 +180,7 @@ run_browser_suite() {
   start_proxy "$suite_kind" || return 1
   suite_status=0
   XTUNNEL_E2E_PASSWORD="$e2e_admin_password" \
+    XTUNNEL_E2E_AGENT_BINARY="$agent_binary" \
     XTUNNEL_E2E_PROXY_KIND="$suite_kind" \
     XTUNNEL_E2E_OUTPUT_DIR="$temp_dir/playwright-$suite_kind" \
     "$repo_root/web/node_modules/.bin/playwright" test \
@@ -238,6 +239,7 @@ key_file="$temp_dir/loopback.key"
 caddy_config="$temp_dir/Caddyfile"
 nginx_config="$temp_dir/nginx.conf"
 server_binary="$temp_dir/xtunnel-server"
+agent_binary="$temp_dir/xtunnel-agent"
 server_log="$temp_dir/server.log"
 mkdir -m 700 "$state_parent" "$data_dir"
 
@@ -247,6 +249,7 @@ ulimit -n 1048576 || fail "Browser E2E requires a nofile limit of at least 10485
 
 npm --prefix "$repo_root/web" run build
 (cd "$repo_root" && go build -o "$server_binary" ./cmd/server)
+(cd "$repo_root" && go build -o "$agent_binary" ./cmd/agent)
 
 e2e_admin_password=$(openssl rand -base64 36 | tr -d '\n')
 [ -n "$e2e_admin_password" ] || fail "Could not generate the temporary administrator password."
@@ -264,7 +267,7 @@ printf '%s\n' \
   '  listen: "127.0.0.1:18081"' \
   'agent_gateway:' \
   '  listen: "127.0.0.1:17443"' \
-  '  public_hostname: "gateway.example.test"' \
+  '  public_hostname: "127.0.0.1"' \
   >"$config_file"
 
 target_hash=$(printf '%s' "$data_dir" | sha256sum | awk '{print $1}')

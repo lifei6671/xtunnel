@@ -408,6 +408,33 @@ func (e OriginPatchScheme) Valid() bool {
 	}
 }
 
+// Defines values for RecentErrorCode.
+const (
+	RecentErrorCodeCONNECTOROFFLINE RecentErrorCode = "CONNECTOR_OFFLINE"
+	RecentErrorCodeNOCAPACITY       RecentErrorCode = "NO_CAPACITY"
+	RecentErrorCodeORIGINDOWN       RecentErrorCode = "ORIGIN_DOWN"
+	RecentErrorCodePROTOCOLERROR    RecentErrorCode = "PROTOCOL_ERROR"
+	RecentErrorCodeTUNNELOFFLINE    RecentErrorCode = "TUNNEL_OFFLINE"
+)
+
+// Valid indicates whether the value is a known member of the RecentErrorCode enum.
+func (e RecentErrorCode) Valid() bool {
+	switch e {
+	case RecentErrorCodeCONNECTOROFFLINE:
+		return true
+	case RecentErrorCodeNOCAPACITY:
+		return true
+	case RecentErrorCodeORIGINDOWN:
+		return true
+	case RecentErrorCodePROTOCOLERROR:
+		return true
+	case RecentErrorCodeTUNNELOFFLINE:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RecentErrorsSummaryAvailability.
 const (
 	RecentErrorsSummaryAvailabilityAVAILABLE   RecentErrorsSummaryAvailability = "AVAILABLE"
@@ -973,7 +1000,7 @@ type Dashboard struct {
 	// GeneratedAt RFC 3339 UTC `Z` 时间戳。
 	GeneratedAt DateTime `json:"generated_at"`
 
-	// RecentErrors M6 Error Read Model 未就绪时返回 UNAVAILABLE 和空 items。
+	// RecentErrors M6-05 Error Read Model 就绪后返回 AVAILABLE；没有最近错误时 items 为空。UNAVAILABLE 只表示该 Read Model 尚不可用。
 	RecentErrors RecentErrorsSummary   `json:"recent_errors"`
 	ServerStatus DashboardServerStatus `json:"server_status"`
 
@@ -1279,15 +1306,19 @@ type PublicLimits struct {
 
 // RecentError defines model for RecentError.
 type RecentError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	// Code M6-05 Dashboard 使用的五类冻结诊断码。
+	Code    RecentErrorCode `json:"code"`
+	Message string          `json:"message"`
 
 	// OccurredAt RFC 3339 UTC `Z` 时间戳。
 	OccurredAt DateTime                     `json:"occurred_at"`
 	RequestId  nullable.Nullable[RequestID] `json:"request_id,omitempty"`
 }
 
-// RecentErrorsSummary M6 Error Read Model 未就绪时返回 UNAVAILABLE 和空 items。
+// RecentErrorCode M6-05 Dashboard 使用的五类冻结诊断码。
+type RecentErrorCode string
+
+// RecentErrorsSummary M6-05 Error Read Model 就绪后返回 AVAILABLE；没有最近错误时 items 为空。UNAVAILABLE 只表示该 Read Model 尚不可用。
 type RecentErrorsSummary struct {
 	Availability RecentErrorsSummaryAvailability `json:"availability"`
 	Items        []RecentError                   `json:"items"`

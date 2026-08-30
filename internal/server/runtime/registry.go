@@ -791,6 +791,9 @@ func (registry *Registry) disconnectIfCurrent(session Session, reason string) (C
 		runtime.lastPicked = ""
 	}
 	event := runtime.disconnectObservationLocked(session, reason)
+	if event.Name != "" {
+		event.TunnelBecameOffline = len(runtime.current) == 0
+	}
 	releaseSessionID := runtime.retireSessionLocked(session, healthTarget)
 	runtime.mu.Unlock()
 	connectorLimit.Release()

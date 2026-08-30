@@ -66,6 +66,12 @@ type ConnectorLifecycleEvent struct {
 	Name     string
 	Snapshot ConnectorSnapshot
 	Reason   string
+	// WasDraining 冻结断开前的 Draining 状态。Active Work Tombstone 会清空
+	// Snapshot.Status，因此观察方不能从断开后的 Snapshot 反推正常 Drain。
+	WasDraining bool
+	// TunnelBecameOffline 只由 DisconnectIfCurrent 在 TunnelRuntime 锁内判定：
+	// 本次 Current 摘除后已无其他 Current Connector。调用方不得在锁外重算。
+	TunnelBecameOffline bool
 }
 
 // connectorObservation 是 TunnelRuntime.mu 保护的可变生命周期事实；对外只发布
@@ -249,6 +255,7 @@ func (runtime *TunnelRuntime) disconnectObservationLocked(session Session, reaso
 		return ConnectorLifecycleEvent{}
 	}
 	snapshot := runtime.connectorSnapshotLocked(observation)
+	wasDraining := snapshot.Status == ConnectorStatusDraining
 	if snapshot.ActiveWork > 0 {
 		observation.status = ""
 		observation.tombstone = true
@@ -258,7 +265,9 @@ func (runtime *TunnelRuntime) disconnectObservationLocked(session Session, reaso
 	} else {
 		delete(runtime.connectors, session.ConnectorID)
 	}
-	return ConnectorLifecycleEvent{Name: ConnectorEventDisconnected, Snapshot: snapshot, Reason: reason}
+	return ConnectorLifecycleEvent{
+		Name: ConnectorEventDisconnected, Snapshot: snapshot, Reason: reason, WasDraining: wasDraining,
+	}
 }
 
 // removeFinishedTombstoneLocked 在确认该 Connector 已无任何 ACTIVE Work 后删除墓碑。

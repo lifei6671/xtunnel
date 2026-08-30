@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-05 Error/Status Observability · BLOCKED（范围审计完成，等待公共 API 行为与 CI 变更确认）
+> **当前阶段**：M6-05 Error/Status Observability · REVIEW（实现、本地验收与独立复审完成，等待精确 CI 与用户阶段复审）
 >
-> **当前结论**：用户已确认 M6-04 阶段复审通过；实现提交 `a1e9c22de27a4453e1ffb4a52521a8d3ae570f41`、证据提交 `0bc59cd731d4930dbef9a22fef979d300f17ddc6` 及各自精确 CI 均为 `success`，M6-04 转为 `DONE`，M6 与全局完成数更新为 `4/7`、`79/95`。M6-05 的权威契约、代码缺口与安全/测试边界已完成三路只读审计；推荐以五类有限诊断码、进程内固定五槽 Latest Projection、既有 Dashboard API/Web 和真实 Linux 双架构故障黑盒完成类别级诊断，不做资源级下钻。因范围包含 OpenAPI 行为/枚举、生成物与 CI Workflow 变更，M6-05 当前标记 `BLOCKED`，等待用户明确确认；M6 Gate Checklist 继续全部未勾选。
+> **当前结论**：用户已确认 M6-05 范围；五类有限诊断码、进程内固定五槽 Latest Projection、最终逻辑 OPEN 与 generation-fenced Connector/Tunnel 生命周期接线、Dashboard API/Web、真实 Linux 双架构五故障黑盒及 Caddy/Nginx Browser E2E 均已实现。本地 Go/Web/OpenAPI/生成漂移、Race、Module 与 Shell 验证通过，安全/生命周期复审最终 `APPROVED`；M6-05 进入 `REVIEW`，等待实现提交的精确 CI 与用户阶段复审。M6 与全局完成数仍为 `4/7`、`79/95`，M6 Gate Checklist 继续全部未勾选。
 
 ---
 
@@ -376,7 +376,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `DONE` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `DONE` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `DONE` |
-| M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `BLOCKED` |
+| M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `REVIEW` |
 | M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard + Agent Connectivity Diag | Diag 复用生产 Token Parser、Endpoint/DNS、Dialer、TLS Builder、Pin Verifier 和 ALPN，覆盖 DNS/TCP/TLS/Pin/ALPN/Auth/Snapshot Receive；不得复制宽松连接栈，也不得把完整 Token 写入 argv 作为唯一入口；输出 PASS/WARNING/FAIL 与 READY 变体；覆盖证书 30/7/1 天告警、Audit 查询/导出、Linux systemd 与 Windows SCM 的启动失败、恢复重启和 30s Stop/Shutdown 超时诊断 | `NOT_STARTED` |
 | M6-07 | M6 Gate | M6-01至 M6-06 | Observability 验收证据 | 故障注入下五类核心问题均可唯一定位 | `NOT_STARTED` |
 
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-04` 已完成。当前待办为：
 
-1. `M6-05` — 三路范围审计已完成，等待用户确认五类诊断码、固定五槽内存投影、既有 Dashboard 行为切换、生成契约与 Linux 双架构 CI 范围；确认前不修改实现。
+1. `M6-05` — 五类诊断码、固定五槽内存投影、Dashboard、真实 Linux 双架构五故障黑盒与 Caddy/Nginx Browser E2E 已实现并通过本地验收、独立复审；等待精确 CI 与用户阶段复审。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 至 M6-04 已完成；M6-05 当前为 `BLOCKED`，完成数更新为 `79/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次进度同步自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 至 M6-04 已完成；M6-05 当前为 `REVIEW`，完成数保持 `79/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次进度同步自动转为 `DONE`。
 
 推进规则：
 
@@ -1561,3 +1561,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - Web 与下钻边界：现有 Dashboard 最近错误区改为五类稳定中文标签并展示可选 `request_id`，修复相同时间/类别的 React Key 冲突；浏览器不重算状态、不解析 `message`、不使用 HTML 注入。当前 Wire 没有 Tunnel/Service/Connector/Trace ID，本轮不增加资源 ID、详情 URL 或点击跳转，因此交付是“类别级诊断”而非“资源级下钻”；若要求点击定位具体资源，必须另行确认 OpenAPI 结构化可空 ID 扩展，禁止把 ID 拼进 message。
 - 测试与 CI：单元/Race 覆盖五类映射、状态边沿去重、旧 generation、内部 Failover、固定五槽、并发发布/快照、UTC、可空 request ID、返回副本和 Secret/Origin/Header/IP/底层错误 Sentinel；Management Contract 覆盖 `AVAILABLE` 空/非空与最大项数；Linux amd64/arm64 新增明确命名的 M6-05 Server→Agent→Origin 五类故障黑盒；Linux amd64 复用现有 Caddy/Nginx Chromium Gate 验证真实页面类别、空态、刷新与敏感数据不进入 DOM/URL/Storage，不新增 Playwright 依赖或 Lockfile 变更。
 - 授权与状态：上述范围会修改 OpenAPI `RecentError.code` 行为/枚举及 Go/TypeScript 生成物、Dashboard Application/API/Web、Tunnel/Session/Health/Capacity 观察接线、测试与 CI Workflow，属于需确认变更；不新增 REST Path、第三方依赖、Lockfile、Database Schema/Migration、Server 配置、Proto、生产权限或资源级下钻字段，也不改变既有日志字段/级别。三路只读审计均确认类别级方案可实施；用户明确确认前 M6-05 标记 `BLOCKED`，M6 Gate Checklist 全部未勾选。
+
+## 2026-08-30 · M6-05 Error/Status Observability 实现与本地验收 · REVIEW
+
+- 授权与边界：用户明确确认上一轮审计的 M6-05 范围。OpenAPI `RecentError.code` 冻结为五值枚举并经 Wrapper 更新 Go/TypeScript 生成物；实现 Dashboard Application/API/Web、Tunnel/Session 生命周期观察、最终逻辑 OPEN 观察、测试与 CI Workflow。未新增 REST Path、第三方依赖或 Lockfile，也未修改 Database Schema/Migration、Server 配置、Proto、部署配置、生产权限、资源级下钻字段或日志字段/级别。
+- 投影与 API：新增进程内固定五槽 Latest Projection，分别保存 `TUNNEL_OFFLINE`、`CONNECTOR_OFFLINE`、`ORIGIN_DOWN`、`NO_CAPACITY`、`PROTOCOL_ERROR` 每类最新不可变记录；并发发布使用原子槽，同类迟到记录不倒退，Snapshot 深拷贝并按 UTC 时间倒序。固定中文文案不接收底层错误、Origin、Header、IP 或 Secret；`request_id` 仅保留通过 `req_` 校验的真实关联值。Dashboard Recent Errors 从 `UNAVAILABLE` 转为 `AVAILABLE`，空进程返回非 nil 空列表；`services_error` 只统计 `APPLY_FAILED`、`TUNNEL_OFFLINE`、`ORIGIN_UNHEALTHY`、`NO_CAPACITY`。
+- OPEN 与生命周期：Tunnel 外层 defer 只在一次最终逻辑 OPEN 收敛后观察有限 Protocol Error Code，内部 Work 重试、Connector Failover、`OPEN_DRAINING`、认证/配置/取消/版本/Internal 分支不重复或误发。Connector 断开先在 `TunnelRuntime` 锁内完成 generation fencing，再冻结 `WasDraining` 与 `TunnelBecameOffline` 两个 O(1) 事件事实；Bridge 不反向扫描 Session Manager。Server Shutdown、Revoke、Delete、Replacement 与正常 Drain 均被过滤，包含 Draining 但仍有 Active Work、Snapshot 转 Tombstone 的竞态边界。
+- Web 与真实浏览器：概览页以生成枚举的穷尽映射展示五类中文标签和可选请求 ID，修复同时间/类别 Key 冲突，不解析固定 message、不使用 HTML 注入。Web-only 类型化 Fixture 覆盖五类、空态、`UNAVAILABLE`、XSS 字符串与 Storage；现有 Linux Caddy/Nginx Chromium Gate 构建真实 Agent，Token 仅经子进程环境传递，以 `SIGKILL` 注入非预期断线，再从真实 `/dashboard` 与刷新后的 Overview 验证 Connector/Tunnel Offline、空请求 ID及 Token 不进入 DOM、URL、LocalStorage 或 SessionStorage。
+- 故障黑盒与 CI：新增 Linux 原生 Server→Agent→Origin 五类故障黑盒。`NO_CAPACITY` 使用真实 Work Pool 容量竞争，`ORIGIN_DOWN` 关闭真实 Origin，Connector/Tunnel Offline 使用 Current Session 停止与 generation fencing，`PROTOCOL_ERROR` 使用已认证测试 Agent 返回非法 `OPEN_OK + PROTOCOL_ERROR`。Dashboard 断言五槽恰好五项、UTC、真实/空 request ID 与敏感 Sentinel 不泄漏；CI 的 Linux amd64/arm64 Matrix 新增精确命名步骤 `Run native M6 Error status observability blackbox`，Linux amd64 Browser Gate 同时执行真实 Agent 流程。
+- 本地证据与复审：Go `1.27.0`、`GOTOOLCHAIN=local` 下，全仓 `go test ./...`、`go vet ./...`、相关五包 Race、`go mod verify`、`go mod tidy -diff` 通过；Web Check/Build、OpenAPI Validate/Breaking `100/100`、Generate Check、Contract Test、Shell 语法与 `git diff --check` 通过。WSL Linux amd64 五故障黑盒单次及连续 10 次通过，Linux arm64 测试二进制交叉编译通过；真实 Agent+Caddy/Nginx 浏览器流程等待精确 Linux CI，Windows 本机未冒充该证据。安全/生命周期复审在修复 Drain Tombstone 与锁外 Tunnel 判断两个 P1 后最终 `APPROVED`，无剩余 P0/P1/P2。
+- 状态与文档：M6-05 进入 `REVIEW`，等待实现提交的精确 CI 与用户阶段复审，不标记 `DONE`；M6 保持 `4/7`、全局保持 `79/95`，M6 Gate Checklist 全部未勾选。根 README、总技术方案和本开发计划已同步；Proto、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、部署配置、权限模型、日志契约与 `AGENTS.md` 无需更新。

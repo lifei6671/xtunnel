@@ -29,6 +29,7 @@ import (
 	servermanagementapi "github.com/lifei6671/xtunnel/internal/server/managementapi"
 	servermetrics "github.com/lifei6671/xtunnel/internal/server/metrics"
 	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
+	serverrecenterror "github.com/lifei6671/xtunnel/internal/server/recenterror"
 	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
 	"github.com/lifei6671/xtunnel/internal/server/sessionruntime"
@@ -130,6 +131,7 @@ func openGatewayLifecycle(
 	tokenService *application.ConnectionTokenService,
 	metricsBridge *serverMetricsBridge,
 	usageBridge *serverUsageBridge,
+	diagnosticsBridge *serverDiagnosticsBridge,
 	traceRuntime *tracing.Runtime,
 ) (*gateway.Server, *sessionruntime.Manager, *tunnel.Proxy, *serverlimits.Manager, error) {
 	if metricsBridge == nil {
@@ -137,6 +139,9 @@ func openGatewayLifecycle(
 	}
 	if usageBridge == nil || usageBridge.owner == nil {
 		return nil, nil, nil, nil, errors.New("server usage bridge is required")
+	}
+	if diagnosticsBridge == nil || diagnosticsBridge.owner == nil || diagnosticsBridge.now == nil {
+		return nil, nil, nil, nil, errors.New("server diagnostics bridge is required")
 	}
 	if healthBudget == nil {
 		return nil, nil, nil, nil, errors.New("health target budget manager is required")
@@ -203,6 +208,7 @@ func openGatewayLifecycle(
 		Logger:               logger,
 		ReportRuntimeError:   reportRuntimeError,
 		ReconcileObserver:    metricsBridge.ObserveReconcile,
+		LifecycleObserver:    diagnosticsBridge.ObserveConnectorLifecycle,
 	})
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("construct gateway Session runtime: %w", err)
@@ -240,6 +246,7 @@ func openGatewayLifecycle(
 		LimitManager:   limitManager,
 		Metrics:        metricsBridge,
 		Usage:          usageBridge,
+		Diagnostics:    diagnosticsBridge,
 		Logger:         logger,
 		Tracing:        traceRuntime,
 	})
@@ -705,6 +712,10 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 		}
 	}
 	metricsBridge := &serverMetricsBridge{}
+	recentErrors := serverrecenterror.NewOwner()
+	diagnosticsBridge := &serverDiagnosticsBridge{
+		owner: recentErrors, now: time.Now, reportError: reportRuntimeError,
+	}
 	usageOwner, err := serverusage.New(serverusage.Options{
 		Repository: &serverUsageRepository{store: serverResources.database},
 		ReportError: func(error) {
@@ -716,7 +727,8 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 	}
 	usageBridge := &serverUsageBridge{owner: usageOwner}
 	gatewayServer, sessions, tunnelProxy, limitManager, err := openGatewayLifecycle(
-		config, resources, logger, reportRuntimeError, healthBudget, identity, tokenService, metricsBridge, usageBridge, traceRuntime,
+		config, resources, logger, reportRuntimeError, healthBudget, identity, tokenService,
+		metricsBridge, usageBridge, diagnosticsBridge, traceRuntime,
 	)
 	if err != nil {
 		return nil, err
@@ -867,7 +879,7 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 		Services:        serviceAPI,
 		System:          systemRead,
 		SecurityAudits:  application.NewSecurityAuditQueryService(serverResources.database),
-		Dashboard:       application.NewDashboardService(tunnels, serviceAPI, systemRead, serviceAPI),
+		Dashboard:       application.NewDashboardService(tunnels, serviceAPI, systemRead, serviceAPI, recentErrors),
 		Logger:          logger,
 	})
 	if err != nil {

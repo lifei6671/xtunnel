@@ -25,12 +25,19 @@ func TestConnectorSnapshotsMetricsHeartbeatDrainAndLifecycleLogs(t *testing.T) {
 	session := commitSession(t, registry, testTunnelID, testConnectorID)
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	var lifecycleMu sync.Mutex
+	observedLifecycle := make([]serverruntime.ConnectorLifecycleEvent, 0, 3)
 	manager, err := New(registry, Options{
 		HighPriorityCapacity: 8, NormalCapacity: 8, InboundCapacity: 8,
 		WriteTimeout: testWriteTimeout, MaxReplayEntries: testReplayEntries,
 		MaxWorkTotal: 64, MaxWorkConnecting: 16, HeartbeatTimeout: 5 * time.Second,
 		SnapshotProvider: testSnapshotProvider{},
 		Logger:           logger,
+		LifecycleObserver: func(event serverruntime.ConnectorLifecycleEvent) {
+			lifecycleMu.Lock()
+			defer lifecycleMu.Unlock()
+			observedLifecycle = append(observedLifecycle, event)
+		},
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -117,6 +124,15 @@ func TestConnectorSnapshotsMetricsHeartbeatDrainAndLifecycleLogs(t *testing.T) {
 	}
 	if strings.Contains(logs, "session_secret") || strings.Contains(logs, "xta_") {
 		t.Fatalf("lifecycle logs exposed a Secret: %s", logs)
+	}
+	lifecycleMu.Lock()
+	events := append([]serverruntime.ConnectorLifecycleEvent(nil), observedLifecycle...)
+	lifecycleMu.Unlock()
+	if len(events) != 3 || events[0].Name != serverruntime.ConnectorEventConnected ||
+		events[1].Name != serverruntime.ConnectorEventDraining ||
+		events[2].Name != serverruntime.ConnectorEventDisconnected ||
+		events[2].Reason != "control_session_closed" || events[2].Snapshot.Session != session {
+		t.Fatalf("LifecycleObserver events = %#v, want fenced connected/draining/disconnected sequence", events)
 	}
 }
 

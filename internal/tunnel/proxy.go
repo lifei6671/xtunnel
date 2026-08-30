@@ -52,6 +52,9 @@ type Options struct {
 	// Usage 接收最终逻辑 OPEN 与 RAW 业务字节的持久化增量。实现必须只更新
 	// 有界内存；任何错误都要沿当前连接失败返回，禁止静默丢弃账目。
 	Usage Usage
+	// Diagnostics 只消费一次逻辑 OPEN 的最终有限错误码和真实 request_id。
+	// 内部 Work 重试与跨 Connector Failover 不得直接调用它，避免重复诊断事件。
+	Diagnostics Diagnostics
 	// Tracing 为 Server 数据面的显式进程级 Trace Runtime。nil 保留不采集、
 	// 不传播 Trace Context 的单元测试与禁用配置行为。
 	Tracing *internaltracing.Runtime
@@ -69,6 +72,12 @@ type Metrics interface {
 	ObserveOriginConnect(time.Duration)
 	AddIngressBytes(uint64)
 	AddEgressBytes(uint64)
+}
+
+// Diagnostics 是数据面向进程内 Error/Status Latest Projection 的最小出口。
+// 回调必须有界、并发安全且不得执行网络、磁盘 IO 或记录底层错误文本。
+type Diagnostics interface {
+	ObserveOpen(protocolv1.ErrorCode, string)
 }
 
 // Usage 是 Tunnel 数据面对进程级 Usage Owner 的最小消费方契约。一次公网逻辑
@@ -270,10 +279,13 @@ func (tunnelProxy *Proxy) openConnection(
 	// Failover 始终留在本栈帧内，因此统一在最外层按最终结果 exactly-once 观测，
 	// 不会把 Wire attempt 误计成新的公网 OPEN。
 	defer func() {
+		code := tunnelMetricErrorCode(resultErr)
+		if tunnelProxy.options.Diagnostics != nil {
+			tunnelProxy.options.Diagnostics.ObserveOpen(code, request.RequestID)
+		}
 		if tunnelProxy.options.Metrics == nil {
 			return
 		}
-		code := tunnelMetricErrorCode(resultErr)
 		tunnelProxy.options.Metrics.ObserveOpen(time.Since(startedAt), code)
 		originConnectLatencyMS := finalOriginConnectLatencyMS
 		if isOriginErrorCode(code) {

@@ -18,6 +18,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/repository"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
+	serverrecenterror "github.com/lifei6671/xtunnel/internal/server/recenterror"
 	serverstatus "github.com/lifei6671/xtunnel/internal/server/status"
 )
 
@@ -69,6 +70,14 @@ func TestManagementReadAPIsUseAuthenticatedFrozenProjections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSystemReadService() error = %v", err)
 	}
+	recentErrors := serverrecenterror.NewOwner()
+	recentRequestID := "req_01K4Z3JMESEMR8E7Z8AC9PKYYJ"
+	recentOccurredAt := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
+	if err := recentErrors.Publish(serverrecenterror.Record{
+		Code: serverrecenterror.CodeOriginDown, OccurredAt: recentOccurredAt, RequestID: &recentRequestID,
+	}); err != nil {
+		t.Fatalf("publish recent error: %v", err)
+	}
 	dashboard := application.NewDashboardService(
 		dashboardTunnelReaderFake{views: []application.TunnelView{{
 			Status: serverstatus.TunnelStatusOnline, ConnectorsOnline: 2, ActiveConnections: 7,
@@ -80,6 +89,7 @@ func TestManagementReadAPIsUseAuthenticatedFrozenProjections(t *testing.T) {
 		}},
 		dashboardStatusOwnerFake{status: application.DashboardServerStatusReady},
 		dashboardUsageReaderFake{totals: repository.UsageTotals{Connections: 9, IngressBytes: 10, EgressBytes: 11}},
+		recentErrors,
 	)
 	handler, err := NewHandler(HandlerOptions{
 		Management: config.Management, Store: store, System: system,
@@ -132,14 +142,20 @@ func TestManagementReadAPIsUseAuthenticatedFrozenProjections(t *testing.T) {
 	egress, egressErr := dashboardBody.Traffic.EgressBytesToday.Get()
 	if dashboardBody.ServerStatus != DashboardServerStatusREADY ||
 		dashboardBody.Counts.TunnelsOnline != 1 || dashboardBody.Counts.ConnectorsOnline != 2 ||
-		dashboardBody.Counts.ServicesReady != 1 || dashboardBody.Counts.ServicesError != 1 ||
+		dashboardBody.Counts.ServicesReady != 1 || dashboardBody.Counts.ServicesError != 2 ||
 		dashboardBody.Counts.ActiveConnections != 7 ||
 		dashboardBody.Traffic.Availability != UsageSummaryAvailabilityAVAILABLE ||
 		connectionsErr != nil || ingressErr != nil || egressErr != nil ||
 		connections != 9 || ingress != 10 || egress != 11 ||
-		dashboardBody.RecentErrors.Availability != RecentErrorsSummaryAvailabilityUNAVAILABLE ||
-		len(dashboardBody.RecentErrors.Items) != 0 {
+		dashboardBody.RecentErrors.Availability != RecentErrorsSummaryAvailabilityAVAILABLE ||
+		len(dashboardBody.RecentErrors.Items) != 1 ||
+		dashboardBody.RecentErrors.Items[0].Code != RecentErrorCodeORIGINDOWN ||
+		!dashboardBody.RecentErrors.Items[0].OccurredAt.Equal(recentOccurredAt) {
 		t.Fatalf("dashboard response = %#v", dashboardBody)
+	}
+	gotRequestID, err := dashboardBody.RecentErrors.Items[0].RequestId.Get()
+	if err != nil || string(gotRequestID) != recentRequestID {
+		t.Fatalf("dashboard recent error request_id = %q/%v, want %q", gotRequestID, err, recentRequestID)
 	}
 
 	healthResponse := doRequest(t, client, http.MethodGet, server.URL+"/api/v1/system/health", "", nil)

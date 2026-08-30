@@ -4950,7 +4950,7 @@ Egress Traffic Today
 Recent Errors
 ```
 
-当前 Dashboard 已直接展示 Server Status、Tunnel/Connector/Service 计数和 Active Connections。Server Status 只来自 System Health owner，页面不得根据资源数量重算；M6 尚未提供的 Connections Today、Ingress/Egress Traffic Today 与 Recent Errors 必须明确显示 `UNAVAILABLE`，不得用零值伪装为真实统计。
+当前 Dashboard 已直接展示 Server Status、Tunnel/Connector/Service 计数、Active Connections、当日 Connections/Ingress/Egress Usage 与 Recent Errors。Server Status 只来自 System Health owner，页面不得根据资源数量重算；Usage 和 Recent Errors owner 已就绪时，即使当前值为空或为零也必须返回 `AVAILABLE`，`UNAVAILABLE` 只保留给对应 Read Model 尚未接入的状态，不得混淆“暂无数据”和“能力不可用”。
 
 ---
 
@@ -5598,7 +5598,7 @@ Traffic Summary
 Recent Errors
 ```
 
-Dashboard API 复用 System Health 的状态 owner，以及既有 Tunnel/Service Application 投影计算资源计数；不同 owner 的只读快照允许最终一致，但不得访问 SQLite 重算运行态或在前端推导第二套状态。M6 Usage 已从 Repository 返回 `AVAILABLE` 当日聚合；Recent Errors 尚未接线，固定返回 `UNAVAILABLE` 和空列表，并明确保留未实现语义。
+Dashboard API 复用 System Health 的状态 owner，以及既有 Tunnel/Service Application 投影计算资源计数；不同 owner 的只读快照允许最终一致，但不得访问 SQLite 重算运行态或在前端推导第二套状态。M6 Usage 从 Repository 返回 `AVAILABLE` 当日聚合；Recent Errors 由进程内固定五槽 Latest Projection 返回 `AVAILABLE`，每类只保留最新一条并按 UTC 时间倒序输出，重启后为空但不伪装成 `UNAVAILABLE`。诊断码只允许 `TUNNEL_OFFLINE`、`CONNECTOR_OFFLINE`、`ORIGIN_DOWN`、`NO_CAPACITY`、`PROTOCOL_ERROR`；Tunnel/Connector 离线消费完成 generation fencing 的非预期生命周期边沿，Origin/Capacity/Protocol 只消费最终逻辑 OPEN，内部 Failover 不重复。固定中文文案不得包含底层错误、Origin、Header、IP 或 Secret；`request_id` 仅在真实关联值存在时返回。
 
 ---
 

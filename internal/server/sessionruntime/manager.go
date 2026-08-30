@@ -82,6 +82,9 @@ type Options struct {
 	// ReconcileObserver 在一次实际 Snapshot Build 完成后同步接收 Duration 与有限错误码。
 	// 回调必须有界且非阻塞；成功使用 ERROR_CODE_OK，内部失败统一使用 INTERNAL_ERROR。
 	ReconcileObserver func(time.Duration, protocolv1.ErrorCode)
+	// LifecycleObserver 在 Registry 完成 generation fencing 并生成不可变事件后于锁外调用。
+	// 回调必须有界且非阻塞，不得反向进入 Session Manager 或执行 IO。
+	LifecycleObserver func(serverruntime.ConnectorLifecycleEvent)
 }
 
 // MetricsSnapshot 是 M2 Runtime 的无 Label 聚合快照；M6 只负责把这些字段导出到
@@ -1575,9 +1578,16 @@ func (manager *Manager) markDraining(managed *managedSession) {
 	}
 }
 
-// logLifecycle 在锁外记录不含 Credential 的值型事件；空字段不会伪造日志属性。
+// logLifecycle 在锁外先发布不含 Credential 的值型事件，再写结构化日志；空字段不会
+// 伪造日志属性。Observer 与日志共享 Registry 已完成 generation fencing 的同一事实。
 func (manager *Manager) logLifecycle(event serverruntime.ConnectorLifecycleEvent) {
-	if manager == nil || manager.logger == nil || event.Name == "" {
+	if manager == nil || event.Name == "" {
+		return
+	}
+	if manager.options.LifecycleObserver != nil {
+		manager.options.LifecycleObserver(event)
+	}
+	if manager.logger == nil {
 		return
 	}
 	snapshot := event.Snapshot

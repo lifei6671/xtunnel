@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/repository"
+	serverrecenterror "github.com/lifei6671/xtunnel/internal/server/recenterror"
 	serverstatus "github.com/lifei6671/xtunnel/internal/server/status"
 )
 
@@ -42,7 +43,7 @@ func TestDashboardSnapshotAggregatesAuthoritativeViews(t *testing.T) {
 			},
 			wantCounts: DashboardCounts{
 				TunnelsTotal: 5, TunnelsOnline: 1, TunnelsOffline: 1, ConnectorsOnline: 3,
-				ServicesTotal: 7, ServicesReady: 1, ServicesError: 1, ActiveConnections: 12,
+				ServicesTotal: 7, ServicesReady: 1, ServicesError: 4, ActiveConnections: 12,
 			},
 		},
 		{
@@ -59,7 +60,10 @@ func TestDashboardSnapshotAggregatesAuthoritativeViews(t *testing.T) {
 			usage := &dashboardUsageReaderFake{totals: repository.UsageTotals{
 				Connections: 11, IngressBytes: 22, EgressBytes: 33,
 			}}
-			service := NewDashboardService(tunnels, services, dashboardServerStatusFake{status: test.serverStatus}, usage)
+			service := NewDashboardService(
+				tunnels, services, dashboardServerStatusFake{status: test.serverStatus}, usage,
+				serverrecenterror.NewOwner(),
+			)
 			service.now = func() time.Time { return generatedAt }
 
 			got, err := service.Snapshot(context.Background())
@@ -78,9 +82,9 @@ func TestDashboardSnapshotAggregatesAuthoritativeViews(t *testing.T) {
 				got.Traffic.EgressBytesToday == nil || *got.Traffic.EgressBytesToday != 33 {
 				t.Fatalf("Snapshot().Traffic = %+v, want AVAILABLE usage", got.Traffic)
 			}
-			if got.RecentErrors.Availability != DashboardAvailabilityUnavailable ||
+			if got.RecentErrors.Availability != DashboardAvailabilityAvailable ||
 				got.RecentErrors.Items == nil || len(got.RecentErrors.Items) != 0 {
-				t.Fatalf("Snapshot().RecentErrors = %+v, want UNAVAILABLE with non-nil empty items", got.RecentErrors)
+				t.Fatalf("Snapshot().RecentErrors = %+v, want AVAILABLE with non-nil empty items", got.RecentErrors)
 			}
 			if want := generatedAt.UTC(); !got.GeneratedAt.Equal(want) || got.GeneratedAt.Location() != time.UTC {
 				t.Fatalf("Snapshot().GeneratedAt = %v (%v), want %v (UTC)", got.GeneratedAt, got.GeneratedAt.Location(), want)
@@ -102,7 +106,7 @@ func TestDashboardSnapshotFreezesUTCMidnightOnce(t *testing.T) {
 	usage := &dashboardUsageReaderFake{}
 	service := NewDashboardService(
 		&dashboardTunnelReaderFake{}, &dashboardServiceReaderFake{},
-		dashboardServerStatusFake{status: DashboardServerStatusReady}, usage,
+		dashboardServerStatusFake{status: DashboardServerStatusReady}, usage, serverrecenterror.NewOwner(),
 	)
 	first := time.Date(2026, time.August, 30, 0, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
 	second := first.Add(24 * time.Hour)
@@ -130,6 +134,7 @@ func TestDashboardSnapshotRejectsUsageOverflow(t *testing.T) {
 		&dashboardTunnelReaderFake{}, &dashboardServiceReaderFake{},
 		dashboardServerStatusFake{status: DashboardServerStatusReady},
 		&dashboardUsageReaderFake{totals: repository.UsageTotals{Connections: uint64(^uint64(0)>>1) + 1}},
+		serverrecenterror.NewOwner(),
 	)
 	if _, err := service.Snapshot(context.Background()); !errors.Is(err, repository.ErrUsageOverflow) {
 		t.Fatalf("Snapshot() overflow error = %v, want ErrUsageOverflow", err)
@@ -188,12 +193,13 @@ func TestDashboardSnapshotRejectsInvalidInputsAndStatus(t *testing.T) {
 		wantErr error
 	}{
 		{name: "nil receiver", ctx: context.Background(), wantErr: ErrDashboardInput},
-		{name: "nil context", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage), wantErr: ErrDashboardInput},
-		{name: "nil tunnel reader", service: NewDashboardService(nil, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage), ctx: context.Background(), wantErr: ErrDashboardInput},
-		{name: "nil service reader", service: NewDashboardService(validTunnels, nil, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage), ctx: context.Background(), wantErr: ErrDashboardInput},
-		{name: "nil status owner", service: NewDashboardService(validTunnels, validServices, nil, validUsage), ctx: context.Background(), wantErr: ErrDashboardInput},
-		{name: "nil usage reader", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, nil), ctx: context.Background(), wantErr: ErrDashboardInput},
-		{name: "unknown status", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: "STARTING"}, validUsage), ctx: context.Background(), wantErr: ErrDashboardServerStatus},
+		{name: "nil context", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage, serverrecenterror.NewOwner()), wantErr: ErrDashboardInput},
+		{name: "nil tunnel reader", service: NewDashboardService(nil, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage, serverrecenterror.NewOwner()), ctx: context.Background(), wantErr: ErrDashboardInput},
+		{name: "nil service reader", service: NewDashboardService(validTunnels, nil, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage, serverrecenterror.NewOwner()), ctx: context.Background(), wantErr: ErrDashboardInput},
+		{name: "nil status owner", service: NewDashboardService(validTunnels, validServices, nil, validUsage, serverrecenterror.NewOwner()), ctx: context.Background(), wantErr: ErrDashboardInput},
+		{name: "nil usage reader", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, nil, serverrecenterror.NewOwner()), ctx: context.Background(), wantErr: ErrDashboardInput},
+		{name: "nil recent error reader", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage, nil), ctx: context.Background(), wantErr: ErrDashboardInput},
+		{name: "unknown status", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: "STARTING"}, validUsage, serverrecenterror.NewOwner()), ctx: context.Background(), wantErr: ErrDashboardServerStatus},
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -203,7 +209,7 @@ func TestDashboardSnapshotRejectsInvalidInputsAndStatus(t *testing.T) {
 		ctx     context.Context
 		wantErr error
 	}{
-		name: "canceled context", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage),
+		name: "canceled context", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage, serverrecenterror.NewOwner()),
 		ctx: canceled, wantErr: context.Canceled,
 	})
 	deadline, cancelDeadline := context.WithDeadline(context.Background(), time.Unix(1, 0))
@@ -214,7 +220,7 @@ func TestDashboardSnapshotRejectsInvalidInputsAndStatus(t *testing.T) {
 		ctx     context.Context
 		wantErr error
 	}{
-		name: "expired deadline", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage),
+		name: "expired deadline", service: NewDashboardService(validTunnels, validServices, dashboardServerStatusFake{status: DashboardServerStatusReady}, validUsage, serverrecenterror.NewOwner()),
 		ctx: deadline, wantErr: context.DeadlineExceeded,
 	})
 
@@ -257,7 +263,7 @@ func TestDashboardSnapshotPropagatesOwnerErrors(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			service := NewDashboardService(test.tunnels, test.services, dashboardServerStatusFake{status: DashboardServerStatusReady}, test.usage)
+			service := NewDashboardService(test.tunnels, test.services, dashboardServerStatusFake{status: DashboardServerStatusReady}, test.usage, serverrecenterror.NewOwner())
 			_, err := service.Snapshot(context.Background())
 			if !errors.Is(err, errRead) || !strings.Contains(err.Error(), test.wantMessage) {
 				t.Fatalf("Snapshot() error = %v, want wrapped source error containing %q", err, test.wantMessage)
@@ -274,6 +280,7 @@ func TestDashboardSnapshotPropagatesServerStatusError(t *testing.T) {
 		tunnels, services,
 		dashboardServerStatusFake{status: DashboardServerStatusReady, err: errStatus},
 		&dashboardUsageReaderFake{},
+		serverrecenterror.NewOwner(),
 	)
 
 	_, err := service.Snapshot(context.Background())
@@ -286,22 +293,32 @@ func TestDashboardSnapshotPropagatesServerStatusError(t *testing.T) {
 }
 
 func TestDashboardSnapshotDoesNotReuseRecentErrorStorage(t *testing.T) {
+	owner := serverrecenterror.NewOwner()
+	requestID := "req_01K4Z3JMESEMR8E7Z8AC9PKYYJ"
+	if err := owner.Publish(serverrecenterror.Record{
+		Code: serverrecenterror.CodeProtocolError, OccurredAt: time.Now(), RequestID: &requestID,
+	}); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
 	service := NewDashboardService(
 		&dashboardTunnelReaderFake{}, &dashboardServiceReaderFake{},
 		dashboardServerStatusFake{status: DashboardServerStatusReady},
 		&dashboardUsageReaderFake{},
+		owner,
 	)
 	first, err := service.Snapshot(context.Background())
 	if err != nil {
 		t.Fatalf("first Snapshot() error = %v", err)
 	}
-	first.RecentErrors.Items = append(first.RecentErrors.Items, DashboardRecentError{Code: "MUTATED"})
+	first.RecentErrors.Items[0].Message = "MUTATED"
+	*first.RecentErrors.Items[0].RequestID = "req_mutated"
 	second, err := service.Snapshot(context.Background())
 	if err != nil {
 		t.Fatalf("second Snapshot() error = %v", err)
 	}
-	if len(second.RecentErrors.Items) != 0 {
-		t.Fatalf("second Snapshot().RecentErrors.Items = %+v, want an independent empty slice", second.RecentErrors.Items)
+	if len(second.RecentErrors.Items) != 1 || second.RecentErrors.Items[0].Message == "MUTATED" ||
+		second.RecentErrors.Items[0].RequestID == nil || *second.RecentErrors.Items[0].RequestID != requestID {
+		t.Fatalf("second Snapshot().RecentErrors.Items = %+v, want an independent owner snapshot", second.RecentErrors.Items)
 	}
 }
 

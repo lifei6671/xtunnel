@@ -69,7 +69,9 @@ func TestProxyUsageRecordsFinalOpenFailureOnce(t *testing.T) {
 	fixture := newFailoverFixture(t, testConnectorID)
 	defer cleanupDialFixture(t, fixture)
 	usage := &recordingTunnelUsage{}
+	diagnostics := &recordingTunnelDiagnostics{}
 	fixture.proxy.options.Usage = usage
+	fixture.proxy.options.Diagnostics = diagnostics
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -79,6 +81,11 @@ func TestProxyUsageRecordsFinalOpenFailureOnce(t *testing.T) {
 	usageSnapshot := usage.snapshot()
 	if usageSnapshot.failedOpens != 1 || usageSnapshot.successfulOpens != 0 {
 		t.Fatalf("usage OPEN snapshot = %#v, want one final failure", usageSnapshot)
+	}
+	observations := diagnostics.snapshot()
+	if len(observations) != 1 || observations[0].code != protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR ||
+		observations[0].requestID != testHTTPDialRequest(0, testDialClientAddr).RequestID {
+		t.Fatalf("diagnostic OPEN observations = %#v, want one final failure with request_id", observations)
 	}
 }
 
@@ -108,6 +115,28 @@ func TestMeteredConnectionUsageDirectionsAndErrors(t *testing.T) {
 type openMetricObservation struct {
 	duration time.Duration
 	code     protocolv1.ErrorCode
+}
+
+type diagnosticOpenObservation struct {
+	code      protocolv1.ErrorCode
+	requestID string
+}
+
+type recordingTunnelDiagnostics struct {
+	mu           sync.Mutex
+	observations []diagnosticOpenObservation
+}
+
+func (diagnostics *recordingTunnelDiagnostics) ObserveOpen(code protocolv1.ErrorCode, requestID string) {
+	diagnostics.mu.Lock()
+	defer diagnostics.mu.Unlock()
+	diagnostics.observations = append(diagnostics.observations, diagnosticOpenObservation{code: code, requestID: requestID})
+}
+
+func (diagnostics *recordingTunnelDiagnostics) snapshot() []diagnosticOpenObservation {
+	diagnostics.mu.Lock()
+	defer diagnostics.mu.Unlock()
+	return append([]diagnosticOpenObservation(nil), diagnostics.observations...)
 }
 
 type recordingTunnelMetrics struct {

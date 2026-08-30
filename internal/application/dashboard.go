@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/repository"
+	serverrecenterror "github.com/lifei6671/xtunnel/internal/server/recenterror"
 	serverstatus "github.com/lifei6671/xtunnel/internal/server/status"
 )
 
@@ -54,7 +55,7 @@ type DashboardUsageSummary struct {
 	EgressBytesToday  *int64
 }
 
-// DashboardRecentError 是未来 M6 Error Read Model 向 Dashboard 提供的稳定错误投影。
+// DashboardRecentError 是 M6 Error Read Model 向 Dashboard 提供的稳定错误投影。
 type DashboardRecentError struct {
 	Code       string
 	Message    string
@@ -62,7 +63,7 @@ type DashboardRecentError struct {
 	RequestID  *string
 }
 
-// DashboardRecentErrorsSummary 在 M6 Error Read Model 就绪前显式返回空 items。
+// DashboardRecentErrorsSummary 以 AVAILABLE 区分已就绪但暂时无错误的空投影。
 type DashboardRecentErrorsSummary struct {
 	Availability DashboardAvailability
 	Items        []DashboardRecentError
@@ -100,6 +101,11 @@ type DashboardServerStatusOwner interface {
 	DashboardServerStatus(context.Context) (DashboardServerStatus, error)
 }
 
+// DashboardRecentErrorReader 返回进程内固定五槽的不可变最新错误投影。
+type DashboardRecentErrorReader interface {
+	Snapshot() []serverrecenterror.Item
+}
+
 var (
 	_ DashboardTunnelReader  = (*TunnelManagementService)(nil)
 	_ DashboardServiceReader = (*ServiceAPIService)(nil)
@@ -112,6 +118,7 @@ type DashboardService struct {
 	services DashboardServiceReader
 	status   DashboardServerStatusOwner
 	usage    DashboardUsageReader
+	errors   DashboardRecentErrorReader
 	now      func() time.Time
 }
 
@@ -121,12 +128,16 @@ func NewDashboardService(
 	services DashboardServiceReader,
 	status DashboardServerStatusOwner,
 	usage DashboardUsageReader,
+	recentErrors DashboardRecentErrorReader,
 ) *DashboardService {
-	return &DashboardService{tunnels: tunnels, services: services, status: status, usage: usage, now: time.Now}
+	return &DashboardService{
+		tunnels: tunnels, services: services, status: status, usage: usage,
+		errors: recentErrors, now: time.Now,
+	}
 }
 
-// Snapshot 聚合 Tunnel 与 Service 的权威展示状态。ServicesError 只统计
-// APPLY_FAILED；其他非 READY 状态有独立业务语义，留待 M6-05 的诊断聚合区分。
+// Snapshot 聚合 Tunnel 与 Service 的权威展示状态。ServicesError 只统计稳定故障态；
+// DISABLED 与 CONFIG_SYNCING 分别是管理选择和暂态，不得伪装成错误。
 func (service *DashboardService) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	if !service.valid(ctx) {
 		return DashboardSnapshot{}, ErrDashboardInput
@@ -175,9 +186,20 @@ func (service *DashboardService) Snapshot(ctx context.Context) (DashboardSnapsho
 		switch serviceView.Status {
 		case serverstatus.ServiceStatusReady:
 			counts.ServicesReady++
-		case serverstatus.ServiceStatusApplyFailed:
+		case serverstatus.ServiceStatusApplyFailed,
+			serverstatus.ServiceStatusTunnelOffline,
+			serverstatus.ServiceStatusOriginUnhealthy,
+			serverstatus.ServiceStatusNoCapacity:
 			counts.ServicesError++
 		}
+	}
+	recentErrorItems := service.errors.Snapshot()
+	recentErrors := make([]DashboardRecentError, 0, len(recentErrorItems))
+	for _, item := range recentErrorItems {
+		recentErrors = append(recentErrors, DashboardRecentError{
+			Code: string(item.Code), Message: item.Message,
+			OccurredAt: item.OccurredAt.UTC(), RequestID: item.RequestID,
+		})
 	}
 
 	return DashboardSnapshot{
@@ -185,8 +207,8 @@ func (service *DashboardService) Snapshot(ctx context.Context) (DashboardSnapsho
 		Counts:       counts,
 		Traffic:      traffic,
 		RecentErrors: DashboardRecentErrorsSummary{
-			Availability: DashboardAvailabilityUnavailable,
-			Items:        make([]DashboardRecentError, 0),
+			Availability: DashboardAvailabilityAvailable,
+			Items:        recentErrors,
 		},
 		GeneratedAt: generatedAt,
 	}, nil
@@ -235,5 +257,6 @@ func (service *ServiceAPIService) ListAll(ctx context.Context) ([]ServiceView, e
 
 func (service *DashboardService) valid(ctx context.Context) bool {
 	return service != nil && ctx != nil && service.tunnels != nil &&
-		service.services != nil && service.status != nil && service.usage != nil && service.now != nil
+		service.services != nil && service.status != nil && service.usage != nil &&
+		service.errors != nil && service.now != nil
 }

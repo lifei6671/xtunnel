@@ -25,6 +25,7 @@ import { ManagementView } from "./management";
 
 type AuthSession = components["schemas"]["AuthSession"];
 type Dashboard = components["schemas"]["Dashboard"];
+type RecentErrorCode = components["schemas"]["RecentError"]["code"];
 type APIErrorEnvelope =
   | components["schemas"]["ErrorResponse"]
   | components["schemas"]["SetupRequiredErrorResponse"];
@@ -40,6 +41,18 @@ type DashboardState =
   | { status: "error"; message: string };
 
 type ConsolePage = "overview" | "management";
+
+const recentErrorLabels = {
+  TUNNEL_OFFLINE: "Tunnel 离线",
+  CONNECTOR_OFFLINE: "Connector 离线",
+  ORIGIN_DOWN: "源站异常",
+  NO_CAPACITY: "容量不足",
+  PROTOCOL_ERROR: "协议错误",
+} as const satisfies Readonly<Record<RecentErrorCode, string>>;
+
+function recentErrorLabel(code: RecentErrorCode) {
+  return recentErrorLabels[code];
+}
 
 const navigation: ReadonlyArray<{
   label: string;
@@ -502,10 +515,13 @@ function DashboardView({ dashboard, onRefresh }: {
           </div>
           {errorsAvailable && dashboard.recent_errors.items.length > 0 ? (
             <ul className="error-list">
-              {dashboard.recent_errors.items.map((item) => (
-                <li key={`${item.occurred_at}-${item.code}`}>
-                  <strong>{item.code}</strong>
-                  <span>{item.message}</span>
+              {dashboard.recent_errors.items.map((item, index) => (
+                <li key={`${item.code}-${item.occurred_at}-${item.request_id ?? "none"}-${index}`}>
+                  <strong>{recentErrorLabel(item.code)}</strong>
+                  <span>
+                    {item.message}
+                    {item.request_id ? ` · 请求 ${item.request_id}` : null}
+                  </span>
                   <time dateTime={item.occurred_at}>{new Date(item.occurred_at).toLocaleString("zh-CN", { hour12: false })}</time>
                 </li>
               ))}

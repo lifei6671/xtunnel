@@ -841,12 +841,16 @@ export interface components {
             readonly active_connections: number;
         };
         readonly RecentError: {
-            readonly code: string;
+            /**
+             * @description M6-05 Dashboard 使用的五类冻结诊断码。
+             * @enum {string}
+             */
+            readonly code: "TUNNEL_OFFLINE" | "CONNECTOR_OFFLINE" | "ORIGIN_DOWN" | "NO_CAPACITY" | "PROTOCOL_ERROR";
             readonly message: string;
             readonly occurred_at: components["schemas"]["DateTime"];
             readonly request_id?: components["schemas"]["RequestID"] | null;
         };
-        /** @description M6 Error Read Model 未就绪时返回 UNAVAILABLE 和空 items。 */
+        /** @description M6-05 Error Read Model 就绪后返回 AVAILABLE；没有最近错误时 items 为空。UNAVAILABLE 只表示该 Read Model 尚不可用。 */
         readonly RecentErrorsSummary: {
             /** @enum {string} */
             readonly availability: "AVAILABLE" | "UNAVAILABLE";

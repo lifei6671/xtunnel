@@ -21,6 +21,7 @@ import (
 
 	"github.com/lifei6671/xtunnel/internal/application"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
+	serverrecenterror "github.com/lifei6671/xtunnel/internal/server/recenterror"
 	serversnapshot "github.com/lifei6671/xtunnel/internal/server/snapshot"
 	"github.com/lifei6671/xtunnel/internal/tcpport"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -671,6 +672,7 @@ func newManagementReadContractHarness(t *testing.T, contract *managementOpenAPIC
 		dashboardTunnelReaderFake{}, dashboardServiceReaderFake{},
 		dashboardStatusOwnerFake{status: application.DashboardServerStatusReady},
 		dashboardUsageReaderFake{},
+		serverrecenterror.NewOwner(),
 	)
 	handler, err := NewHandler(HandlerOptions{
 		Management:     config.Management,

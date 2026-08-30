@@ -55,13 +55,21 @@ func dashboardResponse(snapshot application.DashboardSnapshot) (Dashboard, error
 		EgressBytesToday:  nullableInt64(snapshot.Traffic.EgressBytesToday),
 	}
 	recentErrors := make([]RecentError, 0, len(snapshot.RecentErrors.Items))
+	if len(snapshot.RecentErrors.Items) > 20 {
+		return Dashboard{}, errors.New("dashboard recent errors exceed API item limit")
+	}
 	for _, item := range snapshot.RecentErrors.Items {
+		code := RecentErrorCode(item.Code)
+		if !code.Valid() || item.OccurredAt.IsZero() {
+			return Dashboard{}, errors.New("dashboard recent error projection is invalid")
+		}
 		requestID := nullable.NewNullNullable[RequestID]()
 		if item.RequestID != nil {
 			requestID = nullable.NewNullableWithValue[RequestID](*item.RequestID)
 		}
 		recentErrors = append(recentErrors, RecentError{
-			Code: item.Code, Message: item.Message, OccurredAt: item.OccurredAt.UTC(), RequestId: requestID,
+			Code: code, Message: item.Message,
+			OccurredAt: item.OccurredAt.UTC(), RequestId: requestID,
 		})
 	}
 	return Dashboard{
