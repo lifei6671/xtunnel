@@ -319,7 +319,7 @@ func (handler *ManagementHandler) readAPIReady(path string) bool {
 	switch path {
 	case "/api/v1/system/info", "/api/v1/system/health", "/api/v1/system/config":
 		return handler.system != nil
-	case "/api/v1/security-audit-events":
+	case "/api/v1/security-audit-events", "/api/v1/security-audit-events/export":
 		return handler.securityAudits != nil
 	case "/api/v1/dashboard":
 		return handler.dashboard != nil

@@ -169,6 +169,16 @@ jobs:
           go test -count=1 -timeout 120s ./internal/server/bootstrap \
             -run '^TestErrorStatusObservabilityEndToEnd$'
 
+      - name: Run native M6 Agent connectivity diagnostic blackbox
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          go test -count=1 -timeout 120s ./internal/agent/gateway \
+            -run '^TestDiagnose'
+          go test -count=1 -timeout 120s ./internal/agent/bootstrap \
+            -run '^TestExecuteDiagnose'
+
       - name: Run native M4 1 GiB streaming gate
         shell: bash
         timeout-minutes: 3
@@ -236,9 +246,9 @@ jobs:
           expect_version_rejected invalid --build-arg 'XTUNNEL_VERSION=v0.1.0 invalid'
           expect_version_rejected too-long --build-arg 'XTUNNEL_VERSION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
-      - name: Run native systemd packaging smoke
+      - name: Run native M6 Operations systemd fault diagnostics smoke
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         run: |
           set -euo pipefail
           server_binary="$RUNNER_TEMP/xtunnel-server"
@@ -324,7 +334,15 @@ jobs:
           go test -c -o $serviceTest ./internal/agent/service
           if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 service test compile failed' }
 
-      - name: Run Windows Service smoke
+      - name: Run Windows M6 Stop timeout diagnostic unit gate
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          go test ./internal/agent/service -run '^TestWindowsServiceHandlerFailsWhenRuntimeDoesNotStop$' -count=1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows Stop timeout diagnostic unit gate failed' }
+
+      - name: Run Windows M6 SCM failure and recovery smoke
         shell: powershell
         run: |
           Set-StrictMode -Version Latest

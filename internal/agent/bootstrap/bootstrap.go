@@ -15,6 +15,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/lifei6671/xtunnel/internal/agent/connector"
+	agentgateway "github.com/lifei6671/xtunnel/internal/agent/gateway"
 	"github.com/lifei6671/xtunnel/internal/agent/service"
 	"github.com/lifei6671/xtunnel/internal/buildinfo"
 	"github.com/lifei6671/xtunnel/internal/logging"
@@ -29,6 +30,7 @@ const (
 )
 
 type lifecycleRunner func(context.Context, string, io.Writer) error
+type diagnosticRunner func(context.Context, string) agentgateway.DiagnosticResult
 
 type serviceOperations interface {
 	Install(context.Context, string) error
@@ -37,7 +39,10 @@ type serviceOperations interface {
 
 type platformServiceOperations struct{}
 
-var errCLIHelp = errors.New("CLI help requested")
+var (
+	errCLIHelp            = errors.New("CLI help requested")
+	errDiagnosticNotReady = errors.New("connectivity diagnostic reported NOT_READY")
+)
 
 func (platformServiceOperations) Install(ctx context.Context, token string) error {
 	return service.Install(ctx, token)
@@ -49,10 +54,19 @@ func (platformServiceOperations) Uninstall(ctx context.Context) (service.Uninsta
 
 // Execute 把操作系统输入和信号接入 Agent 生命周期，并返回进程退出码。
 func Execute(program string, args, environ []string, stdout, stderr io.Writer) int {
+	return executeProgram(program, args, environ, stdout, stderr, agentgateway.Diagnose)
+}
+
+func executeProgram(
+	program string,
+	args, environ []string,
+	stdout, stderr io.Writer,
+	diagnose diagnosticRunner,
+) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := execute(ctx, program, args, environ, stdout, stderr, platformServiceOperations{}); err != nil {
+	if err := executeWithDiagnostic(ctx, program, args, environ, stdout, stderr, platformServiceOperations{}, diagnose); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", program, err)
 		return 1
 	}
@@ -66,7 +80,18 @@ func execute(
 	stdout, stderr io.Writer,
 	services serviceOperations,
 ) error {
-	command := newAgentCommand(program, environ, stdout, stderr, services)
+	return executeWithDiagnostic(ctx, program, args, environ, stdout, stderr, services, agentgateway.Diagnose)
+}
+
+func executeWithDiagnostic(
+	ctx context.Context,
+	program string,
+	args, environ []string,
+	stdout, stderr io.Writer,
+	services serviceOperations,
+	diagnose diagnosticRunner,
+) error {
+	command := newAgentCommand(program, environ, stdout, stderr, services, diagnose)
 	err := command.Run(ctx, append([]string{program}, args...))
 	if errors.Is(err, errCLIHelp) {
 		return nil
@@ -92,8 +117,15 @@ func agentHelpBefore(ctx context.Context, command *cli.Command) (context.Context
 
 // newAgentCommand 由一棵 urfave/cli 命令树统一声明 Agent 的公开命令面。
 // Token 的来源选择和校验仍由 bootstrap 持有，避免 CLI 框架读取环境变量后改变安全优先级。
-func newAgentCommand(program string, environ []string, stdout, stderr io.Writer, services serviceOperations) *cli.Command {
+func newAgentCommand(
+	program string,
+	environ []string,
+	stdout, stderr io.Writer,
+	services serviceOperations,
+	diagnose diagnosticRunner,
+) *cli.Command {
 	var runToken string
+	var diagnoseToken string
 	var installToken string
 	stopOnFirstArgument := 1
 
@@ -142,6 +174,42 @@ func newAgentCommand(program string, environ []string, stdout, stderr io.Writer,
 				return runWithTokenSource(ctx, stderr, runLifecycle, func() (string, error) {
 					return resolveTokenSource(runToken, current.IsSet("token"), environ)
 				})
+			},
+		},
+		{
+			Name:            "diagnose",
+			Usage:           "run a non-authenticating Gateway connectivity precheck",
+			UsageText:       program + " diagnose [--token string]",
+			HideHelpCommand: true,
+			StopOnNthArg:    &stopOnFirstArgument,
+			Before:          agentHelpBefore,
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "token", Usage: "Agent Token", Destination: &diagnoseToken, HideDefault: true},
+			},
+			OnUsageError: command.OnUsageError,
+			Action: func(ctx context.Context, current *cli.Command) error {
+				if current.NArg() != 0 {
+					return errors.New("diagnose does not accept positional arguments")
+				}
+				if diagnose == nil {
+					return errors.New("Agent diagnostic runner must not be nil")
+				}
+				token, err := resolveTokenSource(diagnoseToken, current.IsSet("token"), environ)
+				if err != nil {
+					return fmt.Errorf("load agent token: %w", err)
+				}
+				result := diagnose(ctx, token)
+				if err := writeDiagnosticResult(stdout, result); err != nil {
+					return err
+				}
+				switch result.Summary {
+				case agentgateway.DiagnosticReady, agentgateway.DiagnosticReadyDegraded:
+					return nil
+				case agentgateway.DiagnosticNotReady:
+					return errDiagnosticNotReady
+				default:
+					return errors.New("connectivity diagnostic returned an invalid summary")
+				}
 			},
 		},
 		{
@@ -221,6 +289,18 @@ func newAgentCommand(program string, environ []string, stdout, stderr io.Writer,
 		},
 	}
 	return command
+}
+
+func writeDiagnosticResult(writer io.Writer, result agentgateway.DiagnosticResult) error {
+	for _, step := range result.Steps {
+		if _, err := fmt.Fprintf(writer, "%s %s %s\n", step.Status, step.Stage, step.Message); err != nil {
+			return fmt.Errorf("write connectivity diagnostic step: %w", err)
+		}
+	}
+	if _, err := fmt.Fprintln(writer, result.Summary); err != nil {
+		return fmt.Errorf("write connectivity diagnostic summary: %w", err)
+	}
+	return nil
 }
 
 // run 解析唯一的 Tunnel Token 来源，并把同一个 Token 交给进程内唯一 Connector。

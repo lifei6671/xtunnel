@@ -6861,6 +6861,38 @@ DNS Resolver、TCP Dialer、TLS Builder、SPKI Verifier 和 ALPN 配置，禁止
 `WARNING`、`FAIL`，汇总为 `READY`、`READY_DEGRADED`、`NOT_READY`。Token 输入复用
 正式 Bootstrap 的安全来源，不在示例中鼓励把真实 Token 放入共享 Shell History。
 
+V0.1 公共入口固定为 `xtunnel-agent diagnose [--token string]`，Token 来源顺序与正式
+Bootstrap 一致：显式 `--token`、`XTUNNEL_TOKEN`、systemd Credential。命令使用生产
+10 秒总 Dial Budget，先解析 Token 与 Endpoint，再分别对 Control 和 Work ALPN 执行
+DNS、TCP、TLS 1.3、Public CA 或 Pinned SPKI、精确 ALPN 阶段检查；IP Literal 的 DNS
+阶段直接 `PASS`。证书剩余不超过 30 天时 Trust 阶段返回 `WARNING`，汇总为
+`READY_DEGRADED`；任一失败立即汇总为 `NOT_READY` 并以非零码退出。诊断只建立和关闭
+TLS 连接，不发送应用层 Auth 或 Snapshot，不输出完整 Token、Endpoint 或底层错误文本。
+
+Dashboard 额外返回 Server 冻结的 `gateway_certificate`：`tls_mode`、UTC `expires_at`、
+`remaining_seconds`、`level`、`recent_renewal_failed` 与可空稳定错误码。等级边界固定为
+`HEALTHY`、30 天内 `WARNING`、7 天内 `CRITICAL`、1 天内 `EMERGENCY`、已过期
+`EXPIRED`；Web 不得自行重算。Prometheus 版本化规则只消费
+`xtunnel_gateway_certificate_expiry_seconds`，用 `time()` 形成互斥的 30 天、7 天、1 天
+和已过期窗口。Pinned 热续签成功记录 `gateway_certificate_renewed`；失败记录
+`gateway_certificate_renewal_failed` 与 `error_code=CERTIFICATE_RENEWAL_FAILED`。Server
+日志可保留经过调用方边界约束的结构化运维错误上下文，但不得包含 Token、私钥或证书
+内容；Dashboard/API 只暴露有限错误码，不返回底层错误。Public 证书仍由外部系统续签。
+
+`GET /api/v1/security-audit-events/export` 复用查询接口的 Admin Session Cookie 与六个
+筛选条件，返回 `application/x-ndjson`、`Cache-Control: no-store` 和固定下载文件名。
+Server 在发送响应前同时固定 SQLite append 序号上界与 `(occurred_at,event_id)` 排序
+上界，之后按 opaque keyset 每批最多读取 200 行；并发新增事件即使回填旧时间也不得
+混入本次导出，空结果返回空 Body。读取、取消或写入在流开始后失败时必须立即中止连接，
+不得伪造完整文件或追加 JSON/500；客户端只可在完整下载成功后原子发布候选文件。
+
+Linux systemd 与 Windows SCM 的 M6-06 Smoke 必须在隔离 Runner 中验证真实启动失败、
+持久日志/退出状态和恢复重启。systemd 以运行时 drop-in 缩短 Stop 超时并用 `SIGSTOP`
+制造超时诊断，退出后恢复环境；生产 Unit 不预先修改 `TimeoutStopSec`。Windows 通过
+隔离 DPAPI Credential 副本验证 `CREDENTIAL_LOAD_FAILED` 和恢复后的新进程；30 秒
+`STOP_TIMEOUT` 分支由 Handler 单元测试锁定，不能冒充真实卡死 Smoke。具体处置命令与
+证据边界以 `docs/operations_runbook.md` 为准。
+
 ---
 
 # 162. Repository Structure

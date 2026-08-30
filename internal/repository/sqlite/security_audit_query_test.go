@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -263,6 +264,39 @@ func TestQuerySecurityAuditEventsReturnsIndependentDigests(t *testing.T) {
 	if second.Events[0].BeforeStateDigest[0] != 'a' || second.Events[0].AfterStateDigest[0] != 'b' {
 		t.Fatalf("persisted digests changed after caller mutation: before=%q after=%q",
 			second.Events[0].BeforeStateDigest, second.Events[0].AfterStateDigest)
+	}
+}
+
+func TestSecurityAuditExportBoundaryExcludesBackdatedConcurrentAppend(t *testing.T) {
+	store := openSecurityAuditQueryStore(t)
+	events := securityAuditQueryFixtures()
+	seedSecurityAuditQueryEvents(t, store, events)
+	query := repository.SecurityAuditEventQuery{Limit: repository.MaxSecurityAuditEventQueryLimit}
+	boundary, exists, err := store.SecurityAuditEventExportBoundary(context.Background(), query)
+	if err != nil || !exists {
+		t.Fatalf("SecurityAuditEventExportBoundary() = %#v/%v/%v", boundary, exists, err)
+	}
+
+	backdated := securityAuditQueryGatewayEvent('5', 150, "gateway.example.test")
+	seedSecurityAuditQueryEvents(t, store, []repository.SecurityAuditEvent{backdated})
+	query.Upper = &boundary.Upper
+	query.AppendSequenceUpper = &boundary.MaxAppendSequence
+	page, err := store.QuerySecurityAuditEvents(context.Background(), query)
+	if err != nil {
+		t.Fatalf("QuerySecurityAuditEvents(export boundary) error = %v", err)
+	}
+	want := []string{events[4].EventID, events[3].EventID, events[2].EventID, events[1].EventID, events[0].EventID}
+	if got := securityAuditEventIDs(page.Events); !reflect.DeepEqual(got, want) {
+		t.Fatalf("export IDs = %v, want frozen pre-append IDs %v", got, want)
+	}
+
+	query.AppendSequenceUpper = nil
+	withoutAppendFence, err := store.QuerySecurityAuditEvents(context.Background(), query)
+	if err != nil {
+		t.Fatalf("QuerySecurityAuditEvents(tuple only) error = %v", err)
+	}
+	if got := securityAuditEventIDs(withoutAppendFence.Events); !slices.Contains(got, backdated.EventID) {
+		t.Fatalf("tuple-only query IDs = %v, want backdated concurrent event %q to demonstrate append fence", got, backdated.EventID)
 	}
 }
 

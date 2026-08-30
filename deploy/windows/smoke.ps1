@@ -63,6 +63,25 @@ function Wait-AgentServiceDeleted {
     throw "service $serviceName was not deleted"
 }
 
+function Wait-AgentServiceFailure {
+    param(
+        [int]$TimeoutSeconds = 4
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $service = Get-AgentService
+        if (($null -ne $service) -and ($service.State -eq 'Stopped')) {
+            if ($service.ExitCode -eq 0) {
+                throw "service $serviceName startup failure reported ExitCode=0"
+            }
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "service $serviceName did not expose a stopped failure before recovery"
+}
+
 function Assert-AgentServiceStable {
     $before = Get-AgentService
     if (($null -eq $before) -or ($before.State -ne 'Running') -or ($before.ProcessId -eq 0)) {
@@ -188,6 +207,57 @@ function Assert-EventLogContract {
         Start-Sleep -Milliseconds 250
     }
     throw 'Windows Event Log did not contain a valid Agent lifecycle JSON record'
+}
+
+function Wait-AgentEvent {
+    param(
+        [Parameter(Mandatory = $true)]
+        [DateTime]$StartTime,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Event,
+
+        [string]$ErrorCode = '',
+
+        [string[]]$ForbiddenValues = @(),
+
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $records = @(Get-WinEvent -FilterHashtable @{
+                LogName      = 'Application'
+                ProviderName = $eventSourceName
+                StartTime    = $StartTime
+            } -ErrorAction SilentlyContinue)
+        foreach ($record in $records) {
+            $message = $record.Message
+            if ([string]::IsNullOrWhiteSpace($message)) {
+                continue
+            }
+            foreach ($forbidden in $ForbiddenValues) {
+                if ((-not [string]::IsNullOrEmpty($forbidden)) -and $message.Contains($forbidden)) {
+                    throw 'Windows Event Log contains a plaintext Connection Token'
+                }
+            }
+            try {
+                $payload = $message | ConvertFrom-Json
+            }
+            catch {
+                continue
+            }
+            if (($payload.component -ne 'agent') -or ($payload.event -ne $Event)) {
+                continue
+            }
+            if ((-not [string]::IsNullOrEmpty($ErrorCode)) -and ($payload.error_code -ne $ErrorCode)) {
+                continue
+            }
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "Windows Event Log did not contain event=$Event error_code=$ErrorCode"
 }
 
 function Assert-CredentialProtected {
@@ -321,6 +391,34 @@ try {
     Start-Service -Name $serviceName
     Wait-AgentServiceStatus -Status 'Running'
     Assert-AgentServiceStable
+
+    # 破坏 DPAPI blob 只影响隔离 Runner 上的测试 Credential，且保留原 ACL。服务必须
+    # 写入稳定失败事件并以非零码退出；恢复原 blob 后由 SCM 5 秒 recovery 自动拉起。
+    $recoveryProcessBefore = (Get-AgentService).ProcessId
+    $validProtectedCredential = [IO.File]::ReadAllBytes($credentialPath)
+    Stop-Service -Name $serviceName
+    Wait-AgentServiceStatus -Status 'Stopped'
+    $recoveryStart = [DateTime]::UtcNow.AddSeconds(-1)
+    [IO.File]::WriteAllBytes($credentialPath, [byte[]](0x58, 0x54, 0x55, 0x4E, 0x4E, 0x45, 0x4C))
+    try {
+        Start-Service -Name $serviceName
+    }
+    catch {
+        # SCM 可能在 Start-Service 返回前观察到非零退出；稳定证据来自 Event Log。
+    }
+    Wait-AgentEvent -StartTime $recoveryStart -Event 'windows_service_failed' `
+        -ErrorCode 'CREDENTIAL_LOAD_FAILED' -ForbiddenValues @($firstToken, $secondToken)
+    Wait-AgentServiceFailure
+    [IO.File]::WriteAllBytes($credentialPath, $validProtectedCredential)
+    Wait-AgentServiceStatus -Status 'Running'
+    Assert-AgentServiceStable
+    $recoveryProcessAfter = (Get-AgentService).ProcessId
+    if (($recoveryProcessAfter -eq 0) -or ($recoveryProcessAfter -eq $recoveryProcessBefore)) {
+        throw "SCM recovery did not start a new Agent process: before=$recoveryProcessBefore after=$recoveryProcessAfter"
+    }
+    Wait-AgentEvent -StartTime $recoveryStart -Event 'windows_service_running' `
+        -ForbiddenValues @($firstToken, $secondToken)
+    Assert-CredentialProtected -PlaintextToken $secondToken
 
     Invoke-Agent -ArgumentList @('service', 'uninstall')
     $uninstallCompleted = $true

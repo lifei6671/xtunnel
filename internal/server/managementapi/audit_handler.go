@@ -3,18 +3,27 @@ package managementapi
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/lifei6671/xtunnel/internal/application"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	"github.com/oapi-codegen/nullable"
 )
 
 const securityAuditPageResource = "security_audit_events"
+
+const (
+	securityAuditExportPageSize = repository.MaxSecurityAuditEventQueryLimit
+	securityAuditExportFilename = `attachment; filename="xtunnel-security-audit.ndjson"`
+)
 
 func (api *managementStrictAPI) ListSecurityAuditEvents(
 	ctx context.Context,
@@ -78,6 +87,117 @@ func (api *managementStrictAPI) ListSecurityAuditEvents(
 		response.NextPageToken = &next
 	}
 	return ListSecurityAuditEvents200JSONResponse(response), nil
+}
+
+// securityAuditExportResponse 在 Strict Handler 的响应访问阶段直接写出 NDJSON。
+// 首页和固定上界已在 200 提交前读取；后续任何数据库、取消或写入错误都通过
+// http.ErrAbortHandler 中止传输，不能在部分 NDJSON 后追加一个伪 500 JSON。
+type securityAuditExportResponse struct {
+	ctx       context.Context
+	handler   *ManagementHandler
+	requestID string
+	service   *application.SecurityAuditQueryService
+	query     repository.SecurityAuditEventQuery
+	first     repository.SecurityAuditEventPage
+}
+
+func (response securityAuditExportResponse) VisitExportSecurityAuditEventsResponse(writer http.ResponseWriter) error {
+	writer.Header().Set("Content-Type", "application/x-ndjson")
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Disposition", securityAuditExportFilename)
+	writer.WriteHeader(http.StatusOK)
+
+	encoder := json.NewEncoder(writer)
+	page := response.first
+	for {
+		for _, event := range page.Events {
+			if err := encoder.Encode(securityAuditEventResponse(event)); err != nil {
+				response.abort(err)
+			}
+		}
+		if err := http.NewResponseController(writer).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			response.abort(err)
+		}
+		if page.Next == nil {
+			return nil
+		}
+		response.query.After = page.Next
+		next, err := response.service.Query(response.ctx, response.query)
+		if err != nil {
+			response.abort(err)
+		}
+		page = next
+	}
+}
+
+func (response securityAuditExportResponse) abort(err error) {
+	if response.ctx.Err() == nil && !errors.Is(err, io.ErrClosedPipe) {
+		response.handler.logInternalError(
+			response.ctx, response.requestID, "management_security_audit_export_failed", err,
+		)
+	}
+	panic(http.ErrAbortHandler)
+}
+
+func (api *managementStrictAPI) ExportSecurityAuditEvents(
+	ctx context.Context,
+	request ExportSecurityAuditEventsRequestObject,
+) (ExportSecurityAuditEventsResponseObject, error) {
+	requestContext := managementRequestContextFrom(ctx)
+	if requestContext == nil || api.handler.securityAudits == nil {
+		return ExportSecurityAuditEvents500JSONResponse{InternalErrorJSONResponse(apiError(
+			APIErrorCodeINTERNALERROR, "服务器内部错误", requestIDFromContext(requestContext),
+		))}, nil
+	}
+	params := ListSecurityAuditEventsParams{
+		Action: request.Params.Action, Result: request.Params.Result,
+		ResourceType: request.Params.ResourceType, ResourceId: request.Params.ResourceId,
+		OccurredFrom: request.Params.OccurredFrom, OccurredTo: request.Params.OccurredTo,
+	}
+	query, _, emptyRange, err := securityAuditQuery(params, requestContext.request.URL.Query())
+	if err != nil {
+		return ExportSecurityAuditEvents400JSONResponse{BadRequestJSONResponse(apiError(
+			APIErrorCodeINVALIDREQUEST, "请求参数无效", requestContext.requestID,
+		))}, nil
+	}
+	query.Limit = securityAuditExportPageSize
+	if emptyRange {
+		return securityAuditExportResponse{
+			ctx: ctx, handler: api.handler, requestID: requestContext.requestID,
+			service: api.handler.securityAudits, query: query,
+		}, nil
+	}
+	boundary, exists, err := api.handler.securityAudits.ExportBoundary(ctx, query)
+	if errors.Is(err, repository.ErrInvalidSecurityAuditEventQuery) {
+		return ExportSecurityAuditEvents400JSONResponse{BadRequestJSONResponse(apiError(
+			APIErrorCodeINVALIDREQUEST, "请求参数无效", requestContext.requestID,
+		))}, nil
+	}
+	if err != nil {
+		api.handler.logInternalError(ctx, requestContext.requestID, "management_security_audit_export_query_failed", err)
+		return ExportSecurityAuditEvents500JSONResponse{InternalErrorJSONResponse(apiError(
+			APIErrorCodeINTERNALERROR, "服务器内部错误", requestContext.requestID,
+		))}, nil
+	}
+	if !exists {
+		return securityAuditExportResponse{
+			ctx: ctx, handler: api.handler, requestID: requestContext.requestID,
+			service: api.handler.securityAudits, query: query,
+		}, nil
+	}
+	query.Upper = &boundary.Upper
+	query.AppendSequenceUpper = &boundary.MaxAppendSequence
+	first, err := api.handler.securityAudits.Query(ctx, query)
+	if err != nil {
+		api.handler.logInternalError(ctx, requestContext.requestID, "management_security_audit_export_first_page_failed", err)
+		return ExportSecurityAuditEvents500JSONResponse{InternalErrorJSONResponse(apiError(
+			APIErrorCodeINTERNALERROR, "服务器内部错误", requestContext.requestID,
+		))}, nil
+	}
+	return securityAuditExportResponse{
+		ctx: ctx, handler: api.handler, requestID: requestContext.requestID,
+		service: api.handler.securityAudits, query: query, first: first,
+	}, nil
 }
 
 func securityAuditQuery(params ListSecurityAuditEventsParams, rawQuery url.Values) (

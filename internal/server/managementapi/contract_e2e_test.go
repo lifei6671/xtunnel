@@ -147,6 +147,7 @@ func TestManagementSuccessfulResponsesMatchOpenAPI(t *testing.T) {
 		{actualPath: "/api/v1/system/health", contractPath: "/system/health"},
 		{actualPath: "/api/v1/system/config", contractPath: "/system/config"},
 		{actualPath: "/api/v1/security-audit-events", contractPath: "/security-audit-events"},
+		{actualPath: "/api/v1/security-audit-events/export", contractPath: "/security-audit-events/export"},
 	} {
 		response := doRequest(t, readHarness.client, http.MethodGet, readHarness.server.URL+test.actualPath, "", nil)
 		assertSuccess(http.MethodGet, test.contractPath, http.StatusOK, response)
@@ -159,6 +160,51 @@ func TestManagementSuccessfulResponsesMatchOpenAPI(t *testing.T) {
 	sort.Strings(gotOperations)
 	if wantOperations := contract.operations(t); !equalStrings(gotOperations, wantOperations) {
 		t.Fatalf("successful HTTP operations = %v, OpenAPI operations = %v", gotOperations, wantOperations)
+	}
+}
+
+func TestDashboardResponseAlwaysIncludesCompleteGatewayCertificate(t *testing.T) {
+	contract := loadManagementOpenAPIContract(t)
+	harness := newManagementReadContractHarness(t, contract)
+	response := doRequest(t, harness.client, http.MethodGet, harness.server.URL+"/api/v1/dashboard", "", nil)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /dashboard status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	var dashboard map[string]json.RawMessage
+	if err := json.NewDecoder(response.Body).Decode(&dashboard); err != nil {
+		t.Fatalf("decode Dashboard response: %v", err)
+	}
+	certificateJSON, exists := dashboard["gateway_certificate"]
+	if !exists || bytes.Equal(certificateJSON, []byte("null")) {
+		t.Fatal("Dashboard response omitted gateway_certificate")
+	}
+	var certificateFields map[string]json.RawMessage
+	if err := json.Unmarshal(certificateJSON, &certificateFields); err != nil {
+		t.Fatalf("decode Dashboard gateway_certificate: %v", err)
+	}
+	wantFields := []string{
+		"tls_mode", "expires_at", "remaining_seconds", "level",
+		"recent_renewal_failed", "recent_renewal_error_code",
+	}
+	if len(certificateFields) != len(wantFields) {
+		t.Fatalf("Dashboard gateway_certificate fields = %v, want %v", certificateFields, wantFields)
+	}
+	for _, field := range wantFields {
+		if _, exists := certificateFields[field]; !exists {
+			t.Errorf("Dashboard gateway_certificate omitted %s", field)
+		}
+	}
+	var certificate GatewayCertificate
+	if err := json.Unmarshal(certificateJSON, &certificate); err != nil {
+		t.Fatalf("decode typed Dashboard gateway_certificate: %v", err)
+	}
+	if certificate.TlsMode != GatewayCertificateTlsModePinned || certificate.ExpiresAt.IsZero() ||
+		certificate.RemainingSeconds <= 0 || certificate.Level != HEALTHY || certificate.RecentRenewalFailed {
+		t.Fatalf("Dashboard gateway_certificate = %#v", certificate)
+	}
+	if _, err := certificate.RecentRenewalErrorCode.Get(); err == nil {
+		t.Fatal("Dashboard gateway_certificate unexpectedly included a renewal failure code")
 	}
 }
 
@@ -479,8 +525,16 @@ func (contract *managementOpenAPIContract) assertResponse(t *testing.T, method, 
 	}
 
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		t.Fatalf("%s %s status %d Content-Type = %q, want application/json", method, path, response.StatusCode, response.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("%s %s status %d Content-Type = %q", method, path, response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	if mediaType == "application/x-ndjson" {
+		media := object(t, content[mediaType], mediaType+" response")
+		contract.validateSchema(t, method+" "+path+" response", objectField(t, media, "schema"), string(responseBody))
+		return responseBody
+	}
+	if mediaType != "application/json" {
+		t.Fatalf("%s %s status %d Content-Type = %q, want a declared response media type", method, path, response.StatusCode, response.Header.Get("Content-Type"))
 	}
 	media := object(t, content["application/json"], "application/json response")
 	var instance any
@@ -673,6 +727,7 @@ func newManagementReadContractHarness(t *testing.T, contract *managementOpenAPIC
 		dashboardStatusOwnerFake{status: application.DashboardServerStatusReady},
 		dashboardUsageReaderFake{},
 		serverrecenterror.NewOwner(),
+		dashboardCertificateReaderFake,
 	)
 	handler, err := NewHandler(HandlerOptions{
 		Management:     config.Management,

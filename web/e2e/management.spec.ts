@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { readFile } from "node:fs/promises";
 
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
@@ -8,6 +9,8 @@ import type { components } from "../src/api/schema.gen";
 
 type AuthSession = components["schemas"]["AuthSession"];
 type Dashboard = components["schemas"]["Dashboard"];
+type SecurityAuditEvent = components["schemas"]["SecurityAuditEvent"];
+type SecurityAuditEventList = components["schemas"]["SecurityAuditEventList"];
 type Tunnel = components["schemas"]["Tunnel"];
 
 type JSONRecord = Record<string, unknown>;
@@ -121,6 +124,34 @@ test("Web-only mock 验证概览页五类最近错误渲染", async ({ page }) =
     expires_at: "2026-08-31T01:02:03Z",
   } satisfies AuthSession;
   let recentErrors: Dashboard["recent_errors"] = { availability: "AVAILABLE", items };
+  let gatewayCertificate: Dashboard["gateway_certificate"] = {
+    tls_mode: "pinned",
+    expires_at: "2027-08-30T01:02:04Z",
+    remaining_seconds: 31_536_000,
+    level: "HEALTHY",
+    recent_renewal_failed: false,
+    recent_renewal_error_code: null,
+  };
+  const auditListRequests: URL[] = [];
+  const auditExportRequests: URL[] = [];
+  const auditEvent = {
+    event_id: "evt_01J00000000000000000000001",
+    operation_id: "op_01J00000000000000000000001",
+    event: "SECURITY_OPERATION_RESULT",
+    action: "GATEWAY_KEY_ROTATE",
+    actor_type: "LOCAL_OPERATOR",
+    actor_id: null,
+    source_ip: null,
+    resource_type: "GATEWAY_IDENTITY",
+    resource_id: "<img src=x onerror=alert('audit-unsafe')>",
+    result: "SUCCEEDED",
+    error_code: null,
+    request_id: null,
+    trace_id: null,
+    before_state_digest: null,
+    after_state_digest: null,
+    occurred_at: occurredAt,
+  } satisfies SecurityAuditEvent;
 
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
@@ -153,13 +184,44 @@ test("Web-only mock 验证概览页五类最近错误渲染", async ({ page }) =
           egress_bytes_today: 0,
         },
         recent_errors: recentErrors,
+        ...(gatewayCertificate ? { gateway_certificate: gatewayCertificate } : {}),
         generated_at: "2026-08-30T01:02:04Z",
       } satisfies Dashboard),
+    });
+  });
+  await page.route("**/api/v1/security-audit-events/export**", async (route) => {
+    auditExportRequests.push(new URL(route.request().url()));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/x-ndjson",
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Disposition": 'attachment; filename="xtunnel-security-audit.ndjson"',
+      },
+      body: `${JSON.stringify(auditEvent)}\n`,
+    });
+  });
+  await page.route(/\/api\/v1\/security-audit-events(?:\?.*)?$/, async (route) => {
+    const requestURL = new URL(route.request().url());
+    auditListRequests.push(requestURL);
+    const nextPage = requestURL.searchParams.get("page_token") === "mock-next-page";
+    const pageEvent = nextPage
+      ? { ...auditEvent, event_id: "evt_01J00000000000000000000002", resource_id: "mock-page-two" }
+      : auditEvent;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [pageEvent],
+        ...(!nextPage && requestURL.searchParams.get("action") === null
+          ? { next_page_token: "mock-next-page" }
+          : {}),
+      } satisfies SecurityAuditEventList),
     });
   });
 
   await page.goto("/");
   await expect(page.getByText("dashboard-admin", { exact: true })).toBeVisible();
+  await expect(page.locator(".certificate-panel").getByText("HEALTHY", { exact: true })).toBeVisible();
   await expect(page.locator(".error-list li")).toHaveCount(6);
   for (const label of ["Tunnel 离线", "Connector 离线", "源站异常", "容量不足"] as const) {
     await expect(page.getByText(label, { exact: true })).toBeVisible();
@@ -179,6 +241,49 @@ test("Web-only mock 验证概览页五类最近错误渲染", async ({ page }) =
   recentErrors = { availability: "UNAVAILABLE", items: [] };
   await page.getByRole("button", { name: "刷新运行状态" }).click();
   await expect(page.getByText("M6 Error Read Model 尚未接入。", { exact: true })).toBeVisible();
+
+  gatewayCertificate = undefined;
+  await page.getByRole("button", { name: "刷新运行状态" }).click();
+  await expect(page.getByText("Gateway 证书状态不可用，请检查 Server 响应完整性。", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "安全审计" }).click();
+  await expect(page.getByRole("heading", { name: "安全审计" })).toBeVisible();
+  await expect(page.getByText("Gateway 身份轮换", { exact: true })).toBeVisible();
+  await expect(page.getByText("<img src=x onerror=alert('audit-unsafe')>", { exact: true })).toBeVisible();
+  await expect(page.locator(".audit-results img")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "下一页" }).click();
+  await expect(page.getByText("mock-page-two", { exact: true })).toBeVisible();
+  expect(auditListRequests.at(-1)?.searchParams.get("page_token")).toBe("mock-next-page");
+
+  await page.getByLabel("动作").selectOption("GATEWAY_KEY_ROTATE");
+  await page.getByLabel("结果").selectOption("SUCCEEDED");
+  await page.getByLabel("资源类型").selectOption("GATEWAY_IDENTITY");
+  await page.getByLabel("资源 ID").fill(auditEvent.resource_id);
+  await page.getByRole("button", { name: "应用筛选" }).click();
+  await expect(page.getByText(auditEvent.resource_id, { exact: true })).toBeVisible();
+  const filteredListQuery = auditListRequests.at(-1)?.searchParams;
+  expect(Object.fromEntries(filteredListQuery ?? [])).toEqual({
+    page_size: "50",
+    action: "GATEWAY_KEY_ROTATE",
+    result: "SUCCEEDED",
+    resource_type: "GATEWAY_IDENTITY",
+    resource_id: auditEvent.resource_id,
+  });
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "导出 NDJSON" }).click();
+  const download = await downloadPromise;
+  expect(Object.fromEntries(auditExportRequests.at(-1)?.searchParams ?? [])).toEqual({
+    action: "GATEWAY_KEY_ROTATE",
+    result: "SUCCEEDED",
+    resource_type: "GATEWAY_IDENTITY",
+    resource_id: auditEvent.resource_id,
+  });
+  expect(download.suggestedFilename()).toBe("xtunnel-security-audit.ndjson");
+  const downloadPath = await download.path();
+  expect(downloadPath).toBeTruthy();
+  expect((await readFile(downloadPath!, "utf8")).trim()).toContain('"event":"SECURITY_OPERATION_RESULT"');
 });
 
 test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${proxyKind ?? "unknown"}）`, async ({ page, context }) => {
@@ -225,6 +330,18 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   expect(authMe.status).toBe(200);
   await expectNoStore(authMe.headers);
   expect((authMe.body?.admin as JSONRecord | undefined)?.username).toBe("e2e-admin");
+
+  const dashboardResponse = await browserRequest(page, "/api/v1/dashboard");
+  expect(dashboardResponse.status).toBe(200);
+  const gatewayCertificate = (dashboardResponse.body as Dashboard | undefined)?.gateway_certificate;
+  expect(gatewayCertificate).toBeTruthy();
+  const certificatePanel = page.locator(".certificate-panel");
+  await expect(certificatePanel.getByText("UNAVAILABLE", { exact: true })).toHaveCount(0);
+  await expect(certificatePanel.getByText(gatewayCertificate!.level, { exact: true })).toBeVisible();
+  const renderedExpiry = await page.evaluate((expiresAt) =>
+    new Date(expiresAt).toLocaleString("zh-CN", { hour12: false }), gatewayCertificate!.expires_at
+  );
+  await expect(certificatePanel.locator(".certificate-expiry")).toHaveText(renderedExpiry);
 
   const csrfRejected = await browserRequest(page, "/api/v1/tunnels", {
     method: "POST",
@@ -320,6 +437,77 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   expect(page.url().includes(firstToken)).toBe(false);
   expect(await page.locator("body").evaluate((body, token) => !body.textContent?.includes(token), firstToken)).toBe(true);
   expect(await browserStorageIsEmpty(page, firstToken)).toBe(true);
+
+  const initialAuditResponsePromise = page.waitForResponse((response) => {
+    const requestURL = new URL(response.url());
+    return response.request().method() === "GET" &&
+      requestURL.pathname === "/api/v1/security-audit-events" &&
+      requestURL.searchParams.get("page_token") === null;
+  });
+  await page.getByRole("button", { name: "安全审计" }).click();
+  const initialAuditResponse = await initialAuditResponsePromise;
+  await expect(page.getByRole("heading", { name: "安全审计" })).toBeVisible();
+  await expect(page.locator(".audit-results tbody tr").first()).toBeVisible();
+  const initialAudit = await initialAuditResponse.json() as SecurityAuditEventList;
+  const selectedAudit = initialAudit.items[0];
+  if (!selectedAudit) throw new Error("真实管理链路没有可用于筛选验证的 Security Audit Event");
+
+  await page.getByLabel("动作").selectOption(selectedAudit.action);
+  await page.getByLabel("结果").selectOption(selectedAudit.result);
+  await page.getByLabel("资源类型").selectOption(selectedAudit.resource_type);
+  const filteredAuditResponsePromise = page.waitForResponse((response) => {
+    const requestURL = new URL(response.url());
+    return response.request().method() === "GET" &&
+      requestURL.pathname === "/api/v1/security-audit-events" &&
+      requestURL.searchParams.get("action") === selectedAudit.action &&
+      requestURL.searchParams.get("result") === selectedAudit.result &&
+      requestURL.searchParams.get("resource_type") === selectedAudit.resource_type;
+  });
+  await page.getByRole("button", { name: "应用筛选" }).click();
+  const filteredAuditResponse = await filteredAuditResponsePromise;
+  const filteredAuditURL = new URL(filteredAuditResponse.url());
+  expect(Object.fromEntries(filteredAuditURL.searchParams)).toEqual({
+    page_size: "50",
+    action: selectedAudit.action,
+    result: selectedAudit.result,
+    resource_type: selectedAudit.resource_type,
+  });
+  const filteredAudit = await filteredAuditResponse.json() as SecurityAuditEventList;
+  expect(filteredAudit.items.length).toBeGreaterThan(0);
+  expect(filteredAudit.items.every((event) =>
+    event.action === selectedAudit.action &&
+    event.result === selectedAudit.result &&
+    event.resource_type === selectedAudit.resource_type
+  )).toBe(true);
+  await expect(page.locator(".audit-results tbody tr")).toHaveCount(filteredAudit.items.length);
+
+  const auditDownloadPromise = page.waitForEvent("download");
+  const auditResponsePromise = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/v1/security-audit-events/export",
+  );
+  await page.getByRole("button", { name: "导出 NDJSON" }).click();
+  const [auditDownload, auditResponse] = await Promise.all([auditDownloadPromise, auditResponsePromise]);
+  expect(auditResponse.status()).toBe(200);
+  expect((await auditResponse.allHeaders())["cache-control"]).toBe("no-store");
+  expect(Object.fromEntries(new URL(auditResponse.url()).searchParams)).toEqual({
+    action: selectedAudit.action,
+    result: selectedAudit.result,
+    resource_type: selectedAudit.resource_type,
+  });
+  expect(auditDownload.suggestedFilename()).toBe("xtunnel-security-audit.ndjson");
+  const auditDownloadPath = await auditDownload.path();
+  expect(auditDownloadPath).toBeTruthy();
+  const auditExport = await readFile(auditDownloadPath!, "utf8");
+  const exportedAudits = auditExport.trim().split("\n").filter(Boolean).map((line) =>
+    JSON.parse(line) as SecurityAuditEvent
+  );
+  expect(exportedAudits.length).toBeGreaterThan(0);
+  expect(exportedAudits.every((event) =>
+    event.action === selectedAudit.action &&
+    event.result === selectedAudit.result &&
+    event.resource_type === selectedAudit.resource_type
+  )).toBe(true);
+  expect(auditExport.includes(firstToken)).toBe(false);
 
   await page.getByRole("button", { name: "服务与隧道" }).click();
   await expect(page.getByRole("heading", { name: "browser-e2e" })).toBeVisible();

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -225,6 +226,66 @@ const (
 func (e FieldViolationsDetailsType) Valid() bool {
 	switch e {
 	case FIELDVIOLATIONS:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GatewayCertificateLevel.
+const (
+	CRITICAL  GatewayCertificateLevel = "CRITICAL"
+	EMERGENCY GatewayCertificateLevel = "EMERGENCY"
+	EXPIRED   GatewayCertificateLevel = "EXPIRED"
+	HEALTHY   GatewayCertificateLevel = "HEALTHY"
+	WARNING   GatewayCertificateLevel = "WARNING"
+)
+
+// Valid indicates whether the value is a known member of the GatewayCertificateLevel enum.
+func (e GatewayCertificateLevel) Valid() bool {
+	switch e {
+	case CRITICAL:
+		return true
+	case EMERGENCY:
+		return true
+	case EXPIRED:
+		return true
+	case HEALTHY:
+		return true
+	case WARNING:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GatewayCertificateRecentRenewalErrorCode.
+const (
+	GATEWAYCERTIFICATERENEWALFAILED GatewayCertificateRecentRenewalErrorCode = "GATEWAY_CERTIFICATE_RENEWAL_FAILED"
+)
+
+// Valid indicates whether the value is a known member of the GatewayCertificateRecentRenewalErrorCode enum.
+func (e GatewayCertificateRecentRenewalErrorCode) Valid() bool {
+	switch e {
+	case GATEWAYCERTIFICATERENEWALFAILED:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GatewayCertificateTlsMode.
+const (
+	GatewayCertificateTlsModePinned GatewayCertificateTlsMode = "pinned"
+	GatewayCertificateTlsModePublic GatewayCertificateTlsMode = "public"
+)
+
+// Valid indicates whether the value is a known member of the GatewayCertificateTlsMode enum.
+func (e GatewayCertificateTlsMode) Valid() bool {
+	switch e {
+	case GatewayCertificateTlsModePinned:
+		return true
+	case GatewayCertificateTlsModePublic:
 		return true
 	default:
 		return false
@@ -635,16 +696,16 @@ func (e SnapshotLimitDetailsType) Valid() bool {
 
 // Defines values for SystemConfigAgentGatewayTlsMode.
 const (
-	Pinned SystemConfigAgentGatewayTlsMode = "pinned"
-	Public SystemConfigAgentGatewayTlsMode = "public"
+	SystemConfigAgentGatewayTlsModePinned SystemConfigAgentGatewayTlsMode = "pinned"
+	SystemConfigAgentGatewayTlsModePublic SystemConfigAgentGatewayTlsMode = "public"
 )
 
 // Valid indicates whether the value is a known member of the SystemConfigAgentGatewayTlsMode enum.
 func (e SystemConfigAgentGatewayTlsMode) Valid() bool {
 	switch e {
-	case Pinned:
+	case SystemConfigAgentGatewayTlsModePinned:
 		return true
-	case Public:
+	case SystemConfigAgentGatewayTlsModePublic:
 		return true
 	default:
 		return false
@@ -997,6 +1058,9 @@ type CreateTunnelRequest struct {
 type Dashboard struct {
 	Counts DashboardCounts `json:"counts"`
 
+	// GatewayCertificate 由 Server 冻结的 Gateway 叶证书状态；客户端不得重算 level 或解析错误文本。
+	GatewayCertificate *GatewayCertificate `json:"gateway_certificate,omitempty"`
+
 	// GeneratedAt RFC 3339 UTC `Z` 时间戳。
 	GeneratedAt DateTime `json:"generated_at"`
 
@@ -1080,6 +1144,28 @@ type FieldViolationsDetails struct {
 
 // FieldViolationsDetailsType defines model for FieldViolationsDetails.Type.
 type FieldViolationsDetailsType string
+
+// GatewayCertificate 由 Server 冻结的 Gateway 叶证书状态；客户端不得重算 level 或解析错误文本。
+type GatewayCertificate struct {
+	// ExpiresAt RFC 3339 UTC `Z` 时间戳。
+	ExpiresAt DateTime `json:"expires_at"`
+
+	// Level 分别表示剩余时间大于 30 天、不超过 30 天、不超过 7 天、不超过 1 天和已过期。
+	Level                  GatewayCertificateLevel                                     `json:"level"`
+	RecentRenewalErrorCode nullable.Nullable[GatewayCertificateRecentRenewalErrorCode] `json:"recent_renewal_error_code"`
+	RecentRenewalFailed    bool                                                        `json:"recent_renewal_failed"`
+	RemainingSeconds       int64                                                       `json:"remaining_seconds"`
+	TlsMode                GatewayCertificateTlsMode                                   `json:"tls_mode"`
+}
+
+// GatewayCertificateLevel 分别表示剩余时间大于 30 天、不超过 30 天、不超过 7 天、不超过 1 天和已过期。
+type GatewayCertificateLevel string
+
+// GatewayCertificateRecentRenewalErrorCode defines model for GatewayCertificate.RecentRenewalErrorCode.
+type GatewayCertificateRecentRenewalErrorCode string
+
+// GatewayCertificateTlsMode defines model for GatewayCertificate.TlsMode.
+type GatewayCertificateTlsMode string
 
 // HTTPExposure defines model for HTTPExposure.
 type HTTPExposure struct {
@@ -1745,6 +1831,20 @@ type ListSecurityAuditEventsParams struct {
 
 	// PageToken 绑定资源、排序边界和 Filter Hash 的 Server 不透明 Token。
 	PageToken    *PageToken                 `form:"page_token,omitempty" json:"page_token,omitempty"`
+	Action       *SecurityAuditAction       `form:"action,omitempty" json:"action,omitempty"`
+	Result       *SecurityAuditResult       `form:"result,omitempty" json:"result,omitempty"`
+	ResourceType *SecurityAuditResourceType `form:"resource_type,omitempty" json:"resource_type,omitempty"`
+	ResourceId   *string                    `form:"resource_id,omitempty" json:"resource_id,omitempty"`
+
+	// OccurredFrom 包含此 UTC 时刻。
+	OccurredFrom *DateTime `form:"occurred_from,omitempty" json:"occurred_from,omitempty"`
+
+	// OccurredTo 不包含此 UTC 时刻。
+	OccurredTo *DateTime `form:"occurred_to,omitempty" json:"occurred_to,omitempty"`
+}
+
+// ExportSecurityAuditEventsParams defines parameters for ExportSecurityAuditEvents.
+type ExportSecurityAuditEventsParams struct {
 	Action       *SecurityAuditAction       `form:"action,omitempty" json:"action,omitempty"`
 	Result       *SecurityAuditResult       `form:"result,omitempty" json:"result,omitempty"`
 	ResourceType *SecurityAuditResourceType `form:"resource_type,omitempty" json:"resource_type,omitempty"`
@@ -3062,6 +3162,9 @@ type ServerInterface interface {
 	// ListSecurityAuditEvents 只读查询持久化 Security Audit Event
 	// (GET /security-audit-events)
 	ListSecurityAuditEvents(w http.ResponseWriter, r *http.Request, params ListSecurityAuditEventsParams)
+	// ExportSecurityAuditEvents 流式导出持久化 Security Audit Event
+	// (GET /security-audit-events/export)
+	ExportSecurityAuditEvents(w http.ResponseWriter, r *http.Request, params ExportSecurityAuditEventsParams)
 	// ListServices 分页读取一个 Tunnel 下的 Service
 	// (GET /services)
 	ListServices(w http.ResponseWriter, r *http.Request, params ListServicesParams)
@@ -3366,6 +3469,104 @@ func (siw *ServerInterfaceWrapper) ListSecurityAuditEvents(w http.ResponseWriter
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListSecurityAuditEvents(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ExportSecurityAuditEvents operation middleware
+func (siw *ServerInterfaceWrapper) ExportSecurityAuditEvents(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ExportSecurityAuditEventsParams
+
+	// ------------- Optional query parameter "action" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "action", r.URL.Query(), &params.Action, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "action"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "action", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "result" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "result", r.URL.Query(), &params.Result, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "result"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "result", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "resource_type" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "resource_type", r.URL.Query(), &params.ResourceType, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "resource_type"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "resource_type", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "resource_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "resource_id", r.URL.Query(), &params.ResourceId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "resource_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "resource_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "occurred_from" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "occurred_from", r.URL.Query(), &params.OccurredFrom, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "occurred_from"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "occurred_from", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "occurred_to" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "occurred_to", r.URL.Query(), &params.OccurredTo, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "occurred_to"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "occurred_to", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ExportSecurityAuditEvents(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -4658,6 +4859,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/system/health", wrapper.GetSystemHealth)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/system/config", wrapper.GetSystemConfig)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/security-audit-events", wrapper.ListSecurityAuditEvents)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/security-audit-events/export", wrapper.ExportSecurityAuditEvents)
 
 	return m
 }
@@ -5078,6 +5280,109 @@ func (response ListSecurityAuditEvents401JSONResponse) VisitListSecurityAuditEve
 type ListSecurityAuditEvents500JSONResponse struct{ InternalErrorJSONResponse }
 
 func (response ListSecurityAuditEvents500JSONResponse) VisitListSecurityAuditEventsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ExportSecurityAuditEventsRequestObject struct {
+	Params ExportSecurityAuditEventsParams
+}
+
+type ExportSecurityAuditEventsResponseObject interface {
+	VisitExportSecurityAuditEventsResponse(w http.ResponseWriter) error
+}
+
+type ExportSecurityAuditEvents200ResponseHeaders struct {
+	CacheControl       *string
+	ContentDisposition string
+}
+
+type ExportSecurityAuditEvents200ApplicationxNdjsonResponse struct {
+	Body          io.Reader
+	Headers       ExportSecurityAuditEvents200ResponseHeaders
+	ContentLength int64
+}
+
+func (response ExportSecurityAuditEvents200ApplicationxNdjsonResponse) VisitExportSecurityAuditEventsResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	if response.Headers.CacheControl != nil {
+		w.Header().Set("Cache-Control", fmt.Sprint(*response.Headers.CacheControl))
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprint(response.Headers.ContentDisposition))
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// If w doesn't support flushing, fall back to io.Copy.
+		_, err := io.Copy(w, response.Body)
+		return err
+	}
+	// text/event-stream messages are typically small; use a
+	// modest buffer and flush after each chunk so clients see
+	// events immediately instead of waiting on OS buffering.
+	buf := make([]byte, 4096)
+	for {
+		n, err := response.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return writeErr
+			}
+			flusher.Flush()
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+type ExportSecurityAuditEvents400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response ExportSecurityAuditEvents400JSONResponse) VisitExportSecurityAuditEventsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ExportSecurityAuditEvents401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ExportSecurityAuditEvents401JSONResponse) VisitExportSecurityAuditEventsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ExportSecurityAuditEvents500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response ExportSecurityAuditEvents500JSONResponse) VisitExportSecurityAuditEventsResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -7318,6 +7623,9 @@ type StrictServerInterface interface {
 	// ListSecurityAuditEvents 只读查询持久化 Security Audit Event
 	// (GET /security-audit-events)
 	ListSecurityAuditEvents(ctx context.Context, request ListSecurityAuditEventsRequestObject) (ListSecurityAuditEventsResponseObject, error)
+	// ExportSecurityAuditEvents 流式导出持久化 Security Audit Event
+	// (GET /security-audit-events/export)
+	ExportSecurityAuditEvents(ctx context.Context, request ExportSecurityAuditEventsRequestObject) (ExportSecurityAuditEventsResponseObject, error)
 	// ListServices 分页读取一个 Tunnel 下的 Service
 	// (GET /services)
 	ListServices(ctx context.Context, request ListServicesRequestObject) (ListServicesResponseObject, error)
@@ -7545,6 +7853,32 @@ func (sh *strictHandler) ListSecurityAuditEvents(w http.ResponseWriter, r *http.
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ListSecurityAuditEventsResponseObject); ok {
 		if err := validResponse.VisitListSecurityAuditEventsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ExportSecurityAuditEvents operation middleware
+func (sh *strictHandler) ExportSecurityAuditEvents(w http.ResponseWriter, r *http.Request, params ExportSecurityAuditEventsParams) {
+	var request ExportSecurityAuditEventsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ExportSecurityAuditEvents(ctx, request.(ExportSecurityAuditEventsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ExportSecurityAuditEvents")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ExportSecurityAuditEventsResponseObject); ok {
+		if err := validResponse.VisitExportSecurityAuditEventsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

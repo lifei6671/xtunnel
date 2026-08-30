@@ -5,10 +5,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
@@ -23,6 +25,9 @@ const (
 	// defaultRenewalCheckInterval 限制常驻 Server 对本地证书文件的检查频率。
 	// pinned 身份启动时已检查一次；后续每天检查可确保进入 30 天窗口后自动续签。
 	defaultRenewalCheckInterval = 24 * time.Hour
+
+	certificateRenewedEvent       = "gateway_certificate_renewed"
+	certificateRenewalFailedEvent = "gateway_certificate_renewal_failed"
 )
 
 var (
@@ -53,6 +58,9 @@ type ServerOptions struct {
 	// ReportRuntimeError 接收后台 goroutine 的致命错误。回调必须保持非阻塞；
 	// Gateway 会先停止接收新连接并取消仍在运行的连接处理器，再调用该回调。
 	ReportRuntimeError func(error)
+	// Logger 接收证书续签的稳定运维事件。生产 Bootstrap 必须注入统一 JSON Logger；
+	// nil 仅供不启动续签流程的包内构造和测试使用。
+	Logger *slog.Logger
 	// AcquireMaintenanceBarrier 把 pinned 身份的运行期续签纳入 Server 的
 	// durable-state 写屏障。返回的 release 必须可在续签结束后无阻塞调用；
 	// 等待过程必须尊重 ctx，确保 Shutdown 能解除仍在排队的续签。
@@ -93,6 +101,13 @@ type Server struct {
 // 它不返回证书链、SPKI 或私钥对象，避免采集方取得 TLS 身份所有权。
 type MetricsSnapshot struct {
 	CertificateExpiryUnixSeconds int64
+}
+
+// CertificateStatus 是 Dashboard 与 Metrics 共用的只读证书状态。续签底层错误
+// 不离开 Gateway owner；运维投影只消费失败布尔值，避免泄漏文件路径等内部细节。
+type CertificateStatus struct {
+	ExpiryUnixSeconds int64
+	RenewalFailed     bool
 }
 
 // NewServer 校验静态限制并构造尚未监听的 Gateway。
@@ -277,16 +292,26 @@ func (server *Server) LastRenewalError() error {
 // MetricsSnapshot 在 identityMu 下读取当前身份，因此 pinned 运行期续签成功后下次
 // 采集会立即看到新到期时间；public 与 pinned 身份使用同一只读边界。
 func (server *Server) MetricsSnapshot() MetricsSnapshot {
+	status := server.CertificateStatus()
+	return MetricsSnapshot{CertificateExpiryUnixSeconds: status.ExpiryUnixSeconds}
+}
+
+// CertificateStatus 在同一读锁内冻结到期时间与最近续签结果，避免 Dashboard
+// 把两个不同时刻的状态拼成一个快照。
+func (server *Server) CertificateStatus() CertificateStatus {
 	if server == nil {
-		return MetricsSnapshot{}
+		return CertificateStatus{}
 	}
 	server.identityMu.RLock()
 	defer server.identityMu.RUnlock()
 	leaf := server.identity.Leaf()
 	if leaf == nil {
-		return MetricsSnapshot{}
+		return CertificateStatus{RenewalFailed: server.lastRenewalError != nil}
 	}
-	return MetricsSnapshot{CertificateExpiryUnixSeconds: leaf.NotAfter.Unix()}
+	return CertificateStatus{
+		ExpiryUnixSeconds: leaf.NotAfter.Unix(),
+		RenewalFailed:     server.lastRenewalError != nil,
+	}
 }
 
 // getCertificate 在读锁下复制当前证书值，使后台续签发布与握手读取互不竞态。
@@ -360,9 +385,7 @@ func (server *Server) renewPinnedIdentity(ctx context.Context) {
 	if acquire := server.options.AcquireMaintenanceBarrier; acquire != nil {
 		release, err := acquire(ctx)
 		if err != nil {
-			server.identityMu.Lock()
-			server.lastRenewalError = fmt.Errorf("acquire gateway identity maintenance barrier: %w", err)
-			server.identityMu.Unlock()
+			server.recordRenewalFailure(ctx, fmt.Errorf("acquire gateway identity maintenance barrier: %w", err))
 			return
 		}
 		defer release()
@@ -372,15 +395,42 @@ func (server *Server) renewPinnedIdentity(ctx context.Context) {
 	identity := server.identity
 	server.identityMu.RUnlock()
 	renewed, err := identity.renewIfNecessary(server.now())
-	server.identityMu.Lock()
-	defer server.identityMu.Unlock()
 	if err != nil {
-		// 续签失败时保留内存中的旧有效身份，供当前和后续 TLS 握手继续使用。
-		server.lastRenewalError = err
+		server.recordRenewalFailure(ctx, err)
 		return
 	}
+	renewedCertificate := !identity.Leaf().Equal(renewed.Leaf())
+	server.identityMu.Lock()
 	server.identity = renewed
 	server.lastRenewalError = nil
+	server.identityMu.Unlock()
+	if renewedCertificate && server.options.Logger != nil {
+		server.options.Logger.InfoContext(
+			ctx,
+			certificateRenewedEvent,
+			"previous_certificate_expiry_seconds", identity.Leaf().NotAfter.Unix(),
+			"certificate_expiry_seconds", renewed.Leaf().NotAfter.Unix(),
+		)
+	}
+}
+
+// recordRenewalFailure 先发布失败状态再写日志，避免 Logger IO 落入身份锁；旧证书
+// 继续对新握手可见，后续成功检查会清空 LastRenewalError 并发出成功事件。
+func (server *Server) recordRenewalFailure(ctx context.Context, err error) {
+	server.identityMu.Lock()
+	server.lastRenewalError = err
+	expiry := server.identity.Leaf().NotAfter.Unix()
+	server.identityMu.Unlock()
+	// Shutdown 取消导致的 Barrier 退出不是证书故障；保留 owner 状态，但不制造告警日志。
+	if server.options.Logger != nil && ctx.Err() == nil {
+		server.options.Logger.ErrorContext(
+			ctx,
+			certificateRenewalFailedEvent,
+			logging.ErrorCodeKey, "CERTIFICATE_RENEWAL_FAILED",
+			"certificate_expiry_seconds", expiry,
+			"error", err,
+		)
+	}
 }
 
 // protocolFromALPN 只接受冻结的 Control/Work 协议，未知或空 ALPN 快速失败。

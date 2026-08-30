@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"net"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/safego"
 )
 
@@ -333,10 +335,16 @@ func TestServerRenewsRunningPinnedIdentityAndHotLoadsNewHandshakes(t *testing.T)
 	if err != nil {
 		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
 	}
+	var logs bytes.Buffer
+	logger, err := logging.New(&logs, logging.Options{Level: "info", Format: "json", Component: "server"})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
 	server, err := NewServer(ServerOptions{
 		Listen:                  "127.0.0.1:0",
 		Identity:                identity,
 		MaxPendingTLSHandshakes: 2,
+		Logger:                  logger,
 		// 将周期设为很长，令测试显式触发一次续签并验证运行中热加载。
 		renewalCheckInterval: time.Hour,
 		now:                  func() time.Time { return createdAt.Add(367 * 24 * time.Hour) },
@@ -385,6 +393,15 @@ func TestServerRenewsRunningPinnedIdentityAndHotLoadsNewHandshakes(t *testing.T)
 	}
 	if !bytes.Equal(oldConnection.ConnectionState().PeerCertificates[0].Raw, oldCertificate) {
 		t.Fatal("renewal changed the certificate already negotiated by an old connection")
+	}
+	var renewalLog map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &renewalLog); err != nil {
+		t.Fatalf("decode certificate renewal log: %v; output = %q", err, logs.String())
+	}
+	if renewalLog[logging.EventKey] != certificateRenewedEvent || renewalLog[logging.ComponentKey] != "server" ||
+		int64(renewalLog["previous_certificate_expiry_seconds"].(float64)) != identity.Leaf().NotAfter.Unix() ||
+		int64(renewalLog["certificate_expiry_seconds"].(float64)) != wantRenewedExpiry {
+		t.Fatalf("certificate renewal log = %#v", renewalLog)
 	}
 }
 
@@ -552,27 +569,40 @@ func TestServerRenewalFailureRetainsOldIdentityAndExposesError(t *testing.T) {
 		paths:    identityPaths(filepath.Join(t.TempDir(), "missing-data-dir")),
 		hostname: "gateway.example.test",
 	}
+	var logs bytes.Buffer
+	logger, err := logging.New(&logs, logging.Options{Level: "info", Format: "json", Component: "server"})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
 	server, err := NewServer(ServerOptions{
 		Listen:                  "127.0.0.1:0",
 		Identity:                identity,
 		MaxPendingTLSHandshakes: 1,
-		renewalCheckInterval:    time.Millisecond,
+		Logger:                  logger,
 		now:                     func() time.Time { return createdAt.Add(367 * 24 * time.Hour) },
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
-	if err := server.Start(context.Background()); err != nil {
-		t.Fatalf("Server.Start() error = %v", err)
+	server.renewPinnedIdentity(context.Background())
+	if server.LastRenewalError() == nil {
+		t.Fatal("Server.LastRenewalError() = nil, want renewal failure")
 	}
-	t.Cleanup(func() { _ = server.Close() })
-	waitForGatewayCondition(t, func() bool { return server.LastRenewalError() != nil })
 	certificate, err := server.getCertificate(&tls.ClientHelloInfo{})
 	if err != nil {
 		t.Fatalf("TLS GetCertificate() error = %v", err)
 	}
 	if !bytes.Equal(certificate.Certificate[0], identity.Leaf().Raw) {
 		t.Fatal("renewal failure replaced the old valid TLS identity")
+	}
+	var renewalLog map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &renewalLog); err != nil {
+		t.Fatalf("decode certificate renewal failure log: %v; output = %q", err, logs.String())
+	}
+	if renewalLog[logging.EventKey] != certificateRenewalFailedEvent || renewalLog[logging.ComponentKey] != "server" ||
+		renewalLog[logging.ErrorCodeKey] != "CERTIFICATE_RENEWAL_FAILED" ||
+		int64(renewalLog["certificate_expiry_seconds"].(float64)) != identity.Leaf().NotAfter.Unix() {
+		t.Fatalf("certificate renewal failure log = %#v", renewalLog)
 	}
 }
 

@@ -132,7 +132,8 @@ type SecurityAuditEventCursor struct {
 
 // SecurityAuditEventQuery 描述安全审计事件的只读筛选。
 // OccurredFrom 包含边界，OccurredTo 不包含边界；After 按
-// (occurred_at, event_id) DESC 继续读取下一页。
+// (occurred_at, event_id) DESC 继续读取下一页；Upper 包含边界，用于流式导出
+// 在开始时冻结可见上界，避免之后追加的更新事件混入本次结果。
 type SecurityAuditEventQuery struct {
 	Action       string
 	Result       string
@@ -141,7 +142,11 @@ type SecurityAuditEventQuery struct {
 	OccurredFrom *int64
 	OccurredTo   *int64
 	After        *SecurityAuditEventCursor
-	Limit        int
+	Upper        *SecurityAuditEventCursor
+	// AppendSequenceUpper 是 Repository 在导出开始时冻结的仅内部追加序号上界。
+	// 它与公开的 tuple Upper 共同保证回填旧 occurred_at 的并发追加也不会混入。
+	AppendSequenceUpper *int64
+	Limit               int
 }
 
 // Validate 检查 Repository 查询边界；Limit 不在此处应用默认值。
@@ -156,8 +161,12 @@ func (query SecurityAuditEventQuery) Validate() error {
 	if query.OccurredFrom != nil && query.OccurredTo != nil && *query.OccurredFrom >= *query.OccurredTo {
 		return ErrInvalidSecurityAuditEventQuery
 	}
-	if query.After != nil &&
-		(query.After.OccurredAt <= 0 || !validate.ValidID(query.After.EventID, "evt_")) {
+	for _, cursor := range []*SecurityAuditEventCursor{query.After, query.Upper} {
+		if cursor != nil && (cursor.OccurredAt <= 0 || !validate.ValidID(cursor.EventID, "evt_")) {
+			return ErrInvalidSecurityAuditEventQuery
+		}
+	}
+	if query.AppendSequenceUpper != nil && *query.AppendSequenceUpper < 1 {
 		return ErrInvalidSecurityAuditEventQuery
 	}
 	return nil
@@ -196,9 +205,17 @@ type SecurityAuditEventPage struct {
 	Next   *SecurityAuditEventCursor
 }
 
+// SecurityAuditEventExportBoundary 同时冻结排序 tuple 上界与 append-only 序号栅栏。
+// MaxAppendSequence 只用于同一 Repository 的后续页查询，不进入 API 或导出内容。
+type SecurityAuditEventExportBoundary struct {
+	Upper             SecurityAuditEventCursor
+	MaxAppendSequence int64
+}
+
 // SecurityAuditEventQueryStore 只暴露读取能力，不允许修改或删除审计证据。
 type SecurityAuditEventQueryStore interface {
 	QuerySecurityAuditEvents(context.Context, SecurityAuditEventQuery) (SecurityAuditEventPage, error)
+	SecurityAuditEventExportBoundary(context.Context, SecurityAuditEventQuery) (SecurityAuditEventExportBoundary, bool, error)
 }
 
 // SecurityAuditEventRepository 只允许幂等追加安全事件，不暴露修改或删除入口。

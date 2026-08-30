@@ -6,8 +6,10 @@ usage() {
 Usage: smoke.sh --server-binary PATH --agent-binary PATH
 
 Runs install, start, restart, stop, start, and uninstall checks for both
-systemd services. This destructive test is only for an isolated Linux host. It
-refuses to run when any XTunnel path, service user, or service group exists.
+systemd services. It also injects a bounded Server startup failure, recovery
+restart, and runtime-only stop timeout. This destructive test is only for an
+isolated Linux host. It refuses to run when any XTunnel path, service user,
+service group, or runtime drop-in exists.
 EOF
 }
 
@@ -54,6 +56,7 @@ fi
 for path in \
 	/etc/systemd/system/xtunnel-server.service \
 	/etc/systemd/system/xtunnel-agent.service \
+	/run/systemd/system/xtunnel-server.service.d \
 	/usr/local/bin/xtunnel-server \
 	/usr/local/bin/xtunnel-agent \
 	/etc/xtunnel \
@@ -93,11 +96,13 @@ cleanup() {
 	done
 	rm -rf -- \
 		/etc/xtunnel \
+		/run/systemd/system/xtunnel-server.service.d \
 		/run/xtunnel \
 		/run/xtunnel-agent \
 		/var/lib/xtunnel \
 		/var/lib/xtunnel-agent \
 		"$temp_dir"
+	systemctl daemon-reload >/dev/null 2>&1 || true
 	for service_user in xtunnel-server xtunnel-agent; do
 		if id "$service_user" >/dev/null 2>&1; then
 			userdel "$service_user" >/dev/null 2>&1 || true
@@ -111,6 +116,39 @@ trap cleanup 0
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+wait_for_unit_state() {
+	unit=$1
+	want=$2
+	deadline=$(( $(date +%s) + 30 ))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		if [ "$(systemctl show --property=ActiveState --value "$unit")" = "$want" ]; then
+			return 0
+		fi
+		sleep 1
+	done
+	printf '%s did not reach ActiveState=%s\n' "$unit" "$want" >&2
+	return 1
+}
+
+wait_for_restarted_pid() {
+	unit=$1
+	old_pid=$2
+	deadline=$(( $(date +%s) + 30 ))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		state=$(systemctl show --property=ActiveState --value "$unit")
+		new_pid=$(systemctl show --property=MainPID --value "$unit")
+		case "$new_pid" in
+			''|*[!0-9]*) new_pid=0 ;;
+		esac
+		if [ "$state" = active ] && [ "$new_pid" -ne 0 ] && [ "$new_pid" -ne "$old_pid" ]; then
+			return 0
+		fi
+		sleep 1
+	done
+	printf '%s did not recover with a new MainPID after failure\n' "$unit" >&2
+	return 1
+}
 
 umask 077
 cat >"$temp_dir/server.yaml" <<'EOF'
@@ -223,6 +261,119 @@ credentials_directory=/run/credentials/xtunnel-agent.service
 runtime_credential="/proc/$agent_pid/root$credentials_directory/xtunnel-agent.token"
 test -r "$runtime_credential"
 test "$(cat "$runtime_credential")" = "$smoke_agent_token"
+
+# 启动失败使用 runtime-only Restart=no，避免无效配置形成无限重启；恢复后立即删除
+# drop-in。Journal、Result 和退出码共同证明故障可定位，生产 Unit 不被改写。
+server_unit=xtunnel-server.service
+server_dropin=/run/systemd/system/xtunnel-server.service.d
+cp /etc/xtunnel/server.yaml "$temp_dir/server.valid.yaml"
+mkdir -p "$server_dropin"
+cat >"$server_dropin/m6-06.conf" <<'EOF'
+[Service]
+Restart=no
+EOF
+systemctl daemon-reload
+systemctl stop "$server_unit"
+startup_failure_since=$(date +%s)
+printf '%s\n' 'invalid: [unterminated' > /etc/xtunnel/server.yaml
+set +e
+systemctl start "$server_unit"
+startup_command_status=$?
+set -e
+case "$startup_command_status" in
+	''|*[!0-9]*)
+		printf 'systemctl start returned invalid status=%s\n' "$startup_command_status" >&2
+		exit 1
+		;;
+esac
+wait_for_unit_state "$server_unit" failed
+test "$(systemctl show --property=Result --value "$server_unit")" = exit-code
+server_exit_status=$(systemctl show --property=ExecMainStatus --value "$server_unit")
+case "$server_exit_status" in
+	''|*[!0-9]*|0)
+		printf 'Server startup failure returned invalid ExecMainStatus=%s\n' "$server_exit_status" >&2
+		exit 1
+		;;
+esac
+journalctl -u "$server_unit" --since "@$startup_failure_since" --no-pager | grep -F 'load server config' >/dev/null
+cp "$temp_dir/server.valid.yaml" /etc/xtunnel/server.yaml
+rm -f -- "$server_dropin/m6-06.conf"
+rmdir "$server_dropin"
+systemctl daemon-reload
+systemctl reset-failed "$server_unit"
+systemctl start "$server_unit"
+systemctl is-active --quiet "$server_unit"
+
+# 生产 Restart=on-failure 必须在非预期退出后产生新 PID；该注入不修改磁盘数据。
+restart_count_before=$(systemctl show --property=NRestarts --value "$server_unit")
+server_pid_before=$(systemctl show --property=MainPID --value "$server_unit")
+case "$restart_count_before:$server_pid_before" in
+	*[!0-9:]*|:*|*:|*:0)
+		printf 'Server recovery precondition is invalid: NRestarts=%s MainPID=%s\n' "$restart_count_before" "$server_pid_before" >&2
+		exit 1
+		;;
+esac
+recovery_since=$(date +%s)
+kill -KILL "$server_pid_before"
+wait_for_restarted_pid "$server_unit" "$server_pid_before"
+restart_count_after=$(systemctl show --property=NRestarts --value "$server_unit")
+case "$restart_count_after" in
+	''|*[!0-9]*)
+		printf 'Server recovery returned invalid NRestarts=%s\n' "$restart_count_after" >&2
+		exit 1
+		;;
+esac
+if [ "$restart_count_after" -le "$restart_count_before" ]; then
+	printf 'Server NRestarts did not increase: before=%s after=%s\n' "$restart_count_before" "$restart_count_after" >&2
+	exit 1
+fi
+journalctl -u "$server_unit" --since "@$recovery_since" --no-pager | grep -F 'process_started' >/dev/null
+
+# 先记录生产 Unit 的真实 Stop 上限；这里只用 runtime drop-in 把隔离测试压缩到 2 秒，
+# 再 SIGSTOP 制造可恢复的无进展进程。测试结束后恢复原 Unit，不预改 TimeoutStopSec。
+production_stop_timeout=$(systemctl show --property=TimeoutStopUSec --value "$server_unit")
+case "$production_stop_timeout" in
+	''|0|infinity)
+		printf 'Server production TimeoutStopUSec is not a finite positive value: %s\n' "$production_stop_timeout" >&2
+		exit 1
+		;;
+esac
+systemctl stop "$server_unit"
+mkdir -p "$server_dropin"
+cat >"$server_dropin/m6-06.conf" <<'EOF'
+[Service]
+Restart=no
+TimeoutStopSec=2s
+EOF
+systemctl daemon-reload
+systemctl start "$server_unit"
+server_timeout_pid=$(systemctl show --property=MainPID --value "$server_unit")
+case "$server_timeout_pid" in
+	''|*[!0-9]*|0)
+		printf 'Server timeout injection returned invalid MainPID=%s\n' "$server_timeout_pid" >&2
+		exit 1
+		;;
+esac
+timeout_since=$(date +%s)
+kill -STOP "$server_timeout_pid"
+set +e
+systemctl stop "$server_unit"
+stop_command_status=$?
+set -e
+case "$stop_command_status" in
+	''|*[!0-9]*)
+		printf 'systemctl stop returned invalid status=%s\n' "$stop_command_status" >&2
+		exit 1
+		;;
+esac
+test "$(systemctl show --property=Result --value "$server_unit")" = timeout
+journalctl -u "$server_unit" --since "@$timeout_since" --no-pager | grep -E 'stop-sigterm.*timed out' >/dev/null
+rm -f -- "$server_dropin/m6-06.conf"
+rmdir "$server_dropin"
+systemctl daemon-reload
+systemctl reset-failed "$server_unit"
+systemctl start "$server_unit"
+systemctl is-active --quiet "$server_unit"
 
 for unit in xtunnel-server.service xtunnel-agent.service; do
 	systemctl stop "$unit"

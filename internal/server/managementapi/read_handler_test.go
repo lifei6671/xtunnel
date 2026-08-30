@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -43,6 +44,14 @@ func (fake dashboardUsageReaderFake) UsageToday(context.Context, time.Time) (rep
 type dashboardStatusOwnerFake struct {
 	status application.DashboardServerStatus
 }
+
+var dashboardCertificateReaderFake = application.DashboardGatewayCertificateReaderFunc(
+	func(context.Context) (application.DashboardGatewayCertificateSource, error) {
+		return application.DashboardGatewayCertificateSource{
+			TLSMode: "pinned", ExpiryUnixSeconds: time.Date(2027, time.August, 30, 0, 0, 0, 0, time.UTC).Unix(),
+		}, nil
+	},
+)
 
 func (fake dashboardStatusOwnerFake) DashboardServerStatus(context.Context) (application.DashboardServerStatus, error) {
 	return fake.status, nil
@@ -90,6 +99,7 @@ func TestManagementReadAPIsUseAuthenticatedFrozenProjections(t *testing.T) {
 		dashboardStatusOwnerFake{status: application.DashboardServerStatusReady},
 		dashboardUsageReaderFake{totals: repository.UsageTotals{Connections: 9, IngressBytes: 10, EgressBytes: 11}},
 		recentErrors,
+		dashboardCertificateReaderFake,
 	)
 	handler, err := NewHandler(HandlerOptions{
 		Management: config.Management, Store: store, System: system,
@@ -157,6 +167,15 @@ func TestManagementReadAPIsUseAuthenticatedFrozenProjections(t *testing.T) {
 	if err != nil || string(gotRequestID) != recentRequestID {
 		t.Fatalf("dashboard recent error request_id = %q/%v, want %q", gotRequestID, err, recentRequestID)
 	}
+	if dashboardBody.GatewayCertificate.TlsMode != GatewayCertificateTlsModePinned ||
+		dashboardBody.GatewayCertificate.Level != HEALTHY ||
+		dashboardBody.GatewayCertificate.RecentRenewalFailed ||
+		dashboardBody.GatewayCertificate.RemainingSeconds <= 0 {
+		t.Fatalf("dashboard gateway certificate = %#v", dashboardBody.GatewayCertificate)
+	}
+	if _, err := dashboardBody.GatewayCertificate.RecentRenewalErrorCode.Get(); err == nil {
+		t.Fatal("dashboard gateway certificate renewal error code is present without a failure")
+	}
 
 	healthResponse := doRequest(t, client, http.MethodGet, server.URL+"/api/v1/system/health", "", nil)
 	var health SystemHealth
@@ -203,6 +222,28 @@ func TestManagementReadAPIsUseAuthenticatedFrozenProjections(t *testing.T) {
 		t.Fatalf("second audit page = %#v", secondPage)
 	}
 
+	export := doRequest(t, client, http.MethodGet,
+		server.URL+"/api/v1/security-audit-events/export?action=CONNECTION_TOKEN_REVEAL", "", nil)
+	exportBody, err := io.ReadAll(export.Body)
+	export.Body.Close()
+	if err != nil || export.StatusCode != http.StatusOK {
+		t.Fatalf("audit export status/read = %d/%v", export.StatusCode, err)
+	}
+	if export.Header.Get("Cache-Control") != "no-store" ||
+		export.Header.Get("Content-Disposition") != securityAuditExportFilename {
+		t.Fatalf("audit export headers = %#v", export.Header)
+	}
+	lines := bytes.Split(bytes.TrimSpace(exportBody), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("audit export lines = %d, want 2; body = %s", len(lines), exportBody)
+	}
+	for index, wantID := range []string{"evt_01J00000000000000000000002", "evt_01J00000000000000000000001"} {
+		var event SecurityAuditEvent
+		if err := json.Unmarshal(lines[index], &event); err != nil || event.EventId != wantID {
+			t.Fatalf("audit export line %d = %#v/%v, want %s", index, event, err, wantID)
+		}
+	}
+
 	boundTokenURL := server.URL + "/api/v1/security-audit-events?page_size=1&action=CONNECTION_TOKEN_ROTATE&page_token=" +
 		url.QueryEscape(*firstPage.NextPageToken)
 	boundToken := doRequest(t, client, http.MethodGet, boundTokenURL, "", nil)
@@ -233,6 +274,53 @@ func TestManagementReadAPIsUseAuthenticatedFrozenProjections(t *testing.T) {
 		t.Fatalf("security audit mutation status = %d, want 405", mutation.StatusCode)
 	}
 	mutation.Body.Close()
+}
+
+func TestSecurityAuditExportAbortsCommittedStreamOnLaterPageFailure(t *testing.T) {
+	event := repository.SecurityAuditEvent{
+		EventID: "evt_01J00000000000000000000001", OperationID: "op_01J00000000000000000000001",
+		Event: repository.SecurityAuditEventOperationResult, Action: repository.SecurityAuditActionGatewayKeyRotate,
+		ActorType: repository.SecurityAuditActorLocalOperator, ResourceType: repository.SecurityAuditResourceGatewayIdentity,
+		ResourceID: "gateway.example.test", Result: repository.SecurityAuditResultSucceeded, OccurredAt: 100,
+	}
+	queryErr := errors.New("next page failed")
+	service := application.NewSecurityAuditQueryService(&auditExportQueryStoreFake{err: queryErr})
+	response := securityAuditExportResponse{
+		ctx: context.Background(), handler: &ManagementHandler{logger: slog.New(slog.NewJSONHandler(io.Discard, nil))},
+		requestID: "req_01J00000000000000000000000", service: service,
+		query: repository.SecurityAuditEventQuery{Limit: repository.MaxSecurityAuditEventQueryLimit},
+		first: repository.SecurityAuditEventPage{
+			Events: []repository.SecurityAuditEvent{event},
+			Next:   &repository.SecurityAuditEventCursor{OccurredAt: event.OccurredAt, EventID: event.EventID},
+		},
+	}
+	recorder := httptest.NewRecorder()
+	defer func() {
+		if recovered := recover(); recovered != http.ErrAbortHandler {
+			t.Fatalf("VisitExportSecurityAuditEventsResponse() panic = %v, want http.ErrAbortHandler", recovered)
+		}
+		if recorder.Code != http.StatusOK || bytes.Contains(recorder.Body.Bytes(), []byte(`"error"`)) {
+			t.Fatalf("committed export response = %d/%s, want truncated NDJSON without appended error envelope", recorder.Code, recorder.Body.Bytes())
+		}
+	}()
+	_ = response.VisitExportSecurityAuditEventsResponse(recorder)
+	t.Fatal("VisitExportSecurityAuditEventsResponse() returned, want connection abort")
+}
+
+type auditExportQueryStoreFake struct{ err error }
+
+func (fake *auditExportQueryStoreFake) QuerySecurityAuditEvents(
+	context.Context,
+	repository.SecurityAuditEventQuery,
+) (repository.SecurityAuditEventPage, error) {
+	return repository.SecurityAuditEventPage{}, fake.err
+}
+
+func (fake *auditExportQueryStoreFake) SecurityAuditEventExportBoundary(
+	context.Context,
+	repository.SecurityAuditEventQuery,
+) (repository.SecurityAuditEventExportBoundary, bool, error) {
+	return repository.SecurityAuditEventExportBoundary{}, false, fake.err
 }
 
 func managementReadTestConfig(publicURL string) serverconfig.Config {

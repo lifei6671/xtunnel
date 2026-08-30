@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-05 Error/Status Observability · REVIEW（实现、本地验收、独立复审与精确 CI 完成，等待用户阶段复审）
+> **当前阶段**：M6-06 运维诊断流程 · IN_PROGRESS（推荐范围已获确认并完成本地实现/验证，等待真实平台、浏览器与精确 CI 证据）
 >
-> **当前结论**：用户已确认 M6-05 范围；五类有限诊断码、进程内固定五槽 Latest Projection、最终逻辑 OPEN 与 generation-fenced Connector/Tunnel 生命周期接线、Dashboard API/Web、真实 Linux 双架构五故障黑盒及 Caddy/Nginx Browser E2E 均已实现。本地 Go/Web/OpenAPI/生成漂移、Race、Module 与 Shell 验证通过，安全/生命周期与 E2E 复审最终 `APPROVED`；实现提交 `65674c1be8a69054585e3dc6438093bc7426eee1` 暴露的错误测试故障模型已由修正提交 `3ca0c8508eab849aa227ff63ea2d46fe00570207` 收敛，后者的精确 [CI #33309924709](https://github.com/lifei6671/xtunnel/actions/runs/33309924709) 整体 `success`。M6-05 保持 `REVIEW` 等待用户阶段复审；M6 与全局完成数仍为 `4/7`、`79/95`，M6 Gate Checklist 继续全部未勾选。
+> **当前结论**：用户已确认按推荐范围实施 M6-06。当前工作区已实现无副作用 `xtunnel-agent diagnose`、证书 Dashboard 与互斥 30/7/1/expired 告警、固定边界流式 Audit NDJSON 导出、运维 Runbook，以及 Linux systemd/Windows SCM 故障 Smoke 与明确命名 CI Gate；本地 Test/Race/Vet、OpenAPI、Web、Module 与语法验证通过。真实 Linux/Windows 平台 Smoke、Chromium E2E 和绑定提交 SHA 的精确 CI 尚未运行，任务保持 `IN_PROGRESS`，完成数仍为 `80/95`，M6 Gate Checklist 继续全部未勾选。
 
 ---
 
@@ -376,8 +376,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `DONE` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `DONE` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `DONE` |
-| M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `REVIEW` |
-| M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard + Agent Connectivity Diag | Diag 复用生产 Token Parser、Endpoint/DNS、Dialer、TLS Builder、Pin Verifier 和 ALPN，覆盖 DNS/TCP/TLS/Pin/ALPN/Auth/Snapshot Receive；不得复制宽松连接栈，也不得把完整 Token 写入 argv 作为唯一入口；输出 PASS/WARNING/FAIL 与 READY 变体；覆盖证书 30/7/1 天告警、Audit 查询/导出、Linux systemd 与 Windows SCM 的启动失败、恢复重启和 30s Stop/Shutdown 超时诊断 | `NOT_STARTED` |
+| M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `DONE` |
+| M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard + Agent Connectivity Diag | Diag 复用生产 Token Parser、Endpoint/DNS、Dialer、TLS Builder、Pin Verifier 和 ALPN，覆盖 Token/Endpoint/DNS/TCP/TLS/Pin/ALPN；默认 Precheck 不执行 Auth/Snapshot，未来真实诊断须先冻结无污染协议语义；不得复制宽松连接栈，也不得把完整 Token 写入 argv 作为唯一入口；输出 PASS/WARNING/FAIL 与 READY 变体；覆盖证书 30/7/1 天告警、Audit 查询/固定边界流式导出、Linux systemd 与 Windows SCM 的启动失败、恢复重启和 Stop/Shutdown 超时诊断 | `IN_PROGRESS` |
 | M6-07 | M6 Gate | M6-01至 M6-06 | Observability 验收证据 | 故障注入下五类核心问题均可唯一定位 | `NOT_STARTED` |
 
 ## 12.2 M6 Gate Checklist
@@ -424,13 +424,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-04` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-05` 已完成。当前待办为：
 
-1. `M6-05` — 五类诊断码、固定五槽内存投影、Dashboard、真实 Linux 双架构五故障黑盒与 Caddy/Nginx Browser E2E 已实现，并通过本地验收、独立复审与精确 CI；等待用户阶段复审。
+1. `M6-06` — 推荐范围已获确认并完成本地实现/验证；等待 Linux amd64/arm64 systemd、提升权限 Windows SCM、Chromium E2E、提交后精确 CI 与用户阶段复审。真实 Auth/Snapshot 诊断因缺少不污染在线 Session 的独立协议语义不纳入 V0.1 默认 Precheck。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 至 M6-04 已完成；M6-05 当前为 `REVIEW`，完成数保持 `79/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次进度同步自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 至 M6-05 已完成；M6-06 当前为 `IN_PROGRESS`，完成数为 `80/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次进度同步自动转为 `DONE`。
 
 推进规则：
 
@@ -1572,3 +1572,23 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 本地证据与复审：Go `1.27.0`、`GOTOOLCHAIN=local` 下，全仓 `go test ./...`、`go vet ./...`、相关五包 Race、`go mod verify`、`go mod tidy -diff` 通过；Web Check/Build、OpenAPI Validate/Breaking `100/100`、Generate Check、Contract Test、Shell 语法与 `git diff --check` 通过。首版 Linux amd64 黑盒单次及连续 10 次虽通过，但实现提交的精确 [CI #33309482495](https://github.com/lifei6671/xtunnel/actions/runs/33309482495) 证明 `cancel Agent context` 实际会先完成正常 Drain，不能作为 Offline 故障；测试已改为先断言正常 Drain 无诊断，再强制关闭未发送 Drain 的已认证 Control Session，修正版 Linux amd64 原生黑盒连续 20 次、相关三包 Race 与 Bootstrap Vet、Windows 包级测试、Linux amd64 交叉编译均通过。安全/生命周期与 E2E 复审最终均 `APPROVED`，无剩余 P0/P1/P2。
 - 精确 CI 与状态：实现提交 `65674c1be8a69054585e3dc6438093bc7426eee1` 的 [CI #33309482495](https://github.com/lifei6671/xtunnel/actions/runs/33309482495) 在双架构全仓测试中准确拒绝了错误的 Offline 故障模型；修正提交 `3ca0c8508eab849aa227ff63ea2d46fe00570207` 的 [CI #33309924709](https://github.com/lifei6671/xtunnel/actions/runs/33309924709) 整体 `success`。Linux amd64/arm64 的 `Run native M6 Error status observability blackbox`、全仓 Test/Race/Vet、Proto/OpenAPI/生成物清洁、OCI/systemd 均通过；Linux amd64 真实 Agent+Caddy/Nginx Browser E2E 与 Windows Agent Service 也通过。M6-05 保持 `REVIEW` 等待用户阶段复审，不标记 `DONE`；M6 保持 `4/7`、全局保持 `79/95`，M6 Gate Checklist 全部未勾选。
 - 文档同步：根 README、总技术方案和本开发计划已同步；Proto、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、部署配置、权限模型、日志契约与 `AGENTS.md` 无需更新。
+
+## 2026-08-30 · M6-05 用户阶段复审与 M6-06 范围审计 · BLOCKED
+
+- M6-05 复审与状态：用户明确确认 M6-05 阶段复审通过。实现提交 `65674c1be8a69054585e3dc6438093bc7426eee1` 暴露的 Offline 故障模型问题已由修正提交 `3ca0c8508eab849aa227ff63ea2d46fe00570207` 收敛；本轮重新查询确认后者的精确 [CI #33309924709](https://github.com/lifei6671/xtunnel/actions/runs/33309924709) 仍为 `completed/success`，Head SHA 精确匹配。结合既有本地验收、关键失败分支和三路独立复审，M6-05 从 `REVIEW` 转为 `DONE`，M6 从 `4/7` 更新为 `5/7`，全局从 `79/95` 更新为 `80/95`；M6 Gate Checklist 六项继续全部未勾选。
+- M6-06 当前事实：仓库尚无 Agent Connectivity Diagnostic 或独立运维 Runbook；Agent CLI 只有 `run` 与 `service install/uninstall`。生产 Gateway 的 `DialContext` 已严格复用 Connection Token Parser、Token 内 Endpoint、系统 DNS/TCP、TLS 1.3、Public CA/Pinned SPKI 和精确 ALPN，但 DNS/TCP/TLS 当前合并在一次 `tls.Dialer.DialContext` 中，没有可稳定按错误字符串拆分的阶段观察面。Server 已导出 `xtunnel_gateway_certificate_expiry_seconds`，Audit 已有只读筛选与 opaque Pagination，Dashboard 已有 M6-05 五类最近错误；仓库没有 30/7/1 天 Prometheus 告警规则、Audit 完整导出、证书/Audit Dashboard 投影或 systemd/SCM 故障恢复 Runbook。
+- 协议冲突与推荐裁定：本任务表要求 Connectivity Diag 覆盖 Auth/Snapshot Receive，但总方案已冻结默认 Precheck 只验证 Token、Endpoint、DNS、TCP、TLS、证书/Pin 和 ALPN，并禁止建立可能替换正式 Connector Session 的隐藏认证。直接运行正式 Connector 或手工拼接 Auth/Owner 会登记或替换 Session、占用 Health/Capacity、接收并应用 Snapshot，还可能制造 M6-05 Offline 事件。推荐本轮以总方案为准，只实现无副作用 Precheck；真实 Auth/Snapshot Diagnostic 延期，未来只有在 Protocol Review 冻结不登记、不替换、不计费且不污染 Runtime 的独立语义后才能实施。
+- 推荐最小实现范围：新增 Agent `diagnose` 公共命令，Token 继续复用 `--token > XTUNNEL_TOKEN > systemd Credential` 的正式安全来源且示例优先环境/Credential，不把 argv 作为唯一入口；在 `internal/agent/gateway` 内把生产 Dial 路径重构为共享的阶段观察实现，禁止增加独立 Endpoint、CA、Pin、`insecure` 或 fallback。输出逐阶段 `PASS/WARNING/FAIL` 与汇总 `READY/READY_DEGRADED/NOT_READY`，共用生产 10 秒总预算并确保连接关闭；不执行 Auth/Snapshot。新增运维 Runbook、只消费现有证书 Gauge 的版本化 30/7/1 天告警规则、Dashboard 证书状态、Audit 查询与有固定上界的流式 NDJSON 导出，以及 Linux systemd/Windows SCM 启动失败、恢复重启和 Stop/Shutdown 超时的隔离 Smoke。
+- 验收边界：单元与契约测试覆盖每一诊断阶段、三类步骤/汇总结论、取消/超时、连接释放、Token/Secret Sentinel、告警四边界和 Audit 并发追加下的固定导出上界；Linux amd64/arm64 原生 CI 覆盖真实 Token/DNS/TCP/TLS/Pin/ALPN 成功及唯一失败；Linux systemd 与提升权限 Windows SCM 真实故障 Smoke 验证持久日志、退出码、恢复重启和超时定位；Linux amd64 Caddy/Nginx Chromium 验证 Dashboard、Audit 筛选/下载与浏览器敏感信息边界。文档、Fixture、告警 YAML、Web Mock、单页 Audit JSON、交叉编译、Windows 单测或旧 CI 均不能冒充 M6-06/M6 Gate 通过。
+- Ask First 与状态：以上推荐范围会新增 Agent 公共 CLI/内部导出诊断入口，修改 OpenAPI 与 Go/TypeScript 生成物、Dashboard/Web、稳定证书续签日志语义、版本化监控/可能的 systemd 生产配置、平台 Smoke 和 CI Workflow，属于需明确确认的接口、配置、日志与 CI 变更。推荐不新增第三方依赖或 Lockfile，不修改 Proto、Server Schema、Database Schema/Migration、Agent 本地业务配置或权限模型；若要求真实 Auth/Snapshot，则必须另行确认 Protocol 变更。M6-06 在用户确认前标记 `BLOCKED`，M6-07 保持 `NOT_STARTED`，本次不勾选任何 M6 Gate 项。
+- 文档同步：本轮只同步 README 与本开发计划中的 M6-05 复审、M6-06 审计、状态、计数、队列和证据边界。总技术方案、代码、Proto、OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署资产、CI Workflow、日志契约与 `AGENTS.md` 均未修改，因为 M6-06 行为变更尚未取得用户授权。
+
+## 2026-08-30 · M6-06 运维诊断流程实现与本地验收 · IN_PROGRESS
+
+- 授权与边界：用户明确确认按推荐范围实施。新增 `xtunnel-agent diagnose` 公共命令、Security Audit 导出 REST Path、Dashboard 证书投影、版本化 Prometheus 告警、运维 Runbook、平台 Smoke 与 CI Gate；未新增第三方依赖或 Lockfile，未修改 Proto、Server Schema、Database Schema/Migration、Agent 本地业务配置或权限模型，也未修改生产 systemd `TimeoutStopSec`。默认 Precheck 不执行 Auth/Snapshot；真实诊断仍要求后续 Protocol Review。
+- Connectivity Diagnostic：Token 来源继续按 `--token > XTUNNEL_TOKEN > systemd Credential`，诊断与生产共享 Token Parser、Endpoint、DNS/TCP、TLS 1.3、Public CA/Pinned SPKI 和 Control/Work 精确 ALPN，共用 10 秒总预算并关闭每条探测连接。输出稳定阶段 `PASS/WARNING/FAIL` 与 `READY/READY_DEGRADED/NOT_READY`；证书 30 天窗口为 Warning，失败以非零码退出，不输出 Token、Endpoint 或底层错误文本。真实非重叠 ALPN 会由 Go 1.27 TCP TLS Alert 120 精确归类为 ALPN，不靠错误字符串。
+- API、Dashboard 与 Web：OpenAPI 增至 20 Path/26 Operation，并经 Wrapper 同步 Go/TypeScript 生成物。Dashboard 返回 Server 权威 `gateway_certificate` 与五级到期状态，Web 不重算等级。`GET /security-audit-events/export` 复用 Admin Cookie 与现有筛选，返回 `application/x-ndjson`；开始前固定 SQLite append 序号与排序 tuple 上界，按 keyset 每批最多 200 行，阻止并发新事件或回填旧时间混入。流开始后的读取、取消或写入失败直接中止连接。Web 提供 Audit 查询、分页与下载，并处理 stale request 和 Blob URL 生命周期。
+- 告警、日志与平台诊断：`deploy/monitoring/prometheus/xtunnel-alerts-v1.yaml` 仅消费既有证书到期 Gauge，冻结互斥 30 天、7 天、1 天和 expired 窗口。Pinned 续签记录稳定成功/失败事件；失败日志使用有限错误码并可保留经过调用方边界约束的结构化运维错误上下文，但不得包含 Token、私钥或证书内容，Dashboard/API 不返回底层错误。systemd Smoke 验证无效配置、持久 Journal、`SIGKILL` 恢复重启及仅测试时 drop-in + `SIGSTOP` 超时；Windows SCM Smoke 验证隔离 DPAPI Credential 损坏、`CREDENTIAL_LOAD_FAILED` 与恢复新进程，真实 30 秒 Hang 不可安全注入的边界由单元测试和 Runbook 明示。
+- 本地证据：Go `1.27.0`、`GOTOOLCHAIN=local` 下，改动包定向 Test/Race/Vet、全仓 `go test -p 2 -count=1 -timeout 300s ./...`、全仓 `go test -race -p 2 -count=1 -timeout 300s ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff` 均通过；OpenAPI Validate/Breaking `100/100`、Generate Check 与 `tools/test-openapi.sh` 通过；Web `check`/`build` 通过，Playwright 2 个用例完成发现与编译；systemd Bash 语法、Windows Smoke PowerShell AST 与 `git diff --check` 通过。首次 `tools/test-openapi.sh` 因 WSL 未继承 `GOTOOLCHAIN=local` 快速失败，显式导出后同一正式入口通过，不将首次失败隐藏为通过。
+- 复审与剩余 Gate：Connectivity 分区首轮独立复审发现真实 ALPN Fatal Alert 被误归类为 TLS，已修复并由真实不重叠 ALPN 回归测试闭环。API/Web 首轮复审发现 Audit 浏览器筛选缺口，以及证书字段必填诉求与 immutable OpenAPI Baseline 冲突；筛选/分页/导出同参已补齐，证书字段保持 additive optional，但当前 Server 200 响应测试强制六字段完整且 Web 缺失时明确显示 `UNAVAILABLE`，四项 OpenAPI Gate 恢复通过。最终跨分区复审又发现续签失败日志文档与实现不一致、真实 Browser Gate 未断言证书卡两项 P2，均已修复并复审关闭；Connectivity、API/Web、运维与最终集成复审全部通过，无剩余 P0/P1/P2。真实 Linux amd64/arm64 systemd、提升权限 Windows SCM、Chromium E2E、提交 SHA 与精确 CI 尚无证据，因此 M6-06 保持 `IN_PROGRESS`，M6 保持 `5/7`、全局保持 `80/95`，M6 Gate Checklist 全部未勾选。
+- 文档同步：根 README、总技术方案、本开发计划与新增运维 Runbook 已同步行为、状态和证据边界。Proto、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、生产 systemd Unit、权限模型与 `AGENTS.md` 无需更新。

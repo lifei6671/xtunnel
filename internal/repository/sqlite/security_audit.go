@@ -99,6 +99,9 @@ func (store *Store) QuerySecurityAuditEvents(
 	}
 
 	database := store.database.WithContext(ctx).Model(&securityAuditEventRecord{})
+	if query.AppendSequenceUpper != nil {
+		database = database.Where("rowid <= ?", *query.AppendSequenceUpper)
+	}
 	if query.Action != "" {
 		database = database.Where(SecurityAuditEventColumns.Action+" = ?", query.Action)
 	}
@@ -124,6 +127,15 @@ func (store *Store) QuerySecurityAuditEvents(
 			query.After.OccurredAt,
 			query.After.OccurredAt,
 			query.After.EventID,
+		)
+	}
+	if query.Upper != nil {
+		database = database.Where(
+			"("+SecurityAuditEventColumns.OccurredAt+" < ?) OR ("+
+				SecurityAuditEventColumns.OccurredAt+" = ? AND "+SecurityAuditEventColumns.EventID+" <= ?)",
+			query.Upper.OccurredAt,
+			query.Upper.OccurredAt,
+			query.Upper.EventID,
 		)
 	}
 
@@ -155,6 +167,43 @@ func (store *Store) QuerySecurityAuditEvents(
 		page.Next = &repository.SecurityAuditEventCursor{OccurredAt: last.OccurredAt, EventID: last.EventID}
 	}
 	return page, nil
+}
+
+// SecurityAuditEventExportBoundary 先冻结 append-only rowid 栅栏，再在同一筛选下
+// 读取排序首项。tuple Upper 满足外部导出契约，rowid 栅栏额外排除导出开始后
+// 回填旧 occurred_at 的并发追加；两者都只读，不改变 append-only 表。
+func (store *Store) SecurityAuditEventExportBoundary(
+	ctx context.Context,
+	query repository.SecurityAuditEventQuery,
+) (repository.SecurityAuditEventExportBoundary, bool, error) {
+	if ctx == nil || query.After != nil || query.Upper != nil || query.AppendSequenceUpper != nil {
+		return repository.SecurityAuditEventExportBoundary{}, false, repository.ErrInvalidSecurityAuditEventQuery
+	}
+	if err := query.Validate(); err != nil {
+		return repository.SecurityAuditEventExportBoundary{}, false, err
+	}
+	var maximum int64
+	if err := store.database.WithContext(ctx).Model(&securityAuditEventRecord{}).
+		Select("COALESCE(MAX(rowid), 0)").Scan(&maximum).Error; err != nil {
+		return repository.SecurityAuditEventExportBoundary{}, false, fmt.Errorf("freeze security audit append boundary: %w", err)
+	}
+	if maximum == 0 {
+		return repository.SecurityAuditEventExportBoundary{}, false, nil
+	}
+	query.Limit = 1
+	query.AppendSequenceUpper = &maximum
+	page, err := store.QuerySecurityAuditEvents(ctx, query)
+	if err != nil {
+		return repository.SecurityAuditEventExportBoundary{}, false, err
+	}
+	if len(page.Events) == 0 {
+		return repository.SecurityAuditEventExportBoundary{}, false, nil
+	}
+	first := page.Events[0]
+	return repository.SecurityAuditEventExportBoundary{
+		Upper:             repository.SecurityAuditEventCursor{OccurredAt: first.OccurredAt, EventID: first.EventID},
+		MaxAppendSequence: maximum,
+	}, true, nil
 }
 
 // Append 幂等追加事件。相同 Event ID 与 Operation ID 的完全相同重放视为成功；

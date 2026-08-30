@@ -38,3 +38,21 @@ func (service *SecurityAuditQueryService) Query(
 	}
 	return page, nil
 }
+
+// ExportBoundary 在响应提交前冻结本次导出的 tuple 与 append-only 上界。
+func (service *SecurityAuditQueryService) ExportBoundary(
+	ctx context.Context,
+	query repository.SecurityAuditEventQuery,
+) (repository.SecurityAuditEventExportBoundary, bool, error) {
+	if service == nil || service.store == nil || ctx == nil {
+		return repository.SecurityAuditEventExportBoundary{}, false, ErrSecurityAuditQueryServiceInput
+	}
+	if err := query.Validate(); err != nil {
+		return repository.SecurityAuditEventExportBoundary{}, false, err
+	}
+	boundary, exists, err := service.store.SecurityAuditEventExportBoundary(ctx, query)
+	if err != nil {
+		return repository.SecurityAuditEventExportBoundary{}, false, fmt.Errorf("freeze security audit export boundary: %w", err)
+	}
+	return boundary, exists, nil
+}

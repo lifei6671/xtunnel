@@ -526,6 +526,39 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '500': { $ref: '#/components/responses/InternalError' }
+  /security-audit-events/export:
+    get:
+      tags: [Security Audit]
+      operationId: exportSecurityAuditEvents
+      summary: 流式导出持久化 Security Audit Event
+      description: |
+        复用列表筛选语义。Server 在响应开始前固定 (occurred_at,event_id) 上界，
+        随后按倒序 keyset 有界分页并逐行输出完整 SecurityAuditEvent JSON；并发追加
+        不进入本次导出。连接取消或写失败会立即终止，客户端不得把中断响应视为完整导出。
+      parameters:
+        - { name: action, in: query, schema: { $ref: '#/components/schemas/SecurityAuditAction' } }
+        - { name: result, in: query, schema: { $ref: '#/components/schemas/SecurityAuditResult' } }
+        - { name: resource_type, in: query, schema: { $ref: '#/components/schemas/SecurityAuditResourceType' } }
+        - { name: resource_id, in: query, schema: { type: string, minLength: 1, maxLength: 256 } }
+        - { name: occurred_from, in: query, description: 包含此 UTC 时刻。, schema: { $ref: '#/components/schemas/DateTime' } }
+        - { name: occurred_to, in: query, description: 不包含此 UTC 时刻。, schema: { $ref: '#/components/schemas/DateTime' } }
+      responses:
+        '200':
+          description: NDJSON 流；每行是一个 SecurityAuditEvent，空结果返回空 Body。
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+            Content-Disposition:
+              required: true
+              schema: { type: string, const: 'attachment; filename="xtunnel-security-audit.ndjson"' }
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                format: binary
+                description: 逐行编码的 SecurityAuditEvent JSON。
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
 
 components:
   securitySchemes:
@@ -1172,6 +1205,24 @@ components:
         services_ready: { type: integer, minimum: 0 }
         services_error: { type: integer, minimum: 0 }
         active_connections: { type: integer, minimum: 0 }
+    GatewayCertificate:
+      type: object
+      additionalProperties: false
+      required: [tls_mode, expires_at, remaining_seconds, level, recent_renewal_failed, recent_renewal_error_code]
+      description: 由 Server 冻结的 Gateway 叶证书状态；客户端不得重算 level 或解析错误文本。
+      properties:
+        tls_mode: { type: string, enum: [public, pinned] }
+        expires_at: { $ref: '#/components/schemas/DateTime' }
+        remaining_seconds: { type: integer, format: int64 }
+        level:
+          type: string
+          enum: [HEALTHY, WARNING, CRITICAL, EMERGENCY, EXPIRED]
+          description: 分别表示剩余时间大于 30 天、不超过 30 天、不超过 7 天、不超过 1 天和已过期。
+        recent_renewal_failed: { type: boolean }
+        recent_renewal_error_code:
+          oneOf:
+            - { type: string, const: GATEWAY_CERTIFICATE_RENEWAL_FAILED }
+            - { type: 'null' }
     RecentError:
       type: object
       additionalProperties: false
@@ -1207,6 +1258,7 @@ components:
         counts: { $ref: '#/components/schemas/DashboardCounts' }
         traffic: { $ref: '#/components/schemas/UsageSummary' }
         recent_errors: { $ref: '#/components/schemas/RecentErrorsSummary' }
+        gateway_certificate: { $ref: '#/components/schemas/GatewayCertificate' }
         generated_at: { $ref: '#/components/schemas/DateTime' }
     SystemInfo:
       type: object

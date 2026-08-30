@@ -265,6 +265,7 @@ func openGatewayLifecycle(
 		MaxPendingTLSHandshakes: config.Limits.MaxPendingTLSHandshakes,
 		Handle:                  protocolHandler.handle,
 		ReportRuntimeError:      reportRuntimeError,
+		Logger:                  logger,
 		AcquireMaintenanceBarrier: func(ctx context.Context) (func(), error) {
 			barrier, err := serverResources.database.AcquireBackupBarrier(ctx)
 			if err != nil {
@@ -879,8 +880,20 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 		Services:        serviceAPI,
 		System:          systemRead,
 		SecurityAudits:  application.NewSecurityAuditQueryService(serverResources.database),
-		Dashboard:       application.NewDashboardService(tunnels, serviceAPI, systemRead, serviceAPI, recentErrors),
-		Logger:          logger,
+		Dashboard: application.NewDashboardService(
+			tunnels, serviceAPI, systemRead, serviceAPI, recentErrors,
+			application.DashboardGatewayCertificateReaderFunc(func(ctx context.Context) (application.DashboardGatewayCertificateSource, error) {
+				if err := ctx.Err(); err != nil {
+					return application.DashboardGatewayCertificateSource{}, err
+				}
+				status := gatewayServer.CertificateStatus()
+				return application.DashboardGatewayCertificateSource{
+					TLSMode: config.AgentGateway.TLS.Mode, ExpiryUnixSeconds: status.ExpiryUnixSeconds,
+					RenewalFailed: status.RenewalFailed,
+				}, nil
+			}),
+		),
+		Logger: logger,
 	})
 	if err != nil {
 		cancelRoutes()

@@ -9,9 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	agentgateway "github.com/lifei6671/xtunnel/internal/agent/gateway"
 	"github.com/lifei6671/xtunnel/internal/agent/service"
 	"github.com/lifei6671/xtunnel/internal/logging"
 )
@@ -226,6 +228,184 @@ func TestExecuteDoesNotLeakInvalidToken(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), token) || strings.Contains(stderr.String(), token) {
 		t.Fatal("process error leaked Token")
+	}
+}
+
+func TestExecuteDiagnoseUsesTokenSourcePrecedenceAndStableOutput(t *testing.T) {
+	credentialDirectory := writeCredential(t, "xta_diagnostic_credential_secret")
+	tests := []struct {
+		name    string
+		args    []string
+		environ []string
+		want    string
+	}{
+		{
+			name: "CLI wins",
+			args: []string{"diagnose", "--token", "xta_diagnostic_cli_secret"},
+			environ: []string{
+				"XTUNNEL_TOKEN=xta_diagnostic_environment_secret",
+				"CREDENTIALS_DIRECTORY=" + credentialDirectory,
+			},
+			want: "xta_diagnostic_cli_secret",
+		},
+		{
+			name: "environment wins",
+			args: []string{"diagnose"},
+			environ: []string{
+				"XTUNNEL_TOKEN=xta_diagnostic_environment_secret",
+				"CREDENTIALS_DIRECTORY=" + credentialDirectory,
+			},
+			want: "xta_diagnostic_environment_secret",
+		},
+		{
+			name:    "systemd credential fallback",
+			args:    []string{"diagnose"},
+			environ: []string{"CREDENTIALS_DIRECTORY=" + credentialDirectory},
+			want:    "xta_diagnostic_credential_secret",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var receivedToken string
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := executeProgram("xtunnel-agent", test.args, test.environ, &stdout, &stderr,
+				func(_ context.Context, token string) agentgateway.DiagnosticResult {
+					receivedToken = token
+					return agentgateway.DiagnosticResult{
+						Steps: []agentgateway.DiagnosticStep{{
+							Stage: "TOKEN", Status: agentgateway.DiagnosticPass, Message: "connection token is valid",
+						}},
+						Summary: agentgateway.DiagnosticReady,
+					}
+				})
+			if exitCode != 0 {
+				t.Fatalf("executeProgram() = %d, want 0; stderr = %q", exitCode, stderr.String())
+			}
+			if receivedToken != test.want {
+				t.Fatalf("diagnostic runner received wrong Token source")
+			}
+			if stdout.String() != "PASS TOKEN connection token is valid\nREADY\n" || stderr.Len() != 0 {
+				t.Fatalf("diagnose output = stdout %q stderr %q", stdout.String(), stderr.String())
+			}
+			for _, secret := range []string{
+				"xta_diagnostic_cli_secret",
+				"xta_diagnostic_environment_secret",
+				"xta_diagnostic_credential_secret",
+			} {
+				if strings.Contains(stdout.String()+stderr.String(), secret) {
+					t.Fatalf("diagnose output leaked Token %q", secret)
+				}
+			}
+		})
+	}
+}
+
+func TestExecuteDiagnoseSummaryExitCodesAndSensitiveBoundary(t *testing.T) {
+	const token = "xta_diagnostic_sensitive_token"
+	tests := []struct {
+		name        string
+		summary     agentgateway.DiagnosticSummary
+		status      agentgateway.DiagnosticStatus
+		wantCode    int
+		wantStderr  bool
+		wantSummary string
+	}{
+		{
+			name:    "ready",
+			summary: agentgateway.DiagnosticReady, status: agentgateway.DiagnosticPass,
+			wantCode: 0, wantSummary: "READY\n",
+		},
+		{
+			name:    "ready degraded",
+			summary: agentgateway.DiagnosticReadyDegraded, status: agentgateway.DiagnosticWarning,
+			wantCode: 0, wantSummary: "READY_DEGRADED\n",
+		},
+		{
+			name:    "not ready",
+			summary: agentgateway.DiagnosticNotReady, status: agentgateway.DiagnosticFail,
+			wantCode: 1, wantStderr: true, wantSummary: "NOT_READY\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := executeProgram("xtunnel-agent", []string{"diagnose", "--token", token}, nil, &stdout, &stderr,
+				func(context.Context, string) agentgateway.DiagnosticResult {
+					return agentgateway.DiagnosticResult{
+						Steps: []agentgateway.DiagnosticStep{{
+							Stage: "CONTROL_TCP", Status: test.status, Message: "fixed diagnostic message",
+						}},
+						Summary: test.summary,
+					}
+				})
+			if exitCode != test.wantCode {
+				t.Fatalf("executeProgram() = %d, want %d", exitCode, test.wantCode)
+			}
+			if !strings.HasSuffix(stdout.String(), test.wantSummary) {
+				t.Fatalf("stdout = %q, want suffix %q", stdout.String(), test.wantSummary)
+			}
+			if (stderr.Len() != 0) != test.wantStderr {
+				t.Fatalf("stderr = %q, want present %t", stderr.String(), test.wantStderr)
+			}
+			if strings.Contains(stdout.String()+stderr.String(), token) {
+				t.Fatal("diagnose result leaked Token")
+			}
+		})
+	}
+}
+
+func TestExecuteDiagnoseMalformedTokenUsesPublicPathWithoutLeak(t *testing.T) {
+	const token = "xta_malformed_diagnostic_sensitive_sentinel"
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if exitCode := Execute("xtunnel-agent", []string{"diagnose", "--token", token}, nil, &stdout, &stderr); exitCode != 1 {
+		t.Fatalf("Execute() = %d, want 1", exitCode)
+	}
+	if stdout.String() != "FAIL TOKEN connection token is invalid\nNOT_READY\n" {
+		t.Fatalf("stdout = %q, want stable malformed Token result", stdout.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), token) {
+		t.Fatal("public diagnose path leaked malformed Token")
+	}
+}
+
+func TestExecuteDiagnoseHelpAndInvalidArgumentsDoNotRun(t *testing.T) {
+	var calls atomic.Int32
+	runner := func(context.Context, string) agentgateway.DiagnosticResult {
+		calls.Add(1)
+		return agentgateway.DiagnosticResult{Summary: agentgateway.DiagnosticReady}
+	}
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode int
+		contains string
+	}{
+		{name: "root help", args: []string{"--help"}, contains: "diagnose"},
+		{name: "diagnose help", args: []string{"diagnose", "--help"}, contains: "diagnose [--token string]"},
+		{name: "unknown flag", args: []string{"diagnose", "--endpoint", "secret.example"}, wantCode: 1, contains: "flag provided but not defined"},
+		{name: "positional", args: []string{"diagnose", "xta_positional_secret"}, wantCode: 1, contains: "does not accept positional arguments"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			gotCode := executeProgram("xtunnel-agent", test.args, nil, &stdout, &stderr, runner)
+			if gotCode != test.wantCode {
+				t.Fatalf("executeProgram() = %d, want %d", gotCode, test.wantCode)
+			}
+			if !strings.Contains(stdout.String()+stderr.String(), test.contains) {
+				t.Fatalf("output = stdout %q stderr %q, want %q", stdout.String(), stderr.String(), test.contains)
+			}
+			if strings.Contains(stdout.String()+stderr.String(), "xta_positional_secret") {
+				t.Fatal("invalid argument output leaked positional Token")
+			}
+		})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("help/invalid arguments invoked diagnostic runner %d times", calls.Load())
 	}
 }
 

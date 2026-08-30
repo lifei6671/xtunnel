@@ -84,8 +84,25 @@ func dashboardResponse(snapshot application.DashboardSnapshot) (Dashboard, error
 			Availability: RecentErrorsSummaryAvailability(snapshot.RecentErrors.Availability),
 			Items:        recentErrors,
 		},
-		GeneratedAt: snapshot.GeneratedAt.UTC(),
+		GatewayCertificate: gatewayCertificateResponse(snapshot.GatewayCertificate),
+		GeneratedAt:        snapshot.GeneratedAt.UTC(),
 	}, nil
+}
+
+func gatewayCertificateResponse(certificate application.DashboardGatewayCertificate) *GatewayCertificate {
+	errorCode := nullable.NewNullNullable[GatewayCertificateRecentRenewalErrorCode]()
+	if certificate.RecentRenewalErrorCode != nil {
+		errorCode = nullable.NewNullableWithValue(
+			GatewayCertificateRecentRenewalErrorCode(*certificate.RecentRenewalErrorCode),
+		)
+	}
+	return &GatewayCertificate{
+		TlsMode:   GatewayCertificateTlsMode(certificate.TLSMode),
+		ExpiresAt: certificate.ExpiresAt.UTC(), RemainingSeconds: certificate.RemainingSeconds,
+		Level:                  GatewayCertificateLevel(certificate.Level),
+		RecentRenewalFailed:    certificate.RecentRenewalFailed,
+		RecentRenewalErrorCode: errorCode,
+	}
 }
 
 func managementCount(value uint64) (int, bool) {

@@ -113,11 +113,41 @@ func TestSecurityAuditQueryServicePreservesStoreErrorCause(t *testing.T) {
 	}
 }
 
+func TestSecurityAuditQueryServiceFreezesExportBoundary(t *testing.T) {
+	want := repository.SecurityAuditEventExportBoundary{
+		Upper: repository.SecurityAuditEventCursor{
+			OccurredAt: 200, EventID: "evt_01J00000000000000000000002",
+		},
+		MaxAppendSequence: 42,
+	}
+	store := &securityAuditQueryStoreStub{boundary: want, boundaryExists: true}
+	service := NewSecurityAuditQueryService(store)
+	query := repository.SecurityAuditEventQuery{Limit: repository.MaxSecurityAuditEventQueryLimit}
+	got, exists, err := service.ExportBoundary(context.Background(), query)
+	if err != nil || !exists || got != want {
+		t.Fatalf("ExportBoundary() = %#v/%v/%v, want %#v/true/nil", got, exists, err, want)
+	}
+	if store.calls != 1 || !reflect.DeepEqual(store.query, query) {
+		t.Fatalf("store boundary call = %d/%#v, want 1/%#v", store.calls, store.query, query)
+	}
+}
+
 type securityAuditQueryStoreStub struct {
-	page  repository.SecurityAuditEventPage
-	err   error
-	query repository.SecurityAuditEventQuery
-	calls int
+	page           repository.SecurityAuditEventPage
+	boundary       repository.SecurityAuditEventExportBoundary
+	boundaryExists bool
+	err            error
+	query          repository.SecurityAuditEventQuery
+	calls          int
+}
+
+func (store *securityAuditQueryStoreStub) SecurityAuditEventExportBoundary(
+	_ context.Context,
+	query repository.SecurityAuditEventQuery,
+) (repository.SecurityAuditEventExportBoundary, bool, error) {
+	store.calls++
+	store.query = query
+	return store.boundary, store.boundaryExists, store.err
 }
 
 func (store *securityAuditQueryStoreStub) QuerySecurityAuditEvents(

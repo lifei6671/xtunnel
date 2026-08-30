@@ -17,6 +17,8 @@ var (
 	ErrDashboardInput = errors.New("dashboard input is invalid")
 	// ErrDashboardServerStatus 表示 Server Status owner 返回了契约外状态。
 	ErrDashboardServerStatus = errors.New("dashboard server status is invalid")
+	// ErrDashboardGatewayCertificate 表示 Gateway owner 返回了不可投影的证书状态。
+	ErrDashboardGatewayCertificate = errors.New("dashboard gateway certificate is invalid")
 )
 
 // DashboardServerStatus 是 Server owner 发布的权威 Dashboard 状态。
@@ -69,15 +71,47 @@ type DashboardRecentErrorsSummary struct {
 	Items        []DashboardRecentError
 }
 
+// DashboardGatewayCertificateLevel 是 Server 按 30/7/1 天边界冻结的运维等级。
+type DashboardGatewayCertificateLevel string
+
+const (
+	DashboardGatewayCertificateHealthy   DashboardGatewayCertificateLevel = "HEALTHY"
+	DashboardGatewayCertificateWarning   DashboardGatewayCertificateLevel = "WARNING"
+	DashboardGatewayCertificateCritical  DashboardGatewayCertificateLevel = "CRITICAL"
+	DashboardGatewayCertificateEmergency DashboardGatewayCertificateLevel = "EMERGENCY"
+	DashboardGatewayCertificateExpired   DashboardGatewayCertificateLevel = "EXPIRED"
+)
+
+const DashboardGatewayCertificateRenewalFailedCode = "GATEWAY_CERTIFICATE_RENEWAL_FAILED"
+
+// DashboardGatewayCertificateSource 是 Gateway owner 提供的最小证书状态，不暴露证书、
+// 私钥或底层续签错误。
+type DashboardGatewayCertificateSource struct {
+	TLSMode           string
+	ExpiryUnixSeconds int64
+	RenewalFailed     bool
+}
+
+// DashboardGatewayCertificate 是已经由 Server 冻结等级与稳定错误码的展示投影。
+type DashboardGatewayCertificate struct {
+	TLSMode                string
+	ExpiresAt              time.Time
+	RemainingSeconds       int64
+	Level                  DashboardGatewayCertificateLevel
+	RecentRenewalFailed    bool
+	RecentRenewalErrorCode *string
+}
+
 // DashboardSnapshot 是一次请求内形成的只读值快照。各 owner 不承诺跨方法原子一致，
 // 因此它与 Tunnel/Service API 一样允许并发变更期间短暂最终一致；聚合完成后不保留
 // owner 返回切片或 Runtime 对象的引用。
 type DashboardSnapshot struct {
-	ServerStatus DashboardServerStatus
-	Counts       DashboardCounts
-	Traffic      DashboardUsageSummary
-	RecentErrors DashboardRecentErrorsSummary
-	GeneratedAt  time.Time
+	ServerStatus       DashboardServerStatus
+	Counts             DashboardCounts
+	Traffic            DashboardUsageSummary
+	RecentErrors       DashboardRecentErrorsSummary
+	GatewayCertificate DashboardGatewayCertificate
+	GeneratedAt        time.Time
 }
 
 // DashboardTunnelReader 复用 Tunnel Management API 已完成状态投影的列表入口。
@@ -106,6 +140,21 @@ type DashboardRecentErrorReader interface {
 	Snapshot() []serverrecenterror.Item
 }
 
+// DashboardGatewayCertificateReader 在一次调用中冻结 Gateway 当前证书状态。
+type DashboardGatewayCertificateReader interface {
+	DashboardGatewayCertificate(context.Context) (DashboardGatewayCertificateSource, error)
+}
+
+// DashboardGatewayCertificateReaderFunc 让生命周期装配以闭包适配 Gateway owner，
+// 不把具体 Server 类型下沉到 Application。
+type DashboardGatewayCertificateReaderFunc func(context.Context) (DashboardGatewayCertificateSource, error)
+
+func (read DashboardGatewayCertificateReaderFunc) DashboardGatewayCertificate(
+	ctx context.Context,
+) (DashboardGatewayCertificateSource, error) {
+	return read(ctx)
+}
+
 var (
 	_ DashboardTunnelReader  = (*TunnelManagementService)(nil)
 	_ DashboardServiceReader = (*ServiceAPIService)(nil)
@@ -114,12 +163,13 @@ var (
 
 // DashboardService 聚合已有权威只读投影，不读取或持久化 Runtime 状态。
 type DashboardService struct {
-	tunnels  DashboardTunnelReader
-	services DashboardServiceReader
-	status   DashboardServerStatusOwner
-	usage    DashboardUsageReader
-	errors   DashboardRecentErrorReader
-	now      func() time.Time
+	tunnels     DashboardTunnelReader
+	services    DashboardServiceReader
+	status      DashboardServerStatusOwner
+	usage       DashboardUsageReader
+	errors      DashboardRecentErrorReader
+	certificate DashboardGatewayCertificateReader
+	now         func() time.Time
 }
 
 // NewDashboardService 绑定 Dashboard 所需的最小只读 owner。
@@ -129,10 +179,11 @@ func NewDashboardService(
 	status DashboardServerStatusOwner,
 	usage DashboardUsageReader,
 	recentErrors DashboardRecentErrorReader,
+	certificate DashboardGatewayCertificateReader,
 ) *DashboardService {
 	return &DashboardService{
 		tunnels: tunnels, services: services, status: status, usage: usage,
-		errors: recentErrors, now: time.Now,
+		errors: recentErrors, certificate: certificate, now: time.Now,
 	}
 }
 
@@ -167,6 +218,14 @@ func (service *DashboardService) Snapshot(ctx context.Context) (DashboardSnapsho
 		return DashboardSnapshot{}, fmt.Errorf("read dashboard usage: %w", err)
 	}
 	traffic, err := dashboardUsageSummary(usage)
+	if err != nil {
+		return DashboardSnapshot{}, err
+	}
+	certificateSource, err := service.certificate.DashboardGatewayCertificate(ctx)
+	if err != nil {
+		return DashboardSnapshot{}, fmt.Errorf("read dashboard gateway certificate: %w", err)
+	}
+	certificate, err := dashboardGatewayCertificate(certificateSource, generatedAt)
 	if err != nil {
 		return DashboardSnapshot{}, err
 	}
@@ -210,7 +269,39 @@ func (service *DashboardService) Snapshot(ctx context.Context) (DashboardSnapsho
 			Availability: DashboardAvailabilityAvailable,
 			Items:        recentErrors,
 		},
-		GeneratedAt: generatedAt,
+		GatewayCertificate: certificate,
+		GeneratedAt:        generatedAt,
+	}, nil
+}
+
+func dashboardGatewayCertificate(
+	source DashboardGatewayCertificateSource,
+	now time.Time,
+) (DashboardGatewayCertificate, error) {
+	if (source.TLSMode != "public" && source.TLSMode != "pinned") || source.ExpiryUnixSeconds <= 0 || now.IsZero() {
+		return DashboardGatewayCertificate{}, ErrDashboardGatewayCertificate
+	}
+	remaining := source.ExpiryUnixSeconds - now.UTC().Unix()
+	level := DashboardGatewayCertificateHealthy
+	switch {
+	case remaining <= 0:
+		level = DashboardGatewayCertificateExpired
+	case remaining <= int64((24*time.Hour)/time.Second):
+		level = DashboardGatewayCertificateEmergency
+	case remaining <= int64((7*24*time.Hour)/time.Second):
+		level = DashboardGatewayCertificateCritical
+	case remaining <= int64((30*24*time.Hour)/time.Second):
+		level = DashboardGatewayCertificateWarning
+	}
+	var renewalCode *string
+	if source.RenewalFailed {
+		code := DashboardGatewayCertificateRenewalFailedCode
+		renewalCode = &code
+	}
+	return DashboardGatewayCertificate{
+		TLSMode: source.TLSMode, ExpiresAt: time.Unix(source.ExpiryUnixSeconds, 0).UTC(),
+		RemainingSeconds: remaining, Level: level,
+		RecentRenewalFailed: source.RenewalFailed, RecentRenewalErrorCode: renewalCode,
 	}, nil
 }
 
@@ -258,5 +349,5 @@ func (service *ServiceAPIService) ListAll(ctx context.Context) ([]ServiceView, e
 func (service *DashboardService) valid(ctx context.Context) bool {
 	return service != nil && ctx != nil && service.tunnels != nil &&
 		service.services != nil && service.status != nil && service.usage != nil &&
-		service.errors != nil && service.now != nil
+		service.errors != nil && service.now != nil && service.certificate != nil
 }

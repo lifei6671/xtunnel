@@ -22,6 +22,7 @@ import type { FormEvent } from "react";
 import { apiClient } from "./api/client";
 import type { components } from "./api/schema.gen";
 import { ManagementView } from "./management";
+import { SecurityAuditView } from "./security-audit";
 
 type AuthSession = components["schemas"]["AuthSession"];
 type Dashboard = components["schemas"]["Dashboard"];
@@ -40,7 +41,7 @@ type DashboardState =
   | { status: "ready"; dashboard: Dashboard }
   | { status: "error"; message: string };
 
-type ConsolePage = "overview" | "management";
+type ConsolePage = "overview" | "management" | "audit";
 
 const recentErrorLabels = {
   TUNNEL_OFFLINE: "Tunnel 离线",
@@ -63,6 +64,7 @@ const navigation: ReadonlyArray<{
   { label: "Agent 管理", icon: Bot },
   { label: "服务与隧道", icon: Network, page: "management" },
   { label: "访问入口", icon: RadioTower },
+  { label: "安全审计", icon: ShieldCheck, page: "audit" },
   { label: "系统设置", icon: Settings },
 ] as const;
 
@@ -408,8 +410,10 @@ function Console({ session, onSessionExpired }: {
               <DashboardView dashboard={dashboard.dashboard} onRefresh={() => void loadDashboard()} />
             ) : null}
           </>
-        ) : (
+        ) : currentPage === "management" ? (
           <ManagementView csrfToken={session.csrf_token} onSessionExpired={onSessionExpired} />
+        ) : (
+          <SecurityAuditView onSessionExpired={onSessionExpired} />
         )}
       </main>
     </div>
@@ -423,6 +427,7 @@ function DashboardView({ dashboard, onRefresh }: {
   const counts = dashboard.counts;
   const trafficAvailable = dashboard.traffic.availability === "AVAILABLE";
   const errorsAvailable = dashboard.recent_errors.availability === "AVAILABLE";
+  const certificate = dashboard.gateway_certificate;
 
   return (
     <div className="dashboard-stack">
@@ -480,6 +485,30 @@ function DashboardView({ dashboard, onRefresh }: {
       </section>
 
       <section className="operations-grid" aria-label="运行指标">
+        {certificate ? <article className={`operations-panel certificate-panel ${certificate.level.toLowerCase()}`}>
+          <div className="metric-heading">
+            <span><ShieldCheck aria-hidden="true" />Gateway 证书</span>
+            <small>{certificate.level}</small>
+          </div>
+          <strong className="certificate-expiry">{new Date(certificate.expires_at).toLocaleString("zh-CN", { hour12: false })}</strong>
+          <dl className="certificate-details">
+            <div><dt>TLS 模式</dt><dd>{certificate.tls_mode}</dd></div>
+            <div><dt>剩余秒数</dt><dd>{certificate.remaining_seconds.toLocaleString("zh-CN")}</dd></div>
+          </dl>
+          {certificate.recent_renewal_failed ? (
+            <p className="certificate-warning">最近续签失败 · {certificate.recent_renewal_error_code}</p>
+          ) : <p>Server 已按 30 / 7 / 1 天阈值冻结当前等级。</p>}
+        </article> : <article className="operations-panel certificate-panel unavailable" role="status">
+          <div className="metric-heading">
+            <span><AlertTriangle aria-hidden="true" />Gateway 证书</span>
+            <small>UNAVAILABLE</small>
+          </div>
+          <div className="unavailable-state compact">
+            <span>—</span>
+            <p>Gateway 证书状态不可用，请检查 Server 响应完整性。</p>
+          </div>
+        </article>}
+
         <article className="operations-panel active-connections">
           <div className="metric-heading">
             <span><Activity aria-hidden="true" />实时连接</span>

@@ -315,17 +315,21 @@ strict_operations=$(
     sed -n '/^type StrictServerInterface interface {$/,/^}$/p' "$go_generated_file" |
         grep -c 'ResponseObject, error)'
 )
-[ "$strict_operations" -eq 25 ] || \
-    fail "generated Go strict interface has $strict_operations operations, want 25"
+[ "$strict_operations" -eq 26 ] || \
+    fail "generated Go strict interface has $strict_operations operations, want 26"
 typescript_operations=$(grep -c 'operations\["' "$typescript_generated_file")
-[ "$typescript_operations" -eq 25 ] || \
-    fail "generated TypeScript paths have $typescript_operations operations, want 25"
+[ "$typescript_operations" -eq 26 ] || \
+    fail "generated TypeScript paths have $typescript_operations operations, want 26"
 grep -F 'Health   nullable.Nullable[HealthCheckInput]' "$go_generated_file" >/dev/null || \
     fail 'generated Go PATCH contract lost nullable health state'
 grep -F 'Exposure nullable.Nullable[ExposurePatch]' "$go_generated_file" >/dev/null || \
     fail 'generated Go PATCH contract lost nullable exposure state'
 grep -F 'type StrictServerInterface interface {' "$go_generated_file" >/dev/null || \
     fail 'generated Go strict server interface is missing'
+grep -F 'Body          io.Reader' "$go_generated_file" >/dev/null || \
+    fail 'generated Go audit export contract is not streaming'
+grep -F 'readonly "application/x-ndjson": string;' "$typescript_generated_file" >/dev/null || \
+    fail 'generated TypeScript audit export media type is missing'
 grep -F 'type UpdateServiceApplicationMergePatchPlusJSONRequestBody' "$go_generated_file" >/dev/null || \
     fail 'generated Go contract lost merge-patch media type'
 grep -F 'ETag *string' "$go_generated_file" >/dev/null || \

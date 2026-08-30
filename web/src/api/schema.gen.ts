@@ -388,6 +388,28 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/security-audit-events/export": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * 流式导出持久化 Security Audit Event
+         * @description 复用列表筛选语义。Server 在响应开始前固定 (occurred_at,event_id) 上界，
+         *     随后按倒序 keyset 有界分页并逐行输出完整 SecurityAuditEvent JSON；并发追加
+         *     不进入本次导出。连接取消或写失败会立即终止，客户端不得把中断响应视为完整导出。
+         */
+        readonly get: operations["exportSecurityAuditEvents"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -840,6 +862,21 @@ export interface components {
             readonly services_error: number;
             readonly active_connections: number;
         };
+        /** @description 由 Server 冻结的 Gateway 叶证书状态；客户端不得重算 level 或解析错误文本。 */
+        readonly GatewayCertificate: {
+            /** @enum {string} */
+            readonly tls_mode: "public" | "pinned";
+            readonly expires_at: components["schemas"]["DateTime"];
+            /** Format: int64 */
+            readonly remaining_seconds: number;
+            /**
+             * @description 分别表示剩余时间大于 30 天、不超过 30 天、不超过 7 天、不超过 1 天和已过期。
+             * @enum {string}
+             */
+            readonly level: "HEALTHY" | "WARNING" | "CRITICAL" | "EMERGENCY" | "EXPIRED";
+            readonly recent_renewal_failed: boolean;
+            readonly recent_renewal_error_code: "GATEWAY_CERTIFICATE_RENEWAL_FAILED" | null;
+        };
         readonly RecentError: {
             /**
              * @description M6-05 Dashboard 使用的五类冻结诊断码。
@@ -862,6 +899,7 @@ export interface components {
             readonly counts: components["schemas"]["DashboardCounts"];
             readonly traffic: components["schemas"]["UsageSummary"];
             readonly recent_errors: components["schemas"]["RecentErrorsSummary"];
+            readonly gateway_certificate?: components["schemas"]["GatewayCertificate"];
             readonly generated_at: components["schemas"]["DateTime"];
         };
         readonly SystemInfo: {
@@ -1903,6 +1941,40 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["SecurityAuditEventList"];
+                };
+            };
+            readonly 400: components["responses"]["BadRequest"];
+            readonly 401: components["responses"]["Unauthorized"];
+            readonly 500: components["responses"]["InternalError"];
+        };
+    };
+    readonly exportSecurityAuditEvents: {
+        readonly parameters: {
+            readonly query?: {
+                readonly action?: components["schemas"]["SecurityAuditAction"];
+                readonly result?: components["schemas"]["SecurityAuditResult"];
+                readonly resource_type?: components["schemas"]["SecurityAuditResourceType"];
+                readonly resource_id?: string;
+                /** @description 包含此 UTC 时刻。 */
+                readonly occurred_from?: components["schemas"]["DateTime"];
+                /** @description 不包含此 UTC 时刻。 */
+                readonly occurred_to?: components["schemas"]["DateTime"];
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description NDJSON 流；每行是一个 SecurityAuditEvent，空结果返回空 Body。 */
+            readonly 200: {
+                headers: {
+                    readonly "Cache-Control": components["headers"]["NoStore"];
+                    readonly "Content-Disposition": "attachment; filename=\"xtunnel-security-audit.ndjson\"";
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/x-ndjson": string;
                 };
             };
             readonly 400: components["responses"]["BadRequest"];

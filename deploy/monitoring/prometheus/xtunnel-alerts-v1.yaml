@@ -1,0 +1,34 @@
+groups:
+  - name: xtunnel.gateway-certificate.v1
+    rules:
+      - alert: XTunnelGatewayCertificateExpiresWithin30Days
+        expr: (xtunnel_gateway_certificate_expiry_seconds - time()) <= 2592000 and (xtunnel_gateway_certificate_expiry_seconds - time()) > 604800
+        labels:
+          severity: warning
+        annotations:
+          summary: XTunnel Agent Gateway certificate expires within 30 days
+          description: Renew the public certificate or investigate pinned certificate renewal before the seven-day window.
+
+      - alert: XTunnelGatewayCertificateExpiresWithin7Days
+        expr: (xtunnel_gateway_certificate_expiry_seconds - time()) <= 604800 and (xtunnel_gateway_certificate_expiry_seconds - time()) > 86400
+        labels:
+          severity: warning
+        annotations:
+          summary: XTunnel Agent Gateway certificate expires within 7 days
+          description: Certificate renewal is urgent; follow the XTunnel operations runbook and verify the current certificate expiry metric.
+
+      - alert: XTunnelGatewayCertificateExpiresWithin1Day
+        expr: (xtunnel_gateway_certificate_expiry_seconds - time()) <= 86400 and (xtunnel_gateway_certificate_expiry_seconds - time()) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: XTunnel Agent Gateway certificate expires within 1 day
+          description: Certificate expiry is imminent; restore a valid certificate and verify Agent connectivity immediately.
+
+      - alert: XTunnelGatewayCertificateExpired
+        expr: xtunnel_gateway_certificate_expiry_seconds <= time()
+        labels:
+          severity: critical
+        annotations:
+          summary: XTunnel Agent Gateway certificate has expired
+          description: The current Gateway certificate is expired; replace or recover it before accepting Agent connections.
