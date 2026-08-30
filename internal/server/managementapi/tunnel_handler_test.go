@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/application"
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
@@ -519,6 +520,11 @@ func TestIgnorableTunnelPostCommitCleanupDoesNotHideRuntimeConvergence(t *testin
 			committed: true,
 		},
 		{
+			name:      "tunnel create initialization joined with cleanup",
+			err:       errors.Join(repository.ErrPostCommitCleanup, application.ErrTunnelManagementRuntimeInitialization),
+			committed: true,
+		},
+		{
 			name:      "tunnel delete convergence joined with cleanup",
 			err:       errors.Join(repository.ErrPostCommitCleanup, application.ErrTunnelManagementRuntimeConvergence),
 			committed: true,
@@ -585,6 +591,10 @@ func newTunnelAPIHarness(t *testing.T) *tunnelAPIHarness {
 	}
 	tokens := application.NewConnectionTokenService(store, protector)
 	runtime := &tunnelRuntimeFake{}
+	budget, err := healthbudget.New(healthbudget.Options{MaxTargetsPerTunnel: 100, MaxTargetsGlobal: 1000})
+	if err != nil {
+		t.Fatalf("healthbudget.New() error = %v", err)
+	}
 	endpoint := &protocolv1.GatewayEndpoint{Host: "gateway.example.test", Port: 443}
 	trust := &protocolv1.TlsTrustDescriptor{Mode: &protocolv1.TlsTrustDescriptor_PublicCa{PublicCa: &protocolv1.PublicCATrust{}}}
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -594,7 +604,7 @@ func newTunnelAPIHarness(t *testing.T) *tunnelAPIHarness {
 	publicURL := "https://" + server.Listener.Addr().String()
 	handler, err := NewHandler(HandlerOptions{
 		Management: serverconfig.Management{PublicURL: publicURL}, Store: store,
-		Tunnels:         application.NewTunnelManagementService(store, tokens, runtime, endpoint, trust, 1000),
+		Tunnels:         application.NewTunnelManagementService(store, tokens, runtime, budget, endpoint, trust, 1000),
 		Credentials:     application.NewCredentialLifecycleService(tokens, audit),
 		TunnelLifecycle: application.NewTunnelLifecycleService(store, audit, runtime),
 		Logger:          logger,

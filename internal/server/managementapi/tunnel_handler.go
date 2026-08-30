@@ -73,7 +73,7 @@ func (api *managementStrictAPI) CreateTunnel(ctx context.Context, request Create
 		return CreateTunnel500JSONResponse{InternalErrorJSONResponse(apiError(APIErrorCodeINTERNALERROR, "服务器内部错误", requestIDFromContext(requestContext)))}, nil
 	}
 	result, err := api.handler.tunnels.Create(ctx, application.CreateTunnelInput{Name: request.Body.Name})
-	if err != nil && !errors.Is(err, repository.ErrPostCommitCleanup) {
+	if err != nil && !ignorableTunnelPostCommitCleanup(err, result.Tunnel.ID != "") {
 		failure := api.handler.mapTunnelError(ctx, requestContext, err)
 		switch failure.status {
 		case 422:
@@ -413,6 +413,7 @@ func secretCacheHeaders() (string, string) { return "no-store", "no-cache" }
 func ignorableTunnelPostCommitCleanup(err error, committed bool) bool {
 	return committed && errors.Is(err, repository.ErrPostCommitCleanup) &&
 		!errors.Is(err, application.ErrTunnelRuntimeConvergence) &&
+		!errors.Is(err, application.ErrTunnelManagementRuntimeInitialization) &&
 		!errors.Is(err, application.ErrTunnelManagementRuntimeConvergence)
 }
 
@@ -491,6 +492,8 @@ func (handler *ManagementHandler) mapTunnelError(ctx context.Context, requestCon
 		return managementFailure{status: 409, code: APIErrorCodeCONNECTIONTOKENUNAVAILABLE, message: "当前 Connection Token 不可用"}
 	case errors.Is(err, application.ErrTunnelRuntimeConvergence):
 		return managementFailure{status: 409, code: APIErrorCodeRUNTIMECONVERGENCEFAILED, message: "持久化状态已提交，但运行态尚未完全收敛"}
+	case errors.Is(err, application.ErrTunnelManagementRuntimeInitialization):
+		return managementFailure{status: 500, code: APIErrorCodeRUNTIMECONVERGENCEFAILED, message: "Tunnel 已创建，但运行态尚未完全收敛"}
 	case errors.Is(err, application.ErrTunnelManagementRuntimeConvergence):
 		return managementFailure{status: 500, code: APIErrorCodeRUNTIMECONVERGENCEFAILED, message: "Tunnel 已删除，但运行态尚未完全收敛"}
 	case errors.Is(err, application.ErrTunnelManagementInput), errors.Is(err, application.ErrCredentialLifecycleInput),

@@ -16,9 +16,9 @@ var (
 	ErrInvalidTunnelID = errors.New("health target budget tunnel ID is invalid")
 	// ErrInvalidConnectorID 表示 Connector ID 不符合 Protocol v1 标识符约束。
 	ErrInvalidConnectorID = errors.New("health target budget connector ID is invalid")
-	// ErrTunnelNotInitialized 表示启动阶段尚未装载该 Tunnel 的已提交配置。
+	// ErrTunnelNotInitialized 表示尚未装载该 Tunnel 的已提交配置基线。
 	ErrTunnelNotInitialized = errors.New("health target budget tunnel is not initialized")
-	// ErrTunnelAlreadyInitialized 表示同一 Tunnel 被不同启动基线重复初始化。
+	// ErrTunnelAlreadyInitialized 表示同一 Tunnel 被不同已提交基线重复初始化。
 	ErrTunnelAlreadyInitialized = errors.New("health target budget tunnel is already initialized")
 	// ErrConfigurationRevision 表示 Candidate Revision 未前进。
 	ErrConfigurationRevision = errors.New("health target budget configuration revision is stale")
@@ -104,7 +104,7 @@ func New(options Options) (*Manager, error) {
 	}, nil
 }
 
-// InitializeTunnel 从 SQLite Desired State 装载一个 Tunnel 的已提交启动基线。
+// InitializeTunnel 从 SQLite Desired State 装载一个 Tunnel 的已提交配置基线。
 // 相同 Revision 与计数的重复调用幂等；不同基线快速失败。
 func (manager *Manager) InitializeTunnel(tunnelID string, revision, enabledCount uint64) error {
 	if manager == nil {

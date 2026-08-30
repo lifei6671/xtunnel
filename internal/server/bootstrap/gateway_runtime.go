@@ -678,7 +678,7 @@ func openGatewayAndBootstrapWithStartedAt(
 		serviceOwner, tcpPolicy, routes, sessions, limitManager, tcpIngress,
 	)
 	tunnels := application.NewTunnelManagementService(
-		serverResources.database, tokenService, sessions, endpoint, tlsTrust, config.Limits.MaxTunnels,
+		serverResources.database, tokenService, sessions, healthBudget, endpoint, tlsTrust, config.Limits.MaxTunnels,
 	)
 	systemRead, err := application.NewSystemReadService(
 		buildinfo.Version(),

@@ -31,10 +31,6 @@ import (
 func TestServiceAPIHTTPExposureLifecycleOverTLS(t *testing.T) {
 	harness := newServiceAPIHarness(t)
 	tunnel := createTunnelForTest(t, harness.tunnelAPIHarness, "service API")
-	if err := harness.budget.InitializeTunnel(tunnel.Tunnel.Id, uint64(tunnel.Tunnel.DesiredRevision), 0); err != nil {
-		t.Fatalf("InitializeTunnel() error = %v", err)
-	}
-
 	createBody := map[string]any{
 		"tunnel_id": tunnel.Tunnel.Id,
 		"name":      "web",
@@ -126,9 +122,6 @@ func TestServiceAPIHTTPExposureLifecycleOverTLS(t *testing.T) {
 func TestServiceOpaquePaginationBindsTunnelAndFilters(t *testing.T) {
 	harness := newServiceAPIHarness(t)
 	tunnel := createTunnelForTest(t, harness.tunnelAPIHarness, "service pagination")
-	if err := harness.budget.InitializeTunnel(tunnel.Tunnel.Id, uint64(tunnel.Tunnel.DesiredRevision), 0); err != nil {
-		t.Fatalf("InitializeTunnel() error = %v", err)
-	}
 	createHTTPServiceForTest(t, harness, tunnel.Tunnel.Id, "page-a", "page-a.example.test")
 	createHTTPServiceForTest(t, harness, tunnel.Tunnel.Id, "page-b", "page-b.example.test")
 
@@ -170,9 +163,6 @@ func TestServiceOpaquePaginationBindsTunnelAndFilters(t *testing.T) {
 func TestServicePatchPreconditionsAndMergePatchMatrix(t *testing.T) {
 	harness := newServiceAPIHarness(t)
 	tunnel := createTunnelForTest(t, harness.tunnelAPIHarness, "service patch matrix")
-	if err := harness.budget.InitializeTunnel(tunnel.Tunnel.Id, uint64(tunnel.Tunnel.DesiredRevision), 0); err != nil {
-		t.Fatalf("InitializeTunnel() error = %v", err)
-	}
 	service, etag := createHTTPServiceForTest(t, harness, tunnel.Tunnel.Id, "patch-service", "patch.example.test")
 	_, otherETag := createHTTPServiceForTest(t, harness, tunnel.Tunnel.Id, "other-service", "other.example.test")
 	path := "/api/v1/services/" + service.Id
@@ -359,9 +349,6 @@ func TestUpdateServiceInputMapsEveryNestedValueAndOmitsSiblings(t *testing.T) {
 func TestServiceMutationPreconditionMatrixOverTLS(t *testing.T) {
 	harness := newServiceAPIHarness(t)
 	tunnel := createTunnelForTest(t, harness.tunnelAPIHarness, "service precondition matrix")
-	if err := harness.budget.InitializeTunnel(tunnel.Tunnel.Id, uint64(tunnel.Tunnel.DesiredRevision), 0); err != nil {
-		t.Fatalf("InitializeTunnel() error = %v", err)
-	}
 	service, etag := createHTTPServiceForTest(
 		t, harness, tunnel.Tunnel.Id, "precondition-service", "precondition.example.test",
 	)
@@ -408,9 +395,6 @@ func TestServiceMutationPreconditionMatrixOverTLS(t *testing.T) {
 func TestServicePatchRejectsJSONMediaTypeOverTLS(t *testing.T) {
 	harness := newServiceAPIHarness(t)
 	tunnel := createTunnelForTest(t, harness.tunnelAPIHarness, "service media type")
-	if err := harness.budget.InitializeTunnel(tunnel.Tunnel.Id, uint64(tunnel.Tunnel.DesiredRevision), 0); err != nil {
-		t.Fatalf("InitializeTunnel() error = %v", err)
-	}
 	service, etag := createHTTPServiceForTest(t, harness, tunnel.Tunnel.Id, "media-service", "media.example.test")
 	request, err := http.NewRequest(
 		http.MethodPatch,
@@ -434,9 +418,6 @@ func TestServicePatchRejectsJSONMediaTypeOverTLS(t *testing.T) {
 func TestServiceConcurrentPatchWithSameETagCommitsOnce(t *testing.T) {
 	harness := newServiceAPIHarness(t)
 	tunnel := createTunnelForTest(t, harness.tunnelAPIHarness, "service concurrent patch")
-	if err := harness.budget.InitializeTunnel(tunnel.Tunnel.Id, uint64(tunnel.Tunnel.DesiredRevision), 0); err != nil {
-		t.Fatalf("InitializeTunnel() error = %v", err)
-	}
 	service, etag := createHTTPServiceForTest(t, harness, tunnel.Tunnel.Id, "concurrent-service", "concurrent.example.test")
 	path := "/api/v1/services/" + service.Id
 
@@ -553,9 +534,6 @@ func TestServiceConcurrentPatchWithSameETagCommitsOnce(t *testing.T) {
 func TestServiceAPIRejectsNestedUnknownFieldsOverTLS(t *testing.T) {
 	harness := newServiceAPIHarness(t)
 	tunnel := createTunnelForTest(t, harness.tunnelAPIHarness, "service unknown fields")
-	if err := harness.budget.InitializeTunnel(tunnel.Tunnel.Id, uint64(tunnel.Tunnel.DesiredRevision), 0); err != nil {
-		t.Fatalf("InitializeTunnel() error = %v", err)
-	}
 	validCreateBody := func() map[string]any {
 		return map[string]any{
 			"tunnel_id": tunnel.Tunnel.Id,
@@ -788,7 +766,7 @@ func newServiceAPIHarness(t *testing.T) *serviceAPIHarness {
 	publicURL := "https://" + server.Listener.Addr().String()
 	handler, err := NewHandler(HandlerOptions{
 		Management: serverconfig.Management{PublicURL: publicURL}, Store: store,
-		Tunnels:         application.NewTunnelManagementService(store, tokens, runtime, endpoint, trust, 1000),
+		Tunnels:         application.NewTunnelManagementService(store, tokens, runtime, budget, endpoint, trust, 1000),
 		Credentials:     application.NewCredentialLifecycleService(tokens, audit),
 		TunnelLifecycle: application.NewTunnelLifecycleService(store, audit, runtime),
 		Services:        services,

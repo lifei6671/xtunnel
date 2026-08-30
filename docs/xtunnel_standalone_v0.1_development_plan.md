@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M5-10 Contract/E2E Test Suite · IN_PROGRESS（M2、M3、M4、M5-01 至 M5-09 均已 `DONE`）
 >
-> **当前结论**：用户已明确确认 M5-09 阶段复审通过，M5-09 转为 `DONE`，M5 更新为 `9/11`、全局更新为 `73/95`。M5-10 已落地 25/25 Operation 实际响应 Contract、全 Mutation CSRF、23/23 错误码分类，以及真实 Server/临时 SQLite 分别经 Caddy、Nginx HTTPS 的 Chromium 工作流；本地 Contract/OpenAPI/Web/Go 验证通过，但当前 Windows/WSL 环境没有可执行该 Linux Browser Gate 的 Docker/Go/Node 组合，也没有包含最终源码的精确 CI，因此 M5-10 继续保持 `IN_PROGRESS`，M5 Gate Checklist 六项继续全部未通过。
+> **当前结论**：用户已明确确认 M5-09 阶段复审通过，M5-09 转为 `DONE`，M5 更新为 `9/11`、全局更新为 `73/95`。M5-10 已落地 25/25 Operation 实际响应 Contract、全 Mutation CSRF、23/23 错误码分类，以及真实 Server/临时 SQLite 分别经 Caddy、Nginx HTTPS 的 Chromium 工作流；第六轮精确 CI 已进入真实 Chromium/Caddy 工作流，并暴露在线创建 Tunnel 后未注册 Health Budget 基线的产品缺陷，当前正在修复和补回归证据，因此 M5-10 继续保持 `IN_PROGRESS`，M5 Gate Checklist 六项继续全部未通过。
 
 ---
 
@@ -1431,3 +1431,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 五轮提交与 CI：首次启动生命周期修复提交并推送为 `5b73566b278d619a29be2ff02e74e033e0971627`。精确绑定该 SHA 的 [CI #33290019375](https://github.com/lifei6671/xtunnel/actions/runs/33290019375) 中 Windows Agent Service 和 Linux arm64 全部成功；Linux amd64 的 Browser step 已完成 FD 提升、镜像环境隔离、Web/Server 构建、首次 Gateway 身份生成、在线管理员 Bootstrap 和 Management readiness，随后 Caddy 容器在 HTTPS readiness 前退出，Chromium 尚未启动，本轮不记录为 Browser Gate 通过。
 - 根因与修复：同一 CI Job 中已经通过的原生 Front Proxy E2E 使用锁定 Caddy 镜像的正式命令 `caddy run --config ... --adapter caddyfile`。Browser 启动器向镜像只传了 `run --config ...`，缺少容器内可执行文件名，导致容器入口立即失败。最小修复只补齐 `caddy`，不改变镜像摘要、Caddyfile、TLS、Host Network、Secret 策略或 Nginx 路径。
 - 状态与 Gate：Caddy/Nginx 两轮 Chromium 仍须修复提交后的精确 CI 补证。M5-10 继续保持 `IN_PROGRESS`，M5 Gate Checklist 六项全部保持未勾选，本次未勾选任何产品任务。
+
+## 2026-08-30 · M5-10 在线 Tunnel Health Budget 初始化修复 · IN_PROGRESS
+
+- 六轮提交与 CI：Caddy 命令修复提交并推送为 `7b2843d5a4b1330a7d248fc42ae4893bd674d74a`。精确绑定该 SHA 的 [CI #33290261160](https://github.com/lifei6671/xtunnel/actions/runs/33290261160) 中 Windows Agent Service 与 Linux arm64 全部成功；Linux amd64 的 Browser step 已完成 Server 首次启动、在线管理员 Bootstrap、Caddy HTTPS readiness 并启动真实 Chromium，工作流在创建首个 Service 时收到 `POST /api/v1/services` 的 `500 INTERNAL_ERROR`，因此本轮不记录为 Browser Gate 通过。
+- 本地复现与根因：使用同一 Linux Server 生命周期在 WSL2 复现 Tunnel 创建后立即创建 Service，结构化日志精确返回 `reserve health target budget: health target budget tunnel is not initialized`。启动快照只为进程启动前已存在的 Tunnel 调用 `InitializeTunnel`；在线 `Create Tunnel` 虽已原子提交 Tunnel 与首代 Credential，却没有把 `desired_revision=0`、`health_enabled_count=0` 的基线发布到同一个进程内 Health Budget，导致首次 Service 配置无法把 Revision 从 0 推进到 1。
+- 最小修复：Tunnel Management Application owner 在创建事务确认已提交后、向客户端返回一次性 Credential 前，显式注册新 Tunnel 的空 Health Budget 基线；初始化失败保留“已提交”结果并返回独立 Runtime Initialization 收敛错误，不能被 `ErrPostCommitCleanup` 路径静默忽略。Management API 使用既有 `RUNTIME_CONVERGENCE_FAILED` 错误码，不修改 OpenAPI Wire Contract。回归测试直接断言在线 Tunnel 创建后首次 Service Revision 可立即预留，并移除 Service Handler Fixture 中掩盖该缺口的手工初始化。
+- 本地验证：Go 1.27.0 定向 Application、Health Budget、Management API 与 Bootstrap 测试通过。修复后的 Linux amd64 Server 在 WSL2 从空数据目录启动，经 root-only Bootstrap Socket 在线创建管理员后，真实 API 先创建 Tunnel 返回 `201`，紧接着创建首个 Service 也返回 `201` 且 `required_revision=1`；原 `500` 已无法复现。进程、Socket、临时数据库与交叉构建产物均已清理。
+- 状态与 Gate：修复仍须新提交的精确 GitHub CI 证明 Caddy、Nginx 两轮 Chromium 全部完成。M5-10 继续保持 `IN_PROGRESS`，M5 保持 `9/11`、全局保持 `73/95`，M5-11 继续等待，M5 Gate Checklist 六项全部保持未勾选。

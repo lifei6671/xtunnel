@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/lifei6671/xtunnel/internal/healthbudget"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
@@ -27,6 +28,16 @@ func (emptyTunnelRuntime) RuntimeStatusSnapshots() []serverruntime.SessionStatus
 func (emptyTunnelRuntime) ConnectorSnapshots() []serverruntime.ConnectorSnapshot         { return nil }
 func (emptyTunnelRuntime) DeleteTunnel(string) error                                     { return nil }
 
+type emptyTunnelHealthBudget struct{}
+
+func (emptyTunnelHealthBudget) InitializeTunnel(string, uint64, uint64) error { return nil }
+
+type failingTunnelHealthBudget struct{ err error }
+
+func (budget failingTunnelHealthBudget) InitializeTunnel(string, uint64, uint64) error {
+	return budget.err
+}
+
 func TestTunnelManagementCreateRollsBackTunnelWhenTokenInsertFails(t *testing.T) {
 	store, err := sqlite.Open(context.Background(), t.TempDir())
 	if err != nil {
@@ -39,7 +50,7 @@ func TestTunnelManagementCreateRollsBackTunnelWhenTokenInsertFails(t *testing.T)
 	})
 	tokens := NewConnectionTokenService(store, shortCiphertextProtector{})
 	service := NewTunnelManagementService(
-		store, tokens, emptyTunnelRuntime{},
+		store, tokens, emptyTunnelRuntime{}, emptyTunnelHealthBudget{},
 		&protocolv1.GatewayEndpoint{Host: "gateway.example.test", Port: 443},
 		&protocolv1.TlsTrustDescriptor{Mode: &protocolv1.TlsTrustDescriptor_PublicCa{PublicCa: &protocolv1.PublicCATrust{}}},
 		1000,
@@ -79,7 +90,7 @@ func TestTunnelManagementCreateRejectsConfiguredTunnelLimit(t *testing.T) {
 	}
 
 	service := NewTunnelManagementService(
-		store, NewConnectionTokenService(store, shortCiphertextProtector{}), emptyTunnelRuntime{},
+		store, NewConnectionTokenService(store, shortCiphertextProtector{}), emptyTunnelRuntime{}, emptyTunnelHealthBudget{},
 		&protocolv1.GatewayEndpoint{Host: "gateway.example.test", Port: 443},
 		&protocolv1.TlsTrustDescriptor{Mode: &protocolv1.TlsTrustDescriptor_PublicCa{PublicCa: &protocolv1.PublicCATrust{}}},
 		1,
@@ -102,5 +113,78 @@ func TestTunnelManagementCreateRejectsConfiguredTunnelLimit(t *testing.T) {
 	})
 	if readErr != nil {
 		t.Fatalf("Read(Count) error = %v", readErr)
+	}
+}
+
+func TestTunnelManagementCreateInitializesHealthBudgetForFirstServiceRevision(t *testing.T) {
+	store, err := sqlite.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+	budget, err := healthbudget.New(healthbudget.Options{MaxTargetsPerTunnel: 100, MaxTargetsGlobal: 1000})
+	if err != nil {
+		t.Fatalf("healthbudget.New() error = %v", err)
+	}
+	service := NewTunnelManagementService(
+		store, NewConnectionTokenService(store, testTokenProtector(t, 0xB1)), emptyTunnelRuntime{}, budget,
+		&protocolv1.GatewayEndpoint{Host: "gateway.example.test", Port: 443},
+		&protocolv1.TlsTrustDescriptor{Mode: &protocolv1.TlsTrustDescriptor_PublicCa{PublicCa: &protocolv1.PublicCATrust{}}},
+		1000,
+	)
+	const tunnelID = "tun_01J00000000000000000000002"
+	service.newTunnelID = func() (string, error) { return tunnelID, nil }
+
+	result, err := service.Create(context.Background(), CreateTunnelInput{Name: "first service ready"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if result.Tunnel.ID != tunnelID || result.Tunnel.DesiredRevision != 0 {
+		t.Fatalf("Create() Tunnel = %#v, want ID %q at revision 0", result.Tunnel, tunnelID)
+	}
+	reservation, err := budget.ReserveConfiguration(tunnelID, 1, 1)
+	if err != nil {
+		t.Fatalf("ReserveConfiguration(first Service revision) error = %v", err)
+	}
+	if !reservation.Release() {
+		t.Fatal("Release(first Service revision) = false, want true")
+	}
+}
+
+func TestTunnelManagementCreateReportsCommittedTunnelWhenHealthBudgetInitializationFails(t *testing.T) {
+	store, err := sqlite.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Store.Close() error = %v", err)
+		}
+	})
+	injected := errors.New("injected health budget failure")
+	service := NewTunnelManagementService(
+		store, NewConnectionTokenService(store, testTokenProtector(t, 0xB2)), emptyTunnelRuntime{},
+		failingTunnelHealthBudget{err: injected},
+		&protocolv1.GatewayEndpoint{Host: "gateway.example.test", Port: 443},
+		&protocolv1.TlsTrustDescriptor{Mode: &protocolv1.TlsTrustDescriptor_PublicCa{PublicCa: &protocolv1.PublicCATrust{}}},
+		1000,
+	)
+	const tunnelID = "tun_01J00000000000000000000003"
+	service.newTunnelID = func() (string, error) { return tunnelID, nil }
+
+	result, err := service.Create(context.Background(), CreateTunnelInput{Name: "committed convergence failure"})
+	if result.Tunnel.ID != tunnelID || !errors.Is(err, ErrTunnelManagementRuntimeInitialization) || !errors.Is(err, injected) {
+		t.Fatalf("Create() = (%#v, %v), want committed Tunnel and joined initialization failure", result, err)
+	}
+	readErr := store.Read(context.Background(), func(view repository.RepositoryView) error {
+		_, err := view.Tunnels().Get(context.Background(), tunnelID)
+		return err
+	})
+	if readErr != nil {
+		t.Fatalf("committed Tunnel missing after initialization failure: %v", readErr)
 	}
 }

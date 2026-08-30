@@ -27,6 +27,8 @@ var (
 	ErrTunnelManagementInUse = errors.New("tunnel is referenced by services")
 	// ErrTunnelManagementLimit 表示持久化 Tunnel 已达到配置硬上限。
 	ErrTunnelManagementLimit = errors.New("tunnel limit reached")
+	// ErrTunnelManagementRuntimeInitialization 表示创建已提交但 Health Budget 基线注册失败。
+	ErrTunnelManagementRuntimeInitialization = errors.New("tunnel creation committed but runtime initialization failed")
 	// ErrTunnelManagementRuntimeConvergence 表示删除已提交但 Runtime 清理失败。
 	ErrTunnelManagementRuntimeConvergence = errors.New("tunnel deletion committed but runtime convergence failed")
 )
@@ -39,6 +41,12 @@ type TunnelRuntimeOwner interface {
 	RuntimeStatusSnapshots() []serverruntime.SessionStatusSnapshot
 	ConnectorSnapshots() []serverruntime.ConnectorSnapshot
 	DeleteTunnel(string) error
+}
+
+// TunnelHealthBudgetOwner 接收新建 Tunnel 的空配置基线，使首次 Service 变更与
+// Connector Auth 不必等待进程重启后再由启动快照补注册。
+type TunnelHealthBudgetOwner interface {
+	InitializeTunnel(tunnelID string, revision, enabledCount uint64) error
 }
 
 // CreateTunnelInput 是公开 Create Tunnel 唯一允许提供的业务字段。
@@ -114,27 +122,29 @@ func (err *TunnelInUseError) Unwrap() error { return ErrTunnelManagementInUse }
 // TunnelManagementService 是 Tunnel CRUD 与只读状态投影的唯一 Application owner。
 // Create 把 Tunnel 与首代 Credential 放入同一事务；Delete 在同一写事务检查引用。
 type TunnelManagementService struct {
-	store       repository.Store
-	tokens      *ConnectionTokenService
-	runtime     TunnelRuntimeOwner
-	endpoint    *protocolv1.GatewayEndpoint
-	tlsTrust    *protocolv1.TlsTrustDescriptor
-	maxTunnels  int
-	newTunnelID func() (string, error)
-	now         func() time.Time
+	store        repository.Store
+	tokens       *ConnectionTokenService
+	runtime      TunnelRuntimeOwner
+	healthBudget TunnelHealthBudgetOwner
+	endpoint     *protocolv1.GatewayEndpoint
+	tlsTrust     *protocolv1.TlsTrustDescriptor
+	maxTunnels   int
+	newTunnelID  func() (string, error)
+	now          func() time.Time
 }
 
-// NewTunnelManagementService 绑定唯一 Store、Runtime、Gateway 描述和 Tunnel 硬上限。
+// NewTunnelManagementService 绑定唯一 Store、Runtime、Health Budget、Gateway 描述和 Tunnel 硬上限。
 func NewTunnelManagementService(
 	store repository.Store,
 	tokens *ConnectionTokenService,
 	runtime TunnelRuntimeOwner,
+	healthBudget TunnelHealthBudgetOwner,
 	endpoint *protocolv1.GatewayEndpoint,
 	tlsTrust *protocolv1.TlsTrustDescriptor,
 	maxTunnels int,
 ) *TunnelManagementService {
 	return &TunnelManagementService{
-		store: store, tokens: tokens, runtime: runtime, endpoint: endpoint, tlsTrust: tlsTrust,
+		store: store, tokens: tokens, runtime: runtime, healthBudget: healthBudget, endpoint: endpoint, tlsTrust: tlsTrust,
 		maxTunnels: maxTunnels, newTunnelID: identity.NewTunnelID, now: time.Now,
 	}
 }
@@ -182,6 +192,15 @@ func (service *TunnelManagementService) Create(ctx context.Context, input Create
 	})
 	if transactionErr != nil && !errors.Is(transactionErr, repository.ErrPostCommitCleanup) {
 		return CreateTunnelResult{}, transactionErr
+	}
+	// SQLite 已提交后再发布进程内空基线。这样 Service 首次把 Desired Revision 从
+	// 0 推到 1 时可以立即预留预算；存量 Tunnel 仍由启动快照负责初始化。
+	if err := service.healthBudget.InitializeTunnel(tunnelID, 0, 0); err != nil {
+		return result, errors.Join(
+			transactionErr,
+			ErrTunnelManagementRuntimeInitialization,
+			fmt.Errorf("initialize created tunnel health budget: %w", err),
+		)
 	}
 	return result, transactionErr
 }
@@ -358,7 +377,7 @@ func (service *TunnelManagementService) Delete(ctx context.Context, input Delete
 }
 
 func (service *TunnelManagementService) valid(ctx context.Context) bool {
-	return service != nil && ctx != nil && service.store != nil && service.tokens != nil && service.runtime != nil &&
+	return service != nil && ctx != nil && service.store != nil && service.tokens != nil && service.runtime != nil && service.healthBudget != nil &&
 		service.endpoint != nil && service.tlsTrust != nil && service.maxTunnels > 0 && service.newTunnelID != nil && service.now != nil
 }
 
