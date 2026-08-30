@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-04 Usage Aggregation · REVIEW（实现与本地/WSL Linux 验证完成，等待最终提交的精确 CI 与用户阶段复审）
+> **当前阶段**：M6-04 Usage Aggregation · REVIEW（实现、本地/WSL Linux 验证与实现提交的精确 CI 均完成，等待用户阶段复审）
 >
-> **当前结论**：M6-03 已经用户阶段复审转为 `DONE`，M6 与全局完成数保持 `3/7`、`78/95`。用户已明确确认 M6-04 范围；`000011` minute/hour/day Migration、Usage Repository、单 Owner 60 秒 Flush/Rollup、7 日 Retention、有界 Incremental Vacuum、Tunnel/Bootstrap 生命周期、Service/Dashboard `AVAILABLE` Read Model 和真实 Linux Server→Agent→Origin 黑盒均已落地。本机定向 Race、全仓受控并行 Test/Vet、Module/Web 检查、WSL Linux 稳定性验证和安全/生命周期/API-E2E-CI 三路独立复审均通过；任务进入 `REVIEW`，仍须以最终提交的 Linux amd64/arm64 精确 CI 和用户阶段复审闭环，M6 Gate Checklist 继续全部未勾选。
+> **当前结论**：M6-03 已经用户阶段复审转为 `DONE`，M6 与全局完成数保持 `3/7`、`78/95`。用户已明确确认 M6-04 范围；`000011` minute/hour/day Migration、Usage Repository、单 Owner 60 秒 Flush/Rollup、7 日 Retention、有界 Incremental Vacuum、Tunnel/Bootstrap 生命周期、Service/Dashboard `AVAILABLE` Read Model 和真实 Linux Server→Agent→Origin 黑盒均已落地。本机定向 Race、全仓受控并行 Test/Vet、Module/Web 检查、WSL Linux 稳定性验证、安全/生命周期/API-E2E-CI 三路独立复审，以及实现提交 `a1e9c22de27a4453e1ffb4a52521a8d3ae570f41` 的 Linux amd64/arm64 与 Windows 精确 CI 均通过；任务继续处于 `REVIEW`，仅等待用户阶段复审，M6 Gate Checklist 继续全部未勾选。
 
 ---
 
@@ -426,7 +426,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-03` 已完成。当前待办为：
 
-1. `M6-04` — 实现与本地/WSL Linux 证据已完成，等待最终提交的 Linux amd64/arm64 精确 CI 与用户阶段复审；复审通过前不转 `DONE`。
+1. `M6-04` — 实现、本地/WSL Linux 证据及实现提交的 Linux amd64/arm64 与 Windows 精确 CI 已完成，等待用户阶段复审；复审通过前不转 `DONE`。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
@@ -1550,4 +1550,4 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 稳定性修复：Linux 产品黑盒重复运行时发现，手工裸 `BEGIN` 的一致性只读事务在请求取消后偶发把事务状态带回连接池，使最终 Usage `BEGIN IMMEDIATE` 失败。`ReadConsistent` 改由 `database/sql` 跟踪普通只读事务；保留 WAL 一致快照与不抢写锁语义，同时由标准库保证取消回滚完成后才复用连接。修复后 Usage 黑盒与既有 M4 Product Gate 联合连续 10 轮通过。
 - 本地证据：Go `1.27.0`、`GOTOOLCHAIN=local` 下，七个相关包定向 Race、全仓 `go test -p 2 -count=1 -timeout 300s ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff`、Web Check/Build 均通过。默认并行全仓首轮唯一失败是 `internal/buildinfo` 自编译子进程撞到固定 30 秒墙钟，单包复跑 `0.513s` 通过，受控并行全仓通过。WSL Linux amd64 真实 `TestUsageAggregationEndToEnd` 通过，并与 `TestProductDataPlaneEndToEnd` 联合连续 10 轮通过，覆盖非对称双向字节、Half-Close、Service/Dashboard API、失败 OPEN、最终 Flush、全 Server 重启与无重复入账。
 - 独立复审：安全/持久化、并发/生命周期、API/E2E/CI 三路最终复审均为 `APPROVED`，无 P0/P1/P2。补充压力验证包含 `ReadConsistent` 取消回归 100 次、Owner/OPEN/RAW 关键测试重复 50 次，以及相关 Test/Race/Vet 与 Diff Check。
-- 状态与剩余证据：CI Workflow 已在 Linux amd64/arm64 增加 `Run native M6 Usage aggregation blackbox`。旧库首次升级 v11 会执行一次完整 `VACUUM` 以转换 Incremental Auto Vacuum，失败不记录版本，但大型旧库的启动耗时仍是已知运维风险。当前尚无包含最终内容的 Commit SHA 和精确 CI Run，因此 M6-04 只进入 `REVIEW`，M6 保持 `3/7`、全局保持 `78/95`，M6 Gate Checklist 全部未勾选。
+- 精确 CI 与状态：实现提交 `a1e9c22de27a4453e1ffb4a52521a8d3ae570f41` 的 [CI #33306427567](https://github.com/lifei6671/xtunnel/actions/runs/33306427567) 整体 `success`。Linux amd64/arm64 的 `Run native M6 Usage aggregation blackbox`、全仓 Test/Race/Vet、Proto/OpenAPI/生成物清洁、OCI/systemd 均通过；Linux amd64 的真实 Browser E2E 与 Windows Agent Service 也通过。旧库首次升级 v11 会执行一次完整 `VACUUM` 以转换 Incremental Auto Vacuum，失败不记录版本，但大型旧库的启动耗时仍是已知运维风险。M6-04 继续保持 `REVIEW` 等待用户阶段复审，M6 保持 `3/7`、全局保持 `78/95`，M6 Gate Checklist 全部未勾选。
