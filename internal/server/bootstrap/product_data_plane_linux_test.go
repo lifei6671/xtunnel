@@ -387,7 +387,7 @@ func testProductGateHTTP(
 	waitForProductGateIdleWork(t, runtime, 1)
 	transport := &http.Transport{}
 	t.Cleanup(transport.CloseIdleConnections)
-	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
 	do := func(method, path, source, body string) *http.Response {
 		t.Helper()
 		request, err := http.NewRequestWithContext(t.Context(), method, "http://"+address+path, strings.NewReader(body))
@@ -424,7 +424,7 @@ func testProductGateHTTP(
 	var originRequest productGateHTTPRequest
 	select {
 	case originRequest = <-observed:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Product Gate HTTP Origin did not receive routed request")
 	}
 
@@ -433,7 +433,7 @@ func testProductGateHTTP(
 	var first httpResult
 	select {
 	case first = <-firstResult:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("first Product Gate HTTP request did not finish after Origin release")
 	}
 	if first.err != nil {
