@@ -1,6 +1,6 @@
 # XTunnel
 
-XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面、M2 Credential Lifecycle & Failover Hardening、M3 Configuration/Health/Durable Operations、M4 Product Data Plane、M5-01 至 M5-08 均已通过验收、精确 CI 与用户阶段复审。Tunnel CRUD/Revoke、Token Reveal/Rotate/Revoke、四类部署命令、只读运行态 Connector 列表，以及 7 个 Service Operation、唯一 Nested Exposure 事务与运行态状态投影均已接入生成 Contract；Tunnel、Connector 和 Service List 已接入 HMAC opaque Pagination，Tunnel/Service 已覆盖完整 428/412、PATCH omitted/null/value 和原子 CAS 并发矩阵；System/Config/Security Audit 只读 Handler 与只消费 Server 权威状态的 Dashboard API/UI 已完成。M5-09 Tunnel/Connector/Service 日常管理 UI 已完成本地实现并进入 `REVIEW`，完整 Contract/Browser E2E 与 `/metrics` 导出仍由后续任务实现。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算、生产 HTTP Ingress，以及按持久化 Route 恢复的 Raw TCP/SSH Listener 与转发生命周期；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。
+XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面、M2 Credential Lifecycle & Failover Hardening、M3 Configuration/Health/Durable Operations、M4 Product Data Plane、M5-01 至 M5-09 均已通过验收、精确 CI 与用户阶段复审。Tunnel CRUD/Revoke、Token Reveal/Rotate/Revoke、四类部署命令、只读运行态 Connector 列表，以及 7 个 Service Operation、唯一 Nested Exposure 事务与运行态状态投影均已接入生成 Contract；Tunnel、Connector 和 Service List 已接入 HMAC opaque Pagination，Tunnel/Service 已覆盖完整 428/412、PATCH omitted/null/value 和原子 CAS 并发矩阵；System/Config/Security Audit 只读 Handler、只消费 Server 权威状态的 Dashboard API/UI，以及 Tunnel/Connector/Service 日常管理工作台均已完成。完整 Contract/Browser E2E 正由 M5-10 闭环，`/metrics` 导出仍由后续 M6 任务实现。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算、生产 HTTP Ingress，以及按持久化 Route 恢复的 Raw TCP/SSH Listener 与转发生命周期；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。
 
 ## 开发运行
 
@@ -55,7 +55,7 @@ go build -ldflags $ldflags ./cmd/agent
 
 `v0.1.0-local` 只用于本地开发；正式发布值由发布流程同时注入 Server 与 Agent。未显式注入的普通构建固定报告 `(devel)`，运行时配置和环境变量不能覆盖 Binary Version。
 
-`web/dist` 是被忽略的可重复构建产物，不提交占位文件；缺少生产构建时 Go Embed 会直接编译失败。当前 Web 已接入生成的同源 API Client，并提供登录、`SETUP_REQUIRED` 引导、会话恢复、退出、Dashboard，以及 Tunnel/Connector/Service 链路工作台；CSRF Token 和一次性 Connection Token 只保存在页面内存中。Agent、访问入口与 Settings 导航仍禁用待接入；完整 Contract/Browser E2E 属于 M5-10。
+`web/dist` 是被忽略的可重复构建产物，不提交占位文件；缺少生产构建时 Go Embed 会直接编译失败。当前 Web 已接入生成的同源 API Client，并提供登录、`SETUP_REQUIRED` 引导、会话恢复、退出、Dashboard，以及 Tunnel/Connector/Service 链路工作台；CSRF Token 和一次性 Connection Token 只保存在页面内存中。Agent、访问入口与 Settings 导航仍禁用待接入；M5-09 已通过精确 CI 与用户阶段复审，完整 Contract/Browser E2E 由 M5-10 继续闭环。
 
 本地开发只允许 HTTPS。将两个环境变量指向仓库外已信任的 Loopback Certificate 和 Private Key，并把 `management.public_url` 配置为浏览器实际使用的 Vite HTTPS Origin：
 
@@ -67,7 +67,7 @@ npm --prefix web run dev
 ./tools/test-web-proxy.ps1
 ```
 
-开发代理只转发 `/api/v1` 到 `127.0.0.1:8080`，并保留 Host/Origin。缺少证书时不会降级 HTTP。M5-03 已用真实 SQLite 和 TLS HTTP Server 黑盒覆盖 Login、Secure Cookie、`/auth/me`、CSRF 失败与 Logout；真实 Caddy/Nginx 加浏览器链路仍由 M5-10 的正式 Browser E2E 验收。
+开发代理只转发 `/api/v1` 到 `127.0.0.1:8080`，并保留 Host/Origin。缺少证书时不会降级 HTTP。M5-03 已用真实 SQLite 和 TLS HTTP Server 黑盒覆盖 Login、Secure Cookie、`/auth/me`、CSRF 失败与 Logout。M5-10 的 `npm --prefix web run test:e2e` 只作为 Linux Browser Gate 使用：它构建真实 Server，使用临时 SQLite 和管理员，在同一管理 Origin 上依次经锁定的 Caddy、Nginx 终止 HTTPS，并让 Chromium 各执行一次完整管理工作流。调用方必须按 CI 中的精确摘要预拉两个代理镜像、通过 `XTUNNEL_CADDY_IMAGE`/`XTUNNEL_NGINX_IMAGE` 传入，并预创建当前用户可写且权限为 `0700` 的 `/run/xtunnel`；本机开发仍使用上面的 Vite HTTPS 入口。
 
 Server 继续使用 Schema 驱动的配置入口；Agent 没有 YAML 或本地配置文件，只接收一个版本化 Connection Token：
 

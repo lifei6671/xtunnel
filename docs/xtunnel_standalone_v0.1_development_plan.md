@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-08-29
+> **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M5-09 Tunnel/Connector/Service 管理 UI · REVIEW（M2、M3、M4、M5-01 至 M5-08 均已 `DONE`）
+> **当前阶段**：M5-10 Contract/E2E Test Suite · IN_PROGRESS（M2、M3、M4、M5-01 至 M5-09 均已 `DONE`）
 >
-> **当前结论**：M5-09 已完成 Tunnel/Connector/Service 链路工作台本地实现：Tunnel CRUD/Token Lifecycle、同 Token Connector 部署指引、只读 Connector Runtime、Service CRUD/Enable/Disable、原始 ETag/CSRF/412 恢复和瞬时 Secret 边界均复用冻结生成 Contract。Web Check/Build、真实 SQLite/TLS Management API Go 回归、定向 Race、全仓 Test/Vet、HTTPS Proxy Smoke 与三路独立复审通过；Mock Browser 仅作为布局与交互开发反馈，完整真实 Contract/Browser E2E 仍归 M5-10。当前没有最终 Commit、精确 CI 或用户阶段复审，因此 M5-09 进入 `REVIEW` 而非 `DONE`；M5 保持 `8/11`、全局保持 `72/95`，M5-10 不解锁，M5 Gate Checklist 六项继续全部未通过。
+> **当前结论**：用户已明确确认 M5-09 阶段复审通过，M5-09 转为 `DONE`，M5 更新为 `9/11`、全局更新为 `73/95`。M5-10 已落地 25/25 Operation 实际响应 Contract、全 Mutation CSRF、23/23 错误码分类，以及真实 Server/临时 SQLite 分别经 Caddy、Nginx HTTPS 的 Chromium 工作流；本地 Contract/OpenAPI/Web/Go 验证通过，但当前 Windows/WSL 环境没有可执行该 Linux Browser Gate 的 Docker/Go/Node 组合，也没有包含最终源码的精确 CI，因此 M5-10 继续保持 `IN_PROGRESS`，M5 Gate Checklist 六项继续全部未通过。
 
 ---
 
@@ -109,10 +109,10 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M2 Credential/Failover Hardening | 8 | 8 | `DONE` | M1-14 | M2-08 |
 | M3 Config/Health | 13 | 13 | `DONE` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
-| M5 REST API/Web | 11 | 8 | `IN_PROGRESS` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
+| M5 REST API/Web | 11 | 9 | `IN_PROGRESS` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 0 | `NOT_STARTED` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **72** |  |  |  |
+| **合计** | **95** | **73** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -351,8 +351,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M5-06 | PATCH/ETag/Pagination 并发契约 | M5-04、M5-05 | Handler + Repository Tests | Tunnel 和 Service Aggregate 均覆盖 428/412；omitted/null/value；opaque token 50/200；version 原子递增 | `DONE` |
 | M5-07 | Settings/Read-only Runtime/Audit API | M5-02 | Settings/Audit Handler | 只返回允许公开的有效配置；Audit Query 只读且分页稳定；敏感字段永不返回，不泄露 Secret | `DONE` |
 | M5-08 | Dashboard/Status UI | M5-02、M5-04、M5-05 | React Pages | 直接渲染 Server Status；不在前端重算状态 | `DONE` |
-| M5-09 | Tunnel/Connector/Service 管理 UI | M5-03至 M5-08 | Tunnel CRUD/Token/Connector View/Service CRUD | 日常操作无需 SQLite 或手改 Agent Service Config | `REVIEW` |
-| M5-10 | Contract/E2E Test Suite | M5-02至 M5-09 | API Contract + Browser E2E | 错误码、并发 PATCH、CSRF、Token no-store、生成漂移全覆盖 | `NOT_STARTED` |
+| M5-09 | Tunnel/Connector/Service 管理 UI | M5-03至 M5-08 | Tunnel CRUD/Token/Connector View/Service CRUD | 日常操作无需 SQLite 或手改 Agent Service Config | `DONE` |
+| M5-10 | Contract/E2E Test Suite | M5-02至 M5-09 | API Contract + Browser E2E | 错误码、并发 PATCH、CSRF、Token no-store、生成漂移全覆盖 | `IN_PROGRESS` |
 | M5-11 | M5 Gate | M5-01至 M5-10 | M5 验收证据 | 下方 Checklist 全部通过 | `NOT_STARTED` |
 
 ## 11.3 M5 Gate Checklist
@@ -424,13 +424,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-08` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-09` 已完成。当前待办为：
 
-1. `M5-09` — Tunnel/Connector/Service 管理 UI 已完成本地实现并进入 `REVIEW`；等待最终 Commit、精确 CI 与用户阶段复审，不得把 Mock Browser 开发反馈写成 M5-10 Browser E2E。
+1. `M5-10` — Contract/E2E Test Suite 已进入 `IN_PROGRESS`；覆盖实际响应与 OpenAPI、错误码、并发 PATCH、全 Mutation CSRF、Secret no-store，以及真实 Server/SQLite/HTTPS/Chromium 管理工作流。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-08 已完成；M5-09 为 `REVIEW`，M5-10 继续等待其 `DONE`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-09 已完成；M5-10 正在实现，M5-11 继续等待其 `DONE`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
 
 推进规则：
 
@@ -452,7 +452,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | SQLite Driver/GORM/Migration 方案 | M0-05 开工前 | 用户已明确要求数据库访问使用 GORM；开工时仍需记录 GORM、SQLite Driver 和 Migration 组件的精确版本与选择依据，Migration 保持显式 forward-only，不以 `AutoMigrate` 取代版本管理 |
 | Buf/protoc-gen-go 精确版本 | M0-06 完成前 | 记录版本、下载源、分发包 SHA-256 和生成结果 |
 | OpenAPI Validator/Generator | M0-07/M5-02 开工前 | M0-07 已批准并锁定 vacuum `v0.30.0` 官方 Linux amd64/arm64 归档与二进制 SHA-256；M5-02 已批准并锁定 `oapi-codegen v2.8.0`、`oapi-codegen/runtime v1.6.0`、`nullable v1.1.0`、`openapi-typescript 7.13.0`、工具侧 TypeScript `5.9.3` 与 `openapi-fetch 0.17.0`。唯一入口为 `tools/openapi.sh validate|breaking|generate|generate-check`，CI 不维护第二套方式；TypeScript Generator 因 Web TypeScript 6 Peer Range 冲突隔离在 `tools/openapi-ts`，不得使用 `--force` 或 `--legacy-peer-deps` 绕过。 |
-| Web 依赖与 Node 版本 | M0-08 开工前 | 已批准 Node `24.19.0`、npm `11.17.0`、React/React DOM `19.2.8`、Vite `8.2.2`、Plugin React `6.1.0`、TypeScript `6.0.2` 与对应类型包；用户在管理菜单出现真实图标需求后追加批准 `lucide-react 1.34.0`；直接依赖精确锁定，npm 11 生成并提交 Lockfile，CI 只运行 `npm ci`；Tailwind/shadcn/Router/Query 等继续等待 M5 真实使用点 |
+| Web 依赖与 Node 版本 | M0-08 开工前 | 已批准 Node `24.19.0`、npm `11.17.0`、React/React DOM `19.2.8`、Vite `8.2.2`、Plugin React `6.1.0`、TypeScript `6.0.2` 与对应类型包；用户在管理菜单出现真实图标需求后追加批准 `lucide-react 1.34.0`，并在 M5-10 追加批准 `@playwright/test 1.62.1`；直接依赖精确锁定，npm 11 生成并提交 Lockfile，CI 只运行 `npm ci`，再通过本地锁定的 Playwright CLI 安装对应 Chromium；Tailwind/shadcn/Router/Query 等继续等待 M5 真实使用点 |
 | OCI 基础镜像、Compose 双栈与跨平台 Agent Service 权限模型 | M0-09 开工前 | 已批准三个固定多架构基础镜像摘要、Compose 双栈 Profile 与原生 tcp4/tcp6 监听原语；OCI 使用 `65532:65532` 与只读根，只有 Server 挂载 Data Volume 和 `/run/xtunnel` tmpfs，Agent 无 Volume，从 `XTUNNEL_TOKEN` 取得 Token 并默认执行 `run`；Compose 输入 `XTUNNEL_AGENT_TOKEN` 映射到容器环境；Server 保留 Shell 包装。Agent 在 Linux/Windows 统一使用 Binary `service install --token` 与 `service uninstall`，不提供用户安装脚本。Linux 要求 root/systemd>=249，原子安装到 `/usr/local/bin/xtunnel-agent`，Credential 目录/Source 为 `root:root 0700/0600`，Unit 首行为 `# Managed by xtunnel-agent service install` 且 `ExecStart=/usr/local/bin/xtunnel-agent run`。Windows 支持 amd64/arm64，要求提升权限的 Administrator 与 SCM；ServiceName=`XTunnelAgent`、DisplayName=`XTunnel Agent`、账户=`NT AUTHORITY\LocalService`，Binary=`%ProgramFiles%\XTunnel\xtunnel-agent.exe`，Credential=`%ProgramData%\XTunnel\credentials\agent.token.dpapi` 并使用 `CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN`，SCM ImagePath 仅含安装 Binary + `run`，Description marker 精确为 `Managed by xtunnel-agent service install`；重复安装使用 `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)`，Stop/Shutdown 最多 30s，运行异常返回非零并配置 non-crash recovery。两端均拒绝覆盖/删除非受管同名服务，卸载删除受管服务并保留平台 Credential；Windows 从运行中已安装 EXE 自卸载时使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排重启删除 Binary，Linux 另保留服务用户 |
 | Minimal Security Audit Event Contract | M1-04 收口前 | 用户于 2026-08-26 明确确认数据库 Schema 变更；已冻结 bounded/nullable、`event_id`/`operation_id`、`event`/`action` 枚举、actor/resource/result、稳定失败语义和幂等边界，并以 `000003_security_audit_events.sql`、Repository 校验和 v2 Rotation Journal 落地。Security Audit append-only，禁止 UPDATE/DELETE，Secret/Credential/Private Key/Cookie 禁止入库；M1 写事件，M5 提供只读查询，M6 提供结构化导出、Dashboard 和 Runbook |
 | 首次 Buf Breaking Baseline | M05-04 完成前 | 显式记录“无历史前代”，禁止与当前文件自比较 |
@@ -1379,3 +1379,23 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 独立复审：契约、安全、前端、可访问性与测试证据三路复审先后发现并关闭旧 Dialog ETag 重试、Service 确认时机、跨 Tunnel 迟到响应、Mutation 网络异常、Dialog 焦点和错误提示遮挡等问题；最终无剩余 P0/P1，结论为 `APPROVED` / `APPROVED_FOR_REVIEW`。
 - 状态与 Gate：当前尚无包含最终源码的实现 Commit SHA、精确 GitHub CI Run 或用户阶段复审，因此 M5-09 只进入 `REVIEW`。M5 保持 `8/11`、全局保持 `72/95`，M5-10/M5-11 继续等待；M5 Gate Checklist 六项全部保持未勾选，本次未将任何新产品任务标记为 `DONE`。
 - 文档同步：根 README 与本开发计划同步 M5-09 能力、证据边界和 `REVIEW` 状态。总技术方案、OpenAPI/生成物、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署配置、权限、日志契约与 `AGENTS.md` 无需更新，因为本轮仅消费既有冻结 Contract，没有改变机器权威或外部协议。
+
+## 2026-08-30 · M5-09 精确 CI 证据 · REVIEW
+
+- 提交与 CI：M5-09 最终源码、README 与计划记录共同提交为 `daeb19d68f2009dbb92f8b333243f60e2e5b3649`。精确绑定该 SHA 的 [CI #33255917474](https://github.com/lifei6671/xtunnel/actions/runs/33255917474) 从 2026-08-29 21:47:33 至 21:53:08（Asia/Shanghai）运行 5 分 35 秒；Windows Agent Service、Linux amd64 与 Linux arm64 三个 Job 全部成功，两路 Linux 均通过现行 OpenAPI/Web、全仓 Go Test/Vet/Build、定向 Race、M4 Product、OCI/systemd 与最终工作树清洁检查。
+- 状态与 Gate：最终产物、独立复审、提交和精确 CI 已齐备，但“继续下一步任务”按项目既有裁定不能替代用户阶段复审“通过”。M5-09 继续保持 `REVIEW`，M5 保持 `8/11`、全局保持 `72/95`，M5-10/M5-11 不解锁；M5 Gate Checklist 六项全部保持未勾选。本次未勾选任何产品任务。
+- 文档同步：根 README 与本开发计划只同步精确 CI 和剩余 Review 边界。总技术方案、OpenAPI/生成物、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署配置、生产配置、权限、日志契约与 `AGENTS.md` 无需更新，因为证据闭环没有改变产品或机器契约。
+
+## 2026-08-30 · M5-09 用户阶段复审与 M5-10 授权 · IN_PROGRESS
+
+- 用户明确确认 M5-09 阶段复审通过。结合最终提交 `daeb19d68f2009dbb92f8b333243f60e2e5b3649`、独立复审和精确 [CI #33255917474](https://github.com/lifei6671/xtunnel/actions/runs/33255917474)，M5-09 从 `REVIEW` 转为 `DONE`；M5 从 `8/11` 更新为 `9/11`，全局从 `72/95` 更新为 `73/95`，M5-10 依赖闭环并进入 `IN_PROGRESS`。
+- 授权边界：用户明确确认 M5-10 可以新增并锁定 `@playwright/test 1.62.1`、更新 `web/package-lock.json` 并修改 CI 接入真实 Browser E2E。Node 依赖仍只由 npm 11 Lockfile 和 `npm ci` 解析，CI 通过仓库本地锁定的 Playwright CLI 安装对应 Chromium。实现必须使用真实 Server、临时 SQLite、HTTPS 与 Chromium，不能把 Mock Route 或组件级 TLS Harness 冒充 Browser E2E；Secret 不得写入 Storage、Trace、HAR、Video、Screenshot 或测试报告。
+- Gate 边界：M5 Gate Checklist 六项全部保持未勾选。M5-10 只有在 API 实际响应 Contract、错误码/并发 PATCH/CSRF/no-store、生成漂移和真实 Browser E2E 完成验证与复审后才能进入 `REVIEW`；M5-11 继续等待。
+
+## 2026-08-30 · M5-10 Contract/E2E Test Suite · IN_PROGRESS
+
+- Contract Suite：新增运行时 OpenAPI 响应校验器，先固定预期 `200/201/204`，再校验声明 Header、JSON Content-Type、Body Schema 或 `204` 空 Body；由 OpenAPI 反向核对 Auth 3、Tunnel 10、Service 7、Dashboard/System/Audit 5，共 25/25 Operation 的真实成功响应。12 个带 CSRF Security Requirement 的 Mutation 均证明缺少 Token 时返回 `403 CSRF_INVALID` 且资源状态不变。23 个 `APIErrorCode` 中 17 个由真实 HTTP 失败响应覆盖、5 个由实际错误映射 Case 覆盖，`FORBIDDEN` 是 V0.1 单管理员无角色边界下唯一冻结不可达项，不伪造生产请求。
+- Browser E2E：Web 直接依赖精确锁定 `@playwright/test 1.62.1`。Linux 启动器构建真实 `xtunnel-server` 与嵌入 Web，创建临时 SQLite、管理员和 Loopback Certificate；同一 Server 依次由 CI 已按摘要锁定的 Caddy、Nginx 使用 host network 在同一 Origin 终止 HTTPS，Chromium 各执行 Login/Secure Cookie/AuthMe/CSRF/Logout、Tunnel UI 创建/重命名/删除、Connector Guide、Token Reveal/Rotate no-store、Service UI 创建/双页面 stale ETag `412`/重新编辑/启停/删除。Token 关闭后必须从 DOM、URL、LocalStorage 和 SessionStorage 消失；Trace、HAR、Video、Screenshot、Storage State 和持久测试报告均不生成。
+- CI 与生命周期：Linux amd64 使用本地锁定 CLI 安装 Chromium；Caddy/Nginx 镜像摘要提升为同一 Job 环境权威，既有 Front Proxy E2E 先拉取并核对架构，随后 Browser Gate 复用。Browser step 精确创建当前 Runner 所有、权限 `0700` 的 `/run/xtunnel` 并在退出时 `rmdir`，不污染后续 OCI/systemd Smoke。Server、Docker Proxy、外部锁、Backup Socket、临时数据库、证书、密码与 Playwright Output 均有有界停止和精确清理；密码只注入单次 Playwright 命令，失败日志不回显 Server/Proxy 内容。
+- 本地验证：Windows `go1.27.0` 且 `GOTOOLCHAIN=local` 下，Web Lockfile `npm ci`、`npm run check/build`、Playwright Test List、依赖树 `1.62.1`、OpenAPI Validate/Breaking/Generate Check/Wrapper Test、Contract 定向与 `count=10`、Management API Race/整包/Vet、全仓 `go test ./...`、`go vet ./...`、两进程 Build、`go mod verify`、`go mod tidy -diff`、Shell 语法、CI YAML 解析与 `git diff --check` 均通过。首轮三路复审发现并推动修复成功状态假阳性、人工错误码自证、Vite 代替真实反代、Secret 子进程继承、无界清理和 UI Rename 绕行；Contract、Browser、安全生命周期及 CI/Lockfile/文档三路二次复审均为 `APPROVED`，无剩余 P0/P1/P2/P3。
+- 状态与 Gate：本机没有 Docker，WSL 只有 Windows Node/npm 互操作且缺少 Linux Go/Node，不能执行生产 Linux Server + Docker + Chromium 的完整 Browser Gate；未将交叉构建、Playwright `--list` 或静态 Shell 校验冒充真实 E2E。当前没有实现 Commit、精确 GitHub CI Run 或用户阶段复审，M5-10 继续保持 `IN_PROGRESS`，M5 保持 `9/11`、全局保持 `73/95`，M5-11 继续等待，M5 Gate Checklist 六项全部保持未勾选。

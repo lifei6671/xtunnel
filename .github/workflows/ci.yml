@@ -15,6 +15,9 @@ jobs:
     name: verify (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    env:
+      XTUNNEL_CADDY_IMAGE: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+      XTUNNEL_NGINX_IMAGE: nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
     strategy:
       fail-fast: false
       matrix:
@@ -76,6 +79,13 @@ jobs:
           set -euo pipefail
           npm --prefix tools/openapi-ts ci
           npm --prefix web ci
+
+      - name: Install locked Playwright Chromium and system dependencies
+        if: matrix.arch == 'amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix web exec -- playwright install --with-deps chromium
 
       - name: Verify OpenAPI toolchain and wrapper path
         shell: bash
@@ -143,14 +153,26 @@ jobs:
           XTUNNEL_RUN_FRONT_PROXY_E2E: '1'
         run: |
           set -euo pipefail
-          caddy_image='caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648'
-          nginx_image='nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
-          docker pull "$caddy_image"
-          docker pull "$nginx_image"
-          test "$(docker image inspect --format '{{.Architecture}}' "$caddy_image")" = '${{ matrix.arch }}'
-          test "$(docker image inspect --format '{{.Architecture}}' "$nginx_image")" = '${{ matrix.arch }}'
+          docker pull "$XTUNNEL_CADDY_IMAGE"
+          docker pull "$XTUNNEL_NGINX_IMAGE"
+          test "$(docker image inspect --format '{{.Architecture}}' "$XTUNNEL_CADDY_IMAGE")" = '${{ matrix.arch }}'
+          test "$(docker image inspect --format '{{.Architecture}}' "$XTUNNEL_NGINX_IMAGE")" = '${{ matrix.arch }}'
           go test -count=1 -timeout 180s ./internal/server/httpingress \
             -run '^TestFrontProxyHTTPSAndWebSocketE2E$'
+
+      - name: Run real Caddy and Nginx Browser E2E
+        if: matrix.arch == 'amd64'
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          runtime_dir=/run/xtunnel
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$runtime_dir"
+          cleanup_runtime_dir() {
+            sudo rmdir "$runtime_dir"
+          }
+          trap cleanup_runtime_dir EXIT
+          npm --prefix web run test:e2e
 
       - name: Run native OCI smoke tests
         shell: bash

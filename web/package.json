@@ -11,7 +11,8 @@
   "scripts": {
     "dev": "vite",
     "check": "tsc -b",
-    "build": "tsc -b && vite build"
+    "build": "tsc -b && vite build",
+    "test:e2e": "sh ../tools/test-browser-e2e.sh"
   },
   "dependencies": {
     "lucide-react": "1.34.0",
@@ -20,6 +21,7 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@types/node": "24.13.3",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
