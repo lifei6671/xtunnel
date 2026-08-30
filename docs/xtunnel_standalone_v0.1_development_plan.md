@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-03 OpenTelemetry Trace · IN_PROGRESS（依赖、OTLP 环境、五段 Span、既有 Proto 字段与 Linux 双架构 CI 范围已确认）
+> **当前阶段**：M6-03 OpenTelemetry Trace · REVIEW（实现、复审与 Linux amd64/arm64 精确 CI 已完成，等待用户阶段复审）
 >
-> **当前结论**：用户已明确确认 M6-02 阶段复审通过。实现提交 `d9ed7e8100fc760c2f82ca23a48fddabc71443cc` 的精确 [CI #33299314878](https://github.com/lifei6671/xtunnel/actions/runs/33299314878)，以及证据提交 `b84df8537b35df1e894fe1ef944a4d236cb48432` 的最终 Head 精确 [CI #33299660842](https://github.com/lifei6671/xtunnel/actions/runs/33299660842) 均为 `success`；M6-02 从 `REVIEW` 转为 `DONE`。用户同时确认 M6-03 的依赖/Lockfile、OTLP/HTTP 标准环境、五段 Span、复用既有 Proto 字段与 Linux amd64/arm64 真实 Trace 黑盒边界，M6-03 转为 `IN_PROGRESS`；M6 与全局完成数更新为 `2/7`、`77/95`，M6 Gate Checklist 继续全部未勾选。
+> **当前结论**：M6-03 功能提交 `0aa2fda0bb5740b37abb3485fdb13eb33991f283` 已包含官方 OpenTelemetry `v1.46.0` 依赖、进程私有 OTLP/HTTP Runtime、五段 Server→Agent Span、W3C OPEN 传播、脱敏失败收敛和双架构 Trace 黑盒；稳定性提交 `15a65b46771567cacfc26c5d8ad1eab0a0897298` 将既有 Product Gate 的 Origin 观测等待对齐原有 3 秒 HTTP Deadline。精确绑定最终实现 Head 的 [CI #33302953490](https://github.com/lifei6671/xtunnel/actions/runs/33302953490) 整体成功，Linux amd64/arm64 新增 Trace 黑盒、全仓 Test/Race/Vet、Windows Agent Service 与生成物清洁检查均通过；两路独立复审无剩余 P0/P1/P2。M6-03 转为 `REVIEW` 等待用户阶段复审，不标记 `DONE`；M6 与全局完成数保持 `2/7`、`77/95`，M6 Gate Checklist 继续全部未勾选。
 
 ---
 
@@ -374,7 +374,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | --- | --- | --- | --- | --- | --- |
 | M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `DONE` |
 | M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `DONE` |
-| M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `IN_PROGRESS` |
+| M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `REVIEW` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `NOT_STARTED` |
 | M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `NOT_STARTED` |
 | M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard + Agent Connectivity Diag | Diag 复用生产 Token Parser、Endpoint/DNS、Dialer、TLS Builder、Pin Verifier 和 ALPN，覆盖 DNS/TCP/TLS/Pin/ALPN/Auth/Snapshot Receive；不得复制宽松连接栈，也不得把完整 Token 写入 argv 作为唯一入口；输出 PASS/WARNING/FAIL 与 READY 变体；覆盖证书 30/7/1 天告警、Audit 查询/导出、Linux systemd 与 Windows SCM 的启动失败、恢复重启和 30s Stop/Shutdown 超时诊断 | `NOT_STARTED` |
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01`、`M6-02` 已完成。当前待办为：
 
-1. `M6-03` — 用户已确认依赖、OTLP/HTTP 标准环境、五段 Span、复用既有 Proto 字段与 Linux amd64/arm64 真实 Trace 黑盒边界，当前进入实现。
+1. `M6-03` — 实现、两路独立复审与 Linux amd64/arm64 精确 Trace 黑盒均已完成，当前等待用户阶段复审。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5、M6-01 与 M6-02 已完成；M6-03 已进入 `IN_PROGRESS`，尚未产生实现与验收证据。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次状态同步自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5、M6-01 与 M6-02 已完成；M6-03 已进入 `REVIEW`，等待用户阶段复审。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
 
 推进规则：
 
@@ -1522,3 +1522,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - Trace 与协议边界：实现 `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 五段可关联 Span；复用现有 `OpenRequest.trace_id/traceparent/tracestate`，不修改 Proto，三字段非空时必须合法且一致，否则返回 `PROTOCOL_ERROR`。公网 HTTP/TCP 入口创建本地 Root Trace，不信任客户端提供的 TraceID；Server→Agent 边界传播 W3C Context，日志 `trace_id` 只能取自活动 SpanContext。Control Session 全量 Trace、Baggage、Management 自动插桩、Collector/Jaeger/Tempo 部署、Dashboard 与告警均延期。
 - 验收与状态：Linux amd64/arm64 CI 接入真实 Server→Agent Trace 黑盒，验证 Span 名称、父子关系、Remote Parent、TraceID 与日志一致性；Go 1.27 固定工具链下还需通过定向 Test/Race/Vet、全仓 Test/Vet、Module Verify/Tidy Diff 和精确 CI。M6-03 从 `NOT_STARTED` 转为 `IN_PROGRESS`，当前不标记 `REVIEW` 或 `DONE`，不增加 M6 Gate 勾选。
 - 文档同步：根 README 与本开发计划同步 M6-02 用户复审、M6-03 确认范围、任务状态、仪表盘、队列和本记录。总技术方案、Proto、OpenAPI/生成物、Server Schema、Database Schema、Migration、依赖/Lockfile、CI Workflow、部署配置、权限模型、日志契约与 `AGENTS.md` 本次均未修改；依赖、实现、CI 与必要的总方案语义同步由后续 M6-03 实施完成。
+
+## 2026-08-30 · M6-03 OpenTelemetry Trace 实现与精确 CI · REVIEW
+
+- 运行时与依赖：功能提交 `0aa2fda0bb5740b37abb3485fdb13eb33991f283` 通过 Go 工具锁定官方 OpenTelemetry `v1.46.0` 及 OTLP/HTTP Exporter。Server 与 Agent 各自持有进程私有 Provider/Propagator；无 Endpoint 时 no-op，启用时使用 2048 有界队列、512 Batch 和 5 秒 Batch/Export/Shutdown 上限，不安装全局 Provider，不让 Collector 阻塞数据面。Endpoint、Header、Timeout、Compression、Protocol 与 Insecure 环境先本地校验再显式传给 Exporter；生产只允许 HTTPS，HTTP 仅允许 Loopback，文件型 CA/mTLS 在 V0.1 明确拒绝。Exporter 原始错误被截断，项目日志最多产生一次脱敏 `EXPORT_FAILED`。
+- Trace 与协议：公网 HTTP/TCP 每次入口都以本地 Root 创建 `ingress.Accept`，不采信公网 `traceparent`；Server 依次创建 `tunnel.DialContext` 与 `transport.Acquire`，再从活动 Context 写入既有 `OpenRequest.trace_id/traceparent/tracestate`。Agent 在 Origin Dial 前验证三字段全空兼容、部分字段、非法 Parent、非法 State 和 TraceID 不一致分支，合法输入恢复 Remote Parent 后创建 `origin.Dial→proxy.Bidirectional`。Span 只写有限错误码、Ingress 枚举、HTTP 状态或公网端口，日志 `trace_id` 只来自活动 SpanContext；未修改 Proto、OpenAPI、Server Schema、Agent 本地业务配置、Database Schema 或 Migration。
+- 测试与复审：单元/包级测试覆盖默认关闭、Endpoint/Header/Insecure/Timeout 溢出、Export/Shutdown 脱敏、HTTP KeepAlive 独立 Root、TCP Root、Wire 注入、Agent 非法字段、Remote Parent、Origin/Proxy 失败和取消 Exactly-once。Linux 黑盒使用真实 Bootstrap、Gateway、Token-only Agent、Snapshot、HTTP Tunnel 与 Origin，只以两个独立 Provider 和共享 Recorder 替代 Collector，严格断言五段父子链、Remote Parent、统一 TraceID、公网伪造 Parent 隔离和 Server/Agent 日志相关。两路独立安全/协议与生命周期复审最终均 `APPROVED`，无剩余 P0/P1/P2。
+- 本地证据：Go 1.27.0 且 `GOTOOLCHAIN=local` 下，`go test -count=1 ./...`、`go vet ./...`、CI 同构九包 Race、扩展核心七包加 Tracing/Open/Connector Race、`go mod verify`、`go mod tidy -diff` 与 `git diff --check` 全部通过；WSL Linux amd64 的 Product Gate 与 Trace Gate 在稳定性修正后各连续 10 次通过。首轮 [CI #33302618706](https://github.com/lifei6671/xtunnel/actions/runs/33302618706) 的 arm64 Trace 黑盒及 Windows Job 通过，但 amd64 在既有 Product Gate 的 1 秒 Origin 观测等待发生调度超时；稳定性提交 `15a65b46771567cacfc26c5d8ad1eab0a0897298` 只将该等待对齐原有 3 秒 HTTP Client Deadline，不增加重试或放宽业务断言。
+- 精确 CI 与状态：最终实现 Head `15a65b46771567cacfc26c5d8ad1eab0a0897298` 的 [CI #33302953490](https://github.com/lifei6671/xtunnel/actions/runs/33302953490) 整体 `success`。Linux amd64/arm64 的 `Run native M6 OpenTelemetry trace blackbox`、全仓 Test/Race/Vet、Proto/OpenAPI/生成物清洁、Browser/OCI/systemd 与 Windows Agent Service 全部通过。M6-03 从 `IN_PROGRESS` 转为 `REVIEW` 等待用户阶段复审；不标记 `DONE`，M6 保持 `2/7`、全局保持 `77/95`，M6 Gate Checklist 全部未勾选。
+- 文档同步：根 README、总技术方案和本开发计划同步 OTLP 环境、TLS 限制、Wire/Span/Shutdown 契约、运维说明、状态与可复现证据。CI Workflow 已新增双架构真实 Trace 黑盒；Proto、OpenAPI/生成物、Server Schema、Agent 本地业务配置、Database Schema、Migration、部署配置、权限模型、日志字段契约与 `AGENTS.md` 无需修改。
