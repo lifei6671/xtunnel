@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-02 Prometheus Metrics · IN_PROGRESS（本地实现与验证完成，等待提交后 Linux amd64/arm64 精确 CI）
+> **当前阶段**：M6-02 Prometheus Metrics · REVIEW（实现、复审与 Linux amd64/arm64 精确 CI 已完成，等待用户阶段复审）
 >
-> **当前结论**：用户已明确确认 M6-01 阶段复审通过。实现提交 `eb8a88c25149ca83b0df58680c812474e5a88d09`、证据提交 `56cbb306dc04630b5e7c137a32deeb9bf18fae96` 及各自精确 CI `#33296214987`、`#33296545473` 均成功，M6-01 转为 `DONE`。用户随后确认 M6-02 推荐范围；Server 私有 Prometheus Registry、20 项有限基数指标、独立 Listener 生命周期、Owner/Tunnel 埋点、端口保留与 Linux 黑盒现已完成本地实现，并通过 Go 1.27 定向/全仓 Test、Race、Vet、Module Verify、WSL Linux amd64 真实黑盒和 Linux arm64 测试二进制交叉编译。尚未产生实现 Commit 和精确双架构 CI，M6-02 保持 `IN_PROGRESS`；M6 与全局完成数保持 `1/7`、`76/95`。
+> **当前结论**：M6-02 实现提交 `d9ed7e8100fc760c2f82ca23a48fddabc71443cc` 已包含 Server 私有 Prometheus Registry、20 项有限基数指标、独立 Listener 生命周期、Owner/Tunnel 埋点、端口保留和真实 Linux 黑盒。精确绑定该 SHA 的 [CI #33299314878](https://github.com/lifei6671/xtunnel/actions/runs/33299314878) 整体成功，Linux amd64/arm64 的 `Run native M6 Prometheus metrics blackbox` 及后续生成物清洁检查均通过；三路独立复审无剩余 P0/P1/P2。M6-02 转为 `REVIEW` 等待用户阶段复审，本次不标记 `DONE`，M6 与全局完成数保持 `1/7`、`76/95`。
 
 ---
 
@@ -373,7 +373,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `DONE` |
-| M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `IN_PROGRESS` |
+| M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `REVIEW` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `NOT_STARTED` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `NOT_STARTED` |
 | M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `NOT_STARTED` |
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 已完成。当前待办为：
 
-1. `M6-02` — 本地实现与验证已完成；下一步生成实现 Commit，并由 Linux amd64/arm64 精确 CI 运行新增的真实 `/metrics` 黑盒后进入 `REVIEW`。
+1. `M6-02` — 实现提交、三路独立复审与 Linux amd64/arm64 精确 `/metrics` 黑盒均已完成，当前等待用户阶段复审。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 已完成；M6-02 等待提交与精确双架构 CI。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 已完成；M6-02 已进入 `REVIEW`，等待用户阶段复审。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
 
 推进规则：
 
@@ -1506,3 +1506,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 本地证据：`./tools/check-go-version.ps1` 确认 `go1.27.0 (local)`；定向七包 Test 与 Race、`go test -count=1 -timeout 300s ./...`、`go vet ./...`、`go mod verify`、`git diff --check` 全部通过；coalesced 竞态用例 `-count=20` 通过。Windows 生成的 Linux amd64 测试二进制已在 WSL2 Ubuntu 22.04 真实执行 `TestMetricsEndpointEndToEnd` 与 `TestMetricsEndpointBindFailureRollsBackBootstrap` 并通过；Linux arm64 测试二进制交叉编译通过，但 arm64 原生执行仍必须由 CI 提供。
 - 文档同步：总技术方案第 160 节、根 README 与本计划已同步公开指标、监听安全、Agent 延期、关闭顺序与验证边界。OpenAPI/生成物、Proto、Server Schema、Database Schema、Migration、部署配置、权限模型和日志契约均未改变，因为实现复用既有 `metrics.listen/path`、OpenResponse 字段与 Runtime owner。
 - 状态与剩余边界：当前工作区尚未提交，以上结果属于脏工作区开发反馈；CodeGraph 仍因 `Transport closed` 不可用，已使用原生搜索和定向读取完成结构核查。M6-02 保持 `IN_PROGRESS`，本次未勾选任何产品任务或 M6 Gate；生成实现 Commit 并取得精确 Linux amd64/arm64 CI 成功证据后才可转 `REVIEW`。
+
+## 2026-08-30 · M6-02 实现提交与精确双架构 CI · REVIEW
+
+- 提交与 CI：M6-02 实现提交并推送为 `d9ed7e8100fc760c2f82ca23a48fddabc71443cc`。精确绑定该 SHA 的 [CI #33299314878](https://github.com/lifei6671/xtunnel/actions/runs/33299314878) 从 2026-08-30 15:29:10 至 15:35:32（Asia/Shanghai）运行约 6 分 22 秒，整体结论为 `success`。
+- 双架构 Metrics 证据：原生 Linux arm64 Job `#99224319538` 用时 4 分 32 秒，原生 Linux amd64 Job `#99224319628` 用时 6 分 18 秒；两者的 `Run native M6 Prometheus metrics blackbox` 均为 `success`，真实执行 `TestMetricsEndpointEndToEnd` 与 `TestMetricsEndpointBindFailureRollsBackBootstrap`，覆盖 20 项指标族、精确 Path/404、状态变化、绑定失败回滚、优雅关闭和端口释放。两个 Job 后续 `Verify generated files remain clean` 也均成功。
+- 本地与复审证据：提交前从完整 staged snapshot 通过 Go 1.27 固定工具链检查、全仓 Test/Vet、Module Verify/Tidy Diff、定向七包 Race 与 Diff Check；WSL2 Linux amd64 真实黑盒和 Linux arm64 交叉编译通过。三路独立只读复审覆盖 Contract/Cardinality/CI/文档、Listener/Bootstrap 生命周期，以及 OPEN/Reconcile/Delete 指标语义；复审发现的 `OPEN_DRAINING` 最终错误码遮蔽与 Shutdown 取消误计错误均已修复并经定向 Race 复核，最终无剩余 P0/P1/P2。
+- 状态与 Gate：M6-02 已具备实现产物、关键失败分支、独立复审、本地验收和精确双架构 CI，现从 `IN_PROGRESS` 转为 `REVIEW` 等待用户阶段复审。未将本次“继续”解释为阶段“通过”，M6 保持 `1/7`、全局保持 `76/95`；M6 Gate Checklist 全部保持未勾选，本次未勾选任何产品任务。
+- 文档同步：根 README 与本开发计划同步 M6-02 的精确 CI 证据和 `REVIEW` 边界。总技术方案、OpenAPI/生成物、Proto、Server Schema、Database Schema、Migration、第三方依赖/Lockfile、CI Workflow、部署配置、权限模型、日志契约与 `AGENTS.md` 无需更新，因为本轮只闭环既有实现证据，没有改变机器权威、运行行为或验证入口。
