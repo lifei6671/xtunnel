@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-03 OpenTelemetry Trace · REVIEW（实现、复审与 Linux amd64/arm64 精确 CI 已完成，等待用户阶段复审）
+> **当前阶段**：M6-04 Usage Aggregation · REVIEW（实现与本地/WSL Linux 验证完成，等待最终提交的精确 CI 与用户阶段复审）
 >
-> **当前结论**：M6-03 功能提交 `0aa2fda0bb5740b37abb3485fdb13eb33991f283` 已包含官方 OpenTelemetry `v1.46.0` 依赖、进程私有 OTLP/HTTP Runtime、五段 Server→Agent Span、W3C OPEN 传播、脱敏失败收敛和双架构 Trace 黑盒；测试稳定性提交 `e8037eb849792261d2f55ba276e70bd54474ec03` 将既有 Product Gate 的单次功能 Harness 上限统一为 10 秒，不增加请求重试或放宽业务断言。精确绑定最终实现 Head 的 [CI #33303692342](https://github.com/lifei6671/xtunnel/actions/runs/33303692342) 整体成功，Linux amd64/arm64 新增 Trace 黑盒、全仓 Test/Race/Vet、Windows Agent Service 与生成物清洁检查均通过；两路独立复审无剩余 P0/P1/P2。M6-03 转为 `REVIEW` 等待用户阶段复审，不标记 `DONE`；M6 与全局完成数保持 `2/7`、`77/95`，M6 Gate Checklist 继续全部未勾选。
+> **当前结论**：M6-03 已经用户阶段复审转为 `DONE`，M6 与全局完成数保持 `3/7`、`78/95`。用户已明确确认 M6-04 范围；`000011` minute/hour/day Migration、Usage Repository、单 Owner 60 秒 Flush/Rollup、7 日 Retention、有界 Incremental Vacuum、Tunnel/Bootstrap 生命周期、Service/Dashboard `AVAILABLE` Read Model 和真实 Linux Server→Agent→Origin 黑盒均已落地。本机定向 Race、全仓受控并行 Test/Vet、Module/Web 检查、WSL Linux 稳定性验证和安全/生命周期/API-E2E-CI 三路独立复审均通过；任务进入 `REVIEW`，仍须以最终提交的 Linux amd64/arm64 精确 CI 和用户阶段复审闭环，M6 Gate Checklist 继续全部未勾选。
 
 ---
 
@@ -110,9 +110,9 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M3 Config/Health | 13 | 13 | `DONE` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
-| M6 Observability | 7 | 2 | `IN_PROGRESS` | M5-11 | M6-07 |
+| M6 Observability | 7 | 3 | `IN_PROGRESS` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **77** |  |  |  |
+| **合计** | **95** | **78** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -374,8 +374,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | --- | --- | --- | --- | --- | --- |
 | M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `DONE` |
 | M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `DONE` |
-| M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `REVIEW` |
-| M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `NOT_STARTED` |
+| M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `DONE` |
+| M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `REVIEW` |
 | M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `NOT_STARTED` |
 | M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard + Agent Connectivity Diag | Diag 复用生产 Token Parser、Endpoint/DNS、Dialer、TLS Builder、Pin Verifier 和 ALPN，覆盖 DNS/TCP/TLS/Pin/ALPN/Auth/Snapshot Receive；不得复制宽松连接栈，也不得把完整 Token 写入 argv 作为唯一入口；输出 PASS/WARNING/FAIL 与 READY 变体；覆盖证书 30/7/1 天告警、Audit 查询/导出、Linux systemd 与 Windows SCM 的启动失败、恢复重启和 30s Stop/Shutdown 超时诊断 | `NOT_STARTED` |
 | M6-07 | M6 Gate | M6-01至 M6-06 | Observability 验收证据 | 故障注入下五类核心问题均可唯一定位 | `NOT_STARTED` |
@@ -424,13 +424,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01`、`M6-02` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-03` 已完成。当前待办为：
 
-1. `M6-03` — 实现、两路独立复审与 Linux amd64/arm64 精确 Trace 黑盒均已完成，当前等待用户阶段复审。
+1. `M6-04` — 实现与本地/WSL Linux 证据已完成，等待最终提交的 Linux amd64/arm64 精确 CI 与用户阶段复审；复审通过前不转 `DONE`。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5、M6-01 与 M6-02 已完成；M6-03 已进入 `REVIEW`，等待用户阶段复审。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 至 M6-03 已完成；M6-04 当前为 `REVIEW`，完成数仍保持 `78/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次进度同步自动转为 `DONE`。
 
 推进规则：
 
@@ -1531,3 +1531,23 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 本地证据：Go 1.27.0 且 `GOTOOLCHAIN=local` 下，`go test -count=1 ./...`、`go vet ./...`、CI 同构九包 Race、扩展核心七包加 Tracing/Open/Connector Race、`go mod verify`、`go mod tidy -diff` 与 `git diff --check` 全部通过；WSL Linux amd64 的 Product Gate 与 Trace Gate 在第一轮稳定性修正后各连续 10 次通过，最终 10 秒 Harness 的 Product Gate 再连续 20 次通过。首轮 [CI #33302618706](https://github.com/lifei6671/xtunnel/actions/runs/33302618706) 在既有 1 秒 Origin 观测等待超时；中间提交 `15a65b46771567cacfc26c5d8ad1eab0a0897298` 的 [CI #33302953490](https://github.com/lifei6671/xtunnel/actions/runs/33302953490) 整体成功，但证据 Head 的 [CI #33303339042](https://github.com/lifei6671/xtunnel/actions/runs/33303339042) 又在冷启动并行包负载下耗尽同一 3 秒 Client/观测上限。最终提交 `e8037eb849792261d2f55ba276e70bd54474ec03` 只把该功能 Harness 的 Client、Origin 观测和完成等待统一为 10 秒；请求仍只发送一次，路由、限流、响应与副作用断言均未改变。
 - 精确 CI 与状态：最终实现 Head `e8037eb849792261d2f55ba276e70bd54474ec03` 的 [CI #33303692342](https://github.com/lifei6671/xtunnel/actions/runs/33303692342) 整体 `success`。Linux amd64/arm64 的 `Run native M6 OpenTelemetry trace blackbox`、全仓 Test/Race/Vet、Proto/OpenAPI/生成物清洁、Browser/OCI/systemd 与 Windows Agent Service 全部通过。M6-03 从 `IN_PROGRESS` 转为 `REVIEW` 等待用户阶段复审；不标记 `DONE`，M6 保持 `2/7`、全局保持 `77/95`，M6 Gate Checklist 全部未勾选。
 - 文档同步：根 README、总技术方案和本开发计划同步 OTLP 环境、TLS 限制、Wire/Span/Shutdown 契约、运维说明、状态与可复现证据。CI Workflow 已新增双架构真实 Trace 黑盒；Proto、OpenAPI/生成物、Server Schema、Agent 本地业务配置、Database Schema、Migration、部署配置、权限模型、日志字段契约与 `AGENTS.md` 无需修改。
+
+## 2026-08-30 · M6-03 用户阶段复审与 M6-04 范围审计 · BLOCKED
+
+- M6-03 证据闭环：用户明确确认 M6-03 阶段复审通过。功能提交 `0aa2fda0bb5740b37abb3485fdb13eb33991f283`、最终稳定性实现提交 `e8037eb849792261d2f55ba276e70bd54474ec03` 与证据提交 `05352e2ccad411fab79af646ad8a84fed47c50ac` 均已推送；精确绑定最终 Head 的 [CI #33304009898](https://github.com/lifei6671/xtunnel/actions/runs/33304009898) 整体 `success`，Linux amd64/arm64 Trace 黑盒、全仓 Test/Race/Vet、Browser/OCI/systemd、Windows Agent Service 与生成物清洁检查全部通过。M6-03 从 `REVIEW` 转为 `DONE`，M6 从 `2/7` 更新为 `3/7`，全局从 `77/95` 更新为 `78/95`。
+- M6-04 当前事实：Tunnel RAW 边界现有 `meteredConnection` 只向进程级 Prometheus Registry 累计无 ID 维度的 Ingress/Egress Bytes；仓库没有 `usage_minutes` 或 hour/day Migration，没有 Usage Repository、60 秒 Flush/Rollup Owner、Retention/Compaction/Vacuum 实现。Service API 与 Dashboard 已冻结 `UsageSummary` Wire 形状，但当前显式返回 `UNAVAILABLE`/`null`。Agent Heartbeat 的累计字节只用于 Session 诊断，不能作为持久化 Usage 来源。
+- 推荐实现范围：新增只向前的 `000011` Usage Migration，以 `bucket_time + tunnel_id + service_id` 唯一归属 minute/hour/day 聚合，满足既有 Service Usage 与 Dashboard 总量投影；在成功 OPEN 的 Server RAW 边界按 Service 记连接、双向业务字节与有限错误计数，由单一 Usage Owner 每 60 秒 `Swap(0)` 后批量事务 Upsert，提交失败把未持久化增量合回内存。Rollup 在同一事务中先幂等写入上层 Bucket，再删除已覆盖低层 Bucket；重复执行与 Crash 重跑不得重复统计。
+- 容量与生命周期范围：先以 SQLite 容量 Benchmark 冻结 minute/hour/day Retention、批量大小与 Incremental Vacuum 或等价文件回收策略；本轮推荐使用经 Benchmark 证明的固定 V0.1 常量，不新增 Server 配置项。若 Benchmark 证明必须可配置，则停止并另行申请修改 `configs/server.schema.json`，不得在代码中发明第二套默认值。Graceful Shutdown 在公网入口、Tunnel、Session 等数据面 Owner 退出后执行最终 Usage Flush/Rollup，再关闭 SQLite；Deadline 到期必须显式返回失败并禁止无限等待。
+- API、测试与边界：复用已冻结 OpenAPI `UsageSummary`，不新增 REST Path 或手改生成物；Service 返回自身当日聚合，Dashboard 返回全部 Service 当日总量，读取只走 Usage Repository，不扫描 Runtime。新增 Repository/Owner/并发/失败恢复/Overflow/Rollup/Retention/Vacuum 测试，以及真实 Linux Server→Agent→Origin Usage 黑盒；CI 在 Linux amd64/arm64 增加明确命名的 M6-04 步骤，并继续通过全仓 Test/Race/Vet、Migration Upgrade、Browser/OCI/systemd、Windows Agent Service 与生成物清洁检查。
+- 授权与状态：以上范围会修改数据库 Schema/Migration、Repository、Tunnel/Bootstrap 生命周期、既有 Usage API 的可用状态、测试与 CI/CD，属于需确认变更；不新增第三方依赖，不修改 Proto、OpenAPI、Agent 本地业务配置、Server Schema、部署配置、权限模型或日志字段契约。M6-04 在用户明确确认前保持 `BLOCKED`，M6 Gate Checklist 全部未勾选。
+
+## 2026-08-30 · M6-04 Usage Aggregation 实现与本地验收 · REVIEW
+
+- 授权与边界：用户明确确认上一轮审计的 M6-04 范围。新增前向 `000011` Migration、Repository、Usage Owner、Tunnel/Bootstrap 接线、既有 Service/Dashboard Usage 投影、测试与 Linux 双架构 CI 步骤；未新增第三方依赖，未修改 Proto、OpenAPI/生成物、Agent 本地业务配置、Server Schema、部署配置、权限模型或日志字段契约。
+- 聚合与持久化：成功逻辑 OPEN 只在 `OPEN_OK`、Active Work 注册和最终 Context 检查通过后记一次 Connections；最终失败 OPEN 记一次 Errors，内部 Work 重试/跨 Connector Failover/Heartbeat 不重复计数。RAW `Write` 记 Public→Origin Ingress，`Read` 记 Origin→Public Egress，只累计成功 `n`。单 Owner 每 60 秒交换有界 Map，失败批次合回；最多 65,536 个待提交 Bucket，计数以 SQLite `INTEGER` 上限显式失败。
+- Rollup 与容量：`usage_minutes/hours/days` 以 `bucket_time + tunnel_id + service_id` 唯一归属且不使用级联外键。完成 minute/hour 在同一事务中先写上层再删下层，重复与 Crash 重跑保持幂等；day 固定保留当前 UTC 日和此前 6 日，每轮最多 Incremental Vacuum 256 页。20,000 Service × 7 日、140,000 day 行 Benchmark 为约 `31.05 ms/op`、`249.6 bytes/row`，约 33.3 MiB，因此不新增 Retention 配置项。
+- API 与生命周期：Service Get/List/ListAll 在一次 Repository Read 内批量读取当日 Usage，Dashboard 直接读取全局总量并冻结单个 UTC `generatedAt`，二者从 `UNAVAILABLE/null` 转为 `AVAILABLE` 非 null 数值；读取不合并未 Flush 内存，最多落后 60 秒。Shutdown 在 Metrics/Management/Public/Gateway/Session/Route 排空后，以独立 5 秒 Context 最终 Flush/Rollup，再允许 SQLite 关闭。周期失败只记录稳定 `USAGE_FLUSH_FAILED`，不输出原始数据库错误。
+- 稳定性修复：Linux 产品黑盒重复运行时发现，手工裸 `BEGIN` 的一致性只读事务在请求取消后偶发把事务状态带回连接池，使最终 Usage `BEGIN IMMEDIATE` 失败。`ReadConsistent` 改由 `database/sql` 跟踪普通只读事务；保留 WAL 一致快照与不抢写锁语义，同时由标准库保证取消回滚完成后才复用连接。修复后 Usage 黑盒与既有 M4 Product Gate 联合连续 10 轮通过。
+- 本地证据：Go `1.27.0`、`GOTOOLCHAIN=local` 下，七个相关包定向 Race、全仓 `go test -p 2 -count=1 -timeout 300s ./...`、`go vet ./...`、`go mod verify`、`go mod tidy -diff`、Web Check/Build 均通过。默认并行全仓首轮唯一失败是 `internal/buildinfo` 自编译子进程撞到固定 30 秒墙钟，单包复跑 `0.513s` 通过，受控并行全仓通过。WSL Linux amd64 真实 `TestUsageAggregationEndToEnd` 通过，并与 `TestProductDataPlaneEndToEnd` 联合连续 10 轮通过，覆盖非对称双向字节、Half-Close、Service/Dashboard API、失败 OPEN、最终 Flush、全 Server 重启与无重复入账。
+- 独立复审：安全/持久化、并发/生命周期、API/E2E/CI 三路最终复审均为 `APPROVED`，无 P0/P1/P2。补充压力验证包含 `ReadConsistent` 取消回归 100 次、Owner/OPEN/RAW 关键测试重复 50 次，以及相关 Test/Race/Vet 与 Diff Check。
+- 状态与剩余证据：CI Workflow 已在 Linux amd64/arm64 增加 `Run native M6 Usage aggregation blackbox`。旧库首次升级 v11 会执行一次完整 `VACUUM` 以转换 Incremental Auto Vacuum，失败不记录版本，但大型旧库的启动耗时仍是已知运维风险。当前尚无包含最终内容的 Commit SHA 和精确 CI Run，因此 M6-04 只进入 `REVIEW`，M6 保持 `3/7`、全局保持 `78/95`，M6 Gate Checklist 全部未勾选。

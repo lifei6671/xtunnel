@@ -153,6 +153,14 @@ jobs:
           go test -count=1 -timeout 120s ./internal/server/bootstrap \
             -run '^TestOpenTelemetryTraceEndToEnd$'
 
+      - name: Run native M6 Usage aggregation blackbox
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          go test -count=1 -timeout 120s ./internal/server/bootstrap \
+            -run '^TestUsageAggregationEndToEnd$'
+
       - name: Run native M4 1 GiB streaming gate
         shell: bash
         timeout-minutes: 3

@@ -130,7 +130,7 @@ func TestServiceExposureMigrationUpgradesV9AndIsIdempotent(t *testing.T) {
 		t.Fatalf("seed v9 TCP exposure error = %v", err)
 	}
 
-	if err := runMigrations(context.Background(), database, productionMigrations, testNow); err != nil {
+	if err := runMigrations(context.Background(), database, productionMigrations[:10], testNow); err != nil {
 		t.Fatalf("upgrade to v10 error = %v", err)
 	}
 	var indexCount, triggerCount int64
@@ -148,7 +148,7 @@ func TestServiceExposureMigrationUpgradesV9AndIsIdempotent(t *testing.T) {
 	if indexCount != 2 || triggerCount != 4 {
 		t.Fatalf("Exposure constraints = indexes:%d triggers:%d, want 2/4", indexCount, triggerCount)
 	}
-	if err := runMigrations(context.Background(), database, productionMigrations, testNow); err != nil {
+	if err := runMigrations(context.Background(), database, productionMigrations[:10], testNow); err != nil {
 		t.Fatalf("idempotent v10 rerun error = %v", err)
 	}
 	var versionCount int64

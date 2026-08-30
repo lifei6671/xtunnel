@@ -472,7 +472,7 @@ func TestServiceAPIProjectMutationKeepsCommittedVersionAfterLaterWrite(t *testin
 	if current.Service.Version != 3 || current.Status == serverstatus.ServiceStatusDisabled {
 		t.Fatalf("current projection = version:%d status:%s", current.Service.Version, current.Status)
 	}
-	projected, err := service.ProjectMutation(committed)
+	projected, err := service.ProjectMutation(context.Background(), committed)
 	if err != nil {
 		t.Fatalf("ProjectMutation() error = %v", err)
 	}
@@ -481,13 +481,81 @@ func TestServiceAPIProjectMutationKeepsCommittedVersionAfterLaterWrite(t *testin
 		projected.TunnelVersion != committed.TunnelVersion || projected.Exposure != committed.Exposure {
 		t.Fatalf("committed projection = %+v, mutation = %+v", projected, committed)
 	}
-	createdProjection, err := service.ProjectMutation(created)
+	createdProjection, err := service.ProjectMutation(context.Background(), created)
 	if err != nil {
 		t.Fatalf("ProjectMutation(create result) error = %v", err)
 	}
 	if createdProjection.Service.Version != 1 || !createdProjection.Service.Enabled ||
 		createdProjection.TunnelVersion != created.TunnelVersion || createdProjection.Exposure != created.Exposure {
 		t.Fatalf("create projection after later writes = %+v, create mutation = %+v", createdProjection, created)
+	}
+}
+
+func TestServiceAPIListReadsUsageOnceAndProjectsZero(t *testing.T) {
+	store := openServiceManagementStore(t)
+	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+	usage := &serviceAPIUsageRepositoryFake{byService: map[string]repository.UsageTotals{
+		serviceManagementIDOne: {Connections: 7, IngressBytes: 8, EgressBytes: 9, Errors: 2},
+	}}
+	usageStore := &serviceAPIUsageStore{Store: store, usage: usage}
+	service := newServiceAPITestService(
+		t, usageStore,
+		&recordingSnapshotGate{}, &recordingSnapshotNotifier{}, &recordingRouteNotifier{},
+		serviceManagementIDOne, serviceManagementIDTwo,
+	)
+	for _, name := range []string{"one", "two"} {
+		if _, err := service.Create(context.Background(), CreateServiceAPIInput{
+			Service:  validCreateServiceInput(serviceManagementTunnelID, name),
+			Exposure: ServiceExposureInput{Type: ServiceExposureHTTP, Hostname: name + ".usage.example.test"},
+		}); err != nil {
+			t.Fatalf("Create(%q) error = %v", name, err)
+		}
+	}
+	usageStore.readCalls = 0
+
+	views, err := service.List(context.Background(), serviceManagementTunnelID)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if usageStore.readCalls != 1 || usage.todayByServiceCalls != 1 || usage.todayCalls != 0 || usage.tunnelID != serviceManagementTunnelID ||
+		!usage.now.Equal(time.Unix(200, 0).UTC()) {
+		t.Fatalf("read/usage queries = %d/batch:%d single:%d tunnel:%q now:%v", usageStore.readCalls, usage.todayByServiceCalls, usage.todayCalls, usage.tunnelID, usage.now)
+	}
+	if len(views) != 2 || views[0].Usage != usage.byService[serviceManagementIDOne] || views[1].Usage != (repository.UsageTotals{}) {
+		t.Fatalf("List() usage = %+v", views)
+	}
+}
+
+func TestServiceAPIUsageReadFailuresAndMutationProjection(t *testing.T) {
+	store := openServiceManagementStore(t)
+	seedServiceManagementTunnel(t, store, serviceManagementTunnelID)
+	usage := &serviceAPIUsageRepositoryFake{today: repository.UsageTotals{Connections: 3, IngressBytes: 4, EgressBytes: 5, Errors: 1}}
+	service := newServiceAPITestService(
+		t, &serviceAPIUsageStore{Store: store, usage: usage},
+		&recordingSnapshotGate{}, &recordingSnapshotNotifier{}, &recordingRouteNotifier{}, serviceManagementIDOne,
+	)
+	created, err := service.Create(context.Background(), CreateServiceAPIInput{
+		Service:  validCreateServiceInput(serviceManagementTunnelID, "usage projection"),
+		Exposure: ServiceExposureInput{Type: ServiceExposureHTTP, Hostname: "projection.usage.example.test"},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	view, err := service.ProjectMutation(context.Background(), created)
+	if err != nil {
+		t.Fatalf("ProjectMutation() error = %v", err)
+	}
+	if view.Usage != usage.today || usage.todayCalls != 1 || usage.serviceID != created.Service.ID || usage.tunnelID != created.Service.TunnelID {
+		t.Fatalf("ProjectMutation() usage/view/calls = %+v/%+v/%d", view.Usage, usage, usage.todayCalls)
+	}
+
+	errRead := errors.New("usage read failed")
+	usage.err = errRead
+	if _, err := service.List(context.Background(), serviceManagementTunnelID); !errors.Is(err, errRead) {
+		t.Fatalf("List(usage failure) error = %v, want source error", err)
+	}
+	if _, err := service.ProjectMutation(context.Background(), created); !errors.Is(err, errRead) {
+		t.Fatalf("ProjectMutation(usage failure) error = %v, want source error", err)
 	}
 }
 
@@ -528,6 +596,63 @@ func (limits *serviceAPILimitsFake) Snapshot() serverlimits.Snapshot { return li
 
 type serviceAPIApplyFailuresFake struct {
 	failure *serverstatus.ApplyFailure
+}
+
+type serviceAPIUsageStore struct {
+	repository.Store
+	usage     repository.UsageRepository
+	readCalls int
+}
+
+func (store *serviceAPIUsageStore) Read(ctx context.Context, fn func(repository.RepositoryView) error) error {
+	store.readCalls++
+	return store.Store.Read(ctx, func(view repository.RepositoryView) error {
+		return fn(serviceAPIUsageView{RepositoryView: view, usage: store.usage})
+	})
+}
+
+type serviceAPIUsageView struct {
+	repository.RepositoryView
+	usage repository.UsageRepository
+}
+
+func (view serviceAPIUsageView) Usage() repository.UsageRepository { return view.usage }
+
+type serviceAPIUsageRepositoryFake struct {
+	byService           map[string]repository.UsageTotals
+	today               repository.UsageTotals
+	err                 error
+	todayByServiceCalls int
+	todayCalls          int
+	now                 time.Time
+	tunnelID            string
+	serviceID           string
+}
+
+func (*serviceAPIUsageRepositoryFake) Add(context.Context, []repository.UsageDelta) error { return nil }
+
+func (usage *serviceAPIUsageRepositoryFake) Today(
+	_ context.Context,
+	now time.Time,
+	tunnelID string,
+	serviceID string,
+) (repository.UsageTotals, error) {
+	usage.todayCalls++
+	usage.now = now
+	usage.tunnelID = tunnelID
+	usage.serviceID = serviceID
+	return usage.today, usage.err
+}
+
+func (usage *serviceAPIUsageRepositoryFake) TodayByService(
+	_ context.Context,
+	now time.Time,
+	tunnelID string,
+) (map[string]repository.UsageTotals, error) {
+	usage.todayByServiceCalls++
+	usage.now = now
+	usage.tunnelID = tunnelID
+	return usage.byService, usage.err
 }
 
 func (failures *serviceAPIApplyFailuresFake) ServiceApplyFailure(string, uint64) *serverstatus.ApplyFailure {

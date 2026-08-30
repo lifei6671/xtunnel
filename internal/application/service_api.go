@@ -120,6 +120,7 @@ type ServiceView struct {
 	Service           repository.Service
 	Exposure          repository.ServiceExposure
 	TunnelVersion     int64
+	Usage             repository.UsageTotals
 	Status            serverstatus.ServiceStatus
 	ApplyFailure      *serverstatus.ApplyFailure
 	HealthyConnectors uint64
@@ -527,32 +528,51 @@ func (service *ServiceAPIService) List(ctx context.Context, tunnelID string) ([]
 
 // ProjectMutation 将一次已提交 Mutation 的持久化结果与当前 Runtime 值型快照组合成响应投影。
 // 持久化字段只取自 result，避免并发后续写入让成功响应混入另一个 Desired State 版本。
-func (service *ServiceAPIService) ProjectMutation(result ServiceAPIMutationResult) (ServiceView, error) {
-	if !service.validProjection() || result.Deleted || strings.TrimSpace(result.Service.ID) == "" ||
+func (service *ServiceAPIService) ProjectMutation(ctx context.Context, result ServiceAPIMutationResult) (ServiceView, error) {
+	if !service.validQuery(ctx) || result.Deleted || strings.TrimSpace(result.Service.ID) == "" ||
 		strings.TrimSpace(result.Service.TunnelID) == "" {
 		return ServiceView{}, ErrServiceManagementInput
+	}
+	if err := ctx.Err(); err != nil {
+		return ServiceView{}, err
+	}
+	now := service.now().UTC()
+	var usage repository.UsageTotals
+	if err := service.owner.store.Read(ctx, func(view repository.RepositoryView) error {
+		var err error
+		usage, err = view.Usage().Today(ctx, now, result.Service.TunnelID, result.Service.ID)
+		return err
+	}); err != nil {
+		return ServiceView{}, fmt.Errorf("read service usage: %w", err)
 	}
 	return projectService(
 		result.Service,
 		result.Exposure,
 		result.TunnelVersion,
+		usage,
 		service.runtime.RuntimeStatusSnapshots(),
 		service.limits.Snapshot(),
 		service.applyFailures,
-		service.now().UTC(),
+		now,
 	), nil
 }
 
 func (service *ServiceAPIService) readViews(ctx context.Context, tunnelID, serviceID string) ([]ServiceView, error) {
+	now := service.now().UTC()
 	runtimeSnapshots := service.runtime.RuntimeStatusSnapshots()
 	limitSnapshot := service.limits.Snapshot()
 	var state repository.RouteDesiredState
+	var usageByService map[string]repository.UsageTotals
 	if err := service.owner.store.Read(ctx, func(view repository.RepositoryView) error {
 		var err error
 		state, err = view.Routes().LoadDesiredState(ctx)
+		if err != nil {
+			return err
+		}
+		usageByService, err = view.Usage().TodayByService(ctx, now, tunnelID)
 		return err
 	}); err != nil {
-		return nil, fmt.Errorf("read service desired state: %w", err)
+		return nil, fmt.Errorf("read service view: %w", err)
 	}
 	tunnelVersions := make(map[string]int64, len(state.Tunnels))
 	for _, tunnel := range state.Tunnels {
@@ -568,8 +588,8 @@ func (service *ServiceAPIService) readViews(ctx context.Context, tunnelID, servi
 			return nil, err
 		}
 		result = append(result, projectService(
-			record, exposure, tunnelVersions[record.TunnelID], runtimeSnapshots,
-			limitSnapshot, service.applyFailures, service.now().UTC(),
+			record, exposure, tunnelVersions[record.TunnelID], usageByService[record.ID],
+			runtimeSnapshots, limitSnapshot, service.applyFailures, now,
 		))
 	}
 	if serviceID != "" && len(result) == 0 {
@@ -588,6 +608,7 @@ func projectService(
 	record repository.Service,
 	exposure repository.ServiceExposure,
 	tunnelVersion int64,
+	usage repository.UsageTotals,
 	runtimeSnapshots []serverruntime.SessionStatusSnapshot,
 	limitSnapshot serverlimits.Snapshot,
 	applyFailures ServiceApplyFailureOwner,
@@ -616,7 +637,7 @@ func projectService(
 		applyFailure = nil
 	}
 	return ServiceView{
-		Service: record, Exposure: exposure, TunnelVersion: tunnelVersion,
+		Service: record, Exposure: exposure, TunnelVersion: tunnelVersion, Usage: usage,
 		Status:       status,
 		ApplyFailure: applyFailure, HealthyConnectors: healthy, ActiveConnections: active,
 	}

@@ -54,3 +54,8 @@ var AdminSessions string
 //
 //go:embed 000010_service_exposure.sql
 var ServiceExposure string
+
+// UsageAggregation 包含 M6-04 minute/hour/day Usage 聚合表。
+//
+//go:embed 000011_usage_aggregation.sql
+var UsageAggregation string

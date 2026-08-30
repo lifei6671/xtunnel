@@ -74,7 +74,7 @@ func TestReadConsistentRollsBackAfterRequestContextCanceled(t *testing.T) {
 		t.Fatalf("ReadConsistent() error = %v, want context.Canceled", err)
 	}
 
-	// 独立 Rollback Context 必须先释放已取消请求持有的只读事务和连接。
+	// database/sql 必须先回滚已取消请求的只读事务，再把干净连接交给写入。
 	nextContext, nextCancel := context.WithTimeout(context.Background(), time.Second)
 	defer nextCancel()
 	if err := store.WithTx(nextContext, func(transaction repository.TxStore) error {

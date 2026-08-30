@@ -4480,27 +4480,23 @@ Tunnel 的 ONLINE/OFFLINE 状态由当前 Connector Registry 实时计算；Serv
 
 # 109. Usage Table
 
-只保存聚合数据：
+只保存按 UTC Bucket、Tunnel 与 Service 唯一归属的聚合数据。三层表字段一致，
+`usage_hours` 与 `usage_days` 仅把 Bucket 对齐约束分别改为 3600 和 86400 秒：
 
 ```sql
 CREATE TABLE usage_minutes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-    bucket_time INTEGER NOT NULL,
-
+    bucket_time INTEGER NOT NULL CHECK (bucket_time > 0 AND bucket_time % 60 = 0),
     tunnel_id TEXT NOT NULL,
-
-    connections INTEGER NOT NULL DEFAULT 0,
-
-    ingress_bytes INTEGER NOT NULL DEFAULT 0,
-
-    egress_bytes INTEGER NOT NULL DEFAULT 0,
-
-    errors INTEGER NOT NULL DEFAULT 0,
-
-    UNIQUE(bucket_time, tunnel_id)
+    service_id TEXT NOT NULL,
+    connections INTEGER NOT NULL DEFAULT 0 CHECK (connections >= 0),
+    ingress_bytes INTEGER NOT NULL DEFAULT 0 CHECK (ingress_bytes >= 0),
+    egress_bytes INTEGER NOT NULL DEFAULT 0 CHECK (egress_bytes >= 0),
+    errors INTEGER NOT NULL DEFAULT 0 CHECK (errors >= 0),
+    PRIMARY KEY (bucket_time, tunnel_id, service_id)
 );
 ```
+
+Usage 是已经发生的历史事实，不建立随 Tunnel 或 Service 删除而级联清理的外键。
 
 ---
 
@@ -4530,16 +4526,14 @@ RX / TX
 
 # 111. Usage Aggregation
 
-Server：
+Server 使用一个进程级 Owner 聚合 `(UTC minute, tunnel_id, service_id)`：
 
 ```go
-type UsageCounter struct {
-    Connections atomic.Uint64
-
-    IngressBytes atomic.Uint64
-    EgressBytes  atomic.Uint64
-
-    Errors atomic.Uint64
+type UsageDelta struct {
+    BucketTime time.Time
+    TunnelID   string
+    ServiceID  string
+    Connections, IngressBytes, EgressBytes, Errors uint64
 }
 ```
 
@@ -4557,22 +4551,31 @@ memory
 SQLite transaction
 ```
 
-Flusher 对每个 Counter 使用 `Swap(0)` 取得本批增量，并通过：
+Flusher 每 60 秒交换整张内存 Bucket Map，释放锁后批量事务写入：
 
 ```sql
-INSERT ... ON CONFLICT(bucket_time, tunnel_id)
+INSERT ... ON CONFLICT(bucket_time, tunnel_id, service_id)
 DO UPDATE SET value = value + excluded.value;
 ```
 
-写入失败时把尚未持久化的增量合并回内存 Counter。V0.1 Usage 属于 best-effort 统计：进程 `kill -9` 最多允许丢失当前 60 秒内存桶，但不得重复累计已经确认提交的批次。该误差必须在 Dashboard 和文档中说明。
+写入失败时，未确认提交的完整批次与并发新增量合回内存；确认提交的批次绝不重放。
+待提交 Bucket 总数固定上限 65,536，计数以 SQLite `INTEGER` 上限饱和并显式失败，
+不得因 Repository 长期故障形成无界内存。V0.1 Usage 属于 best-effort 统计：进程
+`kill -9` 最多允许丢失当前 60 秒内存桶，但不得重复累计已确认提交的批次。
 
-M6 实现 Usage 时必须同时提供有界数据生命周期：Minute 明细只短期保留，完成的
-Minute Bucket 幂等汇总为 Hour，Hour 再幂等汇总为 Day；只有汇总事务确认提交后才能
-删除已覆盖的低层 Bucket。重复执行和 Crash 后重跑不得重复统计。具体保留天数必须由
-M6-04 SQLite 容量 Benchmark 后冻结；若决定提供配置项，必须先修改
-`configs/server.schema.json` 这一唯一 Server 配置权威，不能把评审材料中的示例值直接
-写死。Compaction 还必须定义 Incremental Vacuum 或等价文件回收策略，禁止只删 Row
-却让数据库文件无限增长。
+完成的 UTC minute 在同一事务中先累加到 hour、再删除 minute；完成的 hour 随后以
+相同顺序累加到 day 并删除。Crash 后重跑保持幂等，稳态只保留当前未完成的 minute
+和 hour。Day 固定保留当前 UTC 日与此前 6 日，共 7 日；每次 Rollup 提交后最多执行
+256 页 Incremental Vacuum。20,000 Service × 7 日的 140,000 条 day 行容量 Benchmark
+为约 31.05 ms/op、249.6 bytes/row，约 33.3 MiB，因此 V0.1 不新增 Retention 配置项。
+旧库首次升级 v11 时必须在 Migration 事务前执行一次完整 `VACUUM`，把文件转换为
+Incremental Auto Vacuum；失败或取消不会记录 v11，但启动耗时随旧库大小增长。
+
+成功公网逻辑 OPEN 只在 `OPEN_OK`、Active Work 注册和最终 Context 检查均通过后记
+一次 Connections；内部 Work 重试、跨 Connector Failover 与 Heartbeat 都不重复计数。
+最终失败的逻辑 OPEN 只记一次 Errors。RAW 后端连接的 `Write` 计 Ingress，`Read` 计
+Egress，并只累计成功传输的 `n`。Service 与 Dashboard 的当日 Usage 只读 Repository，
+允许最多 60 秒最终一致性，不与进程内未 Flush Map 合并。
 
 禁止：
 
@@ -5595,7 +5598,7 @@ Traffic Summary
 Recent Errors
 ```
 
-Dashboard API 复用 System Health 的状态 owner，以及既有 Tunnel/Service Application 投影计算资源计数；不同 owner 的只读快照允许最终一致，但不得访问 SQLite 重算运行态或在前端推导第二套状态。M6 Usage 与 Recent Errors 未接线时固定返回 `UNAVAILABLE`、`null` 或空列表，并明确保留未实现语义。
+Dashboard API 复用 System Health 的状态 owner，以及既有 Tunnel/Service Application 投影计算资源计数；不同 owner 的只读快照允许最终一致，但不得访问 SQLite 重算运行态或在前端推导第二套状态。M6 Usage 已从 Repository 返回 `AVAILABLE` 当日聚合；Recent Errors 尚未接线，固定返回 `UNAVAILABLE` 和空列表，并明确保留未实现语义。
 
 ---
 
@@ -6235,7 +6238,7 @@ Deadline 后主动关闭剩余 Public / Origin / WorkConn
 
 Close Agent Sessions
 
-Flush Usage
+Final Flush / Rollup Usage
 
 Close SQLite
 ```
@@ -6247,6 +6250,9 @@ drain_timeout = 30s
 ```
 
 Server 超过 `drain_timeout` 后必须主动关闭剩余 Public、Origin、WorkConn 和 Control socket，然后再 Flush/Close SQLite；不得只等待 Context 自然取消，也不得无限阻塞 Shutdown。
+
+Usage Owner 必须晚于公网入口、Tunnel、Session 和 Route Owner 排空，并用独立 5 秒
+Context 执行最终 Flush/Rollup；失败显式进入 Shutdown 结果。SQLite 只能在此后关闭。
 
 ---
 
@@ -7051,6 +7057,8 @@ Load/Create Gateway TLS Identity
  ↓
 Load Route Snapshot
  ↓
+Start Usage Flusher
+ ↓
 Start Management :8080
  ↓
 Check Admin Bootstrap State
@@ -7064,8 +7072,6 @@ Start HTTP Ingress :8081
 Start Agent Gateway :7443
  ↓
 Start Runtime Reconciler
- ↓
-Start Usage Flusher
  ↓
 READY
 ```

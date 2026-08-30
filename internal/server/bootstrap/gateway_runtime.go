@@ -16,6 +16,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/application"
 	"github.com/lifei6671/xtunnel/internal/buildinfo"
 	"github.com/lifei6671/xtunnel/internal/healthbudget"
+	"github.com/lifei6671/xtunnel/internal/logging"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
 	"github.com/lifei6671/xtunnel/internal/safego"
@@ -33,6 +34,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/server/sessionruntime"
 	"github.com/lifei6671/xtunnel/internal/server/snapshot"
 	servertcpingress "github.com/lifei6671/xtunnel/internal/server/tcpingress"
+	serverusage "github.com/lifei6671/xtunnel/internal/server/usage"
 	serverworkauth "github.com/lifei6671/xtunnel/internal/server/workauth"
 	"github.com/lifei6671/xtunnel/internal/tcpport"
 	"github.com/lifei6671/xtunnel/internal/tracing"
@@ -127,10 +129,14 @@ func openGatewayLifecycle(
 	identity gateway.Identity,
 	tokenService *application.ConnectionTokenService,
 	metricsBridge *serverMetricsBridge,
+	usageBridge *serverUsageBridge,
 	traceRuntime *tracing.Runtime,
 ) (*gateway.Server, *sessionruntime.Manager, *tunnel.Proxy, *serverlimits.Manager, error) {
 	if metricsBridge == nil {
 		return nil, nil, nil, nil, errors.New("server metrics bridge is required")
+	}
+	if usageBridge == nil || usageBridge.owner == nil {
+		return nil, nil, nil, nil, errors.New("server usage bridge is required")
 	}
 	if healthBudget == nil {
 		return nil, nil, nil, nil, errors.New("health target budget manager is required")
@@ -233,6 +239,7 @@ func openGatewayLifecycle(
 		AcquireTimeout: config.Transport.TCP.WorkAcquireTimeout.Duration,
 		LimitManager:   limitManager,
 		Metrics:        metricsBridge,
+		Usage:          usageBridge,
 		Logger:         logger,
 		Tracing:        traceRuntime,
 	})
@@ -417,6 +424,7 @@ type gatewayBootstrapCloser struct {
 	tcpIngress      *servertcpingress.Manager
 	sessions        *sessionruntime.Manager
 	routes          *serverroute.Manager
+	usage           *serverusage.Owner
 	cancelRoutes    context.CancelFunc
 	runtimeErrors   chan error
 	drainTimeout    time.Duration
@@ -546,10 +554,18 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		if closer.routes != nil {
 			closer.routes.Wait()
 		}
+		// Usage 必须晚于全部数据面与 Session 排空、早于 SQLite 关闭。使用独立的
+		// 有界 Context，避免进程取消信号跳过最后一批 Flush/Rollup。
+		var usageErr error
+		if closer.usage != nil {
+			usageContext, cancelUsage := context.WithTimeout(context.Background(), 5*time.Second)
+			usageErr = closer.usage.Shutdown(usageContext)
+			cancelUsage()
+		}
 		closer.result = errors.Join(
 			backupErr, bootstrapErr, metricsStopErr, managementStopErr, tcpStopErr, httpStopErr, stopErr,
 			metricsDrainErr, managementDrainErr, tcpDrainErr, httpDrainErr, drainErr,
-			metricsCloseErr, managementCloseErr, tcpCloseErr, httpCloseErr, gatewayErr,
+			metricsCloseErr, managementCloseErr, tcpCloseErr, httpCloseErr, gatewayErr, usageErr,
 		)
 	})
 	return closer.result
@@ -689,8 +705,18 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 		}
 	}
 	metricsBridge := &serverMetricsBridge{}
+	usageOwner, err := serverusage.New(serverusage.Options{
+		Repository: &serverUsageRepository{store: serverResources.database},
+		ReportError: func(error) {
+			logger.Warn("usage_flush_failed", logging.ErrorCodeKey, "USAGE_FLUSH_FAILED")
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("construct server Usage owner: %w", err)
+	}
+	usageBridge := &serverUsageBridge{owner: usageOwner}
 	gatewayServer, sessions, tunnelProxy, limitManager, err := openGatewayLifecycle(
-		config, resources, logger, reportRuntimeError, healthBudget, identity, tokenService, metricsBridge, traceRuntime,
+		config, resources, logger, reportRuntimeError, healthBudget, identity, tokenService, metricsBridge, usageBridge, traceRuntime,
 	)
 	if err != nil {
 		return nil, err
@@ -841,7 +867,7 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 		Services:        serviceAPI,
 		System:          systemRead,
 		SecurityAudits:  application.NewSecurityAuditQueryService(serverResources.database),
-		Dashboard:       application.NewDashboardService(tunnels, serviceAPI, systemRead),
+		Dashboard:       application.NewDashboardService(tunnels, serviceAPI, systemRead, serviceAPI),
 		Logger:          logger,
 	})
 	if err != nil {
@@ -892,12 +918,18 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 		tcpErr := tcpIngress.Close()
 		cancelRoutes()
 		routes.Wait()
-		return errors.Join(metricsErr, managementErr, tcpErr, httpErr, gatewayServer.Close())
+		usageContext, cancelUsage := context.WithTimeout(context.Background(), 5*time.Second)
+		usageErr := usageOwner.Shutdown(usageContext)
+		cancelUsage()
+		return errors.Join(metricsErr, managementErr, tcpErr, httpErr, gatewayServer.Close(), usageErr)
 	}
-	// Metrics 与 Management 必须早于 Admin Bootstrap State 检查启动。
-	// SETUP_REQUIRED 时只保留这两个运维入口；本机 Bootstrap 事务提交后再启动
-	// 三个公网入口。
+	// Usage、Metrics 与 Management 必须早于 Admin Bootstrap State 检查启动。
+	// SETUP_REQUIRED 时 Usage Owner 继续负责已持久化数据的 Rollup，且只保留
+	// 两个运维 Listener；本机 Bootstrap 事务提交后再启动三个公网入口。
 	lifecycleContext := context.WithoutCancel(ctx)
+	if err := usageOwner.Start(lifecycleContext); err != nil {
+		return nil, errors.Join(fmt.Errorf("start server Usage owner: %w", err), cleanupBeforeOwnershipTransfer())
+	}
 	if err := metricsServer.Start(lifecycleContext); err != nil {
 		return nil, errors.Join(fmt.Errorf("start Prometheus metrics listener: %w", err), cleanupBeforeOwnershipTransfer())
 	}
@@ -978,7 +1010,7 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 			gateway: gatewayServer, management: managementServer, metrics: metricsServer,
 			metricsRegistry: metricsRegistry,
 			httpIngress:     httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
-			sessions: sessions, routes: routes, cancelRoutes: cancelRoutes,
+			sessions: sessions, routes: routes, usage: usageOwner, cancelRoutes: cancelRoutes,
 			runtimeErrors: runtimeErrors,
 		}, nil
 	}
@@ -990,7 +1022,7 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 		bootstrap: socket, gateway: gatewayServer, management: managementServer, metrics: metricsServer,
 		metricsRegistry: metricsRegistry,
 		httpIngress:     httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
-		sessions: sessions, routes: routes, cancelRoutes: cancelRoutes,
+		sessions: sessions, routes: routes, usage: usageOwner, cancelRoutes: cancelRoutes,
 		runtimeErrors: runtimeErrors,
 	}, nil
 }

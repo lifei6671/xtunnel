@@ -33,6 +33,12 @@ func (fake dashboardServiceReaderFake) ListAll(context.Context) ([]application.S
 	return append([]application.ServiceView(nil), fake.views...), nil
 }
 
+type dashboardUsageReaderFake struct{ totals repository.UsageTotals }
+
+func (fake dashboardUsageReaderFake) UsageToday(context.Context, time.Time) (repository.UsageTotals, error) {
+	return fake.totals, nil
+}
+
 type dashboardStatusOwnerFake struct {
 	status application.DashboardServerStatus
 }
@@ -73,6 +79,7 @@ func TestManagementReadAPIsUseAuthenticatedFrozenProjections(t *testing.T) {
 			{Status: serverstatus.ServiceStatusOriginUnhealthy},
 		}},
 		dashboardStatusOwnerFake{status: application.DashboardServerStatusReady},
+		dashboardUsageReaderFake{totals: repository.UsageTotals{Connections: 9, IngressBytes: 10, EgressBytes: 11}},
 	)
 	handler, err := NewHandler(HandlerOptions{
 		Management: config.Management, Store: store, System: system,
@@ -120,11 +127,16 @@ func TestManagementReadAPIsUseAuthenticatedFrozenProjections(t *testing.T) {
 	dashboardResponse := doRequest(t, client, http.MethodGet, server.URL+"/api/v1/dashboard", "", nil)
 	var dashboardBody Dashboard
 	decodeSuccess(t, dashboardResponse, &dashboardBody)
+	connections, connectionsErr := dashboardBody.Traffic.ConnectionsToday.Get()
+	ingress, ingressErr := dashboardBody.Traffic.IngressBytesToday.Get()
+	egress, egressErr := dashboardBody.Traffic.EgressBytesToday.Get()
 	if dashboardBody.ServerStatus != DashboardServerStatusREADY ||
 		dashboardBody.Counts.TunnelsOnline != 1 || dashboardBody.Counts.ConnectorsOnline != 2 ||
 		dashboardBody.Counts.ServicesReady != 1 || dashboardBody.Counts.ServicesError != 1 ||
 		dashboardBody.Counts.ActiveConnections != 7 ||
-		dashboardBody.Traffic.Availability != UsageSummaryAvailabilityUNAVAILABLE ||
+		dashboardBody.Traffic.Availability != UsageSummaryAvailabilityAVAILABLE ||
+		connectionsErr != nil || ingressErr != nil || egressErr != nil ||
+		connections != 9 || ingress != 10 || egress != 11 ||
 		dashboardBody.RecentErrors.Availability != RecentErrorsSummaryAvailabilityUNAVAILABLE ||
 		len(dashboardBody.RecentErrors.Items) != 0 {
 		t.Fatalf("dashboard response = %#v", dashboardBody)

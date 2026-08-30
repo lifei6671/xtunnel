@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -19,7 +20,9 @@ func TestProxyMetricsRecordsSuccessfulOriginConnectLatency(t *testing.T) {
 	fixture := newFailoverFixture(t, testConnectorID)
 	defer cleanupDialFixture(t, fixture)
 	metrics := &recordingTunnelMetrics{}
+	usage := &recordingTunnelUsage{}
 	fixture.proxy.options.Metrics = metrics
+	fixture.proxy.options.Usage = usage
 	agent := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], nil)
 	agentResult := make(chan error, 1)
 	go func() {
@@ -56,6 +59,50 @@ func TestProxyMetricsRecordsSuccessfulOriginConnectLatency(t *testing.T) {
 	if len(snapshot.originErrors) != 0 {
 		t.Fatalf("successful OPEN emitted origin error metrics: %v", snapshot.originErrors)
 	}
+	usageSnapshot := usage.snapshot()
+	if usageSnapshot.successfulOpens != 1 || usageSnapshot.failedOpens != 0 {
+		t.Fatalf("usage OPEN snapshot = %#v, want one successful OPEN", usageSnapshot)
+	}
+}
+
+func TestProxyUsageRecordsFinalOpenFailureOnce(t *testing.T) {
+	fixture := newFailoverFixture(t, testConnectorID)
+	defer cleanupDialFixture(t, fixture)
+	usage := &recordingTunnelUsage{}
+	fixture.proxy.options.Usage = usage
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := fixture.proxy.Dial(ctx, testHTTPDialRequest(0, testDialClientAddr)); err == nil {
+		t.Fatal("Dial() error = nil, want final OPEN failure")
+	}
+	usageSnapshot := usage.snapshot()
+	if usageSnapshot.failedOpens != 1 || usageSnapshot.successfulOpens != 0 {
+		t.Fatalf("usage OPEN snapshot = %#v, want one final failure", usageSnapshot)
+	}
+}
+
+func TestMeteredConnectionUsageDirectionsAndErrors(t *testing.T) {
+	usageErr := errors.New("usage capacity")
+	usage := &recordingTunnelUsage{egressErr: usageErr, ingressErr: usageErr}
+	connection := &meteredConnection{
+		Conn: &byteTestConn{readData: []byte("origin")}, usage: usage,
+		tunnelID: testTunnelID, serviceID: testServiceID,
+	}
+
+	buffer := make([]byte, len("origin"))
+	read, err := connection.Read(buffer)
+	if read != len("origin") || string(buffer) != "origin" || !errors.Is(err, usageErr) {
+		t.Fatalf("Read() = (%d, %q, %v), want delivered egress plus usage error", read, buffer, err)
+	}
+	written, err := connection.Write([]byte("public"))
+	if written != len("public") || !errors.Is(err, usageErr) {
+		t.Fatalf("Write() = (%d, %v), want delivered ingress plus usage error", written, err)
+	}
+	usageSnapshot := usage.snapshot()
+	if usageSnapshot.egressBytes != uint64(len("origin")) || usageSnapshot.ingressBytes != uint64(len("public")) {
+		t.Fatalf("usage byte snapshot = %#v", usageSnapshot)
+	}
 }
 
 type openMetricObservation struct {
@@ -71,6 +118,68 @@ type recordingTunnelMetrics struct {
 	originConnect []time.Duration
 	ingressBytes  uint64
 	egressBytes   uint64
+}
+
+type tunnelUsageSnapshot struct {
+	successfulOpens uint64
+	failedOpens     uint64
+	ingressBytes    uint64
+	egressBytes     uint64
+}
+
+type recordingTunnelUsage struct {
+	mu sync.Mutex
+
+	tunnelUsageSnapshot
+	ingressErr error
+	egressErr  error
+	openErr    error
+}
+
+func (usage *recordingTunnelUsage) ObserveOpen(_, _ string, success bool) error {
+	usage.mu.Lock()
+	defer usage.mu.Unlock()
+	if success {
+		usage.successfulOpens++
+	} else {
+		usage.failedOpens++
+	}
+	return usage.openErr
+}
+
+func (usage *recordingTunnelUsage) AddIngressBytes(_, _ string, count uint64) error {
+	usage.mu.Lock()
+	defer usage.mu.Unlock()
+	usage.ingressBytes += count
+	return usage.ingressErr
+}
+
+func (usage *recordingTunnelUsage) AddEgressBytes(_, _ string, count uint64) error {
+	usage.mu.Lock()
+	defer usage.mu.Unlock()
+	usage.egressBytes += count
+	return usage.egressErr
+}
+
+func (usage *recordingTunnelUsage) snapshot() tunnelUsageSnapshot {
+	usage.mu.Lock()
+	defer usage.mu.Unlock()
+	return usage.tunnelUsageSnapshot
+}
+
+type byteTestConn struct {
+	net.Conn
+	readData []byte
+}
+
+func (connection *byteTestConn) Read(buffer []byte) (int, error) {
+	read := copy(buffer, connection.readData)
+	connection.readData = connection.readData[read:]
+	return read, io.EOF
+}
+
+func (*byteTestConn) Write(buffer []byte) (int, error) {
+	return len(buffer), nil
 }
 
 func (metrics *recordingTunnelMetrics) ObserveOpen(duration time.Duration, code protocolv1.ErrorCode) {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/repository"
 	serverstatus "github.com/lifei6671/xtunnel/internal/server/status"
 )
 
@@ -44,8 +46,7 @@ type DashboardCounts struct {
 	ActiveConnections uint64
 }
 
-// DashboardUsageSummary 在 M6 Usage Read Model 就绪前显式返回不可用。
-// nil 计数器对应 OpenAPI 的 null，不能用 0 伪装成真实观测值。
+// DashboardUsageSummary 投影当日全局 Usage；AVAILABLE 时三个计数器均非 nil。
 type DashboardUsageSummary struct {
 	Availability      DashboardAvailability
 	ConnectionsToday  *int64
@@ -88,6 +89,11 @@ type DashboardServiceReader interface {
 	ListAll(context.Context) ([]ServiceView, error)
 }
 
+// DashboardUsageReader 独立读取全局 Usage，避免从 Service 投影循环汇总。
+type DashboardUsageReader interface {
+	UsageToday(context.Context, time.Time) (repository.UsageTotals, error)
+}
+
 // DashboardServerStatusOwner 提供 Server 生命周期 owner 已判定的值型状态。
 // Dashboard 不根据 Tunnel 或 Service 计数重新推导 Server Status。
 type DashboardServerStatusOwner interface {
@@ -97,6 +103,7 @@ type DashboardServerStatusOwner interface {
 var (
 	_ DashboardTunnelReader  = (*TunnelManagementService)(nil)
 	_ DashboardServiceReader = (*ServiceAPIService)(nil)
+	_ DashboardUsageReader   = (*ServiceAPIService)(nil)
 )
 
 // DashboardService 聚合已有权威只读投影，不读取或持久化 Runtime 状态。
@@ -104,6 +111,7 @@ type DashboardService struct {
 	tunnels  DashboardTunnelReader
 	services DashboardServiceReader
 	status   DashboardServerStatusOwner
+	usage    DashboardUsageReader
 	now      func() time.Time
 }
 
@@ -112,8 +120,9 @@ func NewDashboardService(
 	tunnels DashboardTunnelReader,
 	services DashboardServiceReader,
 	status DashboardServerStatusOwner,
+	usage DashboardUsageReader,
 ) *DashboardService {
-	return &DashboardService{tunnels: tunnels, services: services, status: status, now: time.Now}
+	return &DashboardService{tunnels: tunnels, services: services, status: status, usage: usage, now: time.Now}
 }
 
 // Snapshot 聚合 Tunnel 与 Service 的权威展示状态。ServicesError 只统计
@@ -125,6 +134,7 @@ func (service *DashboardService) Snapshot(ctx context.Context) (DashboardSnapsho
 	if err := ctx.Err(); err != nil {
 		return DashboardSnapshot{}, err
 	}
+	generatedAt := service.now().UTC()
 	serverStatus, err := service.status.DashboardServerStatus(ctx)
 	if err != nil {
 		return DashboardSnapshot{}, fmt.Errorf("read dashboard server status: %w", err)
@@ -140,6 +150,14 @@ func (service *DashboardService) Snapshot(ctx context.Context) (DashboardSnapsho
 	services, err := service.services.ListAll(ctx)
 	if err != nil {
 		return DashboardSnapshot{}, fmt.Errorf("read dashboard services: %w", err)
+	}
+	usage, err := service.usage.UsageToday(ctx, generatedAt)
+	if err != nil {
+		return DashboardSnapshot{}, fmt.Errorf("read dashboard usage: %w", err)
+	}
+	traffic, err := dashboardUsageSummary(usage)
+	if err != nil {
+		return DashboardSnapshot{}, err
 	}
 	counts := DashboardCounts{TunnelsTotal: uint64(len(tunnels))}
 	for _, tunnel := range tunnels {
@@ -165,14 +183,44 @@ func (service *DashboardService) Snapshot(ctx context.Context) (DashboardSnapsho
 	return DashboardSnapshot{
 		ServerStatus: serverStatus,
 		Counts:       counts,
-		Traffic: DashboardUsageSummary{
-			Availability: DashboardAvailabilityUnavailable,
-		},
+		Traffic:      traffic,
 		RecentErrors: DashboardRecentErrorsSummary{
 			Availability: DashboardAvailabilityUnavailable,
 			Items:        make([]DashboardRecentError, 0),
 		},
-		GeneratedAt: service.now().UTC(),
+		GeneratedAt: generatedAt,
+	}, nil
+}
+
+// UsageToday 在一次 Repository Read 内读取全局今日 Usage，供 Dashboard 独立消费。
+func (service *ServiceAPIService) UsageToday(ctx context.Context, now time.Time) (repository.UsageTotals, error) {
+	if !service.validQuery(ctx) || now.IsZero() {
+		return repository.UsageTotals{}, ErrServiceManagementInput
+	}
+	if err := ctx.Err(); err != nil {
+		return repository.UsageTotals{}, err
+	}
+	var usage repository.UsageTotals
+	if err := service.owner.store.Read(ctx, func(view repository.RepositoryView) error {
+		var err error
+		usage, err = view.Usage().Today(ctx, now.UTC(), "", "")
+		return err
+	}); err != nil {
+		return repository.UsageTotals{}, fmt.Errorf("read global usage: %w", err)
+	}
+	return usage, nil
+}
+
+func dashboardUsageSummary(usage repository.UsageTotals) (DashboardUsageSummary, error) {
+	if usage.Connections > math.MaxInt64 || usage.IngressBytes > math.MaxInt64 || usage.EgressBytes > math.MaxInt64 {
+		return DashboardUsageSummary{}, repository.ErrUsageOverflow
+	}
+	connections := int64(usage.Connections)
+	ingress := int64(usage.IngressBytes)
+	egress := int64(usage.EgressBytes)
+	return DashboardUsageSummary{
+		Availability: DashboardAvailabilityAvailable, ConnectionsToday: &connections,
+		IngressBytesToday: &ingress, EgressBytesToday: &egress,
 	}, nil
 }
 
@@ -187,5 +235,5 @@ func (service *ServiceAPIService) ListAll(ctx context.Context) ([]ServiceView, e
 
 func (service *DashboardService) valid(ctx context.Context) bool {
 	return service != nil && ctx != nil && service.tunnels != nil &&
-		service.services != nil && service.status != nil && service.now != nil
+		service.services != nil && service.status != nil && service.usage != nil && service.now != nil
 }

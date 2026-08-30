@@ -104,7 +104,7 @@ func (api *managementStrictAPI) CreateService(ctx context.Context, request Creat
 		failure := api.handler.mapServiceError(ctx, requestContext, err)
 		return createServiceFailure(failure, requestIDFromContext(requestContext)), nil
 	}
-	view, err := api.handler.services.ProjectMutation(result)
+	view, err := api.handler.services.ProjectMutation(ctx, result)
 	if err != nil {
 		api.handler.logInternalError(ctx, requestIDFromContext(requestContext), "management_service_post_commit_projection_failed", err)
 		return CreateService500JSONResponse{InternalErrorJSONResponse(apiError(APIErrorCodeINTERNALERROR, "服务器内部错误", requestIDFromContext(requestContext)))}, nil
@@ -236,7 +236,7 @@ func (api *managementStrictAPI) committedServiceOK(
 	requestContext *managementRequestContext,
 	result application.ServiceAPIMutationResult,
 ) (ServiceOKJSONResponse, *managementFailure) {
-	view, err := api.handler.services.ProjectMutation(result)
+	view, err := api.handler.services.ProjectMutation(ctx, result)
 	if err != nil {
 		api.handler.logInternalError(ctx, requestIDFromContext(requestContext), "management_service_post_commit_projection_failed", err)
 		failure := managementFailure{status: 500, code: APIErrorCodeINTERNALERROR, message: "服务器内部错误"}
@@ -526,6 +526,10 @@ func serviceResponse(view application.ServiceView) (Service, error) {
 	if view.HealthyConnectors > math.MaxInt || view.ActiveConnections > math.MaxInt {
 		return Service{}, errors.New("service counters exceed int")
 	}
+	usage, err := availableServiceUsage(view.Usage)
+	if err != nil {
+		return Service{}, err
+	}
 	applyFailure := nullable.NewNullNullable[ApplyFailure]()
 	// OpenAPI 规定只有 APPLY_FAILED 才能返回详情；DISABLED 的优先级更高，
 	// 即使 Runtime 仍保留同 revision 的失败记录也必须投影为 null。
@@ -538,7 +542,7 @@ func serviceResponse(view application.ServiceView) (Service, error) {
 		Health: health, Exposure: exposure, Enabled: view.Service.Enabled, Version: view.Service.Version,
 		Status: ServiceStatus(view.Status), ApplyFailure: applyFailure,
 		HealthyConnectors: int(view.HealthyConnectors), ActiveConnections: int(view.ActiveConnections),
-		Usage: unavailableServiceUsage(), CreatedAt: time.Unix(view.Service.CreatedAt, 0).UTC(), UpdatedAt: time.Unix(view.Service.UpdatedAt, 0).UTC(),
+		Usage: usage, CreatedAt: time.Unix(view.Service.CreatedAt, 0).UTC(), UpdatedAt: time.Unix(view.Service.UpdatedAt, 0).UTC(),
 	}, nil
 }
 
@@ -616,9 +620,16 @@ func serviceExposureResponse(value repository.ServiceExposure) (nullable.Nullabl
 	}
 }
 
-func unavailableServiceUsage() UsageSummary {
-	return UsageSummary{Availability: UsageSummaryAvailabilityUNAVAILABLE,
-		ConnectionsToday: nullable.NewNullNullable[int64](), IngressBytesToday: nullable.NewNullNullable[int64](), EgressBytesToday: nullable.NewNullNullable[int64]()}
+func availableServiceUsage(usage repository.UsageTotals) (UsageSummary, error) {
+	if usage.Connections > math.MaxInt64 || usage.IngressBytes > math.MaxInt64 || usage.EgressBytes > math.MaxInt64 {
+		return UsageSummary{}, repository.ErrUsageOverflow
+	}
+	return UsageSummary{
+		Availability:      UsageSummaryAvailabilityAVAILABLE,
+		ConnectionsToday:  nullable.NewNullableWithValue(int64(usage.Connections)),
+		IngressBytesToday: nullable.NewNullableWithValue(int64(usage.IngressBytes)),
+		EgressBytesToday:  nullable.NewNullableWithValue(int64(usage.EgressBytes)),
+	}, nil
 }
 
 func (handler *ManagementHandler) mapServiceError(ctx context.Context, requestContext *managementRequestContext, err error) managementFailure {

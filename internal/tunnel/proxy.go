@@ -49,6 +49,9 @@ type Options struct {
 	// Metrics 接收逻辑 OPEN 与成功进入 RAW 后的进程级遥测。实现必须并发安全且
 	// 不得阻塞数据面；nil 保留不采集遥测的现有行为。
 	Metrics Metrics
+	// Usage 接收最终逻辑 OPEN 与 RAW 业务字节的持久化增量。实现必须只更新
+	// 有界内存；任何错误都要沿当前连接失败返回，禁止静默丢弃账目。
+	Usage Usage
 	// Tracing 为 Server 数据面的显式进程级 Trace Runtime。nil 保留不采集、
 	// 不传播 Trace Context 的单元测试与禁用配置行为。
 	Tracing *internaltracing.Runtime
@@ -66,6 +69,14 @@ type Metrics interface {
 	ObserveOriginConnect(time.Duration)
 	AddIngressBytes(uint64)
 	AddEgressBytes(uint64)
+}
+
+// Usage 是 Tunnel 数据面对进程级 Usage Owner 的最小消费方契约。一次公网逻辑
+// OPEN 只能按最终结果调用一次；内部 Work 重试和跨 Connector Failover 不单独计数。
+type Usage interface {
+	ObserveOpen(tunnelID, serviceID string, success bool) error
+	AddIngressBytes(tunnelID, serviceID string, bytes uint64) error
+	AddEgressBytes(tunnelID, serviceID string, bytes uint64) error
 }
 
 // DialRequest 完整描述一次 Tunnel OPEN 的值传递路由输入。
@@ -244,6 +255,17 @@ func (tunnelProxy *Proxy) openConnection(
 	}
 	startedAt := time.Now()
 	var finalOriginConnectLatencyMS uint32
+	usageObservationAttempted := false
+	// 失败事件由最外层 OPEN 栈帧提交一次。若成功事件本身无法进入 Usage Owner，
+	// 该错误会关闭刚发布的连接，但不能再把同一次 OPEN 重复记为失败。
+	defer func() {
+		if tunnelProxy.options.Usage == nil || resultErr == nil || usageObservationAttempted {
+			return
+		}
+		if err := tunnelProxy.options.Usage.ObserveOpen(request.TunnelID, request.ServiceID, false); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("record failed usage OPEN: %w", err))
+		}
+	}()
 	// Serve 与 Dial 只在这里提交一次公网逻辑 OPEN。内部 Work 重试和跨 Connector
 	// Failover 始终留在本栈帧内，因此统一在最外层按最终结果 exactly-once 观测，
 	// 不会把 Wire attempt 误计成新的公网 OPEN。
@@ -507,8 +529,11 @@ func (tunnelProxy *Proxy) openConnection(
 	// Listener 生命周期，HTTP Dial 则使用脱离单请求取消的池化生命周期。
 	lifecycleContext, cancelWork := context.WithCancel(lifecycleParent)
 	dataConnection := active.Connection
-	if tunnelProxy.options.Metrics != nil {
-		dataConnection = &meteredConnection{Conn: dataConnection, metrics: tunnelProxy.options.Metrics}
+	if tunnelProxy.options.Metrics != nil || tunnelProxy.options.Usage != nil {
+		dataConnection = &meteredConnection{
+			Conn: active.Connection, metrics: tunnelProxy.options.Metrics, usage: tunnelProxy.options.Usage,
+			tunnelID: request.TunnelID, serviceID: request.ServiceID,
+		}
 	}
 	pooled := &pooledConnection{
 		Conn: dataConnection, work: selectedWork, openLease: openLease,
@@ -531,6 +556,12 @@ func (tunnelProxy *Proxy) openConnection(
 	if err := openContext.Err(); err != nil {
 		return nil, errors.Join(err, connection.Close())
 	}
+	if tunnelProxy.options.Usage != nil {
+		usageObservationAttempted = true
+		if err := tunnelProxy.options.Usage.ObserveOpen(request.TunnelID, request.ServiceID, true); err != nil {
+			return nil, errors.Join(fmt.Errorf("record successful usage OPEN: %w", err), connection.Close())
+		}
+	}
 	opened = true
 	connectionLogger.InfoContext(openContext, logging.EventTunnelConnectionOpened,
 		"ingress_type", request.Ingress.String(),
@@ -544,13 +575,23 @@ func (tunnelProxy *Proxy) openConnection(
 // 立即累计，因此 TCP 与 HTTP KeepAlive 共用同一套方向语义且不重复计数。
 type meteredConnection struct {
 	net.Conn
-	metrics Metrics
+	metrics   Metrics
+	usage     Usage
+	tunnelID  string
+	serviceID string
 }
 
 func (connection *meteredConnection) Read(buffer []byte) (int, error) {
 	read, err := connection.Conn.Read(buffer)
 	if read > 0 {
-		connection.metrics.AddEgressBytes(uint64(read))
+		if connection.metrics != nil {
+			connection.metrics.AddEgressBytes(uint64(read))
+		}
+		if connection.usage != nil {
+			if usageErr := connection.usage.AddEgressBytes(connection.tunnelID, connection.serviceID, uint64(read)); usageErr != nil {
+				err = errors.Join(err, fmt.Errorf("record usage egress bytes: %w", usageErr))
+			}
+		}
 	}
 	return read, err
 }
@@ -558,7 +599,14 @@ func (connection *meteredConnection) Read(buffer []byte) (int, error) {
 func (connection *meteredConnection) Write(buffer []byte) (int, error) {
 	written, err := connection.Conn.Write(buffer)
 	if written > 0 {
-		connection.metrics.AddIngressBytes(uint64(written))
+		if connection.metrics != nil {
+			connection.metrics.AddIngressBytes(uint64(written))
+		}
+		if connection.usage != nil {
+			if usageErr := connection.usage.AddIngressBytes(connection.tunnelID, connection.serviceID, uint64(written)); usageErr != nil {
+				err = errors.Join(err, fmt.Errorf("record usage ingress bytes: %w", usageErr))
+			}
+		}
 	}
 	return written, err
 }

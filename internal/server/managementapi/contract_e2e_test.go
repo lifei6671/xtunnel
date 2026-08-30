@@ -670,6 +670,7 @@ func newManagementReadContractHarness(t *testing.T, contract *managementOpenAPIC
 	dashboard := application.NewDashboardService(
 		dashboardTunnelReaderFake{}, dashboardServiceReaderFake{},
 		dashboardStatusOwnerFake{status: application.DashboardServerStatusReady},
+		dashboardUsageReaderFake{},
 	)
 	handler, err := NewHandler(HandlerOptions{
 		Management:     config.Management,

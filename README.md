@@ -1,6 +1,6 @@
 # XTunnel
 
-XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面、M2 Credential Lifecycle & Failover Hardening、M3 Configuration/Health/Durable Operations、M4 Product Data Plane 与完整 M5 REST API/Web Console 均已通过验收、精确 CI 与用户阶段复审。Tunnel CRUD/Revoke、Token Reveal/Rotate/Revoke、四类部署命令、只读运行态 Connector 列表，以及 7 个 Service Operation、唯一 Nested Exposure 事务与运行态状态投影均已接入生成 Contract；Tunnel、Connector 和 Service List 已接入 HMAC opaque Pagination，Tunnel/Service 已覆盖完整 428/412、PATCH omitted/null/value 和原子 CAS 并发矩阵；System/Config/Security Audit 只读 Handler、只消费 Server 权威状态的 Dashboard API/UI，以及 Tunnel/Connector/Service 日常管理工作台均已完成。M5 总 Gate 的 OpenAPI/生成漂移、实际响应 Contract、并发 PATCH、Pagination、认证会话与真实 Web 日常工作流六项全部通过。M6-01 的全链路 JSON Logging、有限错误码和 Windows Event Log Source/Smoke 已通过本地验收、独立复审、两次精确 CI 与用户阶段复审；M6-02 的 Server 私有 Prometheus Registry、独立 `/metrics` 生命周期、20 项有限基数指标和真实 Linux 黑盒也已通过本地验收、独立复审、Linux amd64/arm64 精确 CI 与用户阶段复审；M6-03 的进程私有 OTLP/HTTP Runtime、五段跨进程 Trace、W3C OPEN 传播和真实 Linux 双架构黑盒已通过本地验收、独立复审与精确 CI，当前进入阶段复审。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算、生产 HTTP Ingress，以及按持久化 Route 恢复的 Raw TCP/SSH Listener 与转发生命周期；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。
+XTunnel Standalone V0.1 正在按开发计划逐步实现。核心领域模型已对齐 Cloudflare Tunnel：管理端创建 Tunnel，Tunnel 持有一枚可重复取回的 ACTIVE Token；同一 Token 可启动多个临时 Connector，全部代理 Service 挂在 Tunnel 下。M1 核心数据面、M2 Credential Lifecycle & Failover Hardening、M3 Configuration/Health/Durable Operations、M4 Product Data Plane 与完整 M5 REST API/Web Console 均已通过验收、精确 CI 与用户阶段复审。Tunnel CRUD/Revoke、Token Reveal/Rotate/Revoke、四类部署命令、只读运行态 Connector 列表，以及 7 个 Service Operation、唯一 Nested Exposure 事务与运行态状态投影均已接入生成 Contract；Tunnel、Connector 和 Service List 已接入 HMAC opaque Pagination，Tunnel/Service 已覆盖完整 428/412、PATCH omitted/null/value 和原子 CAS 并发矩阵；System/Config/Security Audit 只读 Handler、只消费 Server 权威状态的 Dashboard API/UI，以及 Tunnel/Connector/Service 日常管理工作台均已完成。M5 总 Gate 的 OpenAPI/生成漂移、实际响应 Contract、并发 PATCH、Pagination、认证会话与真实 Web 日常工作流六项全部通过。M6-01 的全链路 JSON Logging、有限错误码和 Windows Event Log Source/Smoke 已通过本地验收、独立复审、两次精确 CI 与用户阶段复审；M6-02 的 Server 私有 Prometheus Registry、独立 `/metrics` 生命周期、20 项有限基数指标和真实 Linux 黑盒也已通过本地验收、独立复审、Linux amd64/arm64 精确 CI 与用户阶段复审；M6-03 的进程私有 OTLP/HTTP Runtime、五段跨进程 Trace、W3C OPEN 传播和真实 Linux 双架构黑盒已通过本地验收、独立复审、最终 Head 精确 CI 与用户阶段复审。M6-04 Usage Aggregation 已完成 minute/hour/day 前向 Migration、单 Owner 60 秒批量 Flush、幂等 Rollup、7 日 Retention、Service/Dashboard 当日读模型及真实 Linux 黑盒，当前等待精确 CI 与用户阶段复审。Server 已具备 Multi-Connector 公平选择、在线生命周期快照、Token Rotate/Revoke、Tunnel 全代 Revoke、RAW 前受限故障切换、持续 Snapshot/Route Reconcile、按 Service Health/Revision 过滤的 Connector 选择、两级 Health Target 硬预算、生产 HTTP Ingress，以及按持久化 Route 恢复的 Raw TCP/SSH Listener 与转发生命周期；Agent 已从当前 Ack 生效的内存 Snapshot 解析并连接 HTTP/HTTPS/TCP Origin，由进程级中心调度器执行服务健康检查，并经 Control Outbox 批量上报。
 
 ## 开发运行
 
@@ -86,6 +86,8 @@ Connection Token 对用户始终是单个不透明的 `xta_...` 字符串，语�
 
 OpenTelemetry Trace 默认关闭；Server 与 Agent 各自只有在进程环境中设置 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` 或 `OTEL_EXPORTER_OTLP_ENDPOINT` 时，才启用进程私有的 OTLP/HTTP Protobuf Exporter。生产 Endpoint 必须使用 HTTPS，明文 HTTP 只允许 loopback；支持标准的 Headers、Timeout、`none`/`gzip` Compression 以及固定 `http/protobuf` Protocol 环境变量。Exporter 使用有界非阻塞队列，Collector 失败只产生一次脱敏 `EXPORT_FAILED` 告警，进程退出时最多用 5 秒 Flush。V0.1 不安装全局 OTel Provider/Propagator，也不接受文件型 CA/mTLS 环境变量；需要自定义 CA 或双向 TLS 时必须在前置 Collector/代理层终止，不能把证书或私钥路径交给 XTunnel。
 
+Server Usage 以成功 `OPEN_OK` 后的 RAW 数据面为唯一来源，按 UTC minute、Tunnel 和 Service 聚合连接数与双向业务字节；内部 Failover 和 Agent Heartbeat 不重复入账。单 Owner 每 60 秒批量写入 SQLite，完成的 minute/hour 立即幂等上卷，day 固定保留 7 个 UTC 日并执行有界 Incremental Vacuum。Service 与 Dashboard 返回已持久化的当日 `AVAILABLE` Usage，最多落后当前流量 60 秒；进程 `kill -9` 仍可能丢失最后一个未 Flush 内存窗口。
+
 Server 当前按以下顺序初始化存储：
 
 ```text
@@ -98,6 +100,7 @@ Resolve Stable Data Target
 → Load/Create independent Tunnel Token Master Key
 → Validate stored Snapshots and rebuild Health Target Budget
 → Load immutable Route Snapshot
+→ Start Usage Flusher
 → Start Management API
 → No Admin: remain SETUP_REQUIRED with Management only
 → After first Admin: TCP Listener Restore → HTTP Ingress → Agent Gateway → Runtime Reconciler

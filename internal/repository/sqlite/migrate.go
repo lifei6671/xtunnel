@@ -15,6 +15,7 @@ import (
 // 在同一事务内完成，最后才记录版本，避免部分 DDL 被误认为已应用。
 type migration struct {
 	version    int
+	before     func(context.Context, *gorm.DB) error
 	prepare    func(context.Context, *gorm.DB) error
 	statements []string
 }
@@ -85,6 +86,40 @@ var productionMigrations = []migration{
 			migrations.ServiceExposure,
 		},
 	},
+	{
+		version: 11,
+		before:  enableIncrementalVacuum,
+		statements: []string{
+			migrations.UsageAggregation,
+		},
+	},
+}
+
+// enableIncrementalVacuum 在 v11 事务开始前一次性转换数据库文件格式。
+// VACUUM 不能在事务内执行；转换先于版本记录且可安全重跑，失败时 v11 仍未应用。
+func enableIncrementalVacuum(ctx context.Context, database *gorm.DB) error {
+	return database.WithContext(ctx).Connection(func(connection *gorm.DB) error {
+		var mode int
+		if err := connection.Raw("PRAGMA auto_vacuum").Scan(&mode).Error; err != nil {
+			return fmt.Errorf("read SQLite auto_vacuum mode: %w", err)
+		}
+		if mode == 2 {
+			return nil
+		}
+		if err := connection.Exec("PRAGMA auto_vacuum = INCREMENTAL").Error; err != nil {
+			return fmt.Errorf("enable SQLite incremental auto_vacuum: %w", err)
+		}
+		if err := connection.Exec("VACUUM").Error; err != nil {
+			return fmt.Errorf("convert SQLite database for incremental vacuum: %w", err)
+		}
+		if err := connection.Raw("PRAGMA auto_vacuum").Scan(&mode).Error; err != nil {
+			return fmt.Errorf("verify SQLite auto_vacuum mode: %w", err)
+		}
+		if mode != 2 {
+			return fmt.Errorf("SQLite auto_vacuum mode is %d, want incremental", mode)
+		}
+		return nil
+	})
 }
 
 // migrateServiceExposureUniqueness 在建立唯一索引和跨表触发器前检查历史数据。
@@ -156,6 +191,11 @@ func runMigrations(ctx context.Context, database *gorm.DB, available []migration
 	}
 
 	for _, next := range available[len(applied):] {
+		if next.before != nil {
+			if err := next.before(ctx, database); err != nil {
+				return fmt.Errorf("prepare migration %d outside transaction: %w", next.version, err)
+			}
+		}
 		if err := database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 			if next.prepare != nil {
 				if err := next.prepare(ctx, transaction); err != nil {

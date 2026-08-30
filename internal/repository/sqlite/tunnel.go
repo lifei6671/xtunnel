@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -131,34 +132,23 @@ func (store *Store) ReadConsistent(ctx context.Context, fn func(repository.Repos
 		return errors.New("repository consistent read callback must not be nil")
 	}
 
-	return store.database.WithContext(ctx).Connection(func(connection *gorm.DB) (resultErr error) {
-		committed := false
-		if err := connection.Exec("BEGIN").Error; err != nil {
-			return fmt.Errorf("begin consistent repository read: %w", err)
-		}
-		defer func() {
-			if committed {
-				return
-			}
-			// 回调可能因请求取消而返回；资源清理不能继承已取消的请求 Context，
-			// 否则打开的只读事务会随连接回到池中并长期保留 WAL 快照。
-			rollbackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
-			defer cancel()
-			if err := connection.WithContext(rollbackContext).Exec("ROLLBACK").Error; err != nil {
-				resultErr = errors.Join(resultErr, fmt.Errorf("rollback consistent repository read: %w", err))
-			}
-		}()
-
-		transaction := connection.Session(&gorm.Session{SkipDefaultTransaction: true})
-		if err := fn(&transactionStore{database: transaction, readOnly: true}); err != nil {
-			return err
-		}
-		if err := connection.Exec("COMMIT").Error; err != nil {
-			return fmt.Errorf("commit consistent repository read: %w", err)
-		}
-		committed = true
-		return nil
-	})
+	// 只读事务必须交给 database/sql 跟踪，不能用裸 BEGIN 后把连接手工放回池。
+	// 请求取消时 database/sql 会回滚并在清理完成前阻止连接复用，避免残留事务让
+	// 后续 BEGIN IMMEDIATE 偶发命中“transaction within a transaction”。
+	transaction, err := store.pool.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin consistent repository read: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	database := store.database.WithContext(ctx).Session(&gorm.Session{NewDB: true, SkipDefaultTransaction: true})
+	database.Statement.ConnPool = transaction
+	if err := fn(&transactionStore{database: database, readOnly: true}); err != nil {
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit consistent repository read: %w", err)
+	}
+	return nil
 }
 
 // WithTx 使用 SQLite BEGIN IMMEDIATE 取得写入权后运行 fn。
@@ -257,6 +247,11 @@ func (store *transactionStore) Services() repository.ServiceRepository {
 // Route Repository 本身不启动事务；完整状态读取必须由 Store.ReadConsistent 包裹。
 func (store *transactionStore) Routes() repository.RouteRepository {
 	return routeRepository{database: store.database, readOnly: store.readOnly}
+}
+
+// Usage 返回当前只读视图或写事务作用域的 Usage Repository。
+func (store *transactionStore) Usage() repository.UsageRepository {
+	return usageRepository{database: store.database, readOnly: store.readOnly}
 }
 
 // tunnelRepository 绑定一个 RepositoryView；readOnly 防止读取回调绕过写事务。

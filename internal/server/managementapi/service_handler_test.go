@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -49,8 +50,11 @@ func TestServiceAPIHTTPExposureLifecycleOverTLS(t *testing.T) {
 	etag := createdResponse.Header.Get("ETag")
 	var created Service
 	decodeSuccess(t, createdResponse, &created)
-	if created.Status != ServiceStatusTUNNELOFFLINE || created.Usage.Availability != UsageSummaryAvailabilityUNAVAILABLE ||
-		!created.Usage.ConnectionsToday.IsNull() || !created.Usage.IngressBytesToday.IsNull() || !created.Usage.EgressBytesToday.IsNull() {
+	connections, connectionsErr := created.Usage.ConnectionsToday.Get()
+	ingress, ingressErr := created.Usage.IngressBytesToday.Get()
+	egress, egressErr := created.Usage.EgressBytesToday.Get()
+	if created.Status != ServiceStatusTUNNELOFFLINE || created.Usage.Availability != UsageSummaryAvailabilityAVAILABLE ||
+		connectionsErr != nil || ingressErr != nil || egressErr != nil || connections != 0 || ingress != 0 || egress != 0 {
 		t.Fatalf("created status/usage = %s/%#v", created.Status, created.Usage)
 	}
 	httpsOrigin, err := created.Origin.AsHTTPSOrigin()
@@ -621,6 +625,34 @@ func TestServiceETagIsOpaqueAndBindsAggregateVersions(t *testing.T) {
 		if validServiceIfMatch(value) {
 			t.Fatalf("validServiceIfMatch(%q) = true", value)
 		}
+	}
+}
+
+func TestServiceResponseProjectsAvailableUsageAndRejectsOverflow(t *testing.T) {
+	view := application.ServiceView{
+		Service: repository.Service{
+			ID: "svc_01ARZ3NDEKTSV4RRFFQ69G5FAV", TunnelID: "tun_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			Name: "usage", OriginScheme: repository.OriginSchemeHTTP, OriginHost: "127.0.0.1",
+			OriginPort: 8080, ConnectTimeoutMS: 1000, Enabled: true, Version: 1, CreatedAt: 1, UpdatedAt: 1,
+		},
+		Status: serverstatus.ServiceStatusTunnelOffline,
+		Usage:  repository.UsageTotals{Connections: 12, IngressBytes: 34, EgressBytes: 56},
+	}
+	got, err := serviceResponse(view)
+	if err != nil {
+		t.Fatalf("serviceResponse() error = %v", err)
+	}
+	connections, connectionsErr := got.Usage.ConnectionsToday.Get()
+	ingress, ingressErr := got.Usage.IngressBytesToday.Get()
+	egress, egressErr := got.Usage.EgressBytesToday.Get()
+	if got.Usage.Availability != UsageSummaryAvailabilityAVAILABLE || connectionsErr != nil || ingressErr != nil ||
+		egressErr != nil || connections != 12 || ingress != 34 || egress != 56 {
+		t.Fatalf("serviceResponse().Usage = %#v", got.Usage)
+	}
+
+	view.Usage.Connections = uint64(math.MaxInt64) + 1
+	if _, err := serviceResponse(view); !errors.Is(err, repository.ErrUsageOverflow) {
+		t.Fatalf("serviceResponse(overflow) error = %v, want ErrUsageOverflow", err)
 	}
 }
 
