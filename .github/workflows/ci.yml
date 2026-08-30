@@ -309,10 +309,13 @@ jobs:
           go vet ./internal/agent/... ./cmd/agent
           if ($LASTEXITCODE -ne 0) { throw 'Agent vet failed' }
           $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent.exe'
+          $gateHelperPath = Join-Path $env:RUNNER_TEMP 'xtunnel-scm-gate-helper.exe'
           $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"
           $ldflags = "-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$buildVersion"
           go build -trimpath -ldflags $ldflags -o $agentPath ./cmd/agent
           if ($LASTEXITCODE -ne 0) { throw 'Agent build failed' }
+          go build -trimpath -o $gateHelperPath ./tests/windows-scm-gate
+          if ($LASTEXITCODE -ne 0) { throw 'Windows SCM Gate Helper build failed' }
 
       - name: Cross-build Windows arm64 Agent
         shell: powershell
@@ -325,6 +328,7 @@ jobs:
           $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent-arm64.exe'
           $bootstrapTest = Join-Path $env:RUNNER_TEMP 'agent-bootstrap-arm64.test.exe'
           $serviceTest = Join-Path $env:RUNNER_TEMP 'agent-service-arm64.test.exe'
+          $gateHelperPath = Join-Path $env:RUNNER_TEMP 'xtunnel-scm-gate-helper-arm64.exe'
           $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"
           $ldflags = "-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$buildVersion"
           go build -trimpath -ldflags $ldflags -o $agentPath ./cmd/agent
@@ -333,6 +337,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 bootstrap test compile failed' }
           go test -c -o $serviceTest ./internal/agent/service
           if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 service test compile failed' }
+          go build -trimpath -o $gateHelperPath ./tests/windows-scm-gate
+          if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 SCM Gate Helper build failed' }
 
       - name: Run Windows M6 Stop timeout diagnostic unit gate
         shell: powershell
@@ -342,13 +348,14 @@ jobs:
           go test ./internal/agent/service -run '^TestWindowsServiceHandlerFailsWhenRuntimeDoesNotStop$' -count=1
           if ($LASTEXITCODE -ne 0) { throw 'Windows Stop timeout diagnostic unit gate failed' }
 
-      - name: Run Windows M6 SCM failure and recovery smoke
+      - name: Run Windows M6 SCM persistent Event Log gate
         shell: powershell
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent.exe'
-          ./deploy/windows/smoke.ps1 -AgentPath $agentPath
+          $gateHelperPath = Join-Path $env:RUNNER_TEMP 'xtunnel-scm-gate-helper.exe'
+          ./deploy/windows/smoke.ps1 -AgentPath $agentPath -GateHelperPath $gateHelperPath
 
       - name: Verify working tree remains clean
         shell: powershell

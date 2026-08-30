@@ -6890,9 +6890,13 @@ Linux systemd 与 Windows SCM 的 M6-06 Smoke 必须在隔离 Runner 中验证�
 持久日志/退出状态和恢复重启。systemd 以运行时 drop-in 缩短 Stop 超时，并把测试时
 `KillSignal` 改为不终止进程的 `SIGCONT` 来制造超时诊断，退出后恢复环境；生产 Unit
 不预先修改 `TimeoutStopSec` 或 `KillSignal`。Windows 通过
-隔离 DPAPI Credential 副本验证 `CREDENTIAL_LOAD_FAILED` 和恢复后的新进程；30 秒
-`STOP_TIMEOUT` 分支由 Handler 单元测试锁定，不能冒充真实卡死 Smoke。具体处置命令与
-证据边界以 `docs/operations_runbook.md` 为准。
+隔离 DPAPI Credential 副本验证 `CREDENTIAL_LOAD_FAILED` 和恢复后的新进程；M6 Gate
+另构建只在 CI 使用的 Windows SCM Helper，临时把同一受管 Service 的 ImagePath 切换到
+该 Helper，分别让首次运行回调返回错误和忽略 Stop 取消，真实经过生产 Handler 的
+`RUNTIME_FAILED` 与 30 秒 `STOP_TIMEOUT` 分支。Smoke 必须从 Application Event Log
+定位稳定错误码、确认非零 Service Exit 和恢复后的新 PID，并在每轮 `finally` 恢复生产
+ImagePath、停止 Helper、启动原 Agent；Helper、Marker 或测试参数不得进入生产 Binary、
+持久 SCM 配置或用户 CLI。具体处置命令与证据边界以 `docs/operations_runbook.md` 为准。
 
 ---
 

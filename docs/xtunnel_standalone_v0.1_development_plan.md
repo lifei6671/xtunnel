@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-07 Observability Gate · IN_PROGRESS（M6-06 用户阶段复审已通过，正在审计六项 Gate 证据）
+> **当前阶段**：M6-07 Observability Gate · IN_PROGRESS（推荐范围已获授权并完成本地实现、验证与独立复审，等待精确 CI）
 >
-> **当前结论**：用户明确确认 M6-06 阶段复审通过。最终证据提交 `6da646c33f772f5fbf847c44a2c870384aba2596` 的 [CI #33315994274](https://github.com/lifei6671/xtunnel/actions/runs/33315994274) 整体成功，Windows Agent Service、Linux amd64/arm64、真实 Caddy/Nginx Chromium、Agent Connectivity Diagnostic、OCI 与双架构 systemd 故障诊断全部通过。M6-06 转为 `DONE`，M6 更新为 `6/7`、全局更新为 `81/95`；M6-07 进入 `IN_PROGRESS`，六项 Gate 在证据审计完成前继续全部未勾选。
+> **当前结论**：用户已确认 M6-07 推荐范围。Linux 五故障黑盒现从同一次真实故障关联 Dashboard、日志、有限基数 Metric 与 Trace，并明确区分无请求 Trace 的 Offline 生命周期；Windows CI 新增隔离 SCM Gate Helper，真实经过生产 Handler 的 `RUNTIME_FAILED` 和 30 秒 `STOP_TIMEOUT`，再从 Application Event Log、非零 Service Exit 与恢复新 PID 完成定位。Go 1.27 本地验证、WSL2 Linux 原生 Gate、跨架构编译和独立 Tier-3 复审均通过；Linux amd64/arm64 全矩阵、Race 与提升权限 Windows SCM 真实 Gate 仍待绑定提交的精确 CI，因此 M6-07 保持 `IN_PROGRESS`，M6 为 `6/7`、全局为 `81/95`，六项 Checklist 全部未勾选。
 
 ---
 
@@ -383,7 +383,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 ## 12.2 M6 Gate Checklist
 
 - [ ] 关键链路每个 Span 名称符合 `<package>.<FuncName>`。
-- [ ] HTTP/RPC/Control 跨边界 Trace Context 正确传递。
+- [ ] 公网 HTTP/TCP 请求创建本地 Root，并经已认证 Server→Agent `OpenRequest`/Work 边界正确传递 Trace Context；Control Session 全量 Trace 延期。
 - [ ] 日志可通过 `trace_id` 回到同一 Trace。
 - [ ] Metrics 不使用 agent/instance/tunnel/connection ID 作高频 Label。
 - [ ] 注入 Offline、Origin Down、No Capacity 和 Protocol Error 时，状态、日志、Metric 和 Trace 一致。
@@ -424,9 +424,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-05` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-06` 已完成。当前待办为：
 
-1. `M6-07` — 审计六项 Observability Gate 证据，补齐真实故障注入下状态、日志、Metric、Trace 一致性和 Windows 持久日志定位缺口后进入复审。
+1. `M6-07` — 推荐范围已获授权并完成本地实现、验证与独立复审；等待提交后的 Linux amd64/arm64 全矩阵与提升权限 Windows SCM 持久 Event Log 精确 CI。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
@@ -1607,3 +1607,18 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - M6-07 启动边界：用户同时确认继续，M6-07 依赖已闭环并进入 `IN_PROGRESS`。本轮先逐项审计 Span 命名、跨边界 Trace Context、日志与 Trace 关联、Metric Label 基数、四类故障的状态/日志/Metric/Trace 一致性，以及 Windows SCM 持久日志定位六项证据；只有真实缺口完成实现、验证、独立复审与精确 CI 后才能勾选 Checklist 或转为 `REVIEW`。
 - 状态与 Gate：M6 Gate Checklist 暂时六项全部未勾选，M6-07 不因前序任务分别通过而自动完成；M7 继续 `NOT_STARTED`。本次仅闭环 M6-06 产品任务，并启动 M6-07 证据审计。
 - 文档同步：根 README 与本开发计划同步 M6-06 用户复审、最终证据、任务状态、仪表盘和队列。总技术方案、Proto、OpenAPI/生成物、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、部署、权限模型、日志契约与 `AGENTS.md` 暂无需更新；M6-07 审计若发现真实契约或可执行 Gate 缺口，再按其所有权最小同步。
+
+## 2026-08-30 · M6-07 Observability Gate 证据审计 · BLOCKED
+
+- 已通过证据：五段 Span 名称、Server→Agent `OpenRequest`/Work 数据面 W3C Trace Context、日志 `trace_id` 与同一 Trace 的关联，以及全部 20 个 Metric Family 的有限 Label 契约，均已有实现、定向测试和 Linux amd64/arm64 精确 CI 证据。Checklist 原“HTTP/RPC/Control”表述已收敛为冻结的数据面范围；Control Session 全量 Trace 继续按总方案延期，不扩大本 Gate 的 Protocol 范围。
+- P1 缺口一：现有 `TestErrorStatusObservabilityEndToEnd` 只联合验证五类 Dashboard 状态，日志写入 `io.Discard`，未安装 Trace Recorder，也未读取同一 Registry 增量；分散单测不能证明同一次 Offline、Origin Down、No Capacity、Protocol Error 的状态、日志、Metric 和 Trace 一致。最小闭环为扩展既有 Linux 黑盒，逐次记录基线并断言稳定码、Metric 增量、错误 Span、日志同 TraceID、Secret 不泄漏和 Graceful Drain 负路径。
+- P1 缺口二：真实 Windows SCM Smoke 已验证启动失败、`CREDENTIAL_LOAD_FAILED` 持久 Event Log 与恢复新进程，但 `RUNTIME_FAILED` 和 `STOP_TIMEOUT` 只有 Handler 单测，未证明真实 Application Event 可检索。最小闭环为新增不进入生产行为的隔离 Windows Gate Helper，真实注入 callback error 和 30 秒 Stop hang，断言持久事件、非零退出、Secret 不泄漏与恢复新 PID。
+- Ask First 与状态：上述闭环需要修改 Windows Smoke、增加 Windows Gate Helper，并调整 CI Workflow 的明确命名 Gate，属于部署/CI/CD 变更；不需要修改公共 API/Protocol、依赖/Lockfile、Schema/Migration、生产 SCM 配置、权限模型或日志字段。用户确认该最小范围前，M6-07 转为 `BLOCKED`，M6 保持 `6/7`、全局保持 `81/95`，六项 Checklist 全部未勾选。
+
+## 2026-08-30 · M6-07 推荐范围实现与本地验收 · IN_PROGRESS
+
+- 授权与实现：用户明确确认推荐范围。`TestErrorStatusObservabilityEndToEnd` 接入生产 Logger、独立 Server/Agent Trace Runtime 与真实 `/metrics`，对 No Capacity、突发 Offline、Origin Down、Protocol Error 逐次记录基线并联合断言 Dashboard 稳定码、Counter/Gauge 精确增量、错误 Span、日志同 TraceID 和 Secret 不泄漏；Graceful Drain 与无请求的 Offline 生命周期均锁定不制造虚假错误 Trace。Windows 新增只在 Gate 构建的 `tests/windows-scm-gate` Helper，临时切换隔离 Runner 上同一受管 Service 的 ImagePath，真实注入 callback error 和忽略取消的 Stop hang，验证 `RUNTIME_FAILED`、`STOP_TIMEOUT`、非零 SCM Exit、29—35 秒 Stop 窗口、恢复新 PID 和 Event Log 无 Token；每轮 `finally` 恢复生产 ImagePath 和原 Agent。CI 将 Windows 步骤更新为明确命名的持久 Event Log Gate，并交叉构建 amd64/arm64 Helper。
+- 本地验证：固定 `go1.27.0` 与 `GOTOOLCHAIN=local`；Windows Service/Helper 定向 Test、Service Race、Vet、全仓 `go test ./...`、`go vet ./...`、Bootstrap/Metrics/Tunnel/Agent Open 定向 Race、Helper amd64/arm64 Build、Linux Bootstrap amd64/arm64 Test Cross-build、PowerShell 7 AST、Windows PowerShell 5.1 `-File` 预检、Smoke ASCII、`go mod verify` 与 `git diff --check` 均通过。最终 Linux amd64 `CGO_ENABLED=0` Test Binary 在 WSL2 原生运行 `TestErrorStatusObservabilityEndToEnd` 多轮通过；提升权限 Windows SCM/Application Event 的真实 30 秒 Gate 未在本机运行，诚实留待精确 CI。
+- 独立复审：Windows 分区首轮发现 PowerShell 5.1 无 BOM 文件含非 ASCII 注释，已改为全 ASCII 并复审关闭。最终 Tier-3 集成复审又发现安全断言会在失败时把 Secret 载体写回 CI、Offline 生命周期可能遗漏伪 Span，以及 Stop Gate 只锁下界等 P1；已逐项改为固定安全标签/无原始载体失败信息、Span Attributes/Events/Status 安全扫描、Started/Ended 零增量和 29—35 秒双边界，并在每轮修复后复验。最终目标复审 `PASSED`，P0/P1/P2 均为 0。
+- 状态与剩余边界：M6-07 从授权前 `BLOCKED` 转为 `IN_PROGRESS`。当前没有提交 SHA，也没有绑定该实现的 Linux amd64/arm64、Race 和提升权限 Windows SCM 精确 CI，不能勾选 Checklist 或转为 `REVIEW`；M6 保持 `6/7`、全局保持 `81/95`，M7 继续 `NOT_STARTED`。
+- 文档同步：总技术方案与运维 Runbook 同步隔离 Helper、生产 Handler、持久 Event Log、恢复/清理和生产 Binary/CLI 不受污染的边界；根 README 与本计划同步当前状态和验收边界。Proto、OpenAPI/生成物、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、生产 SCM 配置、权限模型、日志字段与 `AGENTS.md` 均未改变。

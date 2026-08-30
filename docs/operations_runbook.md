@@ -151,12 +151,17 @@ Get-WinEvent -FilterHashtable @{
   状态和时间线后再分析阻塞 owner。
 
 Windows CI Smoke 会在隔离 Runner 中损坏后恢复 DPAPI 候选副本，验证真实启动失败和
-SCM 自动恢复。当前没有不改变生产二进制的安全方法让真实 Runtime 稳定卡满 30 秒；
-因此 `STOP_TIMEOUT` 的 30 秒分支由 Windows handler 单元测试验证，不能把普通 Stop
-Smoke 或该单测表述为真实 30 秒 Hang 通过。
+SCM 自动恢复。M6 Gate 另构建独立的 Windows-only SCM Helper，临时把隔离 Runner 上
+同一受管 Service 的 ImagePath 切换到 Helper：首次 `runtime-failure` 让回调返回错误，首次
+`stop-timeout` 忽略取消并真实等待生产 Handler 的 30 秒上界；Marker 让 SCM recovery
+的第二进程稳定等待取消。Smoke 必须从 Application Event Log 定位 `RUNTIME_FAILED`、
+`STOP_TIMEOUT`，验证非零 Service Exit、29—35 秒 Stop 窗口、恢复新 PID 和 Token 不泄漏，
+并在每轮 `finally` 恢复生产 ImagePath、停止 Helper、重新启动原 Agent。Helper 只属于
+CI Gate，不进入生产 Binary、用户 CLI 或持久 SCM 配置；普通 Stop 或 Handler 单测仍不能
+冒充该真实 Gate。
 
 ## 6. 证据边界
 
-告警 YAML、Runbook、单元测试、交叉编译或普通 Stop 只能证明各自范围。M6-06 的平台
-结论仍需 Linux amd64/arm64 原生 systemd Smoke、提升权限 Windows SCM Smoke 和精确
-CI 记录；它们也不能替代 M6 Gate 的五类故障端到端验收。
+告警 YAML、Runbook、单元测试、交叉编译或普通 Stop 只能证明各自范围。M6-07/M6 Gate
+仍需绑定当前提交的 Linux amd64/arm64 原生联合黑盒、Race、提升权限 Windows SCM
+持久 Event Log Smoke 和精确 CI；既有 M6-06 平台证据不能替代本 Gate。

@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$AgentPath
+    [string]$AgentPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$GateHelperPath
 )
 
 # Repository smoke harness only. End users install the service with the Agent executable.
@@ -18,6 +21,10 @@ $productDataDirectory = Join-Path $env:ProgramData 'XTunnel'
 $credentialDirectory = Join-Path $productDataDirectory 'credentials'
 $credentialPath = Join-Path $credentialDirectory 'agent.token.dpapi'
 $agentFullPath = [IO.Path]::GetFullPath($AgentPath)
+$gateHelperFullPath = [IO.Path]::GetFullPath($GateHelperPath)
+$installedGateHelper = Join-Path $installDirectory 'xtunnel-scm-gate-helper.exe'
+$gateDirectory = Join-Path $productDataDirectory 'scm-gate'
+$expectedAgentCommand = '"' + $installedBinary + '" run'
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $installAttempted = $false
 $uninstallCompleted = $false
@@ -75,11 +82,55 @@ function Wait-AgentServiceFailure {
             if ($service.ExitCode -eq 0) {
                 throw "service $serviceName startup failure reported ExitCode=0"
             }
-            return
+            return $service
         }
         Start-Sleep -Milliseconds 100
     }
     throw "service $serviceName did not expose a stopped failure before recovery"
+}
+
+function Wait-AgentServiceProcessChange {
+    param(
+        [Parameter(Mandatory = $true)]
+        [uint32]$PreviousProcessId,
+
+        [int]$TimeoutSeconds = 15
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $service = Get-AgentService
+        if (($null -ne $service) -and ($service.State -eq 'Running') -and
+            ($service.ProcessId -ne 0) -and ($service.ProcessId -ne $PreviousProcessId)) {
+            return $service
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "SCM recovery did not start a new $serviceName process after PID $PreviousProcessId"
+}
+
+function Set-AgentServiceCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandLine
+    )
+
+    $output = & sc.exe config $serviceName 'binPath=' $CommandLine 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+        throw "sc.exe config failed with exit code $LASTEXITCODE`: $message"
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $service = Get-AgentService
+        if (($null -ne $service) -and
+            [string]::Equals($service.PathName, $CommandLine, [StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "service $serviceName did not publish the expected executable command"
 }
 
 function Assert-AgentServiceStable {
@@ -260,6 +311,138 @@ function Wait-AgentEvent {
     throw "Windows Event Log did not contain event=$Event error_code=$ErrorCode"
 }
 
+function Invoke-ScmFaultGate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('runtime-failure', 'stop-timeout')]
+        [string]$Mode,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ErrorCode,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$ForbiddenValues,
+
+        [switch]$RequestStop
+    )
+
+    $markerPath = Join-Path $gateDirectory "$Mode.marker"
+    $helperCommand = '"' + $installedGateHelper + '" ' + $Mode + ' "' + $markerPath + '"'
+    $gateFailure = $null
+    $gateCleanupFailures = New-Object System.Collections.Generic.List[string]
+    [uint32]$recoveredHelperProcessId = 0
+    $commandRestored = $false
+
+    try {
+        if (Test-Path -LiteralPath $markerPath) {
+            Remove-Item -LiteralPath $markerPath -Force
+        }
+        Stop-Service -Name $serviceName
+        Wait-AgentServiceStatus -Status 'Stopped'
+        Set-AgentServiceCommand -CommandLine $helperCommand
+
+        $gateStart = [DateTime]::UtcNow.AddSeconds(-1)
+        Start-Service -Name $serviceName
+        Wait-AgentServiceStatus -Status 'Running'
+        $firstHelper = Get-AgentService
+        if (($null -eq $firstHelper) -or ($firstHelper.ProcessId -eq 0)) {
+            throw "SCM fault helper for $Mode did not expose a running PID"
+        }
+        [uint32]$firstHelperProcessId = $firstHelper.ProcessId
+
+        $stopStarted = $null
+        if ($RequestStop) {
+            $stopStarted = [DateTime]::UtcNow
+            $output = & sc.exe stop $serviceName 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+                throw "sc.exe stop failed with exit code $LASTEXITCODE`: $message"
+            }
+        }
+
+        $failureTimeout = if ($RequestStop) { 40 } else { 10 }
+        $failedService = Wait-AgentServiceFailure -TimeoutSeconds $failureTimeout
+        if (($null -eq $failedService) -or ($failedService.ExitCode -eq 0)) {
+            throw "SCM fault helper for $Mode did not publish a non-zero service exit"
+        }
+        if ($RequestStop) {
+            $stopElapsed = [DateTime]::UtcNow - $stopStarted
+            if ($stopElapsed.TotalSeconds -lt 29) {
+                throw "SCM Stop timeout returned after $($stopElapsed.TotalSeconds) seconds; want the production 30 second bound"
+            }
+            if ($stopElapsed.TotalSeconds -gt 35) {
+                throw "SCM Stop timeout returned after $($stopElapsed.TotalSeconds) seconds; exceeded the 35 second Gate bound"
+            }
+        }
+        Wait-AgentEvent -StartTime $gateStart -Event 'windows_service_failed' `
+            -ErrorCode $ErrorCode -ForbiddenValues $ForbiddenValues -TimeoutSeconds $failureTimeout
+
+        $recoveredHelper = Wait-AgentServiceProcessChange `
+            -PreviousProcessId $firstHelperProcessId -TimeoutSeconds 15
+        $recoveredHelperProcessId = $recoveredHelper.ProcessId
+        Assert-AgentServiceStable
+    }
+    catch {
+        $gateFailure = $_
+    }
+    finally {
+        try {
+            Set-AgentServiceCommand -CommandLine $expectedAgentCommand
+            $commandRestored = $true
+        }
+        catch {
+            $gateCleanupFailures.Add("restore production service command failed: $($_.Exception.Message)")
+        }
+
+        try {
+            if (-not $commandRestored) {
+                throw 'production service command was not restored'
+            }
+            $service = Get-AgentService
+            if (($null -ne $service) -and ($service.State -ne 'Stopped')) {
+                $output = & sc.exe stop $serviceName 2>&1
+                if (($LASTEXITCODE -ne 0) -and ((Get-AgentService).State -ne 'Stopped')) {
+                    $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+                    throw "sc.exe stop during restore failed with exit code $LASTEXITCODE`: $message"
+                }
+                Wait-AgentServiceStatus -Status 'Stopped' -TimeoutSeconds 40
+            }
+            Start-Service -Name $serviceName
+            Wait-AgentServiceStatus -Status 'Running'
+            Assert-AgentServiceStable
+            $restoredService = Get-AgentService
+            if (($recoveredHelperProcessId -ne 0) -and
+                ($restoredService.ProcessId -eq $recoveredHelperProcessId)) {
+                throw "restored Agent reused SCM fault helper PID $recoveredHelperProcessId"
+            }
+            Assert-ServiceContract
+        }
+        catch {
+            $gateCleanupFailures.Add("restore production service process failed: $($_.Exception.Message)")
+        }
+
+        if (Test-Path -LiteralPath $markerPath) {
+            try {
+                Remove-Item -LiteralPath $markerPath -Force
+            }
+            catch {
+                $gateCleanupFailures.Add("remove SCM fault marker failed: $($_.Exception.Message)")
+            }
+        }
+    }
+
+    if ($null -ne $gateFailure) {
+        if ($gateCleanupFailures.Count -ne 0) {
+            $cleanupMessage = $gateCleanupFailures -join [Environment]::NewLine
+            throw "SCM fault gate $Mode failed: $($gateFailure.Exception.Message)$([Environment]::NewLine)Cleanup also failed:$([Environment]::NewLine)$cleanupMessage"
+        }
+        throw $gateFailure
+    }
+    if ($gateCleanupFailures.Count -ne 0) {
+        throw ($gateCleanupFailures -join [Environment]::NewLine)
+    }
+}
+
 function Assert-CredentialProtected {
     param(
         [Parameter(Mandatory = $true)]
@@ -333,6 +516,9 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 if (-not (Test-Path -LiteralPath $agentFullPath -PathType Leaf)) {
     throw "Agent executable not found: $agentFullPath"
 }
+if (-not (Test-Path -LiteralPath $gateHelperFullPath -PathType Leaf)) {
+    throw "Windows SCM Gate Helper not found: $gateHelperFullPath"
+}
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -392,8 +578,8 @@ try {
     Wait-AgentServiceStatus -Status 'Running'
     Assert-AgentServiceStable
 
-    # 破坏 DPAPI blob 只影响隔离 Runner 上的测试 Credential，且保留原 ACL。服务必须
-    # 写入稳定失败事件并以非零码退出；恢复原 blob 后由 SCM 5 秒 recovery 自动拉起。
+    # Corrupt only the isolated Runner credential while preserving its ACL. The service
+    # must log a stable failure and exit non-zero before SCM recovery starts a new process.
     $recoveryProcessBefore = (Get-AgentService).ProcessId
     $validProtectedCredential = [IO.File]::ReadAllBytes($credentialPath)
     Stop-Service -Name $serviceName
@@ -404,11 +590,14 @@ try {
         Start-Service -Name $serviceName
     }
     catch {
-        # SCM 可能在 Start-Service 返回前观察到非零退出；稳定证据来自 Event Log。
+        # SCM may observe the non-zero exit before Start-Service returns; Event Log is authoritative.
     }
     Wait-AgentEvent -StartTime $recoveryStart -Event 'windows_service_failed' `
         -ErrorCode 'CREDENTIAL_LOAD_FAILED' -ForbiddenValues @($firstToken, $secondToken)
-    Wait-AgentServiceFailure
+    $credentialFailure = Wait-AgentServiceFailure
+    if (($null -eq $credentialFailure) -or ($credentialFailure.ExitCode -eq 0)) {
+        throw 'credential failure did not publish a non-zero SCM exit'
+    }
     [IO.File]::WriteAllBytes($credentialPath, $validProtectedCredential)
     Wait-AgentServiceStatus -Status 'Running'
     Assert-AgentServiceStable
@@ -419,6 +608,28 @@ try {
     Wait-AgentEvent -StartTime $recoveryStart -Event 'windows_service_running' `
         -ForbiddenValues @($firstToken, $secondToken)
     Assert-CredentialProtected -PlaintextToken $secondToken
+
+    New-Item -ItemType Directory -Path $gateDirectory | Out-Null
+    & icacls.exe $gateDirectory /inheritance:r `
+        /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-19:(OI)(CI)M' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to protect Windows SCM Gate directory (exit code $LASTEXITCODE)"
+    }
+    Copy-Item -LiteralPath $gateHelperFullPath -Destination $installedGateHelper
+
+    Invoke-ScmFaultGate -Mode 'runtime-failure' -ErrorCode 'RUNTIME_FAILED' `
+        -ForbiddenValues @($firstToken, $secondToken)
+    Invoke-ScmFaultGate -Mode 'stop-timeout' -ErrorCode 'STOP_TIMEOUT' `
+        -ForbiddenValues @($firstToken, $secondToken) -RequestStop
+    Assert-EventLogContract -ForbiddenValues @($firstToken, $secondToken)
+
+    $installedBinaryHashAfterGates = (Get-FileHash -LiteralPath $installedBinary -Algorithm SHA256).Hash
+    if ($sourceBinaryHash -ne $installedBinaryHashAfterGates) {
+        throw 'SCM fault gates modified the installed production Agent binary'
+    }
+
+    Remove-Item -LiteralPath $installedGateHelper -Force
+    Remove-EmptyDirectory -LiteralPath $gateDirectory
 
     Invoke-Agent -ArgumentList @('service', 'uninstall')
     $uninstallCompleted = $true
@@ -437,6 +648,17 @@ catch {
     $primaryFailure = $_
 }
 finally {
+    $remainingServiceBeforeUninstall = Get-AgentService
+    if (($null -ne $remainingServiceBeforeUninstall) -and
+        ($remainingServiceBeforeUninstall.PathName -match ([Regex]::Escape($installedGateHelper)))) {
+        try {
+            Set-AgentServiceCommand -CommandLine $expectedAgentCommand
+        }
+        catch {
+            $cleanupFailures.Add("restore service command before uninstall failed: $($_.Exception.Message)")
+        }
+    }
+
     if ($installAttempted -and (-not $uninstallCompleted)) {
         try {
             Invoke-Agent -ArgumentList @('service', 'uninstall')
@@ -486,7 +708,7 @@ finally {
         }
     }
 
-    foreach ($path in @($installedBinary, $credentialPath)) {
+    foreach ($path in @($installedGateHelper, $installedBinary, $credentialPath)) {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             try {
                 Remove-Item -LiteralPath $path -Force
@@ -496,7 +718,7 @@ finally {
             }
         }
     }
-    foreach ($directory in @($credentialDirectory, $productDataDirectory, $installDirectory)) {
+    foreach ($directory in @($gateDirectory, $credentialDirectory, $productDataDirectory, $installDirectory)) {
         try {
             Remove-EmptyDirectory -LiteralPath $directory
         }
