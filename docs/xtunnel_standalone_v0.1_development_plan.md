@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M5-11 M5 Gate · REVIEW（M2、M3、M4、M5-01 至 M5-10 均已 `DONE`）
+> **当前阶段**：M6-01 全链路 JSON Logging · BLOCKED（等待日志契约、Windows Event Log Source 生命周期与 Windows Smoke 修改授权）
 >
-> **当前结论**：用户已明确确认 M5-10 阶段复审通过，M5-10 转为 `DONE`，M5 更新为 `10/11`、全局更新为 `74/95`。M5-11 已重新执行 OpenAPI Lint/Breaking/Generated Drift、本地 Management API 普通与 Race 测试和 Web Check/Build，并核对最终 Head `1a0b6e6f3b61a9a05155b283ce8539a3b52a90b1` 的精确 CI #33291394271；六项 M5 Gate Checklist 全部具备实现、失败分支、真实 Handler/Browser 与双架构 CI 证据，当前进入 `REVIEW` 等待用户总 Gate 阶段复审。
+> **当前结论**：用户已明确确认 M5-11 总 Gate 阶段复审通过。结合六项已勾选 Checklist、提交 `fbb3274a690f75550116f3c718b7a125fb114697` 与精确 CI #33293330203 三个 Job 全部成功，M5-11 转为 `DONE`，M5 更新为 `11/11` 并完成，全局任务更新为 `75/95`。M6-01 依赖已闭环，但实现会改变稳定日志事件/级别、内部跨包 Logger 接线、Windows Event Log Source 注册与卸载清理行为；按项目 Ask First 边界，在取得明确授权前标记为 `BLOCKED`，未修改代码、依赖、系统权限或 CI。
 
 ---
 
@@ -109,10 +109,10 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M2 Credential/Failover Hardening | 8 | 8 | `DONE` | M1-14 | M2-08 |
 | M3 Config/Health | 13 | 13 | `DONE` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
-| M5 REST API/Web | 11 | 10 | `IN_PROGRESS` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
-| M6 Observability | 7 | 0 | `NOT_STARTED` | M5-11 | M6-07 |
+| M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
+| M6 Observability | 7 | 0 | `BLOCKED` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **74** |  |  |  |
+| **合计** | **95** | **75** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -353,7 +353,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M5-08 | Dashboard/Status UI | M5-02、M5-04、M5-05 | React Pages | 直接渲染 Server Status；不在前端重算状态 | `DONE` |
 | M5-09 | Tunnel/Connector/Service 管理 UI | M5-03至 M5-08 | Tunnel CRUD/Token/Connector View/Service CRUD | 日常操作无需 SQLite 或手改 Agent Service Config | `DONE` |
 | M5-10 | Contract/E2E Test Suite | M5-02至 M5-09 | API Contract + Browser E2E | 错误码、并发 PATCH、CSRF、Token no-store、生成漂移全覆盖 | `DONE` |
-| M5-11 | M5 Gate | M5-01至 M5-10 | M5 验收证据 | 下方 Checklist 全部通过 | `REVIEW` |
+| M5-11 | M5 Gate | M5-01至 M5-10 | M5 验收证据 | 下方 Checklist 全部通过 | `DONE` |
 
 ## 11.3 M5 Gate Checklist
 
@@ -372,7 +372,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `NOT_STARTED` |
+| M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `BLOCKED` |
 | M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `NOT_STARTED` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `NOT_STARTED` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `NOT_STARTED` |
@@ -424,13 +424,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-10` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11` 已完成。当前待办为：
 
-1. `M5-11` — M5 总 Gate 六项 Checklist 已完成实现、失败分支、本地复验、独立复审与精确 CI 核对，进入 `REVIEW` 等待用户阶段复审。
+1. `M6-01` — 全链路 JSON Logging 依赖已闭环并完成三路范围审计；日志事件/级别、内部跨包 Logger 接线、Windows Event Log Source 注册/清理与 Windows Smoke 属 Ask First，等待用户明确授权后开始实现。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5-01 至 M5-10 已完成；M5-11 等待用户总 Gate 阶段复审。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4 与 M5 已完成；M6-01 等待明确授权。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次证据闭环自动转为 `DONE`。
 
 推进规则：
 
@@ -1456,3 +1456,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 本地复验：`GOTOOLCHAIN=local` 下 Go 1.27.0 版本检查通过；`npm ci` 分别重建 OpenAPI/Web 依赖；`./tools/bootstrap-openapi.sh`、`./tools/openapi.sh validate`、`breaking`、`generate-check` 与 `./tools/test-openapi.sh` 全部通过；`npm --prefix web run check`、`build` 通过；`go test -count=1 -timeout 180s ./internal/server/managementapi` 与对应 `-race` 均通过。三路只读独立审计均为 `APPROVED`，无 P0 至 P3 发现。
 - 状态与边界：M5 Gate 六项 Checklist 已全部勾选，但 M5-11 只进入 `REVIEW`，不在用户总 Gate 阶段复审前标记 `DONE`。M5 保持 `10/11`、全局保持 `74/95`；分页 Browser E2E 未创建超过 200 条数据点击“加载更多”，但默认/最大/续页与 Token 完整性已有 Go 自动化，Web 不解析 Token 已由源码审计确认，因此记为非阻断覆盖深度边界。
 - 文档同步：根 README 与本开发计划同步 M5-10 用户复审、M5-11 Checklist、状态、计数、队列和证据。总技术方案、OpenAPI/生成物、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署配置、权限、日志契约与 `AGENTS.md` 不更新，因为本轮只汇总既有实现和验证证据，没有改变产品、机器契约或工具链。
+
+## 2026-08-30 · M5-11 用户总 Gate 复审与 M6-01 范围审计 · BLOCKED
+
+- 用户复审与状态：用户明确确认 M5-11 总 Gate 通过。六项 M5 Checklist 已全部勾选，状态提交 `fbb3274a690f75550116f3c718b7a125fb114697` 的精确 [CI #33293330203](https://github.com/lifei6671/xtunnel/actions/runs/33293330203) 从 2026-08-30 12:49:09 至 12:55:22（Asia/Shanghai）运行 6 分 13 秒，Windows Agent Service、Linux amd64、Linux arm64 三个 Job 全部成功；amd64 Caddy/Nginx Browser E2E 分别 `1 passed (4.0s)`、`1 passed (3.7s)`。M5-11 从 `REVIEW` 转为 `DONE`，M5 完成度更新为 `11/11`、全局更新为 `75/95`。
+- M6-01 当前事实：共享 `internal/logging` 已冻结 `timestamp/level/component/event`、可选真实关联 ID 与敏感属性脱敏；Management API 已生成真实 `request_id`，Session Manager 已输出 Connector 生命周期，Security Audit 只在 append-only Event 耐久提交后派生结构化日志。公网 HTTP/TCP、Tunnel OPEN、Agent Origin 与 RAW 终态仍未形成统一 request/session/connection 日志链；Windows SCM 仍只依赖不保证持久可见的 stderr。
+- 建议实现边界：不新增第三方依赖，复用已锁定的 `golang.org/x/sys/windows/svc/eventlog`；M6-01 只提供可注入的真实 `trace_id` 关联能力，不创建 Span、不传播 W3C Context，后者保持 M6-03 所有权。补齐 Management/Ingress/Tunnel/Agent 的稳定事件、有限 `error_code`、Secret Sentinel 与级别契约测试；Security Audit 继续只从已提交 Event 派生，不新增导出 API/CLI；Windows 使用唯一受管 Event Source、SCM 持久 JSON Sink 与现有 Windows Smoke 查询，不修改 LocalService、Application Log ACL 或新增配置项。
+- Ask First 边界：实现会新增/冻结稳定事件名和 reason-to-level 语义，向多个内部跨包 Options/Callback 注入 Logger/关联上下文，并让提升权限的 `service install/uninstall` 注册、复用或清理 `HKLM` Application Event Log Source，同时扩展 `deploy/windows/smoke.ps1` 的真实事件查询。外来同名 Source 必须拒绝覆盖或删除；Source 打不开时 SCM 启动必须失败，不能静默回退到 stderr。以上涉及日志契约、内部接口、生产系统注册表/安装行为与 CI 验证，需用户明确授权。
+- 不在范围：M6-01 不引入 OpenTelemetry 依赖、Metrics/Drop Metric、Usage、Dashboard Error 聚合、诊断 Runbook、完整 Audit 文件导出，也不修改 Proto、OpenAPI、Server Schema、Migration、第三方依赖或 Lockfile。M6 Gate Checklist 继续全部未勾选。
+- 当前验证：Go 1.27.0 与 `GOTOOLCHAIN=local` 检查通过；三路只读审计分别覆盖日志链路、Windows Sink 和验收边界，均确认技术上可实施但必须先授权。当前未写代码、未改系统权限、未改 CI；M6-01 标记 `BLOCKED`，解除条件是用户明确确认上述日志契约与 Windows Event Source/Smoke 范围。
+- 文档同步：根 README 与本开发计划同步 M5-11 用户复审、M5/M6 状态、计数、队列和阻塞边界。总技术方案、日志契约正文、代码、OpenAPI/生成物、Proto、Server Schema、Migration、依赖/Lockfile、CI/CD、部署资产与 `AGENTS.md` 均未修改，因为用户尚未授权 M6-01 的行为变更。
