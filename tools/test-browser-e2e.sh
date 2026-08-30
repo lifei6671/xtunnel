@@ -9,6 +9,7 @@ proxy_container=
 temp_dir=
 lock_path=
 backup_socket_path=
+bootstrap_socket_path=
 
 fail() {
   printf '%s\n' "$1" >&2
@@ -270,9 +271,7 @@ target_hash=$(printf '%s' "$data_dir" | sha256sum | awk '{print $1}')
 [ -n "$target_hash" ] || fail "Could not calculate the Server data target hash."
 lock_path="$runtime_dir/server-lock-$target_hash.lock"
 backup_socket_path="$runtime_dir/backup-$target_hash.sock"
-
-"$server_binary" admin create --username e2e-admin --password-file "$password_file" --config "$config_file"
-rm -- "$password_file"
+bootstrap_socket_path="$runtime_dir/admin-bootstrap.sock"
 
 openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
   -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
@@ -281,6 +280,31 @@ write_proxy_configs
 
 "$server_binary" --config "$config_file" >"$server_log" 2>&1 &
 server_pid=$!
+
+# 空数据目录必须先由 Server 创建 pinned Gateway 身份，再通过 root-only Bootstrap
+# Socket 在线提交首个管理员；离线先建库会按安全边界禁止首次身份生成。
+bootstrap_ready=false
+bootstrap_attempt=0
+while [ "$bootstrap_attempt" -lt 60 ]; do
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    fail "xtunnel-server exited before admin bootstrap; logs were withheld to protect secrets."
+  fi
+  if [ -S "$bootstrap_socket_path" ]; then
+    bootstrap_ready=true
+    break
+  fi
+  bootstrap_attempt=$((bootstrap_attempt + 1))
+  sleep 1
+done
+[ "$bootstrap_ready" = true ] || fail "xtunnel-server admin bootstrap did not become ready; logs were withheld to protect secrets."
+
+if [ "$(id -u)" -eq 0 ]; then
+  "$server_binary" admin create --username e2e-admin --password-file "$password_file" --config "$config_file"
+else
+  command -v sudo >/dev/null 2>&1 || fail "Browser E2E requires sudo for the root-only admin bootstrap."
+  sudo -n "$server_binary" admin create --username e2e-admin --password-file "$password_file" --config "$config_file"
+fi
+rm -- "$password_file"
 
 server_ready=false
 server_attempt=0

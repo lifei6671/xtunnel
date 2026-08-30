@@ -1417,3 +1417,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 三轮提交与 CI：FD 上限修复提交并推送为 `9316ee002bb95c612430e028ede7c12469611256`。精确绑定该 SHA 的 [CI #33289335871](https://github.com/lifei6671/xtunnel/actions/runs/33289335871) 证明 `sudo prlimit` 与启动器的 `ulimit` 验证均已通过；Windows Agent Service 和 Linux arm64 全部成功，Linux amd64 的 Browser step 完成 Web/Server 构建后，在创建临时管理员时被 Server 配置边界拒绝继承的 `XTUNNEL_NGINX_IMAGE`，Chromium 仍未启动，因此本轮不记录为 Browser Gate 通过。
 - 根因与修复：CI 对单条 npm 命令设置的镜像变量会被启动器及其全部子进程继承。启动器原本只校验镜像摘要和本地架构，没有在调用真实 Server 前移除产品保留前缀。最小修复在校验通过后将两个镜像引用复制到不导出的脚本内部变量，并立即 `unset XTUNNEL_CADDY_IMAGE XTUNNEL_NGINX_IMAGE`；Docker Proxy 继续使用同一精确摘要，Admin CLI、Server 与 Playwright 不再继承测试编排变量，产品的未知 `XTUNNEL_` 快速失败边界保持不变。
 - 状态与 Gate：修复仍须精确 GitHub CI 证明真实 Chromium 分别经 Caddy、Nginx 完成完整管理工作流。M5-10 继续保持 `IN_PROGRESS`，M5 Gate Checklist 六项全部保持未勾选，本次未勾选任何产品任务。
+
+## 2026-08-30 · M5-10 Browser 首次启动生命周期修复 · IN_PROGRESS
+
+- 四轮提交与 CI：启动器环境隔离修复提交并推送为 `3ffcb20e63637280ed69fa6b5cd9a9c43bc4c64c`。精确绑定该 SHA 的 [CI #33289583045](https://github.com/lifei6671/xtunnel/actions/runs/33289583045) 中 Windows Agent Service 和 Linux arm64 全部成功，Linux amd64 的 Browser step 已越过 FD 与测试编排变量边界，完成临时管理员创建后真实 Server 在 readiness 前退出；本轮 Chromium 仍未启动，不记录为 Browser Gate 通过。
+- 本地 Linux 复现与根因：使用固定 Go 1.27.0 交叉构建真实 Linux Server，并在 WSL2 以同一最小配置、空临时数据目录和 `nofile=1048576` 复现，Server 明确返回 `gateway pinned TLS identity is missing`。生产装配只允许 Server 在数据库尚不存在的全新数据目录中首次创建 pinned Gateway 身份；原启动器先用离线 `admin create` 生成 SQLite，导致随后 Server 按防回滚边界拒绝为既有数据库补造身份。`gateway rotate-key` 也只允许旋转既有身份，不能用来绕过首次启动规则。
+- 最小修复：按冻结生产生命周期改为先启动真实 Server，等待其 root-only Admin Bootstrap Socket，再由 CI 的 passwordless `sudo -n` 在线提交首个管理员；Server 因空数据目录先创建 pinned Gateway 身份，管理员事务成功后按既有回调启动 HTTP Ingress、Agent Gateway 和 Snapshot Reconciler。随后继续等待 `/auth/me` 返回 `401` 才运行 Caddy/Nginx Browser Suite；密码仍只经权限受限文件和单次 Playwright 环境传递，原始 Server/Proxy 日志继续不回显。
+- 本地验证：修复后以同一交叉构建 Linux Server 在 WSL2 从空目录启动，确认 Bootstrap Socket 出现后由 root 客户端在线创建管理员，随后 `/api/v1/auth/me` 返回预期 `401`；发送中断后 Server 进程和 Bootstrap Socket 均已清理。该验证证明首次身份与管理员生命周期可达，但不含 Docker Proxy/Chromium，不能替代精确 CI Browser Gate。
+- 状态与 Gate：重排后的首次启动、两轮真实 Chromium 管理工作流及严格清理仍须精确 GitHub CI 补证。M5-10 继续保持 `IN_PROGRESS`，M5 保持 `9/11`、全局保持 `73/95`，M5-11 继续等待，M5 Gate Checklist 六项全部保持未勾选。
