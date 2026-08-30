@@ -26,6 +26,7 @@ import (
 	serverhttpingress "github.com/lifei6671/xtunnel/internal/server/httpingress"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 	servermanagementapi "github.com/lifei6671/xtunnel/internal/server/managementapi"
+	servermetrics "github.com/lifei6671/xtunnel/internal/server/metrics"
 	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
 	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
@@ -124,7 +125,11 @@ func openGatewayLifecycle(
 	healthBudget *healthbudget.Manager,
 	identity gateway.Identity,
 	tokenService *application.ConnectionTokenService,
+	metricsBridge *serverMetricsBridge,
 ) (*gateway.Server, *sessionruntime.Manager, *tunnel.Proxy, *serverlimits.Manager, error) {
+	if metricsBridge == nil {
+		return nil, nil, nil, nil, errors.New("server metrics bridge is required")
+	}
 	if healthBudget == nil {
 		return nil, nil, nil, nil, errors.New("health target budget manager is required")
 	}
@@ -189,6 +194,7 @@ func openGatewayLifecycle(
 		HeartbeatTimeout:     config.ConnectorRuntime.HeartbeatTimeout.Duration,
 		Logger:               logger,
 		ReportRuntimeError:   reportRuntimeError,
+		ReconcileObserver:    metricsBridge.ObserveReconcile,
 	})
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("construct gateway Session runtime: %w", err)
@@ -224,6 +230,7 @@ func openGatewayLifecycle(
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler,
 		AcquireTimeout: config.Transport.TCP.WorkAcquireTimeout.Duration,
 		LimitManager:   limitManager,
+		Metrics:        metricsBridge,
 		Logger:         logger,
 	})
 	if err != nil {
@@ -253,6 +260,65 @@ func openGatewayLifecycle(
 		return nil, nil, nil, nil, fmt.Errorf("construct agent gateway: %w", err)
 	}
 	return server, sessions, tunnelProxy, limitManager, nil
+}
+
+// serverMetricsBridge 解决 Runtime 构造与私有 Registry Source 之间的装配环：
+// Session/Tunnel 在 Listener 启动前先持有该桥，随后 Bootstrap 完成全部 owner 构造并
+// 一次性发布 Registry。发布发生在任何并发回调之前，运行期只做直接同步转发。
+type serverMetricsBridge struct {
+	registry *servermetrics.Registry
+}
+
+func (bridge *serverMetricsBridge) ObserveOpen(duration time.Duration, code protocolv1.ErrorCode) {
+	bridge.registry.ObserveOpen(duration, code)
+}
+
+func (bridge *serverMetricsBridge) ObserveOriginError(code protocolv1.ErrorCode) {
+	bridge.registry.ObserveOriginError(code)
+}
+
+func (bridge *serverMetricsBridge) ObserveOriginConnect(duration time.Duration) {
+	bridge.registry.ObserveOriginConnect(duration)
+}
+
+func (bridge *serverMetricsBridge) ObserveReconcile(duration time.Duration, code protocolv1.ErrorCode) {
+	bridge.registry.ObserveReconcile(duration, code)
+}
+
+func (bridge *serverMetricsBridge) AddIngressBytes(bytes uint64) {
+	bridge.registry.AddIngressBytes(bytes)
+}
+
+func (bridge *serverMetricsBridge) AddEgressBytes(bytes uint64) {
+	bridge.registry.AddEgressBytes(bytes)
+}
+
+// serverMetricsSource 每次抓取只组合三个 owner 的聚合快照，不向 Collector 暴露
+// 高基数 Map。Owner 指针在 Metrics Listener 启动前完成发布且之后不可变；采集过程
+// 不执行数据库或网络 IO。
+type serverMetricsSource struct {
+	sessions     *sessionruntime.Manager
+	healthBudget *healthbudget.Manager
+	gateway      *gateway.Server
+}
+
+func (source *serverMetricsSource) MetricsOwnerSnapshot() servermetrics.OwnerSnapshot {
+	sessions := source.sessions.MetricsSnapshot()
+	health := source.healthBudget.MetricsSnapshot()
+	gatewaySnapshot := source.gateway.MetricsSnapshot()
+	return servermetrics.OwnerSnapshot{
+		ConnectorsOnline:                sessions.XTunnelConnectorsOnline,
+		ControlSessionsOnline:           sessions.XTunnelControlSessionsOnline,
+		ActiveConnections:               sessions.XTunnelActiveConnections,
+		TCPIdleWorkConnections:          sessions.XTunnelTCPIdleWorkConnections,
+		TCPActiveWorkConnections:        sessions.XTunnelTCPActiveWorkConnections,
+		HealthTargets:                   health.HealthTargets,
+		HealthBudgetRejectionsTotal:     health.HealthBudgetRejectionsTotal,
+		GatewayCertificateExpirySeconds: float64(gatewaySnapshot.CertificateExpiryUnixSeconds),
+		RouteSnapshotBytes:              sessions.XTunnelRouteSnapshotBytes,
+		RouteSnapshotRoutes:             sessions.XTunnelRouteSnapshotRoutes,
+		ReconcileCoalescedTotal:         sessions.XTunnelReconcileCoalescedTotal,
+	}
 }
 
 // gatewayProtocolHandler 是 TLS/ALPN 之后唯一的生产协议分发点。
@@ -337,25 +403,27 @@ func (gate *authGate) tryAcquire() (release func(), acquired bool) {
 // gatewayBootstrapCloser 将 Route owner、运行中的 Gateway 与只在 SETUP_REQUIRED
 // 存在的 Bootstrap Socket 一起收束，并保证它们都先于 SQLite 退出。
 type gatewayBootstrapCloser struct {
-	backupBarrier io.Closer
-	bootstrap     io.Closer
-	gateway       *gateway.Server
-	management    *servermanagementapi.Server
-	httpIngress   *serverhttpingress.Server
-	httpHandler   *serverhttpingress.Handler
-	tcpIngress    *servertcpingress.Manager
-	sessions      *sessionruntime.Manager
-	routes        *serverroute.Manager
-	cancelRoutes  context.CancelFunc
-	runtimeErrors chan error
-	drainTimeout  time.Duration
-	once          sync.Once
-	result        error
+	backupBarrier   io.Closer
+	bootstrap       io.Closer
+	gateway         *gateway.Server
+	management      *servermanagementapi.Server
+	metrics         *servermetrics.Server
+	metricsRegistry *servermetrics.Registry
+	httpIngress     *serverhttpingress.Server
+	httpHandler     *serverhttpingress.Handler
+	tcpIngress      *servertcpingress.Manager
+	sessions        *sessionruntime.Manager
+	routes          *serverroute.Manager
+	cancelRoutes    context.CancelFunc
+	runtimeErrors   chan error
+	drainTimeout    time.Duration
+	once            sync.Once
+	result          error
 }
 
-// Close 以幂等方式执行冻结的关闭顺序：先停止维护入口和 TCP/HTTP/Gateway
-// 新连接，再让 Session、TCP 与 HTTP 的已准入工作共用绝对 Deadline 排空；
-// 到期由各 owner 主动关闭残留连接，最后关闭 Gateway 中的连接 goroutine。
+// Close 以幂等方式执行冻结的关闭顺序：先停止 Metrics、Management 和
+// TCP/HTTP/Gateway 新连接，再让抓取、请求、Session 与公网连接共用绝对 Deadline
+// 排空；到期由各 owner 主动关闭残留连接，最后关闭 Gateway 连接 goroutine。
 func (closer *gatewayBootstrapCloser) Close() error {
 	closer.once.Do(func() {
 		var backupErr error
@@ -368,9 +436,13 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		if closer.bootstrap != nil {
 			bootstrapErr = closer.bootstrap.Close()
 		}
-		// 同时关闭 Management 与三类公网入口后才开始排空。TCP/HTTP Listener
-		// 先停可避免新的 OPEN/RoundTrip 继续申请 WorkConn；Gateway 随后停止
-		// 新的 Control/Work。
+		// 同时关闭 Metrics、Management 与三类公网入口后才开始排空。TCP/HTTP
+		// Listener 先停可避免新的 OPEN/RoundTrip 继续申请 WorkConn；Gateway
+		// 随后停止新的 Control/Work。
+		var metricsStopErr error
+		if closer.metrics != nil {
+			metricsStopErr = closer.metrics.StopAccepting()
+		}
 		var managementStopErr error
 		if closer.management != nil {
 			managementStopErr = closer.management.StopAccepting()
@@ -422,6 +494,16 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		} else {
 			managementResult <- nil
 		}
+		metricsResult := make(chan error, 1)
+		if closer.metrics != nil {
+			safego.Go(
+				func(err error) { metricsResult <- err },
+				nil,
+				func() { metricsResult <- closer.metrics.Shutdown(drainContext) },
+			)
+		} else {
+			metricsResult <- nil
+		}
 		var httpDrainErr error
 		if closer.httpIngress != nil {
 			httpDrainErr = closer.httpIngress.Shutdown(drainContext)
@@ -434,7 +516,12 @@ func (closer *gatewayBootstrapCloser) Close() error {
 		drainErr := <-sessionResult
 		tcpDrainErr := <-tcpResult
 		managementDrainErr := <-managementResult
+		metricsDrainErr := <-metricsResult
 		cancelDrain()
+		var metricsCloseErr error
+		if closer.metrics != nil {
+			metricsCloseErr = closer.metrics.Close()
+		}
 		var managementCloseErr error
 		if closer.management != nil {
 			managementCloseErr = closer.management.Close()
@@ -457,9 +544,9 @@ func (closer *gatewayBootstrapCloser) Close() error {
 			closer.routes.Wait()
 		}
 		closer.result = errors.Join(
-			backupErr, bootstrapErr, managementStopErr, tcpStopErr, httpStopErr, stopErr,
-			managementDrainErr, tcpDrainErr, httpDrainErr, drainErr,
-			managementCloseErr, tcpCloseErr, httpCloseErr, gatewayErr,
+			backupErr, bootstrapErr, metricsStopErr, managementStopErr, tcpStopErr, httpStopErr, stopErr,
+			metricsDrainErr, managementDrainErr, tcpDrainErr, httpDrainErr, drainErr,
+			metricsCloseErr, managementCloseErr, tcpCloseErr, httpCloseErr, gatewayErr,
 		)
 	})
 	return closer.result
@@ -572,12 +659,22 @@ func openGatewayAndBootstrapWithStartedAt(
 		default:
 		}
 	}
+	metricsBridge := &serverMetricsBridge{}
 	gatewayServer, sessions, tunnelProxy, limitManager, err := openGatewayLifecycle(
-		config, resources, logger, reportRuntimeError, healthBudget, identity, tokenService,
+		config, resources, logger, reportRuntimeError, healthBudget, identity, tokenService, metricsBridge,
 	)
 	if err != nil {
 		return nil, err
 	}
+	metricsRegistry, err := servermetrics.NewRegistry(&serverMetricsSource{
+		sessions: sessions, healthBudget: healthBudget, gateway: gatewayServer,
+	})
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("construct Prometheus metric registry: %w", err), gatewayServer.Close())
+	}
+	// Registry 必须在任一 Listener/Session owner 启动前一次性发布，确保 Bridge 的
+	// 数据面回调永远不会观察到 nil 或半构造状态。
+	metricsBridge.registry = metricsRegistry
 	routes, err := serverroute.NewManager(serverResources.database)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("construct immutable route snapshot manager: %w", err), gatewayServer.Close())
@@ -742,18 +839,38 @@ func openGatewayAndBootstrapWithStartedAt(
 			gatewayServer.Close(),
 		)
 	}
+	metricsServer, err := servermetrics.NewServer(servermetrics.ServerOptions{
+		Listen: config.Metrics.Listen, Path: config.Metrics.Path,
+		Registry: metricsRegistry, ReportRuntimeError: reportRuntimeError,
+	})
+	if err != nil {
+		cancelRoutes()
+		routes.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("construct Prometheus metrics listener: %w", err),
+			managementServer.Close(),
+			httpIngress.Close(),
+			tcpIngress.Close(),
+			gatewayServer.Close(),
+		)
+	}
 	cleanupBeforeOwnershipTransfer := func() error {
 		httpHandler.CloseIdleConnections()
+		metricsErr := metricsServer.Close()
 		managementErr := managementServer.Close()
 		httpErr := httpIngress.Close()
 		tcpErr := tcpIngress.Close()
 		cancelRoutes()
 		routes.Wait()
-		return errors.Join(managementErr, tcpErr, httpErr, gatewayServer.Close())
+		return errors.Join(metricsErr, managementErr, tcpErr, httpErr, gatewayServer.Close())
 	}
-	// Management 必须早于 Admin Bootstrap State 检查启动。SETUP_REQUIRED 时只保留
-	// 这一入口；本机 Bootstrap 事务提交后再启动三个公网入口。
+	// Metrics 与 Management 必须早于 Admin Bootstrap State 检查启动。
+	// SETUP_REQUIRED 时只保留这两个运维入口；本机 Bootstrap 事务提交后再启动
+	// 三个公网入口。
 	lifecycleContext := context.WithoutCancel(ctx)
+	if err := metricsServer.Start(lifecycleContext); err != nil {
+		return nil, errors.Join(fmt.Errorf("start Prometheus metrics listener: %w", err), cleanupBeforeOwnershipTransfer())
+	}
 	if err := managementServer.Start(lifecycleContext); err != nil {
 		return nil, errors.Join(fmt.Errorf("start management listener: %w", err), cleanupBeforeOwnershipTransfer())
 	}
@@ -828,8 +945,9 @@ func openGatewayAndBootstrapWithStartedAt(
 			return nil, errors.Join(err, cleanupBeforeOwnershipTransfer())
 		}
 		return &gatewayBootstrapCloser{
-			gateway: gatewayServer, management: managementServer,
-			httpIngress: httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
+			gateway: gatewayServer, management: managementServer, metrics: metricsServer,
+			metricsRegistry: metricsRegistry,
+			httpIngress:     httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
 			sessions: sessions, routes: routes, cancelRoutes: cancelRoutes,
 			runtimeErrors: runtimeErrors,
 		}, nil
@@ -839,8 +957,9 @@ func openGatewayAndBootstrapWithStartedAt(
 		return nil, errors.Join(err, cleanupBeforeOwnershipTransfer())
 	}
 	return &gatewayBootstrapCloser{
-		bootstrap: socket, gateway: gatewayServer, management: managementServer,
-		httpIngress: httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
+		bootstrap: socket, gateway: gatewayServer, management: managementServer, metrics: metricsServer,
+		metricsRegistry: metricsRegistry,
+		httpIngress:     httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
 		sessions: sessions, routes: routes, cancelRoutes: cancelRoutes,
 		runtimeErrors: runtimeErrors,
 	}, nil
@@ -889,6 +1008,7 @@ func reservedTCPPorts(config serverconfig.Config) ([]uint16, error) {
 		"management.listen":    config.Management.Listen,
 		"http_ingress.listen":  config.HTTPIngress.Listen,
 		"agent_gateway.listen": config.AgentGateway.Listen,
+		"metrics.listen":       config.Metrics.Listen,
 	} {
 		_, portText, err := net.SplitHostPort(address)
 		if err != nil {

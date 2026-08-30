@@ -25,13 +25,14 @@ func TestReservedTCPPortsUsesOnlyConcreteIngressPorts(t *testing.T) {
 	config.Management.Listen = "127.0.0.1:0"
 	config.HTTPIngress.Listen = "127.0.0.1:8080"
 	config.AgentGateway.Listen = "127.0.0.1:8443"
+	config.Metrics.Listen = "127.0.0.1:9090"
 
 	ports, err := reservedTCPPorts(config)
 	if err != nil {
 		t.Fatalf("reservedTCPPorts() error = %v", err)
 	}
 	slices.Sort(ports)
-	if want := []uint16{80, 443, 8080, 8443}; !reflect.DeepEqual(ports, want) {
+	if want := []uint16{80, 443, 8080, 8443, 9090}; !reflect.DeepEqual(ports, want) {
 		t.Fatalf("reservedTCPPorts() = %v, want %v", ports, want)
 	}
 }

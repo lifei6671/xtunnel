@@ -3,12 +3,14 @@ package sessionruntime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/controlsession"
+	"github.com/lifei6671/xtunnel/internal/protocol/deterministic"
 	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
@@ -110,7 +112,10 @@ func TestReconcileKeepsHighestPendingAndSendsItAfterAck(t *testing.T) {
 func TestShutdownCancelsBlockedSnapshotBuildAndWaitsForLoop(t *testing.T) {
 	provider := &cancelBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})}
 	registry := serverruntime.NewRegistry()
-	manager, err := New(registry, reconcileTestOptions(provider))
+	observed := make(chan protocolv1.ErrorCode, 1)
+	options := reconcileTestOptions(provider)
+	options.ReconcileObserver = func(_ time.Duration, code protocolv1.ErrorCode) { observed <- code }
+	manager, err := New(registry, options)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -144,6 +149,11 @@ func TestShutdownCancelsBlockedSnapshotBuildAndWaitsForLoop(t *testing.T) {
 	if err := manager.MarkDirty(testTunnelID); err != ErrReconcilerNotRunning {
 		t.Fatalf("MarkDirty(after Shutdown) error = %v, want ErrReconcilerNotRunning", err)
 	}
+	select {
+	case code := <-observed:
+		t.Fatalf("Shutdown cancellation emitted Reconcile metrics with code %s", code)
+	default:
+	}
 }
 
 func TestReconcilePublishesFailureStateAndClearsItAfterRecovery(t *testing.T) {
@@ -169,6 +179,157 @@ func TestReconcilePublishesFailureStateAndClearsItAfterRecovery(t *testing.T) {
 		_, exists := manager.SnapshotError(testTunnelID)
 		return !exists
 	})
+}
+
+func TestReconcileMetricsObserveBuildResultAndPublishedSnapshot(t *testing.T) {
+	provider := &revisionSnapshotProvider{
+		revision: 1,
+		delay:    5 * time.Millisecond,
+		services: []*protocolv1.ServiceConfig{
+			{ServiceId: "svc_01J00000000000000000000000"},
+			{ServiceId: "svc_01J00000000000000000000001"},
+		},
+	}
+	type observation struct {
+		duration time.Duration
+		code     protocolv1.ErrorCode
+	}
+	observed := make(chan observation, 2)
+	options := reconcileTestOptions(provider)
+	options.ReconcileObserver = func(duration time.Duration, code protocolv1.ErrorCode) {
+		observed <- observation{duration: duration, code: code}
+	}
+	manager, err := New(serverruntime.NewRegistry(), options)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	startTestManager(t, manager)
+
+	if err := manager.MarkDirty(testTunnelID); err != nil {
+		t.Fatalf("MarkDirty(success) error = %v", err)
+	}
+	success := waitReconcileObservation(t, observed)
+	if success.code != protocolv1.ErrorCode_ERROR_CODE_OK || success.duration < provider.delay {
+		t.Fatalf("success observation = %+v, want OK and duration >= %v", success, provider.delay)
+	}
+	expectedSnapshot := &protocolv1.TunnelSnapshot{
+		TunnelId: testTunnelID, Revision: 1, Services: provider.services,
+	}
+	encoded, err := deterministic.MarshalSnapshot(expectedSnapshot)
+	if err != nil {
+		t.Fatalf("MarshalSnapshot() error = %v", err)
+	}
+	waitFor(t, func() bool {
+		metrics := manager.MetricsSnapshot()
+		return metrics.XTunnelRouteSnapshotBytes == uint64(len(encoded)) &&
+			metrics.XTunnelRouteSnapshotRoutes == 2
+	})
+
+	provider.setError(errors.New("injected metrics failure"))
+	if err := manager.MarkDirty(testTunnelID); err != nil {
+		t.Fatalf("MarkDirty(failure) error = %v", err)
+	}
+	failure := waitReconcileObservation(t, observed)
+	if failure.code != protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR || failure.duration < provider.delay {
+		t.Fatalf("failure observation = %+v, want INTERNAL_ERROR and duration >= %v", failure, provider.delay)
+	}
+	metrics := manager.MetricsSnapshot()
+	if metrics.XTunnelRouteSnapshotBytes != uint64(len(encoded)) || metrics.XTunnelRouteSnapshotRoutes != 2 {
+		t.Fatalf("failed reconcile changed published snapshot metrics: %+v", metrics)
+	}
+}
+
+func TestReconcileMetricsCountMergedDirtyNotificationsExactlyOnce(t *testing.T) {
+	provider := &blockingGenerationProvider{
+		firstStarted: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+	manager, err := New(serverruntime.NewRegistry(), reconcileTestOptions(provider))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	startTestManager(t, manager)
+	if err := manager.MarkDirty(testTunnelID); err != nil {
+		t.Fatalf("MarkDirty(initial) error = %v", err)
+	}
+	select {
+	case <-provider.firstStarted:
+	case <-time.After(testWait):
+		t.Fatal("initial Snapshot build did not start")
+	}
+	if err := manager.MarkDirty(testTunnelID); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.MarkDirty(testTunnelID); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.MarkDirty("tun_01J00000000000000000000001"); err != nil {
+		t.Fatal(err)
+	}
+	// build 已取走 initial dirty 与对应 wake；第一条新 dirty 负责重新唤醒，
+	// 后两条分别因同 Tunnel 替换、共享 wake 已占用而合并。
+	if got := manager.MetricsSnapshot().XTunnelReconcileCoalescedTotal; got != 2 {
+		t.Fatalf("XTunnelReconcileCoalescedTotal = %d, want 2", got)
+	}
+	close(provider.releaseFirst)
+}
+
+func TestReconcileMetricsAggregateMultipleTunnelsAndReplaceOneContribution(t *testing.T) {
+	const secondTunnelID = "tun_01J00000000000000000000001"
+	provider := &multiTunnelSnapshotProvider{snapshots: map[string]snapshotSpec{
+		testTunnelID:   {revision: 1, routes: 1},
+		secondTunnelID: {revision: 1, routes: 2},
+	}}
+	observed := make(chan protocolv1.ErrorCode, 3)
+	options := reconcileTestOptions(provider)
+	options.ReconcileObserver = func(_ time.Duration, code protocolv1.ErrorCode) { observed <- code }
+	manager, err := New(serverruntime.NewRegistry(), options)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	startTestManager(t, manager)
+
+	for _, tunnelID := range []string{testTunnelID, secondTunnelID} {
+		if err := manager.MarkDirty(tunnelID); err != nil {
+			t.Fatalf("MarkDirty(%s) error = %v", tunnelID, err)
+		}
+		if code := waitReconcileObservation(t, observed); code != protocolv1.ErrorCode_ERROR_CODE_OK {
+			t.Fatalf("reconcile code = %s, want OK", code)
+		}
+	}
+	firstBytes, firstRoutes := provider.metrics(t, testTunnelID)
+	secondBytes, secondRoutes := provider.metrics(t, secondTunnelID)
+	waitFor(t, func() bool {
+		metrics := manager.MetricsSnapshot()
+		return metrics.XTunnelRouteSnapshotBytes == firstBytes+secondBytes &&
+			metrics.XTunnelRouteSnapshotRoutes == firstRoutes+secondRoutes
+	})
+
+	provider.set(testTunnelID, snapshotSpec{revision: 2, routes: 3})
+	if err := manager.MarkDirty(testTunnelID); err != nil {
+		t.Fatalf("MarkDirty(updated first tunnel) error = %v", err)
+	}
+	if code := waitReconcileObservation(t, observed); code != protocolv1.ErrorCode_ERROR_CODE_OK {
+		t.Fatalf("updated reconcile code = %s, want OK", code)
+	}
+	updatedBytes, updatedRoutes := provider.metrics(t, testTunnelID)
+	waitFor(t, func() bool {
+		metrics := manager.MetricsSnapshot()
+		return metrics.XTunnelRouteSnapshotBytes == updatedBytes+secondBytes &&
+			metrics.XTunnelRouteSnapshotRoutes == updatedRoutes+secondRoutes
+	})
+}
+
+func waitReconcileObservation[T any](t *testing.T, observed <-chan T) T {
+	t.Helper()
+	select {
+	case item := <-observed:
+		return item
+	case <-time.After(testWait):
+		t.Fatal("timed out waiting for reconcile observation")
+		var zero T
+		return zero
+	}
 }
 
 func TestRejectedSnapshotKeepsObservedAndWaitsForHigherRevision(t *testing.T) {
@@ -288,6 +449,8 @@ type revisionSnapshotProvider struct {
 	revision uint64
 	calls    int
 	err      error
+	delay    time.Duration
+	services []*protocolv1.ServiceConfig
 }
 
 func (provider *revisionSnapshotProvider) Current(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
@@ -295,11 +458,18 @@ func (provider *revisionSnapshotProvider) Current(_ context.Context, tunnelID st
 	provider.calls++
 	revision := provider.revision
 	err := provider.err
+	delay := provider.delay
+	services := append([]*protocolv1.ServiceConfig(nil), provider.services...)
 	provider.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	if err != nil {
 		return serversnapshot.Result{}, err
 	}
-	return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{TunnelId: tunnelID, Revision: revision}}, nil
+	return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{
+		TunnelId: tunnelID, Revision: revision, Services: services,
+	}}, nil
 }
 
 func (provider *revisionSnapshotProvider) setRevision(revision uint64) {
@@ -326,6 +496,49 @@ func (provider *revisionSnapshotProvider) waitCalls(t *testing.T, want int) {
 type cancelBlockingProvider struct {
 	started  chan struct{}
 	canceled chan struct{}
+}
+
+type snapshotSpec struct {
+	revision uint64
+	routes   int
+}
+
+type multiTunnelSnapshotProvider struct {
+	mu        sync.Mutex
+	snapshots map[string]snapshotSpec
+}
+
+func (provider *multiTunnelSnapshotProvider) Current(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
+	return serversnapshot.Result{Snapshot: provider.snapshot(tunnelID)}, nil
+}
+
+func (provider *multiTunnelSnapshotProvider) set(tunnelID string, spec snapshotSpec) {
+	provider.mu.Lock()
+	provider.snapshots[tunnelID] = spec
+	provider.mu.Unlock()
+}
+
+func (provider *multiTunnelSnapshotProvider) snapshot(tunnelID string) *protocolv1.TunnelSnapshot {
+	provider.mu.Lock()
+	spec := provider.snapshots[tunnelID]
+	provider.mu.Unlock()
+	services := make([]*protocolv1.ServiceConfig, spec.routes)
+	for index := range services {
+		services[index] = &protocolv1.ServiceConfig{
+			ServiceId: fmt.Sprintf("svc_01J00000000000000000000%03d", index),
+		}
+	}
+	return &protocolv1.TunnelSnapshot{TunnelId: tunnelID, Revision: spec.revision, Services: services}
+}
+
+func (provider *multiTunnelSnapshotProvider) metrics(t *testing.T, tunnelID string) (uint64, uint64) {
+	t.Helper()
+	snapshot := provider.snapshot(tunnelID)
+	encoded, err := deterministic.MarshalSnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("MarshalSnapshot(%s) error = %v", tunnelID, err)
+	}
+	return uint64(len(encoded)), uint64(len(snapshot.GetServices()))
 }
 
 func (provider *cancelBlockingProvider) Current(ctx context.Context, _ string) (serversnapshot.Result, error) {

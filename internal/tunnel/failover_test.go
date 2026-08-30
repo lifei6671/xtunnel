@@ -22,6 +22,8 @@ const testConnectorThree = "con_01J00000000000000000000002"
 
 func TestProxyConnectionIDFailureDoesNotAcquireConnectorOrWork(t *testing.T) {
 	fixture := newFailoverFixture(t, testConnectorID)
+	metrics := &recordingTunnelMetrics{}
+	fixture.proxy.options.Metrics = metrics
 	session := fixture.sessionsByConnector[testConnectorID]
 	fixture.registerWork(t, session, nil)
 	pool, exists := fixture.sessions.Pool(session)
@@ -45,11 +47,14 @@ func TestProxyConnectionIDFailureDoesNotAcquireConnectorOrWork(t *testing.T) {
 	if snapshot := fixture.limits.Snapshot(); snapshot.PendingOpens != 0 || snapshot.ActiveTotal != 0 {
 		t.Fatalf("limits after connection ID failure = %#v, want no Pending/Active lease", snapshot)
 	}
+	assertSingleOpenMetric(t, metrics, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR)
 	fixture.close(t)
 }
 
 func TestProxyReselectsAlternateConnectorWhenOnlyWorkFailsPreRaw(t *testing.T) {
 	fixture := newFailoverFixture(t, testConnectorID, testConnectorTwo)
+	metrics := &recordingTunnelMetrics{}
+	fixture.proxy.options.Metrics = metrics
 	failedRequest := make(chan *protocolv1.OpenRequest, 1)
 	failedConnection := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], nil)
 	failedResult := make(chan error, 1)
@@ -110,6 +115,11 @@ func TestProxyReselectsAlternateConnectorWhenOnlyWorkFailsPreRaw(t *testing.T) {
 	}
 	if err := <-alternateResult; err != nil {
 		t.Fatalf("alternate echo error = %v", err)
+	}
+	metricSnapshot := assertSingleOpenMetric(t, metrics, protocolv1.ErrorCode_ERROR_CODE_OK)
+	if metricSnapshot.ingressBytes != uint64(len(payload)) || metricSnapshot.egressBytes != uint64(len(payload)) {
+		t.Fatalf("failover traffic metrics = ingress:%d egress:%d, want %d each",
+			metricSnapshot.ingressBytes, metricSnapshot.egressBytes, len(payload))
 	}
 	fixture.close(t)
 }
@@ -376,6 +386,43 @@ func TestProxyReselectsAlternateConnectorImmediatelyOnOpenDraining(t *testing.T)
 	fixture.close(t)
 }
 
+func TestProxyOpenDrainingWithoutAlternateRecordsFinalTunnelOffline(t *testing.T) {
+	fixture := newFailoverFixture(t, testConnectorID)
+	metrics := &recordingTunnelMetrics{}
+	fixture.proxy.options.Metrics = metrics
+	drainingConnection := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], nil)
+	drainingResult := make(chan error, 1)
+	go func() {
+		defer drainingConnection.Close()
+		request := &protocolv1.OpenRequest{}
+		if err := frame.ReadWork(drainingConnection, request); err != nil {
+			drainingResult <- err
+			return
+		}
+		drainingResult <- frame.WriteWork(drainingConnection, &protocolv1.OpenResponse{
+			ConnectionId: request.GetConnectionId(), Status: protocolv1.OpenStatus_OPEN_STATUS_ERROR,
+			ErrorCode: protocolv1.ErrorCode_ERROR_CODE_OPEN_DRAINING,
+		})
+	}()
+
+	connection, err := fixture.proxy.Dial(context.Background(), testHTTPDialRequest(0, testDialClientAddr))
+	if connection != nil {
+		_ = connection.Close()
+		t.Fatal("Dial() returned a connection after the only Connector entered OPEN_DRAINING")
+	}
+	if !errors.Is(err, serverruntime.ErrNoAvailableConnector) {
+		t.Fatalf("Dial() error = %v, want ErrNoAvailableConnector", err)
+	}
+	if err := <-drainingResult; err != nil {
+		t.Fatalf("OPEN_DRAINING script error = %v", err)
+	}
+	metricSnapshot := assertSingleOpenMetric(t, metrics, protocolv1.ErrorCode_ERROR_CODE_TUNNEL_OFFLINE)
+	if len(metricSnapshot.originErrors) != 0 || len(metricSnapshot.originConnect) != 0 {
+		t.Fatalf("OPEN_DRAINING failover exhaustion emitted origin metrics: %#v", metricSnapshot)
+	}
+	fixture.close(t)
+}
+
 func TestProxyReturnsAfterPreRawFailuresWhenNoAlternateIdleExists(t *testing.T) {
 	fixture := newFailoverFixture(t, testConnectorID, testConnectorTwo)
 	failedResults := make([]<-chan error, 0, 2)
@@ -423,10 +470,12 @@ func TestProxyReturnsAfterPreRawFailuresWhenNoAlternateIdleExists(t *testing.T) 
 
 func TestProxyDoesNotReselectAfterNonRetryableOpenFailure(t *testing.T) {
 	tests := []struct {
-		name     string
-		wrap     func(net.Conn) net.Conn
-		response func(*protocolv1.OpenRequest) *protocolv1.OpenResponse
-		want     error
+		name              string
+		wrap              func(net.Conn) net.Conn
+		response          func(*protocolv1.OpenRequest) *protocolv1.OpenResponse
+		want              error
+		wantMetric        protocolv1.ErrorCode
+		wantOriginLatency time.Duration
 	}{
 		{
 			name: "protocol mismatch",
@@ -436,17 +485,18 @@ func TestProxyDoesNotReselectAfterNonRetryableOpenFailure(t *testing.T) {
 					Status:       protocolv1.OpenStatus_OPEN_STATUS_OK, ErrorCode: protocolv1.ErrorCode_ERROR_CODE_OK,
 				}
 			},
-			want: serveropen.ErrProtocol,
+			want: serveropen.ErrProtocol, wantMetric: protocolv1.ErrorCode_ERROR_CODE_PROTOCOL_ERROR,
 		},
 		{
 			name: "origin rejection",
 			response: func(request *protocolv1.OpenRequest) *protocolv1.OpenResponse {
 				return &protocolv1.OpenResponse{
 					ConnectionId: request.GetConnectionId(), Status: protocolv1.OpenStatus_OPEN_STATUS_ERROR,
-					ErrorCode: protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT,
+					ErrorCode: protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT, OriginConnectLatencyMs: 425,
 				}
 			},
-			want: serveropen.ErrRejected,
+			want: serveropen.ErrRejected, wantMetric: protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT,
+			wantOriginLatency: 425 * time.Millisecond,
 		},
 		{
 			name: "RAW committed",
@@ -459,12 +509,14 @@ func TestProxyDoesNotReselectAfterNonRetryableOpenFailure(t *testing.T) {
 					ErrorCode: protocolv1.ErrorCode_ERROR_CODE_OK,
 				}
 			},
-			want: serveropen.ErrRawCommitted,
+			want: serveropen.ErrRawCommitted, wantMetric: protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newFailoverFixture(t, testConnectorID, testConnectorTwo)
+			metrics := &recordingTunnelMetrics{}
+			fixture.proxy.options.Metrics = metrics
 			firstConnection := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], test.wrap)
 			firstResult := make(chan error, 1)
 			go func() {
@@ -499,6 +551,17 @@ func TestProxyDoesNotReselectAfterNonRetryableOpenFailure(t *testing.T) {
 			alternatePool, exists := fixture.sessions.Pool(alternateSession)
 			if !exists || alternatePool.Snapshot().Idle != 1 {
 				t.Fatalf("alternate Pool = %#v, %v, want untouched IDLE WorkConn", alternatePool, exists)
+			}
+			metricSnapshot := assertSingleOpenMetric(t, metrics, test.wantMetric)
+			if test.wantOriginLatency > 0 {
+				if len(metricSnapshot.originErrors) != 1 || metricSnapshot.originErrors[0] != test.wantMetric {
+					t.Fatalf("origin error metrics = %v, want [%s]", metricSnapshot.originErrors, test.wantMetric)
+				}
+				if len(metricSnapshot.originConnect) != 1 || metricSnapshot.originConnect[0] != test.wantOriginLatency {
+					t.Fatalf("origin connect metrics = %v, want [%s]", metricSnapshot.originConnect, test.wantOriginLatency)
+				}
+			} else if len(metricSnapshot.originErrors) != 0 || len(metricSnapshot.originConnect) != 0 {
+				t.Fatalf("non-origin failure emitted origin metrics: %#v", metricSnapshot)
 			}
 			fixture.close(t)
 		})

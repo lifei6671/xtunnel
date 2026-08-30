@@ -89,6 +89,12 @@ type Server struct {
 	now              func() time.Time
 }
 
+// MetricsSnapshot 只暴露当前热加载叶证书的到期 Unix 时间戳。
+// 它不返回证书链、SPKI 或私钥对象，避免采集方取得 TLS 身份所有权。
+type MetricsSnapshot struct {
+	CertificateExpiryUnixSeconds int64
+}
+
 // NewServer 校验静态限制并构造尚未监听的 Gateway。
 func NewServer(options ServerOptions) (*Server, error) {
 	if options.Listen == "" {
@@ -266,6 +272,21 @@ func (server *Server) LastRenewalError() error {
 	server.identityMu.RLock()
 	defer server.identityMu.RUnlock()
 	return server.lastRenewalError
+}
+
+// MetricsSnapshot 在 identityMu 下读取当前身份，因此 pinned 运行期续签成功后下次
+// 采集会立即看到新到期时间；public 与 pinned 身份使用同一只读边界。
+func (server *Server) MetricsSnapshot() MetricsSnapshot {
+	if server == nil {
+		return MetricsSnapshot{}
+	}
+	server.identityMu.RLock()
+	defer server.identityMu.RUnlock()
+	leaf := server.identity.Leaf()
+	if leaf == nil {
+		return MetricsSnapshot{}
+	}
+	return MetricsSnapshot{CertificateExpiryUnixSeconds: leaf.NotAfter.Unix()}
 }
 
 // getCertificate 在读锁下复制当前证书值，使后台续签发布与握手读取互不竞态。

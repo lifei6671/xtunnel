@@ -348,6 +348,9 @@ func TestServerRenewsRunningPinnedIdentityAndHotLoadsNewHandshakes(t *testing.T)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
+	if got := server.MetricsSnapshot().CertificateExpiryUnixSeconds; got != identity.Leaf().NotAfter.Unix() {
+		t.Fatalf("certificate expiry before renewal = %d, want %d", got, identity.Leaf().NotAfter.Unix())
+	}
 	if err := server.Start(context.Background()); err != nil {
 		t.Fatalf("Server.Start() error = %v", err)
 	}
@@ -367,6 +370,10 @@ func TestServerRenewsRunningPinnedIdentityAndHotLoadsNewHandshakes(t *testing.T)
 	if err := server.LastRenewalError(); err != nil {
 		t.Fatalf("Server.LastRenewalError() = %v", err)
 	}
+	wantRenewedExpiry := createdAt.Add(367 * 24 * time.Hour).Add(397 * 24 * time.Hour).Unix()
+	if got := server.MetricsSnapshot().CertificateExpiryUnixSeconds; got != wantRenewedExpiry {
+		t.Fatalf("certificate expiry after renewal = %d, want %d", got, wantRenewedExpiry)
+	}
 	newConnection, err := dialTLS(server.Addr().String(), ControlALPN)
 	if err != nil {
 		t.Fatalf("dialTLS(after renewal) error = %v", err)
@@ -378,6 +385,33 @@ func TestServerRenewsRunningPinnedIdentityAndHotLoadsNewHandshakes(t *testing.T)
 	}
 	if !bytes.Equal(oldConnection.ConnectionState().PeerCertificates[0].Raw, oldCertificate) {
 		t.Fatal("renewal changed the certificate already negotiated by an old connection")
+	}
+}
+
+func TestServerMetricsSnapshotReadsPublicIdentityExpiry(t *testing.T) {
+	issuedAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	certificate, err := newSelfSignedCertificate("public-gateway.example.test", issuedAt)
+	if err != nil {
+		t.Fatalf("newSelfSignedCertificate() error = %v", err)
+	}
+	directory := t.TempDir()
+	keyPath := filepath.Join(directory, "public.key")
+	certPath := filepath.Join(directory, "public.crt")
+	if err := writeKeyPair(keyPath, certPath, certificate); err != nil {
+		t.Fatalf("writeKeyPair() error = %v", err)
+	}
+	identity, err := LoadPublicIdentity(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("LoadPublicIdentity() error = %v", err)
+	}
+	server, err := NewServer(ServerOptions{
+		Listen: "127.0.0.1:0", Identity: identity, MaxPendingTLSHandshakes: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	if got := server.MetricsSnapshot().CertificateExpiryUnixSeconds; got != certificate.leaf.NotAfter.Unix() {
+		t.Fatalf("public certificate expiry = %d, want %d", got, certificate.leaf.NotAfter.Unix())
 	}
 }
 

@@ -108,7 +108,7 @@ func TestHandleReturnsAgentOpenErrorAndClosesWork(t *testing.T) {
 	}
 	response := &protocolv1.OpenResponse{
 		ConnectionId: request.GetConnectionId(), Status: protocolv1.OpenStatus_OPEN_STATUS_ERROR,
-		ErrorCode: protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT,
+		ErrorCode: protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT, OriginConnectLatencyMs: 375,
 	}
 	if err := frame.WriteWork(agentConnection, response); err != nil {
 		t.Fatalf("write OpenResponse: %v", err)
@@ -119,7 +119,8 @@ func TestHandleReturnsAgentOpenErrorAndClosesWork(t *testing.T) {
 			t.Fatalf("Handle() error = %v, want ErrRejected", err)
 		}
 		var rejected *Rejected
-		if !errors.As(err, &rejected) || rejected.Code != protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT {
+		if !errors.As(err, &rejected) || rejected.Code != protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT ||
+			rejected.OriginConnectLatencyMS != 375 {
 			t.Fatalf("Rejected = %#v", rejected)
 		}
 	case <-time.After(testTimeout):

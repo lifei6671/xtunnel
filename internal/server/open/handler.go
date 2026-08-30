@@ -56,6 +56,9 @@ type Active struct {
 // Rejected 保留 Agent 返回的公开失败码，不暴露内部 Origin 地址或错误文本。
 type Rejected struct {
 	Code protocolv1.ErrorCode
+	// OriginConnectLatencyMS 是已验证 OPEN_ERROR 响应中的公开耗时值，仅供
+	// 进程级 Histogram 使用；不携带 Origin 地址或错误文本。
+	OriginConnectLatencyMS uint32
 }
 
 func (rejected *Rejected) Error() string {
@@ -181,7 +184,10 @@ func (handler *Handler) Handle(
 		return nil, fmt.Errorf("%w: accept OpenResponse: %v", ErrProtocol, err)
 	}
 	if response.GetStatus() == protocolv1.OpenStatus_OPEN_STATUS_ERROR {
-		return nil, &Rejected{Code: response.GetErrorCode()}
+		return nil, &Rejected{
+			Code:                   response.GetErrorCode(),
+			OriginConnectLatencyMS: response.GetOriginConnectLatencyMs(),
+		}
 	}
 	// RAW 提交后不能再重放。先停止并等待 Context IO 回调，再检查总握手预算；
 	// 之后不再执行阻塞帧 IO，因此取消无需通过 Deadline 解阻塞。

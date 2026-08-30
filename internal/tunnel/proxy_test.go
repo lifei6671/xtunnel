@@ -118,9 +118,10 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 		t.Fatalf("open.NewHandler() error = %v", err)
 	}
 	var logOutput bytes.Buffer
+	metrics := &recordingTunnelMetrics{}
 	tunnelProxy, err := NewProxy(Options{
 		Registry: registry, Sessions: sessions, OpenHandler: openHandler, AcquireTimeout: time.Second,
-		Logger: testTunnelLoggerTo(&logOutput),
+		Logger: testTunnelLoggerTo(&logOutput), Metrics: metrics,
 	})
 	if err != nil {
 		t.Fatalf("NewProxy() error = %v", err)
@@ -166,6 +167,11 @@ func TestProxyServesTCPEchoThroughSelectedConnector(t *testing.T) {
 		t.Fatal("echo Connector did not finish")
 	}
 	assertTunnelLifecycleLogs(t, logOutput.String(), request, session)
+	metricSnapshot := assertSingleOpenMetric(t, metrics, protocolv1.ErrorCode_ERROR_CODE_OK)
+	if metricSnapshot.ingressBytes != uint64(len(payload)) || metricSnapshot.egressBytes != uint64(len(payload)) {
+		t.Fatalf("Tunnel traffic metrics = ingress:%d egress:%d, want %d each",
+			metricSnapshot.ingressBytes, metricSnapshot.egressBytes, len(payload))
+	}
 
 	_ = controlAgent.Close()
 	select {

@@ -79,6 +79,9 @@ type Options struct {
 	Logger *slog.Logger
 	// ReportRuntimeError 把 Reconcile goroutine panic 或不可恢复的不变量错误交给进程 owner。
 	ReportRuntimeError func(error)
+	// ReconcileObserver 在一次实际 Snapshot Build 完成后同步接收 Duration 与有限错误码。
+	// 回调必须有界且非阻塞；成功使用 ERROR_CODE_OK，内部失败统一使用 INTERNAL_ERROR。
+	ReconcileObserver func(time.Duration, protocolv1.ErrorCode)
 }
 
 // MetricsSnapshot 是 M2 Runtime 的无 Label 聚合快照；M6 只负责把这些字段导出到
@@ -89,6 +92,9 @@ type MetricsSnapshot struct {
 	XTunnelActiveConnections        uint64
 	XTunnelTCPIdleWorkConnections   uint64
 	XTunnelTCPActiveWorkConnections uint64
+	XTunnelReconcileCoalescedTotal  uint64
+	XTunnelRouteSnapshotBytes       uint64
+	XTunnelRouteSnapshotRoutes      uint64
 }
 
 // connectorKey 标识一个 Tunnel 内的稳定 Connector；generation 由映射值携带，
@@ -193,6 +199,12 @@ type Manager struct {
 	snapshotCancel               context.CancelFunc
 	snapshotDone                 chan struct{}
 	snapshotErr                  error
+	reconcileCoalescedTotal      uint64
+	routeSnapshotBytes           uint64
+	routeSnapshotRoutes          uint64
+	// publishedSnapshotMetrics 仅保存每个 Tunnel 最近一次成功发布候选的聚合贡献。
+	// 采集只读取上面的 O(1) totals，不复制或暴露这个 owner 内部索引。
+	publishedSnapshotMetrics map[string]snapshotMetrics
 }
 
 var _ servercontrolauth.TunnelAdmissionController = (*Manager)(nil)
@@ -222,10 +234,11 @@ func New(registry *serverruntime.Registry, options Options) (*Manager, error) {
 		startingByTunnel:  make(map[string]*convergenceGroup),
 		deletingTunnels:   make(map[string]struct{}),
 		revokedTunnels:    make(map[string]struct{}), logger: options.Logger,
-		shutdownDone:     make(chan struct{}),
-		snapshotDirty:    make(map[string]uint64),
-		snapshotFailures: make(map[string]error),
-		snapshotWake:     make(chan struct{}, 1),
+		shutdownDone:             make(chan struct{}),
+		snapshotDirty:            make(map[string]uint64),
+		snapshotFailures:         make(map[string]error),
+		snapshotWake:             make(chan struct{}, 1),
+		publishedSnapshotMetrics: make(map[string]snapshotMetrics),
 	}, nil
 }
 
@@ -904,6 +917,14 @@ func (manager *Manager) MetricsSnapshot() MetricsSnapshot {
 		}
 		metrics.XTunnelTCPIdleWorkConnections += uint64(snapshot.WorkPool.Idle)
 	}
+	if manager == nil {
+		return metrics
+	}
+	manager.snapshotMu.Lock()
+	metrics.XTunnelReconcileCoalescedTotal = manager.reconcileCoalescedTotal
+	metrics.XTunnelRouteSnapshotBytes = manager.routeSnapshotBytes
+	metrics.XTunnelRouteSnapshotRoutes = manager.routeSnapshotRoutes
+	manager.snapshotMu.Unlock()
 	return metrics
 }
 
@@ -915,6 +936,7 @@ func (manager *Manager) RevokeTunnel(tunnelID string) error {
 	}
 	manager.mu.Lock()
 	manager.revokedTunnels[tunnelID] = struct{}{}
+	manager.removePublishedSnapshotMetrics(tunnelID)
 	admissionDone := groupDoneLocked(manager.admittingByTunnel, tunnelID)
 	startupDone := manager.startupDoneLocked(tunnelID)
 	managedSessions := make([]*managedSession, 0)
@@ -1004,6 +1026,7 @@ func (manager *Manager) DeleteTunnel(tunnelID string) error {
 		return serverruntime.ErrTunnelRuntimeRevoked
 	}
 	manager.deletingTunnels[tunnelID] = struct{}{}
+	manager.removePublishedSnapshotMetrics(tunnelID)
 	admissionDone := groupDoneLocked(manager.admittingByTunnel, tunnelID)
 	startupDone := manager.startupDoneLocked(tunnelID)
 	managedSessions := make([]*managedSession, 0)

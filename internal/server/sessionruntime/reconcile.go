@@ -22,6 +22,13 @@ type snapshotCandidate struct {
 	snapshot *protocolv1.TunnelSnapshot
 	revision uint64
 	digest   [sha256.Size]byte
+	bytes    uint64
+	routes   uint64
+}
+
+type snapshotMetrics struct {
+	bytes  uint64
+	routes uint64
 }
 
 type snapshotSend struct {
@@ -109,11 +116,17 @@ func (manager *Manager) markSnapshotDirtyLocked(tunnelID string) error {
 	if manager.snapshotGeneration == ^uint64(0) {
 		return errors.New("server snapshot reconcile generation is exhausted")
 	}
+	_, replaced := manager.snapshotDirty[tunnelID]
 	manager.snapshotGeneration++
 	manager.snapshotDirty[tunnelID] = manager.snapshotGeneration
+	coalesced := replaced
 	select {
 	case manager.snapshotWake <- struct{}{}:
 	default:
+		coalesced = true
+	}
+	if coalesced {
+		manager.reconcileCoalescedTotal++
 	}
 	return nil
 }
@@ -144,11 +157,13 @@ func (manager *Manager) snapshotLoop(ctx context.Context) {
 			if !exists {
 				break
 			}
+			startedAt := time.Now()
 			result, err := manager.options.SnapshotProvider.Current(ctx, tunnelID)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
+				manager.observeReconcile(startedAt, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR)
 				failure := fmt.Errorf("load current TunnelSnapshot: %w", err)
 				manager.recordSnapshotFailure(tunnelID, failure)
 				manager.failInitialSnapshots(tunnelID, failure)
@@ -156,12 +171,14 @@ func (manager *Manager) snapshotLoop(ctx context.Context) {
 			}
 			candidate, err := newSnapshotCandidate(tunnelID, result)
 			if err != nil {
+				manager.observeReconcile(startedAt, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR)
 				manager.recordSnapshotFailure(tunnelID, err)
 				manager.failInitialSnapshots(tunnelID, err)
 				manager.reportSnapshotRuntimeError(err)
 				continue
 			}
 			stale, updates, sends, failures := manager.commitSnapshotCandidate(tunnelID, generation, candidate)
+			manager.observeReconcile(startedAt, protocolv1.ErrorCode_ERROR_CODE_OK)
 			if stale {
 				continue
 			}
@@ -199,6 +216,13 @@ func (manager *Manager) takeSnapshotBuild() (string, uint64, bool) {
 	}
 	for tunnelID, generation := range manager.snapshotDirty {
 		delete(manager.snapshotDirty, tunnelID)
+		// dirty map 是待构建工作的唯一事实源。inner loop 可能在 select 消费
+		// snapshotWake 前直接取走工作，因此这里同步清掉对应的陈旧 token；
+		// 新通知必须先取得 snapshotMu，随后会重新写 map 并发送新的 wake。
+		select {
+		case <-manager.snapshotWake:
+		default:
+		}
 		return tunnelID, generation, true
 	}
 	return "", 0, false
@@ -230,7 +254,45 @@ func newSnapshotCandidate(tunnelID string, result serversnapshot.Result) (*snaps
 		snapshot: proto.Clone(result.Snapshot).(*protocolv1.TunnelSnapshot),
 		revision: result.Snapshot.GetRevision(),
 		digest:   sha256.Sum256(encoded),
+		bytes:    uint64(len(encoded)),
+		routes:   uint64(len(result.Snapshot.GetServices())),
 	}, nil
+}
+
+func (manager *Manager) observeReconcile(startedAt time.Time, code protocolv1.ErrorCode) {
+	if observer := manager.options.ReconcileObserver; observer != nil {
+		observer(time.Since(startedAt), code)
+	}
+}
+
+// recordPublishedSnapshotMetricsLocked 与 generation/revoke fence 在同一个
+// snapshotMu 临界区提交聚合值，避免 Revoke 已扣除贡献后旧 build 再次发布。
+// 调用方必须持有 snapshotMu。
+func (manager *Manager) recordPublishedSnapshotMetricsLocked(candidate *snapshotCandidate) {
+	tunnelID := candidate.snapshot.GetTunnelId()
+	previous := manager.publishedSnapshotMetrics[tunnelID]
+	manager.routeSnapshotBytes -= previous.bytes
+	manager.routeSnapshotRoutes -= previous.routes
+	current := snapshotMetrics{bytes: candidate.bytes, routes: candidate.routes}
+	manager.publishedSnapshotMetrics[tunnelID] = current
+	manager.routeSnapshotBytes += current.bytes
+	manager.routeSnapshotRoutes += current.routes
+}
+
+// removePublishedSnapshotMetrics 在 Manager.mu -> snapshotMu 的固定锁序内扣除一个
+// 已永久 Revoke 或进入 Delete fence 的 Tunnel；失败清理也不能让已撤下 Runtime 继续
+// 出现在进程聚合 Gauge 中。
+func (manager *Manager) removePublishedSnapshotMetrics(tunnelID string) {
+	manager.snapshotMu.Lock()
+	previous, exists := manager.publishedSnapshotMetrics[tunnelID]
+	if exists {
+		delete(manager.publishedSnapshotMetrics, tunnelID)
+		manager.routeSnapshotBytes -= previous.bytes
+		manager.routeSnapshotRoutes -= previous.routes
+	}
+	delete(manager.snapshotDirty, tunnelID)
+	delete(manager.snapshotFailures, tunnelID)
+	manager.snapshotMu.Unlock()
 }
 
 func (manager *Manager) commitSnapshotCandidate(
@@ -240,7 +302,10 @@ func (manager *Manager) commitSnapshotCandidate(
 ) (bool, []*managedSession, []snapshotSend, []snapshotFailure) {
 	manager.mu.Lock()
 	manager.snapshotMu.Lock()
-	if manager.shutdownStarted || !manager.snapshotAccepting || manager.snapshotDirty[tunnelID] > generation {
+	_, revoked := manager.revokedTunnels[tunnelID]
+	_, deleting := manager.deletingTunnels[tunnelID]
+	if manager.shutdownStarted || revoked || deleting || !manager.snapshotAccepting ||
+		manager.snapshotDirty[tunnelID] > generation {
 		manager.snapshotMu.Unlock()
 		manager.mu.Unlock()
 		return true, nil, nil, nil
@@ -263,6 +328,7 @@ func (manager *Manager) commitSnapshotCandidate(
 			sends = append(sends, snapshotSend{managed: managed, candidate: send})
 		}
 	}
+	manager.recordPublishedSnapshotMetricsLocked(candidate)
 	manager.snapshotMu.Unlock()
 	manager.mu.Unlock()
 	return false, updates, sends, failures

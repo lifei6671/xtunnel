@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-02 Prometheus Metrics · BLOCKED（范围审计完成，等待依赖、指标契约、监听面与 Agent 指标延期授权）
+> **当前阶段**：M6-02 Prometheus Metrics · IN_PROGRESS（本地实现与验证完成，等待提交后 Linux amd64/arm64 精确 CI）
 >
-> **当前结论**：用户已明确确认 M6-01 阶段复审通过。实现提交 `eb8a88c25149ca83b0df58680c812474e5a88d09`、证据提交 `56cbb306dc04630b5e7c137a32deeb9bf18fae96` 及各自精确 CI `#33296214987`、`#33296545473` 均成功，M6-01 转为 `DONE`。M6-02 只读审计确认 Server 配置和五项无 Label Runtime Gauge Source 已存在，但仓库尚无 Prometheus 依赖，公开 Metric 类型/Label/Bucket/error_code 语义未完整冻结，方案所列 Agent 八项指标也没有抓取端点或上报协议。M6-02 在用户确认推荐边界前保持 `BLOCKED`；M6 与全局完成数更新为 `1/7`、`76/95`。
+> **当前结论**：用户已明确确认 M6-01 阶段复审通过。实现提交 `eb8a88c25149ca83b0df58680c812474e5a88d09`、证据提交 `56cbb306dc04630b5e7c137a32deeb9bf18fae96` 及各自精确 CI `#33296214987`、`#33296545473` 均成功，M6-01 转为 `DONE`。用户随后确认 M6-02 推荐范围；Server 私有 Prometheus Registry、20 项有限基数指标、独立 Listener 生命周期、Owner/Tunnel 埋点、端口保留与 Linux 黑盒现已完成本地实现，并通过 Go 1.27 定向/全仓 Test、Race、Vet、Module Verify、WSL Linux amd64 真实黑盒和 Linux arm64 测试二进制交叉编译。尚未产生实现 Commit 和精确双架构 CI，M6-02 保持 `IN_PROGRESS`；M6 与全局完成数保持 `1/7`、`76/95`。
 
 ---
 
@@ -373,7 +373,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M6-01 | 全链路 JSON Logging | M1-14、M5-11 | 稳定日志字段 | request/trace/session/connection 可关联；Secret 脱敏；级别正确；Security Audit 的结构化导出只来自已提交的 append-only Event，不以允许丢失的 Runtime Observer 代替；Windows SCM 模式提供可持久检索的 Event Log Source 或等价受支持 Sink，不能仅依赖不保证可见的 stderr | `DONE` |
-| M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `BLOCKED` |
+| M6-02 | Prometheus Metrics | M4-10 | `/metrics` + Metric Registry | 请求数/错误率/P50/P99、Session/Pool/Limit/Health；增加 Open、Origin Connect、Reconcile Duration Histogram，有限枚举 `error_code` Counter，Snapshot Bytes/Service Count/Coalesced Update 指标，以及 Gateway Certificate Expiry；禁止 tunnel/service/connector/connection ID 高基数 Label | `IN_PROGRESS` |
 | M6-03 | OpenTelemetry Trace | M4-10 | Server→Agent Trace Propagation | `ingress.Accept→tunnel.DialContext→transport.Acquire→origin.Dial→proxy.Bidirectional` 可关联 | `NOT_STARTED` |
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `NOT_STARTED` |
 | M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `NOT_STARTED` |
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 已完成。当前待办为：
 
-1. `M6-02` — Prometheus Metrics 范围审计已完成；等待用户确认官方依赖与 Lockfile、Server Metric Contract、现有可配置监听语义，以及 Agent 八项无暴露契约指标从 V0.1 本任务延期的边界。
+1. `M6-02` — 本地实现与验证已完成；下一步生成实现 Commit，并由 Linux amd64/arm64 精确 CI 运行新增的真实 `/metrics` 黑盒后进入 `REVIEW`。
 2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
 3. `M0-02` — Token-only Bootstrap 等待用户复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 已完成；M6-02 等待范围授权。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 已完成；M6-02 等待提交与精确双架构 CI。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次实现自动转为 `DONE`。
 
 推进规则：
 
@@ -1491,3 +1491,18 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - Agent 契约缺口：总方案另列八项 Agent 指标，但没有 Agent 监听地址、端口、认证、多实例或部署抓取契约；固定端口会产生冲突，新增本地配置会破坏 token-only Bootstrap，经 Control Session 上传则要求 Protocol Review。建议从 V0.1 的 M6-02 范围明确延期这八项 Agent 指标，不新增 Agent Listener、Config、Proto 或本地业务状态；若用户要求本任务实现 Agent 指标，必须先单独冻结完整暴露契约。
 - 验收边界：新增 Metric Contract/Cardinality/Collector 与 owner 定向测试，真实 Bootstrap 使用动态 loopback 端口抓取 Prometheus 文本，覆盖非目标路径 404、绑定失败、启动回滚、优雅关闭、端口释放、重复 Registry、并发抓取与高基数 Sentinel；Linux amd64/arm64 CI 增加明确命名的 M6-02 黑盒步骤。Go 1.27 固定工具链下必须通过定向 Test/Race/Vet、全仓 Test/Vet、Module Verify/Tidy Diff 和精确 CI；M6-03 Trace、M6-04 Usage、M6-05 Dashboard、M6-06 告警/Runbook 均不在本任务范围。
 - 状态与阻塞：三路只读审计均确认 Server 侧可实施，但依赖/Lockfile、公开 Metric Contract、监听面安全语义、CI Workflow 和 Agent 指标延期都属于 Ask First。当前未修改代码、总技术方案、Schema、OpenAPI、Proto、依赖、Lockfile 或 CI；M6-02 标记 `BLOCKED`，解除条件是用户明确确认上述推荐范围。本轮 CodeGraph 两次返回 `Transport closed`，结构核查已降级为 `rg/Get-Content`，不把该工具故障写成实现阻塞。
+
+## 2026-08-30 · M6-02 范围确认与实现启动 · IN_PROGRESS
+
+- 用户确认：同意新增并锁定 `github.com/prometheus/client_golang` `v1.24.1` 并由 Go 工具更新 Module Lock；同意 20 项 Server 指标的类型、有限 `error_code`、固定 Histogram Bucket、Owner 快照、Route Snapshot 与进程字节语义；同意保留现有 `metrics.listen/path` 可配置监听且不增加认证；同意 Agent 八项指标从 V0.1 M6-02 延期；同意修改 Linux amd64/arm64 CI 接入真实 Browser-free `/metrics` 黑盒。
+- 契约冻结：总技术方案第 160 节现已记录 Gauge/Counter/Histogram 类型、固定 Bucket、逻辑 OPEN exactly-once、Origin Response 数据来源、未知错误归并、Route Snapshot 路由数、进程字节边界、私有 Registry/ServeMux 与 Agent 延期语义。OpenAPI、Proto、Server Schema、Database Schema 和日志契约均不改变。
+- 当前状态：M6-02 从 `BLOCKED` 转为 `IN_PROGRESS`。实现完成且通过 Go 1.27 固定工具链下的定向 Test/Race/Vet、全仓 Test/Vet、Module Verify/Tidy Diff、Linux amd64/arm64 真实黑盒与复审后才能进入 `REVIEW`；当前不增加 M6 或全局完成数。
+
+## 2026-08-30 · M6-02 本地实现与验证 · IN_PROGRESS
+
+- 实现产物：锁定官方 `github.com/prometheus/client_golang v1.24.1` 及 Go 工具生成的传递依赖；新增私有 Registry、20 项 Contract/Collector、精确 Path 的独立 HTTP Server，以及 StopAccepting/Shutdown/Close 生命周期。Bootstrap 在 Management 前启动 Metrics，绑定失败完整回滚，并把 Metrics 端口纳入 TCP Route 保留与统一 FD/关闭所有权。
+- 数据链路：Tunnel 逻辑 OPEN 在 Failover 外层 exactly-once 记录成功、有限 `error_code`、Open/Origin Duration 与 RAW 业务字节；Health Budget owner 提供 Target 与拒绝累计；Gateway owner 在热续签身份锁下提供当前证书到期 Unix 秒；Session Snapshot owner 聚合 Reconcile Duration/Error/Coalesced 与所有当前 TunnelSnapshot 的 Bytes/Routes，同 Tunnel 替换、Revoke/Delete 均更新贡献。所有 Prometheus Label 均不包含 ID、IP、Path 或错误文本。
+- 测试产物：Metric Contract/Cardinality/Histogram/Registry 隔离、并发 Gather/Record、精确 Path/KeepAlive Fence/排空/绑定失败；OPEN 成功/公开失败/内部失败/Failover/取消/字节方向；Health 拒绝、证书 Public/Pinned 热续签、Reconcile 成功/失败/合并通知/多 Tunnel 聚合与撤销；生产 Bootstrap 真实 `/metrics` 黑盒覆盖 20 项 parser、非目标路径 404、状态变化、绑定冲突回滚、优雅关闭与端口释放。`.github/workflows/ci.yml` 已在 Linux amd64/arm64 Matrix 增加 `Run native M6 Prometheus metrics blackbox`。
+- 本地证据：`./tools/check-go-version.ps1` 确认 `go1.27.0 (local)`；定向七包 Test 与 Race、`go test -count=1 -timeout 300s ./...`、`go vet ./...`、`go mod verify`、`git diff --check` 全部通过；coalesced 竞态用例 `-count=20` 通过。Windows 生成的 Linux amd64 测试二进制已在 WSL2 Ubuntu 22.04 真实执行 `TestMetricsEndpointEndToEnd` 与 `TestMetricsEndpointBindFailureRollsBackBootstrap` 并通过；Linux arm64 测试二进制交叉编译通过，但 arm64 原生执行仍必须由 CI 提供。
+- 文档同步：总技术方案第 160 节、根 README 与本计划已同步公开指标、监听安全、Agent 延期、关闭顺序与验证边界。OpenAPI/生成物、Proto、Server Schema、Database Schema、Migration、部署配置、权限模型和日志契约均未改变，因为实现复用既有 `metrics.listen/path`、OpenResponse 字段与 Runtime owner。
+- 状态与剩余边界：当前工作区尚未提交，以上结果属于脏工作区开发反馈；CodeGraph 仍因 `Transport closed` 不可用，已使用原生搜索和定向读取完成结构核查。M6-02 保持 `IN_PROGRESS`，本次未勾选任何产品任务或 M6 Gate；生成实现 Commit 并取得精确 Linux amd64/arm64 CI 成功证据后才可转 `REVIEW`。

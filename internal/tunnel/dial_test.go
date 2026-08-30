@@ -188,6 +188,8 @@ func TestProxyDialPinsZeroConnectorServiceRevision(t *testing.T) {
 func TestProxyDialSucceedsAndRequestCancellationDoesNotPoisonConnection(t *testing.T) {
 	fixture := newFailoverFixture(t, testConnectorID)
 	defer cleanupDialFixture(t, fixture)
+	metrics := &recordingTunnelMetrics{}
+	fixture.proxy.options.Metrics = metrics
 	agent := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], nil)
 	requests := make(chan *protocolv1.OpenRequest, 1)
 	agentResult := make(chan error, 1)
@@ -225,11 +227,18 @@ func TestProxyDialSucceedsAndRequestCancellationDoesNotPoisonConnection(t *testi
 	waitForSnapshot(t, fixture.limits, func(snapshot serverlimits.Snapshot) bool {
 		return snapshot.ActiveTotal == 0 && snapshot.WorkTotal == 0
 	})
+	metricSnapshot := assertSingleOpenMetric(t, metrics, protocolv1.ErrorCode_ERROR_CODE_OK)
+	if metricSnapshot.ingressBytes != uint64(len(payload)) || metricSnapshot.egressBytes != uint64(len(payload)) {
+		t.Fatalf("HTTP Tunnel traffic metrics = ingress:%d egress:%d, want %d each",
+			metricSnapshot.ingressBytes, metricSnapshot.egressBytes, len(payload))
+	}
 }
 
 func TestProxyDialCancellationDuringOpenClosesWorkAndReleasesLimits(t *testing.T) {
 	fixture := newFailoverFixture(t, testConnectorID)
 	defer cleanupDialFixture(t, fixture)
+	metrics := &recordingTunnelMetrics{}
+	fixture.proxy.options.Metrics = metrics
 	agent := fixture.registerWork(t, fixture.sessionsByConnector[testConnectorID], nil)
 	requestRead := make(chan struct{})
 	agentResult := make(chan error, 1)
@@ -274,6 +283,7 @@ func TestProxyDialCancellationDuringOpenClosesWorkAndReleasesLimits(t *testing.T
 	waitForSnapshot(t, fixture.limits, func(snapshot serverlimits.Snapshot) bool {
 		return snapshot.PendingOpens == 0 && snapshot.ActiveTotal == 0 && snapshot.WorkTotal == 0
 	})
+	assertSingleOpenMetric(t, metrics, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR)
 }
 
 func TestProxyDialCloseFinishesResourcesExactlyOnce(t *testing.T) {

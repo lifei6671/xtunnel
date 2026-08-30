@@ -17,6 +17,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/safego"
 	servercontrolauth "github.com/lifei6671/xtunnel/internal/server/controlauth"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
+	serversnapshot "github.com/lifei6671/xtunnel/internal/server/snapshot"
 )
 
 func TestConnectorSnapshotsMetricsHeartbeatDrainAndLifecycleLogs(t *testing.T) {
@@ -132,6 +133,9 @@ func TestRevokeTunnelFencesLateServeAndCleansRunningSession(t *testing.T) {
 		_, exists := manager.Resolve(session.SessionID)
 		return exists
 	})
+	if metrics := manager.MetricsSnapshot(); metrics.XTunnelRouteSnapshotBytes == 0 {
+		t.Fatalf("initial published Snapshot metrics = %+v, want non-zero bytes", metrics)
+	}
 
 	if err := manager.RevokeTunnel(testTunnelID); err != nil {
 		t.Fatalf("RevokeTunnel() error = %v", err)
@@ -150,6 +154,10 @@ func TestRevokeTunnelFencesLateServeAndCleansRunningSession(t *testing.T) {
 	}
 	if snapshots := manager.ConnectorSnapshots(); len(snapshots) != 0 {
 		t.Fatalf("revoked Connector snapshots = %#v", snapshots)
+	}
+	if metrics := manager.MetricsSnapshot(); metrics.XTunnelRouteSnapshotBytes != 0 ||
+		metrics.XTunnelRouteSnapshotRoutes != 0 {
+		t.Fatalf("revoked Tunnel remained in Snapshot metrics: %+v", metrics)
 	}
 
 	lateServer, lateClient := net.Pipe()
@@ -279,10 +287,22 @@ func TestConvergenceWaitsForStartedOwnerBeforeInstall(t *testing.T) {
 
 func TestDeleteTunnelWaitsForAdmissionAndClearsTemporaryFence(t *testing.T) {
 	registry := serverruntime.NewRegistry()
-	manager := newTestManager(t, registry)
+	manager := newReconcileTestManager(t, registry, snapshotProviderFunc(func(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
+		return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{
+			TunnelId: tunnelID,
+			Services: []*protocolv1.ServiceConfig{{ServiceId: "svc_01J00000000000000000000000"}},
+		}}, nil
+	}))
 	if _, err := registry.Tunnel(testTunnelID); err != nil {
 		t.Fatalf("Tunnel() error = %v", err)
 	}
+	if err := manager.MarkDirty(testTunnelID); err != nil {
+		t.Fatalf("MarkDirty() error = %v", err)
+	}
+	waitFor(t, func() bool {
+		metrics := manager.MetricsSnapshot()
+		return metrics.XTunnelRouteSnapshotBytes > 0 && metrics.XTunnelRouteSnapshotRoutes == 1
+	})
 	releaseAdmission, err := manager.BeginTunnelAdmission(testTunnelID)
 	if err != nil {
 		t.Fatalf("BeginTunnelAdmission() error = %v", err)
@@ -313,6 +333,10 @@ func TestDeleteTunnelWaitsForAdmissionAndClearsTemporaryFence(t *testing.T) {
 		}
 	case <-time.After(testWait):
 		t.Fatal("DeleteTunnel() did not finish after admission release")
+	}
+	if metrics := manager.MetricsSnapshot(); metrics.XTunnelRouteSnapshotBytes != 0 ||
+		metrics.XTunnelRouteSnapshotRoutes != 0 {
+		t.Fatalf("deleted Tunnel remained in Snapshot metrics: %+v", metrics)
 	}
 	releaseAfterDelete, err := manager.BeginTunnelAdmission(testTunnelID)
 	if err != nil {
@@ -481,9 +505,25 @@ func TestDeleteTunnelFailureKeepsAdmissionFence(t *testing.T) {
 		cancel()
 		t.Fatalf("RegisterActiveWork() error = %v", err)
 	}
-	manager := newTestManager(t, registry)
+	manager := newReconcileTestManager(t, registry, snapshotProviderFunc(func(_ context.Context, tunnelID string) (serversnapshot.Result, error) {
+		return serversnapshot.Result{Snapshot: &protocolv1.TunnelSnapshot{
+			TunnelId: tunnelID,
+			Services: []*protocolv1.ServiceConfig{{ServiceId: "svc_01J00000000000000000000000"}},
+		}}, nil
+	}))
+	if err := manager.MarkDirty(testTunnelID); err != nil {
+		t.Fatalf("MarkDirty() error = %v", err)
+	}
+	waitFor(t, func() bool {
+		metrics := manager.MetricsSnapshot()
+		return metrics.XTunnelRouteSnapshotBytes > 0 && metrics.XTunnelRouteSnapshotRoutes == 1
+	})
 	if err := manager.DeleteTunnel(testTunnelID); !errors.Is(err, closeErr) {
 		t.Fatalf("DeleteTunnel() error = %v, want %v", err, closeErr)
+	}
+	if metrics := manager.MetricsSnapshot(); metrics.XTunnelRouteSnapshotBytes != 0 ||
+		metrics.XTunnelRouteSnapshotRoutes != 0 {
+		t.Fatalf("failed Delete fence restored stale Snapshot metrics: %+v", metrics)
 	}
 	if _, err := manager.BeginTunnelAdmission(testTunnelID); !errors.Is(err, serverruntime.ErrTunnelRuntimeRevoked) {
 		t.Fatalf("BeginTunnelAdmission(after failed delete) error = %v, want ErrTunnelRuntimeRevoked", err)

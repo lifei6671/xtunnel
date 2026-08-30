@@ -41,9 +41,23 @@ type Options struct {
 	OpenHandler    *serveropen.Handler
 	AcquireTimeout time.Duration
 	Logger         *slog.Logger
+	// Metrics 接收逻辑 OPEN 与成功进入 RAW 后的进程级遥测。实现必须并发安全且
+	// 不得阻塞数据面；nil 保留不采集遥测的现有行为。
+	Metrics Metrics
 	// LimitManager 为 nil 时保留纯单元测试的无限预算路径；生产装配和 M1 集成测试
 	// 必须传共享 Manager，使 PendingOpen 与 ACTIVE 多维限制作用于真实公网连接。
 	LimitManager *serverlimits.Manager
+}
+
+// Metrics 是 Tunnel 数据面对进程级 Metric Registry 的最小消费方契约。
+// 所有错误码均来自冻结的 Protocol v1 有限枚举；流量只统计 OPEN_OK 后的业务字节，
+// 不包含 WorkConn 握手帧，也不承担 M6-04 Usage 的持久化或 exactly-once 语义。
+type Metrics interface {
+	ObserveOpen(time.Duration, protocolv1.ErrorCode)
+	ObserveOriginError(protocolv1.ErrorCode)
+	ObserveOriginConnect(time.Duration)
+	AddIngressBytes(uint64)
+	AddEgressBytes(uint64)
 }
 
 // DialRequest 完整描述一次 Tunnel OPEN 的值传递路由输入。
@@ -205,6 +219,31 @@ func (tunnelProxy *Proxy) openConnection(
 	clientNetworkAddr net.Addr,
 	peer net.Conn,
 ) (_ *managedConnection, resultErr error) {
+	startedAt := time.Now()
+	var finalOriginConnectLatencyMS uint32
+	// Serve 与 Dial 只在这里提交一次公网逻辑 OPEN。内部 Work 重试和跨 Connector
+	// Failover 始终留在本栈帧内，因此统一在最外层按最终结果 exactly-once 观测，
+	// 不会把 Wire attempt 误计成新的公网 OPEN。
+	defer func() {
+		if tunnelProxy.options.Metrics == nil {
+			return
+		}
+		code := tunnelMetricErrorCode(resultErr)
+		tunnelProxy.options.Metrics.ObserveOpen(time.Since(startedAt), code)
+		originConnectLatencyMS := finalOriginConnectLatencyMS
+		if isOriginErrorCode(code) {
+			tunnelProxy.options.Metrics.ObserveOriginError(code)
+			var rejected *serveropen.Rejected
+			if errors.As(resultErr, &rejected) && rejected.OriginConnectLatencyMS > 0 {
+				originConnectLatencyMS = rejected.OriginConnectLatencyMS
+			}
+		}
+		if originConnectLatencyMS > 0 {
+			tunnelProxy.options.Metrics.ObserveOriginConnect(
+				time.Duration(originConnectLatencyMS) * time.Millisecond,
+			)
+		}
+	}()
 	var openLease *serverlimits.OpenLease
 	openLeaseOwnedByConnection := false
 	defer func() {
@@ -247,7 +286,6 @@ func (tunnelProxy *Proxy) openConnection(
 	if err != nil {
 		return nil, err
 	}
-	startedAt := time.Now()
 	var session serverruntime.Session
 	opened := false
 	defer func() {
@@ -314,6 +352,7 @@ func (tunnelProxy *Proxy) openConnection(
 		if openErr != nil {
 			return nil, openErr
 		}
+		finalOriginConnectLatencyMS = active.Response.GetOriginConnectLatencyMs()
 		if err := work.MarkActive(); err != nil {
 			return nil, err
 		}
@@ -422,8 +461,12 @@ func (tunnelProxy *Proxy) openConnection(
 	// OPEN 与 ACTIVE 使用分离的 Context：TCP Serve 在 OPEN 后恢复
 	// Listener 生命周期，HTTP Dial 则使用脱离单请求取消的池化生命周期。
 	lifecycleContext, cancelWork := context.WithCancel(lifecycleParent)
+	dataConnection := active.Connection
+	if tunnelProxy.options.Metrics != nil {
+		dataConnection = &meteredConnection{Conn: dataConnection, metrics: tunnelProxy.options.Metrics}
+	}
 	pooled := &pooledConnection{
-		Conn: active.Connection, work: selectedWork, openLease: openLease,
+		Conn: dataConnection, work: selectedWork, openLease: openLease,
 		logger: connectionLogger, startedAt: startedAt,
 	}
 	activeWork, err := tunnelRuntime.RegisterActiveWork(serverruntime.ActiveWorkSpec{
@@ -449,6 +492,44 @@ func (tunnelProxy *Proxy) openConnection(
 		"duration_ms", time.Since(startedAt).Milliseconds(),
 	)
 	return connection, nil
+}
+
+// meteredConnection 位于最终 OPEN_OK 的 RAW 边界。对后端连接的 Write 是
+// 公网到 Origin 的 ingress，Read 是 Origin 到公网的 egress；按成功传输的 n
+// 立即累计，因此 TCP 与 HTTP KeepAlive 共用同一套方向语义且不重复计数。
+type meteredConnection struct {
+	net.Conn
+	metrics Metrics
+}
+
+func (connection *meteredConnection) Read(buffer []byte) (int, error) {
+	read, err := connection.Conn.Read(buffer)
+	if read > 0 {
+		connection.metrics.AddEgressBytes(uint64(read))
+	}
+	return read, err
+}
+
+func (connection *meteredConnection) Write(buffer []byte) (int, error) {
+	written, err := connection.Conn.Write(buffer)
+	if written > 0 {
+		connection.metrics.AddIngressBytes(uint64(written))
+	}
+	return written, err
+}
+
+func (connection *meteredConnection) CloseWrite() error {
+	if closer, ok := connection.Conn.(interface{ CloseWrite() error }); ok {
+		return closer.CloseWrite()
+	}
+	return proxy.ErrHalfCloseUnsupported
+}
+
+func (connection *meteredConnection) CloseRead() error {
+	if closer, ok := connection.Conn.(interface{ CloseRead() error }); ok {
+		return closer.CloseRead()
+	}
+	return nil
 }
 
 // pooledConnection 是 WorkPool ACTIVE Work 的 owner，并只为 TCP 同时持有公网
@@ -554,6 +635,55 @@ func tunnelFailureCode(err error) string {
 		return "TUNNEL_OFFLINE"
 	default:
 		return "INTERNAL_ERROR"
+	}
+}
+
+// tunnelMetricErrorCode 把一次逻辑 OPEN 的最终结果收敛到 Protocol v1 的有限
+// ErrorCode。只有 Agent 返回的公开码和本地可稳定映射的公开失败保留分类；取消、
+// Deadline、随机源及其他内部错误统一归 INTERNAL_ERROR，禁止错误文本形成标签。
+func tunnelMetricErrorCode(err error) protocolv1.ErrorCode {
+	if err == nil {
+		return protocolv1.ErrorCode_ERROR_CODE_OK
+	}
+	var rejected *serveropen.Rejected
+	if errors.As(err, &rejected) {
+		if _, known := protocolv1.ErrorCode_name[int32(rejected.Code)]; known &&
+			rejected.Code != protocolv1.ErrorCode_ERROR_CODE_OK &&
+			rejected.Code != protocolv1.ErrorCode_ERROR_CODE_OPEN_DRAINING {
+			return rejected.Code
+		}
+		// OPEN_DRAINING 只是触发跨 Connector 重选的内部信号。若重选失败，
+		// 必须继续按 joined error 中的最终失败分类，不能让它遮蔽 TUNNEL_OFFLINE
+		// 或容量错误；没有更具体公开错误时最终仍收敛为 INTERNAL_ERROR。
+	}
+	switch {
+	case errors.Is(err, serveropen.ErrProtocol):
+		return protocolv1.ErrorCode_ERROR_CODE_PROTOCOL_ERROR
+	case errors.Is(err, serverlimits.ErrPendingOpenCapacity),
+		errors.Is(err, serverlimits.ErrActiveConnectionCapacity),
+		errors.Is(err, serverlimits.ErrWorkCapacity),
+		errors.Is(err, serverlimits.ErrConnectingWorkCapacity),
+		errors.Is(err, serverlimits.ErrIdleWorkCapacity),
+		errors.Is(err, serverworkpool.ErrPoolCapacity),
+		errors.Is(err, serverworkpool.ErrConnectingCapacity):
+		return protocolv1.ErrorCode_ERROR_CODE_WORK_POOL_EXHAUSTED
+	case errors.Is(err, serverruntime.ErrNoAvailableConnector):
+		return protocolv1.ErrorCode_ERROR_CODE_TUNNEL_OFFLINE
+	default:
+		return protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR
+	}
+}
+
+func isOriginErrorCode(code protocolv1.ErrorCode) bool {
+	switch code {
+	case protocolv1.ErrorCode_ERROR_CODE_ORIGIN_REFUSED,
+		protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT,
+		protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE,
+		protocolv1.ErrorCode_ERROR_CODE_ORIGIN_RESET,
+		protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TLS_ERROR:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -59,6 +59,14 @@ type Snapshot struct {
 	ConnectorReferences map[ConnectorKey]uint64
 }
 
+// MetricsSnapshot 是 Health Runtime 的 O(1) 无 Label 聚合快照。
+// 它只暴露当前 Target 总量和进程生命周期内的预算拒绝累计，不复制 Tunnel 或
+// Connector 明细。
+type MetricsSnapshot struct {
+	HealthTargets               uint64
+	HealthBudgetRejectionsTotal uint64
+}
+
 // Manager 使用一把互斥锁线性化配置 Reservation 与 Connector Auth。
 //
 // 调用方需要同时持有 Tunnel Runtime 锁时，固定顺序必须是
@@ -67,10 +75,11 @@ type Snapshot struct {
 type Manager struct {
 	mu sync.Mutex
 
-	options       Options
-	targetsGlobal uint64
-	tunnels       map[string]*tunnelState
-	connectorRefs map[ConnectorKey]uint64
+	options                     Options
+	targetsGlobal               uint64
+	healthBudgetRejectionsTotal uint64
+	tunnels                     map[string]*tunnelState
+	connectorRefs               map[ConnectorKey]uint64
 }
 
 type tunnelState struct {
@@ -161,6 +170,7 @@ func (manager *Manager) ReserveConfiguration(
 	projectedEnabled := max(state.enabledCount, candidateCount)
 	projectedTargets, ok := targetsWithin(state.connectorCount, projectedEnabled, manager.options.MaxTargetsPerTunnel)
 	if !ok || projectedTargets-state.targets > manager.options.MaxTargetsGlobal-manager.targetsGlobal {
+		manager.healthBudgetRejectionsTotal++
 		return nil, ErrTargetCapacity
 	}
 	reservation := &configurationReservation{revision: revision, candidateCount: candidateCount}
@@ -243,10 +253,12 @@ func (manager *Manager) AcquireConnector(tunnelID, connectorID string) (*Connect
 		enabledCount = max(enabledCount, state.reservation.candidateCount)
 	}
 	if state.connectorCount == ^uint64(0) {
+		manager.healthBudgetRejectionsTotal++
 		return nil, ErrTargetCapacity
 	}
 	projectedTargets, ok := targetsWithin(state.connectorCount+1, enabledCount, manager.options.MaxTargetsPerTunnel)
 	if !ok || projectedTargets-state.targets > manager.options.MaxTargetsGlobal-manager.targetsGlobal {
+		manager.healthBudgetRejectionsTotal++
 		return nil, ErrTargetCapacity
 	}
 	manager.targetsGlobal += projectedTargets - state.targets
@@ -318,6 +330,19 @@ func (manager *Manager) Snapshot() Snapshot {
 		snapshot.ConnectorReferences[key] = references
 	}
 	return snapshot
+}
+
+// MetricsSnapshot 返回当前 Health Target 总量与 exactly-once 容量拒绝累计。
+func (manager *Manager) MetricsSnapshot() MetricsSnapshot {
+	if manager == nil {
+		return MetricsSnapshot{}
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return MetricsSnapshot{
+		HealthTargets:               manager.targetsGlobal,
+		HealthBudgetRejectionsTotal: manager.healthBudgetRejectionsTotal,
+	}
 }
 
 func targetsWithin(connectors, enabledCount, limit uint64) (uint64, bool) {

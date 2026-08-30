@@ -6720,25 +6720,38 @@ xtunnel_route_snapshot_routes
 xtunnel_reconcile_coalesced_total
 ```
 
-Agent：
+九项无 Label Gauge 为 `connectors_online`、`control_sessions_online`、
+`active_connections`、`tcp_idle_work_connections`、`tcp_active_work_connections`、
+`health_targets`、`gateway_certificate_expiry_seconds`、`route_snapshot_bytes` 和
+`route_snapshot_routes` 是 Gauge。`open_total`、`ingress_bytes_total`、
+`egress_bytes_total`、`health_budget_rejections_total` 和
+`reconcile_coalesced_total` 是无 Label Counter；`open_errors_total`、
+`origin_errors_total` 和 `reconcile_errors_total` 是只带 `error_code` 的 Counter。
+`open_duration_seconds`、`origin_connect_duration_seconds` 和
+`reconcile_duration_seconds` 是 Histogram，前两者固定 Bucket 为
+`0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30` 秒，
+Reconcile 固定 Bucket 为
+`0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5` 秒。
+P50/P99 由 PromQL `histogram_quantile` 计算，不另建进程内 Quantile Gauge。
 
-```text
-xtunnel_agent_control_connected
+`error_code` 只允许 Protocol v1 `ErrorCode` 的冻结枚举名称；成功不写错误 Counter，
+未识别的值和没有公开协议码的内部失败统一归并为 `ERROR_CODE_INTERNAL_ERROR`，不得把
+底层错误文本写入 Label。`open_total` 和 Open Histogram 按一次公网逻辑 OPEN 计数，
+内部 Connector Failover/Wire OPEN attempt 不得重复累计。Origin Error 与 Connect Duration
+读取该逻辑 OPEN 最终 `OpenResponse` 已携带的 `error_code` 和
+`origin_connect_latency_ms`，不新增 Wire 字段。
 
-xtunnel_agent_tcp_idle
+`route_snapshot_bytes/routes` 聚合当前所有成功发布的确定性 Tunnel Snapshot，`routes`
+表示其中实际序列化的 Route/Service 条目总数，不统计数据库内未进入这些 Snapshot 的
+Service；同 Tunnel 新版本替换旧贡献，Revoke/Delete 同步扣除其贡献。
+Ingress/Egress Byte Counter 是进程生命周期、重启归零的无 Service 维度遥测，不是 M6-04
+Usage exactly-once 权威。所有 Gauge 只读取既有 Runtime/Owner 的聚合快照；新增 Health、
+Gateway 和 Reconcile Source 必须是 O(1) 聚合值，采集不得向 Prometheus 暴露包含 Tunnel、
+Connector、Service 或 Source IP 的高基数 Map。
 
-xtunnel_agent_tcp_active
-
-xtunnel_agent_origin_connect_total
-
-xtunnel_agent_origin_errors_total
-
-xtunnel_agent_health_checks_in_flight
-
-xtunnel_agent_health_budget_exceeded_total
-
-xtunnel_agent_config_revision
-```
+V0.1 的 M6-02 不暴露 Agent 本地 Prometheus 端点，也不新增 Agent Config、Proto 或本地业务
+状态。原规划中的八项 `xtunnel_agent_*` 指标延期到单独的 Agent 暴露与多实例抓取契约，
+不属于本阶段验收范围。
 
 Server 默认通过独立 loopback 端点暴露 Prometheus：
 
@@ -6747,6 +6760,10 @@ metrics:
   listen: "127.0.0.1:9090"
   path: /metrics
 ```
+
+实现使用进程私有 Registry 与独立 `ServeMux`，只注册配置中的精确 Path，不挂接 Default
+Mux、Management API 或公网 Ingress。Schema 继续允许操作者显式配置非 loopback 地址；
+Metrics 端点本身不增加认证，非 loopback 暴露必须由部署网络策略隔离。
 
 核心链路使用 OpenTelemetry Span：
 

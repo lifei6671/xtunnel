@@ -428,6 +428,7 @@ func gatewayLifecycleTestConfig(dataDir, listen string) serverconfig.Config {
 			HeartbeatInterval: baseconfig.Duration{Duration: time.Second},
 			HeartbeatTimeout:  baseconfig.Duration{Duration: 3 * time.Second},
 		},
+		Metrics: serverconfig.Metrics{Listen: "127.0.0.1:0", Path: "/metrics"},
 		Logging: serverconfig.Logging{Level: "info"},
 		Limits: serverconfig.Limits{
 			MaxTunnels:                          16,

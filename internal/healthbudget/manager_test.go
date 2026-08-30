@@ -311,6 +311,70 @@ func TestSnapshotIsDeepCopy(t *testing.T) {
 	lease.Release()
 }
 
+func TestMetricsSnapshotReturnsAggregateTargetsWithoutOwnerKeys(t *testing.T) {
+	manager := mustManager(t, 10, 20)
+	mustInitialize(t, manager, testTunnelID, 1, 2)
+	lease := mustAcquire(t, manager, testTunnelID, testConnectorID)
+	if got := manager.MetricsSnapshot(); got != (MetricsSnapshot{HealthTargets: 2}) {
+		t.Fatalf("MetricsSnapshot() = %+v, want two Health Targets", got)
+	}
+	lease.Release()
+	if got := manager.MetricsSnapshot(); got != (MetricsSnapshot{}) {
+		t.Fatalf("MetricsSnapshot() after Release = %+v, want zero", got)
+	}
+}
+
+func TestMetricsSnapshotCountsEveryCapacityRejectionPathExactlyOnce(t *testing.T) {
+	tests := []struct {
+		name   string
+		reject func(*testing.T, *Manager)
+	}{
+		{
+			name: "configuration reservation",
+			reject: func(t *testing.T, manager *Manager) {
+				mustInitialize(t, manager, testTunnelID, 1, 1)
+				connector := mustAcquire(t, manager, testTunnelID, testConnectorID)
+				t.Cleanup(func() { connector.Release() })
+				if _, err := manager.ReserveConfiguration(testTunnelID, 2, 3); !errors.Is(err, ErrTargetCapacity) {
+					t.Fatalf("ReserveConfiguration() error = %v, want ErrTargetCapacity", err)
+				}
+			},
+		},
+		{
+			name: "connector count overflow",
+			reject: func(t *testing.T, manager *Manager) {
+				mustInitialize(t, manager, testTunnelID, 1, 0)
+				manager.mu.Lock()
+				manager.tunnels[testTunnelID].connectorCount = ^uint64(0)
+				manager.mu.Unlock()
+				if _, err := manager.AcquireConnector(testTunnelID, testConnectorID); !errors.Is(err, ErrTargetCapacity) {
+					t.Fatalf("AcquireConnector() error = %v, want ErrTargetCapacity", err)
+				}
+			},
+		},
+		{
+			name: "projected target capacity",
+			reject: func(t *testing.T, manager *Manager) {
+				mustInitialize(t, manager, testTunnelID, 1, 2)
+				connector := mustAcquire(t, manager, testTunnelID, testConnectorID)
+				t.Cleanup(func() { connector.Release() })
+				if _, err := manager.AcquireConnector(testTunnelID, testConnectorTwo); !errors.Is(err, ErrTargetCapacity) {
+					t.Fatalf("AcquireConnector() error = %v, want ErrTargetCapacity", err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := mustManager(t, 2, 2)
+			test.reject(t, manager)
+			if got := manager.MetricsSnapshot().HealthBudgetRejectionsTotal; got != 1 {
+				t.Fatalf("HealthBudgetRejectionsTotal = %d, want 1", got)
+			}
+		})
+	}
+}
+
 func mustManager(t *testing.T, perTunnel, global uint64) *Manager {
 	t.Helper()
 	manager, err := New(Options{MaxTargetsPerTunnel: perTunnel, MaxTargetsGlobal: global})
