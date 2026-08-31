@@ -3,12 +3,16 @@ package reconnect
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/agent/controlauth"
 	agentgateway "github.com/lifei6671/xtunnel/internal/agent/gateway"
+	"github.com/lifei6671/xtunnel/internal/protocol/frame"
 	protocolv1 "github.com/lifei6671/xtunnel/internal/protocol/gen"
 	connectiontoken "github.com/lifei6671/xtunnel/internal/protocol/token"
 )
@@ -124,6 +128,196 @@ func TestRunStopsOnPermanentAuthenticationAndPinErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunRetriesWrappedAuthTransportTruncation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	authTransportError := fmt.Errorf("read connector auth result: %w",
+		errors.Join(frame.ErrTruncatedFrame, syscall.ECONNRESET))
+	if !errors.Is(authTransportError, frame.ErrTruncatedFrame) ||
+		!errors.Is(authTransportError, syscall.ECONNRESET) ||
+		errors.Is(authTransportError, controlauth.ErrProtocol) {
+		t.Fatalf("auth transport error identity = %v, want truncated frame + connection reset without protocol violation",
+			authTransportError)
+	}
+
+	starter := &failingStarter{err: authTransportError}
+	randomCalls := 0
+	sleepCalls := 0
+	var gotDelay time.Duration
+	err := Run(ctx, starter, func(context.Context, *fakeSession) error { return nil }, Options{
+		InitialBackoff: 2 * time.Second, MaximumBackoff: 30 * time.Second, StableAfter: time.Minute,
+		JitterFraction: 0.2,
+		RandomUnit: func() (float64, error) {
+			randomCalls++
+			return 0.5, nil
+		},
+		Sleep: func(sleepContext context.Context, delay time.Duration) error {
+			sleepCalls++
+			gotDelay = delay
+			cancel()
+			return sleepContext.Err()
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if starter.calls != 1 || randomCalls != 1 || sleepCalls != 1 {
+		t.Fatalf("calls = start:%d random:%d sleep:%d, want 1/1/1",
+			starter.calls, randomCalls, sleepCalls)
+	}
+	if gotDelay != 2*time.Second {
+		t.Fatalf("retry delay = %s, want 2s", gotDelay)
+	}
+}
+
+func TestRunReconnectScaleSpreadsRetryDelays(t *testing.T) {
+	for _, connectorCount := range []int{100, 500, 1000, 5000} {
+		t.Run(fmt.Sprintf("connectors_%d", connectorCount), func(t *testing.T) {
+			results := runReconnectScale(t, connectorCount, errors.New("network unavailable"))
+
+			const bucketCount = 20
+			const lowerBound = 8 * time.Second
+			const upperBound = 12 * time.Second
+			buckets := make([]int, bucketCount)
+			uniqueDelays := make(map[time.Duration]struct{}, connectorCount)
+			for connector, got := range results {
+				if !errors.Is(got.err, context.Canceled) {
+					t.Fatalf("connector %d Run() error = %v, want context.Canceled", connector, got.err)
+				}
+				if got.startCalls != 1 || got.randomCalls != 1 || got.sleepCalls != 1 {
+					t.Fatalf("connector %d calls = start:%d random:%d sleep:%d, want 1/1/1",
+						connector, got.startCalls, got.randomCalls, got.sleepCalls)
+				}
+				if got.delay < lowerBound || got.delay >= upperBound {
+					t.Fatalf("connector %d delay = %s, want [%s,%s)", connector, got.delay, lowerBound, upperBound)
+				}
+				bucket := int((got.delay - lowerBound) * bucketCount / (upperBound - lowerBound))
+				buckets[bucket]++
+				uniqueDelays[got.delay] = struct{}{}
+			}
+
+			if len(uniqueDelays) != connectorCount {
+				t.Fatalf("unique delays = %d, want %d", len(uniqueDelays), connectorCount)
+			}
+			for bucket, count := range buckets {
+				if count == 0 || count > connectorCount/10 {
+					t.Fatalf("bucket %d count = %d, want 1..%d; buckets = %v",
+						bucket, count, connectorCount/10, buckets)
+				}
+			}
+		})
+	}
+}
+
+func TestRunReconnectScaleStopsPermanentErrors(t *testing.T) {
+	for _, connectorCount := range []int{100, 500, 1000, 5000} {
+		t.Run(fmt.Sprintf("connectors_%d", connectorCount), func(t *testing.T) {
+			failure := &controlauth.Failure{
+				Code:  protocolv1.ErrorCode_ERROR_CODE_TOKEN_INVALID,
+				Class: controlauth.FailurePermanent,
+			}
+			results := runReconnectScale(t, connectorCount, failure)
+
+			for connector, got := range results {
+				if !errors.Is(got.err, failure) {
+					t.Fatalf("connector %d Run() error = %v, want permanent failure", connector, got.err)
+				}
+				if got.startCalls != 1 || got.randomCalls != 0 || got.sleepCalls != 0 {
+					t.Fatalf("connector %d calls = start:%d random:%d sleep:%d, want 1/0/0",
+						connector, got.startCalls, got.randomCalls, got.sleepCalls)
+				}
+			}
+		})
+	}
+}
+
+func TestRunReconnectScaleHonorsRetryAfterMinimum(t *testing.T) {
+	for _, connectorCount := range []int{100, 500, 1000, 5000} {
+		t.Run(fmt.Sprintf("connectors_%d", connectorCount), func(t *testing.T) {
+			const retryAfter = 9 * time.Second
+			failure := &controlauth.Failure{
+				Code:       protocolv1.ErrorCode_ERROR_CODE_SESSION_RESOURCE_EXHAUSTED,
+				Class:      controlauth.FailureRetryable,
+				RetryAfter: retryAfter,
+			}
+			results := runReconnectScale(t, connectorCount, failure)
+
+			clamped := 0
+			aboveMinimum := 0
+			for connector, got := range results {
+				if !errors.Is(got.err, context.Canceled) {
+					t.Fatalf("connector %d Run() error = %v, want context.Canceled", connector, got.err)
+				}
+				if got.startCalls != 1 || got.randomCalls != 1 || got.sleepCalls != 1 {
+					t.Fatalf("connector %d calls = start:%d random:%d sleep:%d, want 1/1/1",
+						connector, got.startCalls, got.randomCalls, got.sleepCalls)
+				}
+				if got.delay < retryAfter {
+					t.Fatalf("connector %d delay = %s, below retry_after %s", connector, got.delay, retryAfter)
+				}
+				if got.delay == retryAfter {
+					clamped++
+				} else {
+					aboveMinimum++
+				}
+			}
+			if clamped == 0 || aboveMinimum == 0 {
+				t.Fatalf("retry_after distribution = clamped:%d above:%d, want both", clamped, aboveMinimum)
+			}
+		})
+	}
+}
+
+type reconnectScaleResult struct {
+	delay       time.Duration
+	err         error
+	startCalls  int
+	randomCalls int
+	sleepCalls  int
+}
+
+func runReconnectScale(t *testing.T, connectorCount int, starterError error) []reconnectScaleResult {
+	t.Helper()
+	results := make([]reconnectScaleResult, connectorCount)
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	workers.Add(connectorCount)
+
+	// 每个 Worker 只写自己的结果槽，并拥有独立 Context。起跑门闩制造同批并发，
+	// Sleep 主动取消且 WaitGroup 等待全部退出，因此测试不会依赖真实时间或遗留 goroutine。
+	for connector := range connectorCount {
+		go func() {
+			defer workers.Done()
+			<-start
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			starter := &failingStarter{err: starterError}
+			unit := float64(connector) / float64(connectorCount)
+			var got reconnectScaleResult
+			got.err = Run(ctx, starter, func(context.Context, *fakeSession) error { return nil }, Options{
+				InitialBackoff: 10 * time.Second, MaximumBackoff: 30 * time.Second,
+				StableAfter: time.Minute, JitterFraction: 0.2,
+				RandomUnit: func() (float64, error) {
+					got.randomCalls++
+					return unit, nil
+				},
+				Sleep: func(ctx context.Context, delay time.Duration) error {
+					got.sleepCalls++
+					got.delay = delay
+					cancel()
+					return ctx.Err()
+				},
+			})
+			got.startCalls = starter.calls
+			results[connector] = got
+		}()
+	}
+
+	close(start)
+	workers.Wait()
+	return results
 }
 
 func TestJitterBoundsAndInvalidRandom(t *testing.T) {

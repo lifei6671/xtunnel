@@ -343,8 +343,8 @@ func classifyReadError(err error) error {
 		errors.Is(classified, context.DeadlineExceeded) {
 		return classified
 	}
-	if errors.Is(err, frame.ErrInvalidLength) || errors.Is(err, frame.ErrTruncatedFrame) ||
-		errors.Is(err, frame.ErrFrameTooLarge) || errors.Is(err, frame.ErrMalformedMessage) {
+	if errors.Is(err, frame.ErrInvalidLength) || errors.Is(err, frame.ErrFrameTooLarge) ||
+		errors.Is(err, frame.ErrMalformedMessage) {
 		return fmt.Errorf("%w: auth result frame: %v", ErrProtocol, err)
 	}
 	return classified

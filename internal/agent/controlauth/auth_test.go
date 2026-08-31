@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"syscall"
 	"testing"
 	"time"
 
@@ -135,6 +137,13 @@ func TestAuthenticateRejectsMalformedUnknownAndOversizedResults(t *testing.T) {
 		handler func(net.Conn) error
 	}{
 		{
+			name: "non-canonical frame length",
+			handler: func(connection net.Conn) error {
+				_, err := connection.Write([]byte{0x80, 0x00})
+				return err
+			},
+		},
+		{
 			name: "malformed protobuf",
 			handler: func(connection net.Conn) error {
 				return frame.WritePayload(connection, []byte{0xff}, frame.MaxAuthFrameSize)
@@ -172,6 +181,49 @@ func TestAuthenticateRejectsMalformedUnknownAndOversizedResults(t *testing.T) {
 				t.Fatalf("Authenticate() error = %v, want ErrProtocol", err)
 			}
 		})
+	}
+}
+
+func TestClassifyReadErrorPreservesTruncatedAuthResultCause(t *testing.T) {
+	tests := []struct {
+		name      string
+		frameData []byte
+		wantCause error
+	}{
+		{name: "truncated length", frameData: []byte{0x80}, wantCause: io.EOF},
+		{name: "truncated payload", frameData: []byte{0x03, 0x01, 0x02}, wantCause: io.ErrUnexpectedEOF},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			readErr := frame.ReadAuth(bytes.NewReader(test.frameData), &protocolv1.ConnectorAuthResult{})
+			err := classifyReadError(readErr)
+			if !errors.Is(err, frame.ErrTruncatedFrame) {
+				t.Fatalf("classifyReadError() error = %v, want ErrTruncatedFrame identity", err)
+			}
+			if !errors.Is(err, test.wantCause) {
+				t.Fatalf("classifyReadError() error = %v, want cause %v", err, test.wantCause)
+			}
+			if errors.Is(err, ErrProtocol) {
+				t.Fatalf("classifyReadError() error = %v, must not be permanent ErrProtocol", err)
+			}
+		})
+	}
+}
+
+func TestClassifyReadErrorPreservesConnectionResetCause(t *testing.T) {
+	connectionReset := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+	truncated := fmt.Errorf("%w: payload: %w", frame.ErrTruncatedFrame, connectionReset)
+
+	err := classifyReadError(truncated)
+	if !errors.Is(err, frame.ErrTruncatedFrame) {
+		t.Fatalf("classifyReadError() error = %v, want ErrTruncatedFrame identity", err)
+	}
+	if !errors.Is(err, syscall.ECONNRESET) {
+		t.Fatalf("classifyReadError() error = %v, want ECONNRESET identity", err)
+	}
+	if errors.Is(err, ErrProtocol) {
+		t.Fatalf("classifyReadError() error = %v, must not be permanent ErrProtocol", err)
 	}
 }
 

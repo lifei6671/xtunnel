@@ -1,6 +1,6 @@
 # M7-01 调优证据
 
-> 状态：`REVIEW`
+> 状态：`DONE`（2026-08-31 用户阶段复审通过）
 
 ## 证据边界
 
@@ -187,5 +187,6 @@ Baseline 五次仍为约 `32,830–32,836 B/op`、`4 allocs/op`；这证明生�
 
 结论：M7-01 的三组真实路径 Benchmark、正式环境、资源解释、“保持默认值”调优决策、
 32 KiB 生产 Buffer、关键 Test/Race/Vet、fresh Proxy 正式复验和独立 checkpoint 复审均已
-齐备；精确 CI 与 commit-bound 最终独立复审也已通过。M7-01 进入 `REVIEW`，等待用户
-明确阶段复审；当前不能标记 `DONE`。
+齐备；精确 CI 与 commit-bound 最终独立复审也已通过。用户于 2026-08-31 明确给出
+“`M7-01 阶段复审通过`”，M7-01 已转为 `DONE`。该批准不改变上述 32 KiB 结论、
+未验证边界或 M7 Alpha Gate 状态。
