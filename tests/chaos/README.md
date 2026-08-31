@@ -105,3 +105,58 @@ Pending TLS/Auth 数值。
 - `0`：所选模式的所有档位通过，且临时文件已清理。
 - `1`：参数、平台、工具链、工作区、Manifest/SHA-256、FD 前置检查、测试或清理失败。
 - `129`、`130`、`143`：分别收到 `HUP`、`INT`、`TERM`，退出前仍会执行清理。
+
+---
+
+# M7-03 Graceful Shutdown Chaos Test
+
+M7-03 Runner 调度 `internal/server/bootstrap.TestM7GracefulShutdownChaos`。测试从真实
+公网 TCP/HTTP Listener 进入生产 Bootstrap、Gateway、Token-only Agent 与 Origin，覆盖：
+
+- Server Drain 期间真实 TCP Half-Close 的反向尾部字节；
+- HTTP Streaming 与 WebSocket 在 Graceful Period 内自然完成；
+- TCP、HTTP Slow Origin、WebSocket 同时阻塞时的 Hard Deadline Force Close；
+- Agent 发起两阶段 Drain 后保留既有 ACTIVE、拒绝新 OPEN；
+- Session Snapshot 清空，以及 FD/goroutine 回到冻结预算。
+
+阶段栅栏由 Channel 和 Socket 事件驱动，主断言不依赖随机延迟。组件级的 DrainRequest/Ack
+ID、旧 Ack、OPENING、Usage exactly-once、单边 EOF 和 SIGTERM 接线仍由各 owner 的定向
+测试负责；本 Runner 不把单一产品级用例冒充这些组件证据。
+
+## 构建与运行
+
+直接在装有项目固定 Go `go1.27.0` 的 Linux 环境运行：
+
+```sh
+./tests/chaos/run-m7-03.sh -m smoke
+./tests/chaos/run-m7-03.sh -m full
+```
+
+Linux 没有 Go 时，可在 Windows 使用项目固定工具链生成 `linux/amd64`、
+`GOAMD64=v1`、`CGO_ENABLED=0` 的测试 Binary 与 Manifest：
+
+```powershell
+./tests/chaos/build-m7-03-linux.ps1 -OutputDirectory C:\Temp\xtunnel-m7-03-bin
+```
+
+然后在 Linux/WSL2 中运行：
+
+```sh
+./tests/chaos/run-m7-03.sh -m smoke -b /mnt/c/Temp/xtunnel-m7-03-bin
+./tests/chaos/run-m7-03.sh -m full -b /mnt/c/Temp/xtunnel-m7-03-bin
+```
+
+`smoke` 只运行 TCP Half-Close 自然排空场景；`full` 执行完整场景矩阵。两种模式都把
+Binary 和输出复制到 Linux-native `/tmp/xtunnel-m7-03.XXXXXX`，并在退出时精确清理。
+`full` 还要求当前工作区与预编译 Manifest 均为 clean；Builder 的 `-AllowDirty` 只允许
+生成开发 Smoke 产物。
+
+## 证据边界
+
+- Windows 交叉编译只证明 Linux Test Binary 可生成，不构成 Linux Runtime 证据。
+- WSL2 是 Linux 内核运行证据，但不等于独立原生 Linux 主机或代表性网络条件。
+- `smoke` 不覆盖完整矩阵，不能作为 M7-03 正式通过证据。
+- `full` 只绑定 Manifest 中的 Commit、工具链、平台与 Binary SHA-256；仍需结合定向
+  Test/Race/Vet、精确 CI 和独立交付复审。
+- Runner 不调整 30 秒生产 Drain 默认值，不修改 Proto、Schema、CI、网络 namespace、
+  `tc netem` 或 `nftables`；特权网络故障注入属于 M7-08。

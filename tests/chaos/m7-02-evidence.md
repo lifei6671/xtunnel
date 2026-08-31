@@ -1,6 +1,6 @@
 # M7-02 重连风暴验证证据
 
-> 状态：`REVIEW`（生产分类修复、clean `full`、精确 CI 与 commit-bound 最终独立复审均已通过；等待用户阶段复审）
+> 状态：`DONE`（生产分类修复、clean `full`、精确 CI、commit-bound 最终独立复审与用户阶段复审均已通过）
 
 ## 证据边界
 
@@ -131,8 +131,11 @@ PARTITIONED_PLUS_INTEGRATION`，覆盖 Baseline
 Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`。
 累计 Repair rounds=`3`，冻结提交后的 Repair rounds=`0`。
 
-因此 M7-02 进入 `REVIEW`，等待用户明确阶段复审。当前仍不是 `DONE`，也不构成 M7
-Alpha Gate 通过；WSL2 Loopback 结果不代表原生 Linux 或代表性网络条件。
+用户已明确给出“`M7-02 阶段复审通过`”，因此 M7-02 转为 `DONE`。`REVIEW` 证据提交
+`1babca3290447b33b02ae126c9d03c532c97ff8a` 的
+[GitHub Actions #33391768517](https://github.com/lifei6671/xtunnel/actions/runs/33391768517)
+精确绑定该 SHA，四个 Job 全部成功。M7-02 `DONE` 不构成 M7 Alpha Gate 通过；WSL2
+Loopback 结果不代表独立原生 Linux 主机或代表性网络条件。
 
 ## 已执行命令
 
