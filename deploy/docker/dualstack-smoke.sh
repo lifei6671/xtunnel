@@ -58,9 +58,13 @@ export XTUNNEL_PLATFORM="$platform"
 export XTUNNEL_VERSION=v0.1.0-smoke
 export XTUNNEL_MANAGEMENT_PUBLIC_URL=https://localhost:8080
 export XTUNNEL_AGENT_GATEWAY_HOSTNAME=localhost
-# 端口 0 让 Docker 为四个宿主监听分别选择空闲端口，避免 Smoke 与现有服务冲突。
-export XTUNNEL_MANAGEMENT_PORT=0
-export XTUNNEL_AGENT_GATEWAY_PORT=0
+# 部分 Docker 版本会把同一容器端口的多条 published: 0 映射分配到同一宿主
+# 端口，随后在 IPv4/IPv6 绑定阶段自相冲突。Smoke 使用一对显式高位端口，仍
+# 保持每个产品入口的 IPv4/IPv6 同端口契约；仅在宿主端口竞争时有界换号。
+port_seed=$(date +%s)
+smoke_port_base=$((20000 + ((port_seed + $$) % 30000)))
+export XTUNNEL_MANAGEMENT_PORT=$smoke_port_base
+export XTUNNEL_AGENT_GATEWAY_PORT=$((smoke_port_base + 1))
 agent_token_path="$repo_dir/tests/golden/protocol-v1/connection-token-v1.txt"
 if [ ! -r "$agent_token_path" ]; then
 	printf 'Agent smoke Connection Token fixture is not readable: %s\n' "$agent_token_path" >&2
@@ -103,7 +107,31 @@ if [ "$build" -eq 1 ]; then
 	compose build server
 	compose build agent
 fi
-compose up --detach --no-build
+
+start_compose() {
+	attempt=1
+	while [ "$attempt" -le 3 ]; do
+		if output=$(compose up --detach --no-build 2>&1); then
+			printf '%s\n' "$output"
+			return 0
+		fi
+		printf '%s\n' "$output" >&2
+		case "$output" in
+			*"address already in use"*) ;;
+			*) return 1 ;;
+		esac
+		if [ "$attempt" -eq 3 ]; then
+			return 1
+		fi
+		compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+		smoke_port_base=$((smoke_port_base + 2))
+		export XTUNNEL_MANAGEMENT_PORT=$smoke_port_base
+		export XTUNNEL_AGENT_GATEWAY_PORT=$((smoke_port_base + 1))
+		attempt=$((attempt + 1))
+	done
+}
+
+start_compose
 
 wait_for_start() {
 	service=$1
@@ -190,8 +218,10 @@ printf '%s' "$published_ports" | grep -F '"HostIp":"127.0.0.1"' >/dev/null
 printf '%s' "$published_ports" | grep -F '"HostIp":"::1"' >/dev/null
 printf '%s' "$published_ports" | grep -F '"HostIp":"0.0.0.0"' >/dev/null
 printf '%s' "$published_ports" | grep -F '"HostIp":"::"' >/dev/null
+printf '%s' "$published_ports" | grep -F "\"HostPort\":\"$XTUNNEL_MANAGEMENT_PORT\"" >/dev/null
+printf '%s' "$published_ports" | grep -F "\"HostPort\":\"$XTUNNEL_AGENT_GATEWAY_PORT\"" >/dev/null
 if printf '%s' "$published_ports" | grep -F '"HostPort":"0"' >/dev/null; then
-	printf '%s\n' "Docker did not allocate the requested ephemeral host ports" >&2
+	printf '%s\n' "Compose retained an invalid zero host port" >&2
 	exit 1
 fi
 

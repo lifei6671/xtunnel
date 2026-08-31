@@ -180,8 +180,17 @@ function Invoke-AgentExpectFailure {
         [string[]]$ForbiddenValues = @()
     )
 
-    $output = & $agentFullPath @ArgumentList 2>&1
-    $exitCode = $LASTEXITCODE
+    # Windows PowerShell 5.1 promotes native stderr to a terminating error when
+    # ErrorActionPreference is Stop. Expected product failures must still be captured.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & $agentFullPath @ArgumentList 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
     foreach ($forbidden in $ForbiddenValues) {
         if ((-not [string]::IsNullOrEmpty($forbidden)) -and $message.Contains($forbidden)) {
