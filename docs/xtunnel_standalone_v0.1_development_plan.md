@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-31
 >
-> **当前阶段**：M0-12 M0 Gate · REVIEW（11 项 Checklist 已全部通过，等待用户阶段复审）
+> **当前阶段**：M7 Hardening · READY（M0 完整 Gate 已通过；等待 M7-01 推荐范围确认）
 >
-> **当前结论**：Windows arm64 Runtime Evidence Gap 已由实现提交 `93613e4f83f38cafeec1b07f0e1950761c383b3f` 关闭；其精确 [CI #33355233841](https://github.com/lifei6671/xtunnel/actions/runs/33355233841) attempt 2 为 `completed/success`，Linux amd64/arm64、Windows amd64 Service 与 Windows arm64 原生 Agent Runtime 四个 Job 全部成功。Windows arm64 Runner 已实际通过 Token Bootstrap、DPAPI/SCM Self-install、启动、Shutdown、Recovery、Self-uninstall 与清理 Smoke；结合 M0-01 至 M0-11 既有证据和两路分区加总集成独立复审 P0/P1/P2=`0/0/0`，M0 Gate 11 项 Checklist 全部通过，M0-12 转为 `REVIEW`。用户阶段复审前不标记 `DONE`，因此 M0 保持 `11/12`、全局保持 `84/95`，M7 继续等待 M0-12 `DONE`。
+> **当前结论**：用户已明确确认 M0-12 阶段复审通过。实现提交 `93613e4f83f38cafeec1b07f0e1950761c383b3f` 的精确 [CI #33355233841](https://github.com/lifei6671/xtunnel/actions/runs/33355233841) attempt 2，以及 `REVIEW` 证据提交 `2305e7feccae4fbe6073f4c3702e57881684edf5` 的精确 [CI #33356616887](https://github.com/lifei6671/xtunnel/actions/runs/33356616887) attempt 1 均为 `completed/success`，Windows arm64 Runtime、Windows amd64 Service 与 Linux amd64/arm64 四个 Job 全部成功。结合 11/11 Checklist 和独立复审 P0/P1/P2=`0/0/0`，M0-12 从 `REVIEW` 转为 `DONE`，M0 完成度更新为 `12/12 DONE`、全局更新为 `85/95`。M7-01 至 M7-08 的前置依赖均已满足并进入 `READY`；M7-09 继续等待 M7-04，M7-10 继续等待 M7-01 至 M7-09，本轮不启动 M7 实现。
 
 ---
 
@@ -103,7 +103,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 
 | 里程碑 | 任务数 | 已完成 | 状态 | 入口依赖 | 退出 Gate |
 | --- | ---: | ---: | --- | --- | --- |
-| M0 工程初始化 | 12 | 11 | `REVIEW` | 技术方案基线 | M0-12 |
+| M0 工程初始化 | 12 | 12 | `DONE` | 技术方案基线 | M0-12 |
 | M0.5 Protocol Freeze | 10 | 10 | `DONE` | M0-06 | M05-10 |
 | M1 Secure TCP Baseline | 14 | 14 | `DONE` | M05-10 | M1-14 |
 | M2 Credential/Failover Hardening | 8 | 8 | `DONE` | M1-14 | M2-08 |
@@ -111,8 +111,8 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 7 | `DONE` | M5-11 | M6-07 |
-| M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **84** |  |  |  |
+| M7 Hardening/Alpha | 10 | 0 | `READY` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
+| **合计** | **95** | **85** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -135,7 +135,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M0-09 | OCI/Compose 双栈、Server Shell Packaging 与跨平台 Agent Binary Self-install | M0-03、M0-08 | `deploy/docker`、Server-only `deploy/systemd`、Agent `service install/uninstall`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Agent 在 root/systemd>=249 快速失败，原子安装 Binary、root-only Credential 与 Managed Unit；Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；两端持久启动项只含 Binary + `run` 且无 Secret，均以 managed marker 拒绝覆盖/删除非受管同名服务，卸载保留 Credential；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `DONE` |
 | M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-08 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke。M0-09 的 Compose Runtime Smoke 仍由 M0-09 单独验收 | `DONE` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `DONE` |
-| M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `REVIEW` |
+| M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `DONE` |
 
 ## 5.2 可并行推进
 
@@ -397,14 +397,14 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 对 16/32/64 KiB Proxy Buffer、HTTP/1.1 WorkConn Capacity、Connector Selection CPU/Allocation 做 Benchmark；只依据本项目结果调整 Server Schema 默认值，不删除预算维度；记录 CPU/RAM/FD 环境 | `NOT_STARTED` |
-| M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 100/500/1000 Connector 使用 Stagger + Jitter 重连，无同步 TLS/Auth Storm；永久错误不快速重试；记录 Pending TLS/Auth、`retry_after`、FD/CPU/RAM；Server Restart 后测量 `T_control_reconnect`、`T_config_ready`、`T_workpool_ready`、`T_first_success` 分布，旧 generation 无污染 | `NOT_STARTED` |
-| M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `NOT_STARTED` |
-| M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `NOT_STARTED` |
-| M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `NOT_STARTED` |
-| M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `NOT_STARTED` |
-| M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `NOT_STARTED` |
-| M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `NOT_STARTED` |
+| M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 对 16/32/64 KiB Proxy Buffer、HTTP/1.1 WorkConn Capacity、Connector Selection CPU/Allocation 做 Benchmark；只依据本项目结果调整 Server Schema 默认值，不删除预算维度；记录 CPU/RAM/FD 环境 | `READY` |
+| M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 100/500/1000 Connector 使用 Stagger + Jitter 重连，无同步 TLS/Auth Storm；永久错误不快速重试；记录 Pending TLS/Auth、`retry_after`、FD/CPU/RAM；Server Restart 后测量 `T_control_reconnect`、`T_config_ready`、`T_workpool_ready`、`T_first_success` 分布，旧 generation 无污染 | `READY` |
+| M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `READY` |
+| M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `READY` |
+| M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `READY` |
+| M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `READY` |
+| M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `READY` |
+| M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `READY` |
 | M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；两端 Agent Binary `service install/uninstall` 的安装/升级/卸载覆盖 Managed Marker、Binary 替换、Secret 不落 SCM/argv 和非托管 Unit/Service 拒绝边界；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `NOT_STARTED` |
 | M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `NOT_STARTED` |
 
@@ -424,11 +424,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01` 至 `M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
+当前 `M0-01` 至 `M0-12`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
 
-1. `M0-12` — M0-01 至 M0-11 已全部 `DONE`；11 项 Checklist、Windows arm64 原生 Runtime、独立复审与精确 CI 证据均已齐备，任务进入 `REVIEW`，等待用户阶段复审。
+1. `M7-01` — 推荐下一项。先审计现有 Benchmark、Schema Limit 权威、CI Runner 环境与 CPU/RAM/FD 记录入口，确认最小实施范围后再开工；若 Benchmark 结果需要调整 Server Schema 默认值，必须另行取得配置契约变更确认。
+2. `M7-02` 至 `M7-08` — 前置依赖均已满足并进入 `READY`，但本轮不并行启动实现。
+3. `M7-09` — 继续等待 M7-04 `DONE`；`M7-10` — 继续等待 M7-01 至 M7-09 全部 `DONE`。
 
-`M0-12` 仍是 Alpha 前 Gate。M0-01 至 M0-11、M0.5、M1、M2、M3、M4、M5 与 M6 已完成；全局完成数为 `84/95`。用户明确通过 M0-12 阶段复审前不标记 `DONE`，M7 继续 `NOT_STARTED`。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `85/95`。M7 当前为 `READY`，尚未开始任何实现，也未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -1694,3 +1696,10 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 独立复审：Windows/SCM/DPAPI/Secret/Cleanup 分区、CI Contract/Runner/Toolchain/Permissions 分区与最终集成链路均完成只读复审，覆盖度 `COMPLETE`、证据新鲜度 `FRESH`，最终 P0/P1/P2=`0/0/0`，修复轮次为 `0`。
 - 状态与边界：M0 Gate 11 项 Checklist 全部勾选，M0-12 从 `IN_PROGRESS` 转为 `REVIEW` 等待用户阶段复审；用户明确通过前不标记 `DONE`，因此 M0 保持 `11/12`、全局保持 `84/95`，M7 继续 `NOT_STARTED`。
 - 文档同步：仅更新本开发计划的当前阶段、M0-12 状态、Checklist、队列和证据记录。根 README 与总技术方案无需修改，因为产品命令、平台支持矩阵、机器契约和运行行为没有变化；CI Workflow 已由实现提交记录。
+
+## 2026-08-31 · M0-12 用户阶段复审与 M0 完成 · DONE
+
+- 用户复审与证据：用户明确回复 `M0-12 阶段复审通过`。Windows arm64 Runtime 实现提交 `93613e4f83f38cafeec1b07f0e1950761c383b3f` 的 [CI #33355233841](https://github.com/lifei6671/xtunnel/actions/runs/33355233841) attempt 2，以及 `REVIEW` 证据提交 `2305e7feccae4fbe6073f4c3702e57881684edf5` 的 [CI #33356616887](https://github.com/lifei6671/xtunnel/actions/runs/33356616887) attempt 1 均为 `completed/success`；Windows arm64 Agent Runtime、Windows amd64 Agent Service、Linux amd64 与 Linux arm64 四个 Job 全部成功。M0 Gate 11 项 Checklist、分区和集成独立复审 P0/P1/P2=`0/0/0` 均已齐备。
+- 状态影响：M0-12 从 `REVIEW` 转为 `DONE`，M0 从 `11/12` 更新为 `12/12 DONE`，全局从 `84/95` 更新为 `85/95`。M7-01 至 M7-08 的任务级依赖均已满足并转为 `READY`；M7-09 继续等待 M7-04，M7-10 继续等待 M7-01 至 M7-09。
+- 下一步边界：推荐先对 M7-01 的既有 Benchmark、Limit/Timeout/Rate 权威和可复现环境做只读范围审计，再请求实现确认。本轮不启动 M7-01 至 M7-08，不修改 Server Schema 默认值，不勾选 Alpha Release Gate Checklist。
+- 文档同步：仅更新本开发计划的当前阶段、M0-12/M7 状态、仪表盘、队列和用户复审记录。根 README、总技术方案、Proto、OpenAPI、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、权限模型、日志字段与 `AGENTS.md` 无需更新，因为本轮只闭环既有 Gate 证据和用户审批，没有改变产品或机器契约。
