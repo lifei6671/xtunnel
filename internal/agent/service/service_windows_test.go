@@ -138,6 +138,67 @@ func TestLoadWindowsCredentialFile(t *testing.T) {
 	}
 }
 
+func TestResolveWindowsServiceTokenPrecedence(t *testing.T) {
+	tests := []struct {
+		name             string
+		resolveOverride  func() (string, bool, error)
+		credentialToken  string
+		credentialErr    error
+		want             string
+		wantErr          string
+		wantCredentialIO bool
+	}{
+		{
+			name: "override wins without credential IO",
+			resolveOverride: func() (string, bool, error) {
+				return "xta_override_secret", true, nil
+			},
+			credentialErr: errors.New("corrupt lower-priority credential"),
+			want:          "xta_override_secret",
+		},
+		{
+			name: "credential fallback",
+			resolveOverride: func() (string, bool, error) {
+				return "", false, nil
+			},
+			credentialToken:  "xta_credential_secret",
+			want:             "xta_credential_secret",
+			wantCredentialIO: true,
+		},
+		{
+			name: "invalid override fails without credential IO",
+			resolveOverride: func() (string, bool, error) {
+				return "", true, errors.New("invalid override")
+			},
+			credentialToken: "xta_credential_secret",
+			wantErr:         "resolve Windows service token override: invalid override",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			credentialRead := false
+			token, err := resolveWindowsServiceToken(test.resolveOverride, func() (string, error) {
+				credentialRead = true
+				return test.credentialToken, test.credentialErr
+			})
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("resolveWindowsServiceToken() error = %v", err)
+				}
+			} else if err == nil || err.Error() != test.wantErr {
+				t.Fatalf("resolveWindowsServiceToken() error = %v, want %q", err, test.wantErr)
+			}
+			if token != test.want {
+				t.Fatalf("resolveWindowsServiceToken() = %q, want %q", token, test.want)
+			}
+			if credentialRead != test.wantCredentialIO {
+				t.Fatalf("credential read = %t, want %t", credentialRead, test.wantCredentialIO)
+			}
+		})
+	}
+}
+
 func TestWindowsServiceHandlerCancelsOnStop(t *testing.T) {
 	const token = "xta_windows_service_secret"
 	started := make(chan struct{})

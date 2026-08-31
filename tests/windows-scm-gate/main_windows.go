@@ -28,7 +28,7 @@ func run(args []string) int {
 		return 2
 	}
 
-	handled, err := service.RunIfManagedService(func(ctx context.Context, _ string, _ io.Writer) error {
+	handled, err := service.RunIfManagedService(nil, func(ctx context.Context, _ string, _ io.Writer) error {
 		firstRun, err := claimFirstRun(args[2])
 		if err != nil {
 			return err

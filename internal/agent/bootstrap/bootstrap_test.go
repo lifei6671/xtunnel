@@ -81,6 +81,64 @@ func TestResolveTokenSourcesAndPrecedence(t *testing.T) {
 	}
 }
 
+func TestResolveTokenOverrideDoesNotReadServiceCredential(t *testing.T) {
+	tests := []struct {
+		name        string
+		cliToken    string
+		cliTokenSet bool
+		environ     []string
+		want        string
+		wantFound   bool
+	}{
+		{
+			name:        "CLI wins over environment",
+			cliToken:    "xta_cli_override_secret",
+			cliTokenSet: true,
+			environ:     []string{"XTUNNEL_TOKEN=xta_environment_secret"},
+			want:        "xta_cli_override_secret",
+			wantFound:   true,
+		},
+		{
+			name:      "environment override",
+			environ:   []string{"XTUNNEL_TOKEN=xta_environment_secret"},
+			want:      "xta_environment_secret",
+			wantFound: true,
+		},
+		{
+			name:      "service credential remains lazy fallback",
+			environ:   []string{"CREDENTIALS_DIRECTORY=missing-service-credential"},
+			wantFound: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, found, err := resolveTokenOverrideSource(test.cliToken, test.cliTokenSet, test.environ)
+			if err != nil {
+				t.Fatalf("resolveTokenOverrideSource() error = %v", err)
+			}
+			if got != test.want || found != test.wantFound {
+				t.Fatalf("resolveTokenOverrideSource() = (%q, %t), want (%q, %t)", got, found, test.want, test.wantFound)
+			}
+		})
+	}
+}
+
+func TestResolveTokenOverrideRejectsInvalidHighPrioritySourceWithoutLeaking(t *testing.T) {
+	const secret = "invalid_cli_override_secret"
+	_, found, err := resolveTokenOverrideSource(
+		secret,
+		true,
+		[]string{"XTUNNEL_TOKEN=xta_environment_secret"},
+	)
+	if !found || err == nil || !strings.Contains(err.Error(), "must start with xta_") {
+		t.Fatalf("resolveTokenOverrideSource() = found %t, error %v", found, err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatal("override validation error leaked Token")
+	}
+}
+
 func TestResolveTokenRejectsMissingOrInvalidTokenWithoutLeaking(t *testing.T) {
 	tests := []struct {
 		name    string

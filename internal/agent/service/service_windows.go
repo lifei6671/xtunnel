@@ -628,7 +628,26 @@ func (handler *windowsServiceHandler) Execute(
 	}
 }
 
-func runIfManagedService(callback func(context.Context, string, io.Writer) error) (handled bool, resultErr error) {
+func resolveWindowsServiceToken(
+	resolveOverride func() (string, bool, error),
+	loadCredential func() (string, error),
+) (string, error) {
+	if resolveOverride != nil {
+		token, found, err := resolveOverride()
+		if err != nil {
+			return "", fmt.Errorf("resolve Windows service token override: %w", err)
+		}
+		if found {
+			return token, nil
+		}
+	}
+	return loadCredential()
+}
+
+func runIfManagedService(
+	resolveOverride func() (string, bool, error),
+	callback func(context.Context, string, io.Writer) error,
+) (handled bool, resultErr error) {
 	isService, err := svc.IsWindowsService()
 	if err != nil {
 		return false, fmt.Errorf("detect Windows service context: %w", err)
@@ -658,7 +677,9 @@ func runIfManagedService(callback func(context.Context, string, io.Writer) error
 	}
 	handler := &windowsServiceHandler{
 		callback: callback,
-		load:     loadWindowsCredential,
+		load: func() (string, error) {
+			return resolveWindowsServiceToken(resolveOverride, loadWindowsCredential)
+		},
 		stopWait: windowsStateLimit,
 		writer:   eventWriter,
 		logger:   logger,

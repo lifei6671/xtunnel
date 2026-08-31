@@ -196,9 +196,14 @@ func Name() string {
 }
 
 // RunIfManagedService runs callback under the native service dispatcher when
-// the current process was started by it. The callback receives the platform's
+// the current process was started by it. resolveOverride is evaluated lazily only
+// in that service context; a returned Token takes precedence over the platform
+// credential. The callback receives the selected Token and the platform's
 // persistent service log writer. Foreground processes return handled=false without
-// invoking the callback.
-func RunIfManagedService(callback func(context.Context, string, io.Writer) error) (handled bool, err error) {
-	return runIfManagedService(callback)
+// invoking either function.
+func RunIfManagedService(
+	resolveOverride func() (token string, found bool, err error),
+	callback func(context.Context, string, io.Writer) error,
+) (handled bool, err error) {
+	return runIfManagedService(resolveOverride, callback)
 }

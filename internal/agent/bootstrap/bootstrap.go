@@ -171,9 +171,17 @@ func newAgentCommand(
 				if current.NArg() != 0 {
 					return errors.New("unexpected positional arguments")
 				}
-				return runWithTokenSource(ctx, stderr, runLifecycle, func() (string, error) {
-					return resolveTokenSource(runToken, current.IsSet("token"), environ)
-				})
+				return runWithTokenSource(
+					ctx,
+					stderr,
+					runLifecycle,
+					func() (string, error) {
+						return resolveTokenSource(runToken, current.IsSet("token"), environ)
+					},
+					func() (string, bool, error) {
+						return resolveTokenOverrideSource(runToken, current.IsSet("token"), environ)
+					},
+				)
 			},
 		},
 		{
@@ -317,6 +325,8 @@ func runWithLifecycle(
 ) error {
 	return runWithTokenSource(ctx, stderr, lifecycle, func() (string, error) {
 		return resolveToken(program, args, environ, stderr)
+	}, func() (string, bool, error) {
+		return resolveTokenOverride(program, args, environ, stderr)
 	})
 }
 
@@ -325,11 +335,12 @@ func runWithTokenSource(
 	stderr io.Writer,
 	lifecycle lifecycleRunner,
 	resolve func() (string, error),
+	resolveServiceOverride func() (string, bool, error),
 ) error {
 	if lifecycle == nil {
 		return errors.New("Agent lifecycle runner must not be nil")
 	}
-	handled, err := service.RunIfManagedService(func(serviceContext context.Context, token string, writer io.Writer) error {
+	handled, err := service.RunIfManagedService(resolveServiceOverride, func(serviceContext context.Context, token string, writer io.Writer) error {
 		validatedToken, err := validateToken(token)
 		if err != nil {
 			return fmt.Errorf("validate Windows service credential: %w", err)
@@ -394,8 +405,28 @@ func runLifecycle(ctx context.Context, token string, stderr io.Writer) (resultEr
 }
 
 func resolveToken(program string, args, environ []string, stderr io.Writer) (string, error) {
+	cliToken, cliTokenSet, err := parseTokenFlag(program, args, stderr)
+	if err != nil {
+		return "", err
+	}
+	return resolveTokenSource(cliToken, cliTokenSet, environ)
+}
+
+func resolveTokenOverride(
+	program string,
+	args, environ []string,
+	stderr io.Writer,
+) (string, bool, error) {
+	cliToken, cliTokenSet, err := parseTokenFlag(program, args, stderr)
+	if err != nil {
+		return "", false, err
+	}
+	return resolveTokenOverrideSource(cliToken, cliTokenSet, environ)
+}
+
+func parseTokenFlag(program string, args []string, stderr io.Writer) (string, bool, error) {
 	var cliToken string
-	var token string
+	var cliTokenSet bool
 	parsed := false
 	stopOnFirstArgument := 1
 	command := &cli.Command{
@@ -416,26 +447,23 @@ func resolveToken(program string, args, environ []string, stderr io.Writer) (str
 				return errors.New("unexpected positional arguments")
 			}
 			parsed = true
-			var err error
-			token, err = resolveTokenSource(cliToken, current.IsSet("token"), environ)
-			return err
+			cliTokenSet = current.IsSet("token")
+			return nil
 		},
 	}
 	if err := command.Run(context.Background(), append([]string{program}, args...)); err != nil {
-		return "", fmt.Errorf("parse command line: %w", err)
+		return "", false, fmt.Errorf("parse command line: %w", err)
 	}
 	if !parsed {
-		return "", errCLIHelp
+		return "", false, errCLIHelp
 	}
-	return token, nil
+	return cliToken, cliTokenSet, nil
 }
 
 func resolveTokenSource(cliToken string, cliTokenSet bool, environ []string) (string, error) {
-	if cliTokenSet {
-		return validateToken(cliToken)
-	}
-	if token, ok := lookupEnvironment(environ, tokenEnvironment); ok {
-		return validateToken(token)
+	token, found, err := resolveTokenOverrideSource(cliToken, cliTokenSet, environ)
+	if err != nil || found {
+		return token, err
 	}
 
 	directory, ok := lookupEnvironment(environ, credentialsDirectory)
@@ -445,11 +473,23 @@ func resolveTokenSource(cliToken string, cliTokenSet bool, environ []string) (st
 	if directory == "" {
 		return "", errors.New("CREDENTIALS_DIRECTORY must not be empty")
 	}
-	token, err := os.ReadFile(filepath.Join(directory, systemdCredentialName))
+	credential, err := os.ReadFile(filepath.Join(directory, systemdCredentialName))
 	if err != nil {
 		return "", fmt.Errorf("read systemd credential %q: %w", systemdCredentialName, err)
 	}
-	return validateToken(string(token))
+	return validateToken(string(credential))
+}
+
+func resolveTokenOverrideSource(cliToken string, cliTokenSet bool, environ []string) (string, bool, error) {
+	if cliTokenSet {
+		token, err := validateToken(cliToken)
+		return token, true, err
+	}
+	if environmentToken, ok := lookupEnvironment(environ, tokenEnvironment); ok {
+		token, err := validateToken(environmentToken)
+		return token, true, err
+	}
+	return "", false, nil
 }
 
 func lookupEnvironment(environ []string, name string) (string, bool) {

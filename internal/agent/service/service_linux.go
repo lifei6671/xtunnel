@@ -25,7 +25,10 @@ func platformName() string {
 	return UnitName
 }
 
-func runIfManagedService(func(context.Context, string, io.Writer) error) (bool, error) {
+func runIfManagedService(
+	func() (string, bool, error),
+	func(context.Context, string, io.Writer) error,
+) (bool, error) {
 	return false, nil
 }
 
