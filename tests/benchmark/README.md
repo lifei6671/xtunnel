@@ -60,7 +60,10 @@ Windows 主机可用项目固定工具链交叉编译 Linux amd64 Benchmark，�
 交叉编译入口兼容 Windows PowerShell 5.1，并以 UTF-8 无 BOM、LF 换行写出清单。清单记录源码
 Commit、工作区状态、Go/GOOS/GOARCH 和三个 Binary SHA-256。Prebuilt `full` 模式会
 fail-closed 校验 `go1.27.0/local/linux/amd64/v1/CGO=0`、相同干净 Commit 与三个哈希，
-并把清单及其 SHA-256 固化到结果目录。Prebuilt 模式只保存 CPU/Heap Profile，不使用
+随后把清单与三个 Binary 复制到 Linux-native `/tmp` 临时目录，设置最小权限并再次校验
+SHA-256；`full` 的所有测试只执行这些临时副本，避免从 WSL DrvFS 长跑执行。脚本退出时
+只按精确文件名清理副本并用非递归 `rmdir` 删除临时目录。已校验清单及其 SHA-256 仍会
+固化到结果目录。Smoke 保持直接执行原路径。Prebuilt 模式只保存 CPU/Heap Profile，不使用
 运行环境中偶然存在但未经校验的 Go；Profile 应带回受控环境，用清单记录的同版工具链
 执行 `go tool pprof -top`。运行环境若为 WSL2，证据中必须明确标注，不能写成原生裸机结果。
 
