@@ -1,14 +1,15 @@
-# M7-02 重连风暴开发证据
+# M7-02 重连风暴验证证据
 
-> 状态：`IN_PROGRESS`（生产分类已修复，WSL2 全档开发验证通过；等待 clean Commit/CI 正式证据）
+> 状态：`REVIEW`（生产分类修复、clean `full`、精确 CI 与 commit-bound 最终独立复审均已通过；等待用户阶段复审）
 
 ## 证据边界
 
-- 当前结果来自 Windows `go1.27.0`/`GOTOOLCHAIN=local` 交叉编译的
+- 开发阶段结果来自 Windows `go1.27.0`/`GOTOOLCHAIN=local` 交叉编译的
   `linux/amd64`、`GOAMD64=v1`、`CGO_ENABLED=0` 测试 Binary，并在 WSL2
   `6.18.33.2-microsoft-standard-WSL2` Loopback 上执行。
-- 工作区含本任务未提交改动，Manifest 明确记录 `worktree_clean=false`；以下只能作为
-  开发反馈，不能替代 clean checkout、精确 Commit、CI 或原生 Linux 验收。
+- 开发阶段 Manifest 明确记录 `worktree_clean=false`，因此下方“已通过的开发验证”只作为
+  历史开发反馈；正式证据以提交 `5cd611befc6609fa17051fd2ebe154155563bb0a` 在 WSL2
+  内核的 Linux-native `/tmp` clean `full`、精确 CI 与 commit-bound 最终复审为准。
 - 100/500/1000 使用完整生产 Connector Runtime，每个 Connector 恢复 8 条 Idle
   WorkConn；每档从 Startup/Recovery 阶段开始即用单一受控 Probe 并发尝试真实 TCP
   Origin 往返，记录首个成功，不等待全部 WorkPool 就绪后才启动。5000 使用生产
@@ -86,9 +87,52 @@ Protobuf 仍保持永久 `ErrProtocol`。
 尚未发布 Current 的连接，不是内部 TLS/Auth Semaphore 的精确占用，也不能解释为突破
 配置的 512/512 上限。
 
-M7-02 仍保持 `IN_PROGRESS`：当前工作区未提交，正式 `full` Runner 的 clean checkout
-门禁不能满足，也尚无精确 Commit/CI 与最终 commit-bound 复审；本轮不能写成 `DONE` 或
-上升为 Alpha Gate 通过。
+上述两轮属于修复阶段开发证据；正式 clean `full` 的 5000 档结果见下节。
+
+## 正式 clean full、CI 与最终复审
+
+正式目标为提交 `5cd611befc6609fa17051fd2ebe154155563bb0a`、Tree
+`af1da955f927f92ea2f93c134f1a6818032e57d2`。Windows 使用 Go `go1.27.0`、
+`GOTOOLCHAIN=local` 交叉编译 Linux amd64/GOAMD64=v1/CGO=0 Test Binary；Manifest
+记录 `worktree_clean=true`、精确 Commit 和
+`bootstrap_sha256=c265dd328b3b81f6b6738f388e1ff996567dc46b8f4afd881d12e7694c118e5c`。
+WSL DrvFS 对 15 个未改文件产生换行过滤差异，所以没有绕过 Runner 的 clean Gate，正式
+运行改在 WSL2 内核的 Linux-native `/tmp` 精确克隆执行；这不是独立原生 Linux 主机证据。
+
+FD Soft Limit=`10240` 的首轮在 100/500/1000 通过后，于 5000 档前按设计 Fail
+Preflight（要求 `>=16384`），不计为完整通过。将 Soft Limit 提升为 `65536` 后，四档从头
+重跑并全部通过：
+
+| Connector | 模式 | Recovery control max | Recovery config/work max | Recovery first success | Peak FD | Generation resets |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 100 | full-runtime | 1220 ms | 1220 ms | 3021 ms | 1821 | 100 |
+| 500 | full-runtime | 1288 ms | 1288 ms | 3083 ms | 9025 | 500 |
+| 1000 | full-runtime | 32503 ms | 32503 ms | 3125 ms | 18025 | 944 |
+| 5000 | control-only | 3523 ms | 3543 ms | N/A | 10024 | 5000 |
+
+5000 档 Peak Pending TLS/Auth 观测上界为 `1173`；它仍包含 AUTH 完成后、Current 发布前
+连接，不是内部 Semaphore 的精确占用，也不能解释为突破配置的 512/512 上限。完整 Runner
+输出终止于 `M7-02 chaos run completed.`，Exit Status=`0`。证据哈希：
+
+```text
+manifest_sha256=2403D24BB93CE7B7E4A07E47888B2A9550F18F0B50272282066029643D711F22
+full_log_sha256=4C0941AD84AA7B5E12F26BD86F81B3CF4559A28A3316773C9834B19EE95610CA
+```
+
+[GitHub Actions #33388492749](https://github.com/lifei6671/xtunnel/actions/runs/33388492749)
+的 Head SHA 精确为 `5cd611befc6609fa17051fd2ebe154155563bb0a`，结论
+`completed/success`；Windows Agent service、Windows arm64 Agent runtime、Linux amd64
+verify、Linux arm64 verify 四个 Job 全部成功。
+该 CI 未直接运行 M7-02 四档 Chaos；它与前述 clean `full` 是分离且互补的证据。
+
+最终独立复审为 `CHILD_AGENT / Standard Mode / Tier 3 /
+PARTITIONED_PLUS_INTEGRATION`，覆盖 Baseline
+`fb7ef790cdb3be2ba9f274c4c1e97edb9ecf1de4` 至上述 Target Commit；
+Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`。
+累计 Repair rounds=`3`，冻结提交后的 Repair rounds=`0`。
+
+因此 M7-02 进入 `REVIEW`，等待用户明确阶段复审。当前仍不是 `DONE`，也不构成 M7
+Alpha Gate 通过；WSL2 Loopback 结果不代表原生 Linux 或代表性网络条件。
 
 ## 已执行命令
 
@@ -108,4 +152,5 @@ go vet ./...
 ```
 
 POSIX Runner 已通过 `sh -n`、`dash -n` 和 `shellcheck -s sh`。正式 `full` 模式要求
-当前 checkout 与预编译 Manifest 均为 clean，因此本轮没有绕过该门禁执行正式 full。
+当前 checkout 与预编译 Manifest 均为 clean；正式运行已在 WSL2 内核的 Linux-native
+`/tmp` clean checkout 满足该门禁并执行完成。
