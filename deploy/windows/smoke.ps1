@@ -558,11 +558,16 @@ function Test-PendingDeleteDelta {
     }
 
     $scheduledSource = '\??\' + $BinaryPath
+    $trackedScheduledSource = '*1' + $scheduledSource
     $sourceCount = 0
     for ($index = $Before.Values.Count; $index -lt $After.Values.Count; $index++) {
         if ([string]::Equals(
                 $After.Values[$index],
                 $scheduledSource,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or [string]::Equals(
+                $After.Values[$index],
+                $trackedScheduledSource,
                 [StringComparison]::OrdinalIgnoreCase
             )) {
             $sourceCount++
@@ -571,10 +576,11 @@ function Test-PendingDeleteDelta {
             return $false
         }
     }
-    # REG_MULTI_SZ readers omit the final terminator. If the previous operation
-    # was also a delete, its formerly trailing empty destination becomes visible
-    # before this newly appended source. Accept only that empty value plus the
-    # exact task-owned source; every pre-existing entry must still match above.
+    # Modern Windows can prefix the exact native source with *1 when MoveFileEx
+    # coordinates the delayed operation with link tracking. REG_MULTI_SZ readers
+    # can also expose the prior delete's empty destination after a new append.
+    # Accept only those exact task-owned forms and empty values; every
+    # pre-existing entry must still match above.
     return $sourceCount -eq 1
 }
 
