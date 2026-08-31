@@ -1,6 +1,6 @@
 # M7-01 调优证据
 
-> 状态：`PRODUCTION_BUFFER_CLOSED_AWAITING_FINAL_CI`
+> 状态：`REVIEW`
 
 ## 证据边界
 
@@ -164,6 +164,13 @@ Baseline 五次仍为约 `32,830–32,836 B/op`、`4 allocs/op`；这证明生�
 每次约 32 KiB 的临时分配。吞吐仍有明显 WSL2 Loopback 离散，因此不设置性能阈值，
 也不改变“保留 32 KiB、不采用 64 KiB”的既有决策。
 
+- 最终证据提交 `34d3f8af21d0f08ddeb090dda0e04fbac2617413` 的
+  [CI #33371984555](https://github.com/lifei6671/xtunnel/actions/runs/33371984555)
+  为 `completed/success` 且 Head SHA 精确匹配；Windows Agent Service、Windows arm64
+  Runtime、Linux amd64 与 Linux arm64 四个 Job 全部成功。commit-bound 最终独立复审
+  采用 `CHILD_AGENT / Standard Mode / Tier 3 / PARTITIONED_PLUS_INTEGRATION`，覆盖
+  Code、Tests、Benchmark、Docs 与 Integration，Gate=`PASSED`，P0/P1/P2=`0/0/0`。
+
 ## 调优决策
 
 1. **保留 32 KiB 技术基线，不采用 64 KiB。** 64 KiB 是当前 WSL2 Generic Fallback
@@ -180,5 +187,5 @@ Baseline 五次仍为约 `32,830–32,836 B/op`、`4 allocs/op`；这证明生�
 
 结论：M7-01 的三组真实路径 Benchmark、正式环境、资源解释、“保持默认值”调优决策、
 32 KiB 生产 Buffer、关键 Test/Race/Vet、fresh Proxy 正式复验和独立 checkpoint 复审均已
-齐备。当前仍保持 `IN_PROGRESS`，等待证据提交的精确 CI 与最终态独立复审；满足后才能
-进入 `REVIEW`，不能提前标记 `DONE`。
+齐备；精确 CI 与 commit-bound 最终独立复审也已通过。M7-01 进入 `REVIEW`，等待用户
+明确阶段复审；当前不能标记 `DONE`。

@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-31
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 生产 Buffer 已闭环；等待最终证据提交 CI）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 · REVIEW，等待用户阶段复审）
 >
-> **当前结论**：用户已明确授权继续 M7-01 生产 Buffer 闭环。生产提交 `b793ec3b9fcead57c593442336bfaeb54f750e81` 已按 Go 1.27 `io.Copy` 顺序保留 `WriterTo`/`ReaderFrom` 快路径，并只为 Generic Fallback 使用 32 KiB `sync.Pool`；关键成功、错误、Panic、并发与资源归还测试、包级 Race/Vet、全仓 Test/Vet 和独立 Tier 3 checkpoint 复审均通过。干净提交的 WSL2 Linux amd64 fresh Proxy `2s × 5` 显示生产 Generic 中位数 `6189.05 MB/s`、约 `81 B/op`、`3 allocs/op`，对照裸 Generic 仍约 `32.8 KiB/op`、`4 allocs/op`；不采用 64 KiB，不调整 Connector/HTTP 算法或 Server Schema/Repository 默认值。M7-01 保持 `IN_PROGRESS`，等待证据提交的精确 CI 与最终态独立复审，全局 `DONE` 仍为 `85/95`。
+> **当前结论**：用户授权的 M7-01 生产 Buffer 推荐范围已经闭环。生产提交 `b793ec3b9fcead57c593442336bfaeb54f750e81` 按 Go 1.27 `io.Copy` 顺序保留 `WriterTo`/`ReaderFrom` 快路径，并只为 Generic Fallback 使用 32 KiB `sync.Pool`；关键成功、错误、Panic、并发与资源归还测试、包级 Race/Vet、全仓 Test/Vet 和 WSL2 fresh Proxy `2s × 5` 均通过。证据提交 `34d3f8af21d0f08ddeb090dda0e04fbac2617413` 的 [CI #33371984555](https://github.com/lifei6671/xtunnel/actions/runs/33371984555) 为 `completed/success` 且四个 Job 全部成功；commit-bound Tier 3 最终独立复审 Gate=`PASSED`，P0/P1/P2=`0/0/0`。M7-01 进入 `REVIEW`，等待用户阶段复审；不采用 64 KiB，不调整 Connector/HTTP 算法或 Server Schema/Repository 默认值，全局 `DONE` 仍为 `85/95`。
 
 ---
 
@@ -397,7 +397,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 对 16/32/64 KiB Proxy Buffer、HTTP/1.1 WorkConn Capacity、Connector Selection CPU/Allocation 做 Benchmark；只依据本项目结果调整 Server Schema 默认值，不删除预算维度；记录 CPU/RAM/FD 环境 | `IN_PROGRESS` |
+| M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 对 16/32/64 KiB Proxy Buffer、HTTP/1.1 WorkConn Capacity、Connector Selection CPU/Allocation 做 Benchmark；只依据本项目结果调整 Server Schema 默认值，不删除预算维度；记录 CPU/RAM/FD 环境 | `REVIEW` |
 | M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 100/500/1000 Connector 使用 Stagger + Jitter 重连，无同步 TLS/Auth Storm；永久错误不快速重试；记录 Pending TLS/Auth、`retry_after`、FD/CPU/RAM；Server Restart 后测量 `T_control_reconnect`、`T_config_ready`、`T_workpool_ready`、`T_first_success` 分布，旧 generation 无污染 | `READY` |
 | M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `READY` |
 | M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `READY` |
@@ -426,7 +426,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01` 至 `M0-12`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
 
-1. `M7-01` — 保持 `IN_PROGRESS`。生产 32 KiB Buffer、关键测试、fresh Proxy 正式复验和 checkpoint 独立复审已闭环；下一步提交证据并取得精确 CI，再做最终态独立复审，满足后进入 `REVIEW`。
+1. `M7-01` — `REVIEW`。生产 32 KiB Buffer、关键测试、fresh Proxy 正式复验、精确 CI 与 commit-bound 最终独立复审已闭环；等待用户明确阶段复审通过后才能转为 `DONE`。
 2. `M7-02` 至 `M7-08` — 前置依赖均已满足并进入 `READY`，但本轮不越过 M7-01 的授权边界启动下一项。
 3. `M7-09` — 继续等待 M7-04 `DONE`；`M7-10` — 继续等待 M7-01 至 M7-09 全部 `DONE`。
 
@@ -1724,3 +1724,11 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 采样失败边界：现有 `full` Runner 的 Proxy 主结果及 16/32/64 KiB 分析器全部 Exit Status 0；后续未改动 Connector 测试已输出 `PASS`，但 GNU `time` 在 WSL 中未回收 Zombie 子进程，整套 Runner 被精确终止并完成临时 Binary 清理。因此只把完成的 Proxy 分区作为 fresh 生产证据，不把整套 `full` 写成通过，也不把旧 Connector/HTTP 样本冒充新结果。
 - 独立复审与状态：`CHILD_AGENT / Go profile / Tier 3` checkpoint 覆盖生产实现、相邻生命周期、全部关键测试、Benchmark、冻结技术方案和 Go 1.27 标准库语义，Gate=`PASSED`，P0/P1/P2=`0/0/0`。M7-01 暂时保持 `IN_PROGRESS`，等待证据提交的精确 CI 与最终态独立复审；全局 `DONE` 仍为 `85/95`，本次未勾选任何 Alpha Release Gate。
 - 文档同步：更新本开发计划和 `tests/benchmark/m7-01-evidence.md`。总技术方案、根 README、Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、权限模型、日志字段与 `AGENTS.md` 无需更新，因为生产实现只闭环既有冻结契约，没有改变产品或机器契约。
+
+## 2026-08-31 · M7-01 精确 CI 与最终交付复审 · REVIEW
+
+- 精确 CI：证据提交 `34d3f8af21d0f08ddeb090dda0e04fbac2617413` 已推送并与 `origin/master` 精确一致；[CI #33371984555](https://github.com/lifei6671/xtunnel/actions/runs/33371984555) 为 `completed/success`，Windows Agent Service、Windows arm64 Agent Runtime、Linux amd64 与 Linux arm64 四个 Job 全部成功，生成物与 CI 工作树清洁检查通过。
+- 最终独立复审：`CHILD_AGENT / Standard Mode / Tier 3 / PARTITIONED_PLUS_INTEGRATION` 对 Baseline `24005db...` 至 Target `34d3f8a...` 的 Code、Tests、Benchmark、Docs 与 Integration 完成 commit-bound 覆盖，Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`、Repair rounds=`0`。
+- 状态影响：M7-01 从 `IN_PROGRESS` 进入 `REVIEW`，等待用户明确阶段复审通过；全局 `DONE` 保持 `85/95`，M7-02 至 M7-08 保持 `READY`，M7-09/M7-10 的依赖状态不变，本次未勾选任何 Alpha Release Gate。
+- 证据边界：fresh `full` Runner 仍只有受影响的 Proxy 分区完整闭合，未改动 Connector/HTTP 使用前序正式证据；WSL2 Loopback 结果不代表原生 Linux、TLS 或代表性网络负载，因此不支持 64 KiB、性能阈值、Schema 默认值或其他算法变更。
+- 文档同步：更新本开发计划与 `tests/benchmark/m7-01-evidence.md` 的 REVIEW/CI/最终复审状态。根 README 与总技术方案无需更新；Proto、OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、权限模型、日志字段与 `AGENTS.md` 均未改变。
