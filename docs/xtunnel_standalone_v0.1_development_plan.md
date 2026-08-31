@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-30
 >
-> **当前阶段**：M6-07 Observability Gate · REVIEW（实现、验证、独立复审与精确 CI 均已通过，等待用户阶段复审）
+> **当前阶段**：M0-09 Packaging Closure · IN_PROGRESS（M6 已完成；进入既有部署证据的独立阶段复审）
 >
-> **当前结论**：用户已确认 M6-07 推荐范围。Linux 五故障黑盒现从同一次真实故障关联 Dashboard、日志、有限基数 Metric 与 Trace，并明确区分无请求 Trace 的 Offline 生命周期；Windows 隔离 SCM Gate Helper 真实经过生产 Handler 的 `RUNTIME_FAILED` 和 30 秒 `STOP_TIMEOUT`，再从 Application Event Log、非零 Service Exit 与恢复新 PID 完成定位。Go 1.27 本地验证、WSL2 Linux 原生 Gate、跨架构编译和独立 Tier-3 复审均通过；最终 Head `2606a19` 的精确 [CI #33319582026](https://github.com/lifei6671/xtunnel/actions/runs/33319582026) 已通过 Linux amd64/arm64 全矩阵、Race 与提升权限 Windows SCM 真实 Gate。六项 Checklist 全部闭环，M6-07 转为 `REVIEW` 等待用户阶段复审；M6 仍为 `6/7`、全局仍为 `81/95`。
+> **当前结论**：用户已明确确认 M6-07 阶段复审通过。实现与修复提交 `4a011f5`、`2606a19` 已由最终证据提交 `aab58a6` 的精确 [CI #33320100334](https://github.com/lifei6671/xtunnel/actions/runs/33320100334) 再次覆盖；Windows Agent Service、Linux amd64 与 Linux arm64 三个 Job 全部成功，M6 六项 Checklist 全部闭环。M6-07 转为 `DONE`，M6 更新为 `7/7 DONE`，全局更新为 `82/95`。下一步只复审仍为 `IN_PROGRESS` 的 M0-09 部署证据；M7 不因 M6 完成而绕过 M0-09/M0-12 依赖。
 
 ---
 
@@ -110,9 +110,9 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M3 Config/Health | 13 | 13 | `DONE` | M1-14 | M3-13 |
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
-| M6 Observability | 7 | 6 | `IN_PROGRESS` | M5-11 | M6-07 |
+| M6 Observability | 7 | 7 | `DONE` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 0 | `NOT_STARTED` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **81** |  |  |  |
+| **合计** | **95** | **82** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -378,7 +378,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M6-04 | Usage Aggregation | M4-10、M0-05 | Usage Buffer/Flush/Repository | 字节/连接计数 exactly-once；Batch Flush；minute/hour/day Rollup 幂等且 Crash 后可重跑；先提交汇总再删除已 Rollup 明细；Retention、Compaction 与 Vacuum 策略由本任务容量 Benchmark 冻结，若决定可配置则先修改 Server Schema；重启无负数、重复或明细无限增长 | `DONE` |
 | M6-05 | Error/Status Observability | M3-11、M6-01、M6-02 | Error Code Dashboard Data | Tunnel Offline/Connector Offline/Origin Down/No Capacity/Protocol Error 可区分 | `DONE` |
 | M6-06 | 运维诊断流程 | M6-01至 M6-05 | Runbook + Dashboard + Agent Connectivity Diag | Diag 复用生产 Token Parser、Endpoint/DNS、Dialer、TLS Builder、Pin Verifier 和 ALPN，覆盖 Token/Endpoint/DNS/TCP/TLS/Pin/ALPN；默认 Precheck 不执行 Auth/Snapshot，未来真实诊断须先冻结无污染协议语义；不得复制宽松连接栈，也不得把完整 Token 写入 argv 作为唯一入口；输出 PASS/WARNING/FAIL 与 READY 变体；覆盖证书 30/7/1 天告警、Audit 查询/固定边界流式导出、Linux systemd 与 Windows SCM 的启动失败、恢复重启和 Stop/Shutdown 超时诊断 | `DONE` |
-| M6-07 | M6 Gate | M6-01至 M6-06 | Observability 验收证据 | 故障注入下五类核心问题均可唯一定位 | `REVIEW` |
+| M6-07 | M6 Gate | M6-01至 M6-06 | Observability 验收证据 | 故障注入下五类核心问题均可唯一定位 | `DONE` |
 
 ## 12.2 M6 Gate Checklist
 
@@ -424,13 +424,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 # 14. 当前可立即执行的任务队列
 
-当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-06` 已完成。当前待办为：
+当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
 
-1. `M6-07` — 实现、验证、独立复审与最终 Head 精确 CI 均已通过，当前为 `REVIEW`，等待用户阶段复审。
-2. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与本轮双架构 systemd Packaging Smoke 均已通过，仍等待独立部署阶段复审后再决定是否 `DONE`。
-3. `M0-02` — Token-only Bootstrap 等待用户复审。
+1. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与双架构 systemd Packaging Smoke 均已有精确 CI，当前进入独立部署阶段复审；复审前不标记 `DONE`。
+2. `M0-02` — Token-only Bootstrap 等待用户复审。
+3. `M0-12` — 等待 M0-02 与 M0-09 `DONE` 后执行 M0 总 Gate。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6-01 至 M6-06 已完成；M6-07 当前为 `REVIEW`，完成数仍为 `81/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因本次进度同步自动转为 `DONE`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6 已完成；全局完成数为 `82/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因 M6 完成自动转为 `DONE`；M7 继续 `NOT_STARTED`。
 
 推进规则：
 
@@ -1630,3 +1630,10 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 最终精确 CI：最终 Head `2606a191e0263b8f286a51af5da9bc5d189928ea` 的 [CI #33319582026](https://github.com/lifei6671/xtunnel/actions/runs/33319582026) 为 `completed/success`。Windows Agent Service 的固定 Go 工具链、Build、arm64 Cross-build、Stop Timeout Unit Gate、真实 SCM 持久 Event Log Gate 与工作树清洁全部通过；Linux amd64/arm64 的 Proto/OpenAPI/生成物、Web、全仓 Test/Race/Vet/Build、M4/M6 黑盒、M6 Error Status Observability、Agent Connectivity、1 GiB、Caddy/Nginx、OCI、双架构 systemd 与工作树清洁全部通过，amd64 真实 Chromium Gate 同时成功。
 - 状态与边界：M6 Gate 六项 Checklist 全部勾选，M6-07 从 `IN_PROGRESS` 转为 `REVIEW` 等待用户阶段复审；在用户明确通过前不标记 `DONE`，因此 M6 保持 `6/7`、全局保持 `81/95`，M7 继续 `NOT_STARTED`。Control Session 全量 Trace 仍按冻结方案延期，不因本 Gate 扩大 Protocol 范围。
 - 文档同步：根 README 与本开发计划同步最终提交、精确 CI、Checklist、状态、仪表盘和队列。总技术方案、Runbook 已在实现提交中对齐最终行为；Proto、OpenAPI/生成物、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、生产 SCM 配置、权限模型、日志字段与 `AGENTS.md` 无需再改。
+
+## 2026-08-31 · M6-07 用户阶段复审与 M6 完成 · DONE
+
+- 用户复审与证据：用户明确确认 M6-07 阶段复审通过。最终证据提交 `aab58a635d3bef24140cce83674fee410139064f` 的 [CI #33320100334](https://github.com/lifei6671/xtunnel/actions/runs/33320100334) 为 `completed/success` 且 Head SHA 精确匹配；Windows Agent Service、Linux amd64 与 Linux arm64 三个 Job 全部成功，Windows SCM 持久 Event Log Gate、双架构 Error Status Observability 黑盒、全仓 Test/Race/Vet/Build、OCI、systemd、真实 Chromium 与工作树清洁均通过。
+- 状态影响：M6-07 从 `REVIEW` 转为 `DONE`，M6 从 `6/7` 更新为 `7/7 DONE`，全局从 `81/95` 更新为 `82/95`；六项 M6 Gate Checklist 保持全部勾选。M7 继续 `NOT_STARTED`，因为 M7-01/M7-09/M7-10 仍受 M0-09/M0-12 等依赖约束。
+- 下一步：当前只进入 M0-09 既有部署证据的独立阶段复审，不在本记录中把 M0-09、M0-02 或 M0-12 标记完成。M0-09 若复审通过并由用户确认后，再处理 M0-02 与 M0-12 的剩余复审/Gate。
+- 文档同步：根 README 与本开发计划同步 M6-07 用户复审、最终证据、任务状态、仪表盘和队列。总技术方案、Runbook、Proto、OpenAPI/生成物、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、部署资产、CI/CD、权限模型、日志字段与 `AGENTS.md` 无需更新，因为本轮只闭环既有 Gate 证据和用户审批，没有改变产品或机器契约。
