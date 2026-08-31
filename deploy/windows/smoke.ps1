@@ -651,7 +651,27 @@ function Invoke-InstalledAgentSelfUninstall {
             throw 'self-uninstall reported delayed removal but the running binary disappeared immediately'
         }
         if (-not $ownsPendingDelete) {
-            throw 'self-uninstall did not append the expected delayed binary deletion entry'
+            $entryShape = @($afterPendingRename.Values | Select-Object -First 16 | ForEach-Object {
+                    if ([string]::IsNullOrEmpty($_)) {
+                        'empty'
+                    }
+                    elseif ($_.EndsWith(
+                            [IO.Path]::GetFileName($installedBinary),
+                            [StringComparison]::OrdinalIgnoreCase
+                        )) {
+                        'task-leaf'
+                    }
+                    else {
+                        "other(length=$($_.Length))"
+                    }
+                }) -join ','
+            $taskCandidates = @($afterPendingRename.Values | Where-Object {
+                    (-not [string]::IsNullOrEmpty($_)) -and $_.EndsWith(
+                        [IO.Path]::GetFileName($installedBinary),
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                }) -join '|'
+            throw "self-uninstall did not append the expected delayed binary deletion entry; before_exists=$($beforePendingRename.Exists); before_count=$($beforePendingRename.Values.Count); after_exists=$($afterPendingRename.Exists); after_count=$($afterPendingRename.Values.Count); entry_shape=$entryShape; task_candidates=$taskCandidates"
         }
     }
     catch {
