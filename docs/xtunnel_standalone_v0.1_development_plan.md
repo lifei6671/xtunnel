@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-31
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 正式采样已完成；等待 32 KiB Pool 生产实现授权）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 生产 Buffer 已闭环；等待最终证据提交 CI）
 >
-> **当前结论**：用户已明确确认按推荐范围启动 M7-01。Proxy Buffer、HTTP/1.1 WorkConn Capacity 与 Connector Selection 三条真实产品路径的 Benchmark、固定环境采集和 Windows→Linux amd64 交叉编译入口已经实现；正式 WSL2 Linux amd64 干净 Commit `a1fef7ade670a529860b23fdb5485c7d42b61c2b` 已完成 `2s × 5`、Syscall、GNU time、CPU/Heap Profile 与 GC 采样。结果不支持把 32 KiB 冻结基线改为 64 KiB，也不支持调整 Connector 算法或 Server Schema/Repository 默认值；但总技术方案冻结的“保留 `WriterTo`/`ReaderFrom` 快路径 + 32 KiB `sync.Pool` Generic Fallback”尚未在生产代码落地。M7-01 保持 `IN_PROGRESS`，等待该最小生产范围的单独授权，全局 `DONE` 仍为 `85/95`。
+> **当前结论**：用户已明确授权继续 M7-01 生产 Buffer 闭环。生产提交 `b793ec3b9fcead57c593442336bfaeb54f750e81` 已按 Go 1.27 `io.Copy` 顺序保留 `WriterTo`/`ReaderFrom` 快路径，并只为 Generic Fallback 使用 32 KiB `sync.Pool`；关键成功、错误、Panic、并发与资源归还测试、包级 Race/Vet、全仓 Test/Vet 和独立 Tier 3 checkpoint 复审均通过。干净提交的 WSL2 Linux amd64 fresh Proxy `2s × 5` 显示生产 Generic 中位数 `6189.05 MB/s`、约 `81 B/op`、`3 allocs/op`，对照裸 Generic 仍约 `32.8 KiB/op`、`4 allocs/op`；不采用 64 KiB，不调整 Connector/HTTP 算法或 Server Schema/Repository 默认值。M7-01 保持 `IN_PROGRESS`，等待证据提交的精确 CI 与最终态独立复审，全局 `DONE` 仍为 `85/95`。
 
 ---
 
@@ -426,7 +426,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01` 至 `M0-12`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
 
-1. `M7-01` — 保持 `IN_PROGRESS`。正式采样、资源解释与保持 Schema/算法默认值的调优决策已经齐备；下一步需单独授权实现冻结的“保留快路径 + 32 KiB pooled Generic Fallback”及关键测试，闭环后才能进入 `REVIEW`。
+1. `M7-01` — 保持 `IN_PROGRESS`。生产 32 KiB Buffer、关键测试、fresh Proxy 正式复验和 checkpoint 独立复审已闭环；下一步提交证据并取得精确 CI，再做最终态独立复审，满足后进入 `REVIEW`。
 2. `M7-02` 至 `M7-08` — 前置依赖均已满足并进入 `READY`，但本轮不越过 M7-01 的授权边界启动下一项。
 3. `M7-09` — 继续等待 M7-04 `DONE`；`M7-10` — 继续等待 M7-01 至 M7-09 全部 `DONE`。
 
@@ -1714,3 +1714,13 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 调优结论与边界：64 KiB 在本环境的 Generic Path 中位吞吐比 32 KiB 高约 16.3%、Syscall 少约 7.7%，但结果存在离散且 WSL2 Loopback 未覆盖原生 Linux、TLS/包装连接和代表性网络条件；因此不把冻结的 32 KiB 基线改为 64 KiB。Connector Profile 将 `Sessions.Pools` 副本和 Registry 获取分配标为后续候选，但 100 Connector 约 27.9 us 且无冻结失败阈值；HTTP 已真实达到 128 活动 WorkConn，既有 `http_max_idle_connections=100` 不是活动硬上限。Connector 算法与 Server Schema/Repository 默认值均不修改。
 - 契约缺口与推荐范围：总技术方案已经冻结数据代理使用 32 KiB `sync.Pool`，而当前生产路径仍是裸 `io.Copy`；Benchmark 同时证明 Generic 32 KiB 可从约 32,834 B/op、4 allocs/op 降至约 78–88 B/op、3 allocs/op。下一范围推荐只实现“显式保留 `WriterTo`/`ReaderFrom` 快路径 + 32 KiB pooled Generic Fallback”及关键测试，不改变公开 API、Protocol、Schema、默认值、依赖或其他生产算法；因本轮授权明确排除生产改动，必须另行取得用户确认。
 - 收敛与状态：长采样曾暴露 Benchmark Fixture Heartbeat Timeout、测试进程无上限和 WSL DrvFS Binary 退出挂起，已分别通过 Benchmark-only 心跳窗口、1m/5m 测试 Timeout 与 Linux-native `/tmp` 暂存/二次哈希校验修复。`tests/benchmark/m7-01-evidence.md` 已固化完整环境、五次原始值、CPU/RSS/Syscall/Heap/GC/FD 解释、失败记录与未验证边界。独立证据复审准确识别上述生产契约缺口并阻止提前进入 `REVIEW`；M7-01 保持 `IN_PROGRESS`，全局 `DONE` 仍为 `85/95`，本轮不勾选 Alpha Release Gate Checklist。
+
+## 2026-08-31 · M7-01 生产 Buffer 闭环 · IN_PROGRESS
+
+- 授权与范围：用户明确确认按推荐范围继续 M7-01 生产 Buffer 闭环。只修改 `internal/proxy` 的复制原语、关键测试和生产 Benchmark；未修改公共 API/Protocol、Schema/Repository 默认值、Migration、依赖/Lockfile、Connector/HTTP 算法、CI/CD、权限模型或日志契约。
+- 生产实现：提交 `b793ec3b9fcead57c593442336bfaeb54f750e81` 显式保持 Go 1.27 `io.Copy` 的 Source `WriterTo`、Destination `ReaderFrom` 优先级；仅在两者都不可用时获取固定 32 KiB 包级 `sync.Pool` Buffer，并在成功、EOF、错误和 Panic 路径归还。`proxyOneWay` 的 Half-Close、Context Cancel、Fatal Error 与双向等待收敛没有改变。
+- 测试与本地验证：新增确定性测试覆盖两条快路径零 Pool 访问、Generic 精确 32 KiB、同指针 Get/Put、成功、读错、写错、短写、Panic 与 32 路并发字节隔离；`go test ./internal/proxy -count=1 -timeout=60s`、包级 5 轮和 3 轮 Race、包级/全仓 Vet、第二轮 `go test ./... -count=1 -timeout=120s` 与 `git diff --check` 通过。全仓 Test 首轮仅有无关 `internal/buildinfo` 子进程一次性失败，隔离复跑与第二轮全仓复跑通过，未修改无关代码。
+- fresh Proxy 证据：干净 Commit `b793ec3...` 由 Go `go1.27.0/local` 交叉编译 Linux amd64/CGO=0，Manifest 与 Linux-native 暂存 Binary 二次 SHA-256 校验通过。独立成功的 `2s × 5 / benchmem` 中，生产 TCP ReaderFrom Fast Path 中位数为 `7084.63 MB/s`、约 `31 B/op`、`1 alloc/op`；生产 Generic 32 KiB 中位数为 `6189.05 MB/s`、约 `81 B/op`、`3 allocs/op`，而同 Commit 裸 Generic 仍约 `32,830–32,836 B/op`、`4 allocs/op`。不设置 WSL2 吞吐阈值，不采用 64 KiB。
+- 采样失败边界：现有 `full` Runner 的 Proxy 主结果及 16/32/64 KiB 分析器全部 Exit Status 0；后续未改动 Connector 测试已输出 `PASS`，但 GNU `time` 在 WSL 中未回收 Zombie 子进程，整套 Runner 被精确终止并完成临时 Binary 清理。因此只把完成的 Proxy 分区作为 fresh 生产证据，不把整套 `full` 写成通过，也不把旧 Connector/HTTP 样本冒充新结果。
+- 独立复审与状态：`CHILD_AGENT / Go profile / Tier 3` checkpoint 覆盖生产实现、相邻生命周期、全部关键测试、Benchmark、冻结技术方案和 Go 1.27 标准库语义，Gate=`PASSED`，P0/P1/P2=`0/0/0`。M7-01 暂时保持 `IN_PROGRESS`，等待证据提交的精确 CI 与最终态独立复审；全局 `DONE` 仍为 `85/95`，本次未勾选任何 Alpha Release Gate。
+- 文档同步：更新本开发计划和 `tests/benchmark/m7-01-evidence.md`。总技术方案、根 README、Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、权限模型、日志字段与 `AGENTS.md` 无需更新，因为生产实现只闭环既有冻结契约，没有改变产品或机器契约。

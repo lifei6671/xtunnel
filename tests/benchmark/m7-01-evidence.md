@@ -1,16 +1,18 @@
 # M7-01 调优证据
 
-> 状态：`FORMAL_SAMPLE_COMPLETE_AWAITING_PRODUCTION_AUTH`
+> 状态：`PRODUCTION_BUFFER_CLOSED_AWAITING_FINAL_CI`
 
 ## 证据边界
 
-- Benchmark 源码 Commit：`a1fef7ade670a529860b23fdb5485c7d42b61c2b`，工作树为空。
+- Buffer 选型 Benchmark 源码 Commit：`a1fef7ade670a529860b23fdb5485c7d42b61c2b`，
+  工作树为空；该样本继续作为 16/32/64 KiB 选型证据。
 - 正式采样：WSL2 Linux amd64，三组主结果均使用 `2s × 5`；Syscall、GNU time、
   CPU/Heap Profile 与 GC 使用独立进程采集，避免分析器污染主吞吐结果。
 - 结果目录：`/tmp/xtunnel-m7-01-checkout.iVasUp/results`。该目录是本地主机临时原始证据，
   本文只固化可复核摘要；Runner 可在同类受控环境重复生成全部原始文件。
-- 本次没有修改生产复制路径、Connector 选择算法、Server Schema/Repository 默认值、
-  公共 API/Protocol、依赖、Lockfile 或 CI/CD；正式采样完成不等于冻结实现契约已闭环。
+- 该首轮样本没有修改生产复制路径；最终生产闭环与 fresh Proxy 复验见下文。Connector
+  选择算法、Server Schema/Repository 默认值、公共 API/Protocol、依赖、Lockfile 与
+  CI/CD 始终没有修改。
 
 ## 环境与命令
 
@@ -124,15 +126,51 @@ Registry/Session Manager/WorkPool -> OPEN -> HTTP/1.1` 路径运行：
   `git bundle verify` 通过的完整 Bundle 复制到 WSL-native `/tmp` 后创建干净 checkout。
   该问题属于跨文件系统证据装配，不是产品或 Benchmark 失败。
 
+## 生产 Buffer 闭环与 fresh 复验
+
+- 用户明确授权按推荐范围继续 M7-01 生产 Buffer 闭环。生产提交
+  `b793ec3b9fcead57c593442336bfaeb54f750e81` 只修改 `internal/proxy`：按 Go 1.27
+  `io.Copy` 的顺序先选择 Source `WriterTo`、再选择 Destination `ReaderFrom`，只有两者
+  都不可用时才从包级并发安全 `sync.Pool` 获取固定 32 KiB Buffer，并以 `defer` 在成功、
+  EOF、读错、写错、短写和 Panic 路径归还。Half-Close、Context Cancel、Fatal Error、
+  Connector/HTTP、Schema、默认值、API/Protocol、依赖和日志契约均未改变。
+- 确定性测试使用只暴露 `Read`/`Write` 的 Wrapper 真实进入 Generic Fallback，并验证
+  `WriterTo` 优先级、`ReaderFrom` 次优级、快路径零 Pool 访问、精确 32 KiB、同指针
+  Get/Put、错误身份与并发字节隔离。Go `go1.27.0/local` 下包级 Test、5 轮与 3 轮 Race、
+  包级 Vet、全仓 Test/Vet 和 `git diff --check` 均通过；全仓 Test 首轮仅有无关
+  `internal/buildinfo` 子进程一次性失败，隔离复跑和第二次全仓复跑均通过。
+- 独立 `CHILD_AGENT / Go profile / Tier 3` checkpoint 对生产实现、相邻 `proxyOneWay`
+  生命周期、全部新测试、生产 Benchmark、冻结技术方案与 Go 1.27 标准库语义完成覆盖，
+  Gate=`PASSED`，P0/P1/P2=`0/0/0`。
+- Windows 固定工具链从干净 `b793ec3...` 交叉编译 Linux amd64 Binary；Manifest
+  SHA-256=`412f27d9f62927229907476c6cedd5720ba6eda2df8843b316f08780335739a4`，
+  Proxy Binary SHA-256=`aca8a5286bf7f78839b3b8c6d0f878ad3740d374ca5adebadafc1611353e38f9`。
+  WSL2 端复制到 Linux-native `/tmp` 后再次校验哈希，环境与首轮正式样本相同。
+- Runner 的 Proxy 主结果、GNU time、16/32/64 KiB Syscall/Profile/GC 子项均完成且
+  Proxy 全组 Exit Status=`0`；之后未改动的 Connector Benchmark 已写出 `PASS`，但其
+  GNU `time` 父进程未回收已退出的 Zombie 子进程，导致整套 `full` 未完成。该 Runner
+  被精确终止，trap 已清理 Linux-native Binary；因此本记录只把完成的 Proxy 分区作为
+  fresh 正式证据，不把整套 `full` 写成通过，也不把 Connector/HTTP 旧证据改写为新样本。
+- 随后对同一已校验 Proxy Binary 独立执行生产快路径与生产 Generic 32 KiB
+  `2s × 5 / benchmem`，命令 Exit Status=`0`、`PASS`，并清理临时副本。结果如下：
+
+| 生产路径 | 五次原始 MB/s | 中位数 | B/op 五次 | allocs/op |
+| --- | --- | ---: | --- | ---: |
+| TCP ReaderFrom Fast Path | 6941.25 / 7084.63 / 7311.22 / 8163.98 / 6957.90 | 7084.63 | 32 / 28 / 31 / 28 / 32 | 1 |
+| Generic 32 KiB Pool | 5152.66 / 6589.81 / 4627.32 / 6749.46 / 6189.05 | 6189.05 | 82 / 65 / 66 / 81 / 112 | 3 |
+
+fresh 主结果中，生产 Generic 的 B/op 中位数约为 `81`，而同 Commit 的裸 Generic
+Baseline 五次仍为约 `32,830–32,836 B/op`、`4 allocs/op`；这证明生产 helper 已消除
+每次约 32 KiB 的临时分配。吞吐仍有明显 WSL2 Loopback 离散，因此不设置性能阈值，
+也不改变“保留 32 KiB、不采用 64 KiB”的既有决策。
+
 ## 调优决策
 
 1. **保留 32 KiB 技术基线，不采用 64 KiB。** 64 KiB 是当前 WSL2 Generic Fallback
    的最佳候选，但离散度、虚拟化环境和传输类型覆盖不足以支持修改冻结基线。
-2. **生产 Buffer 契约仍需实现。** 总技术方案已经冻结数据代理使用 32 KiB `sync.Pool`；
-   当前生产路径仍是裸 `io.Copy`。Benchmark 证明 Generic 32 KiB 从约 32,834 B/op、
-   4 allocs/op 降至约 78–88 B/op、3 allocs/op。推荐下一范围只实现“显式保留
-   `WriterTo`/`ReaderFrom` 快路径 + 32 KiB pooled Generic Fallback”及关键测试，不改变
-   公开 API、协议、Schema、默认值、依赖或其他生产算法；该生产变更需用户另行授权。
+2. **生产 Buffer 契约已闭环。** 生产提交 `b793ec3...` 已实现“显式保留
+   `WriterTo`/`ReaderFrom` 快路径 + 32 KiB pooled Generic Fallback”，fresh Proxy
+   复验与关键测试均通过；没有改变公开 API、协议、Schema、默认值、依赖或其他生产算法。
 3. **不调整 Connector 生产算法。** 将 `Sessions.Pools` 快照复制和 Registry 获取分配记录为
    后续 M7-05 Profile/并发证据的候选热点，不提前跨任务优化。
 4. **不调整 HTTP/WorkConn 默认值。** 128 并发已验证，且 100 的现有语义不是活动硬上限。
@@ -140,6 +178,7 @@ Registry/Session Manager/WorkPool -> OPEN -> HTTP/1.1` 路径运行：
    默认值，必须先在原生 Linux、TLS/包装连接和代表性 Payload/网络条件下复测，并分别取得
    生产实现或配置契约授权。
 
-结论：M7-01 的三组真实路径 Benchmark、正式环境、五次结果、CPU/RSS/Syscall/Heap/GC/FD
-解释和“保持默认值”调优决策已经齐备；但 32 KiB `sync.Pool` 冻结实现尚未落地，M7-01
-保持 `IN_PROGRESS`，等待推荐生产范围授权，不能提前进入阶段复审。
+结论：M7-01 的三组真实路径 Benchmark、正式环境、资源解释、“保持默认值”调优决策、
+32 KiB 生产 Buffer、关键 Test/Race/Vet、fresh Proxy 正式复验和独立 checkpoint 复审均已
+齐备。当前仍保持 `IN_PROGRESS`，等待证据提交的精确 CI 与最终态独立复审；满足后才能
+进入 `REVIEW`，不能提前标记 `DONE`。
