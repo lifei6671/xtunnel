@@ -558,19 +558,24 @@ function Test-PendingDeleteDelta {
     }
 
     $scheduledSource = '\??\' + $BinaryPath
-    if (-not [string]::Equals(
-            $After.Values[$Before.Values.Count],
-            $scheduledSource,
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
-        return $false
-    }
-    for ($index = $Before.Values.Count + 1; $index -lt $After.Values.Count; $index++) {
-        if (-not [string]::IsNullOrEmpty($After.Values[$index])) {
+    $sourceCount = 0
+    for ($index = $Before.Values.Count; $index -lt $After.Values.Count; $index++) {
+        if ([string]::Equals(
+                $After.Values[$index],
+                $scheduledSource,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            $sourceCount++
+        }
+        elseif (-not [string]::IsNullOrEmpty($After.Values[$index])) {
             return $false
         }
     }
-    return $true
+    # REG_MULTI_SZ readers omit the final terminator. If the previous operation
+    # was also a delete, its formerly trailing empty destination becomes visible
+    # before this newly appended source. Accept only that empty value plus the
+    # exact task-owned source; every pre-existing entry must still match above.
+    return $sourceCount -eq 1
 }
 
 function Restore-PendingRenameSnapshot {
