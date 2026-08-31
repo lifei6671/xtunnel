@@ -28,7 +28,17 @@ type proxyBenchmarkCopy func(destination io.Writer, source io.Reader, limit int6
 func BenchmarkProxyBuffer(b *testing.B) {
 	b.Run("io_copy_tcp_fast_path", func(b *testing.B) {
 		benchmarkProxyCopy(b, func(destination io.Writer, source io.Reader, limit int64) (int64, error) {
-			return io.Copy(destination, &io.LimitedReader{R: source, N: limit})
+			return copyProxyStream(destination, &io.LimitedReader{R: source, N: limit}, &proxyCopyBuffers)
+		})
+	})
+
+	b.Run("production_generic_32k", func(b *testing.B) {
+		benchmarkProxyCopy(b, func(destination io.Writer, source io.Reader, limit int64) (int64, error) {
+			return copyProxyStream(
+				proxyBenchmarkWriterOnly{Writer: destination},
+				&io.LimitedReader{R: proxyBenchmarkReaderOnly{Reader: source}, N: limit},
+				&proxyCopyBuffers,
+			)
 		})
 	})
 

@@ -35,6 +35,21 @@ type copyResult struct {
 	cleanupErr error
 }
 
+const proxyCopyBufferSize = 32 << 10
+
+type proxyCopyBuffer [proxyCopyBufferSize]byte
+
+type proxyBufferPool interface {
+	Get() any
+	Put(any)
+}
+
+var proxyCopyBuffers = sync.Pool{
+	New: func() any {
+		return new(proxyCopyBuffer)
+	},
+}
+
 // ProxyBidirectional 在两个连接之间逐字节转发，直到双向都收到 EOF、发生 fatal error
 // 或 Context 取消。
 //
@@ -123,7 +138,7 @@ func startProxyOneWay(direction string, destination, source net.Conn, results ch
 }
 
 func proxyOneWay(direction string, destination, source net.Conn, results chan<- copyResult) {
-	_, err := io.Copy(destination, source)
+	_, err := copyProxyStream(destination, source, &proxyCopyBuffers)
 	var cleanupErr error
 	if err == nil {
 		// io.Copy 返回 nil 代表源端正常 EOF。先关闭可选的读半边，再关闭目标写半边，
@@ -138,6 +153,23 @@ func proxyOneWay(direction string, destination, source net.Conn, results chan<- 
 		}
 	}
 	results <- copyResult{direction: direction, err: err, cleanupErr: cleanupErr}
+}
+
+func copyProxyStream(destination io.Writer, source io.Reader, buffers proxyBufferPool) (int64, error) {
+	// 与 io.Copy 保持相同的快路径优先级，并且只在两个接口快路径都不可用时
+	// 获取用户态 Buffer，避免 TCP splice/readfrom 路径承担无效的 Pool 开销。
+	if writerTo, ok := source.(io.WriterTo); ok {
+		return writerTo.WriteTo(destination)
+	}
+	if readerFrom, ok := destination.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(source)
+	}
+
+	buffer := buffers.Get().(*proxyCopyBuffer)
+	// Generic Fallback 的成功、EOF 与错误出口都必须归还同一个 Buffer；
+	// Buffer 只由当前复制调用持有，归还前不会跨 goroutine 共享。
+	defer buffers.Put(buffer)
+	return io.CopyBuffer(destination, source, buffer[:])
 }
 
 func isCompletedCloseRead(err error) bool {
