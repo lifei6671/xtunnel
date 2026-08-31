@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-31
 >
-> **当前阶段**：M0-02 Token-only Bootstrap · IN_PROGRESS（M0-09 已完成用户阶段复审；进入 M0-02 既有产物与证据复核）
+> **当前阶段**：M0-02 Token-only Bootstrap · REVIEW（产物、失败分支、独立复审与精确 CI 已齐备，等待用户阶段复审）
 >
-> **当前结论**：用户已明确确认 M0-09 阶段复审通过。结合实现 Head `389a15dbd59420449df952e6a5a81ebee8e5d4c0` 的精确 [CI #33349658948](https://github.com/lifei6671/xtunnel/actions/runs/33349658948)、证据提交 `e202b82e45a56b3030275f34b54f6fd3869539bb` 的精确 [CI #33350623364](https://github.com/lifei6671/xtunnel/actions/runs/33350623364) 与独立复审 P0/P1/P2=`0/0/0`，M0-09 从 `REVIEW` 转为 `DONE`。M0 更新为 `10/12`、全局更新为 `83/95`。当前只进入 M0-02 Token-only Bootstrap 的既有产物与证据复核；M0-12 仍等待 M0-02 `DONE`，M7 不绕过 M0-12。
+> **当前结论**：M0-02 既有产物复核覆盖 Server Strict Config、Agent Token-only Bootstrap、Linux systemd Credential、Windows SCM/DPAPI 与容器环境变量路径。Windows 分区发现并关闭一个 SCM 绕过 `--token`>`XTUNNEL_TOKEN`>DPAPI 优先级的 P1；修复提交 `2115ef12c0cbacf1820562fd402216effcf05af5` 的精确 [CI #33352369265](https://github.com/lifei6671/xtunnel/actions/runs/33352369265) 为 `completed/success`，Windows、Linux amd64、Linux arm64 三个 Job 全部成功，三路独立复审最终 P0/P1/P2=`0/0/0`。M0-02 转为 `REVIEW` 等待用户阶段复审，不提前标记 `DONE`；M0 保持 `10/12`、全局保持 `83/95`，M0-12 仍等待 M0-02 `DONE`，M7 不绕过 M0-12。
 
 ---
 
@@ -125,7 +125,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | M0-01 | 建立 Go Module 与目录骨架 | 无 | `go.mod`、`cmd/server`、`cmd/agent`、`internal/*` 骨架 | `go.mod` 声明 `go 1.27` 并由 `toolchain` 记录稳定的精确 `go1.27.x` 版本；提供 `GOTOOLCHAIN=local` 的版本检查入口；`go test ./...`、`go vet ./...`；无空壳公共抽象 | `DONE` |
-| M0-02 | Server Config Schema + Agent Token Bootstrap | M0-01 | `configs/server.schema.json`、Server Config、Agent Token Bootstrap CLI | Server Strict YAML 与 CLI>Env>YAML>Default；Agent 无 Schema/YAML，`run` 仅按 `--token`>`XTUNNEL_TOKEN`>OS Service Credential 取值；Linux 使用 systemd Credential，Windows SCM 使用 ProgramData DPAPI Machine-scope Credential；非空、无首尾空白、`xta_` 前缀、8192-byte 上限；未知 Flag/位置参数失败 | `IN_PROGRESS` |
+| M0-02 | Server Config Schema + Agent Token Bootstrap | M0-01 | `configs/server.schema.json`、Server Config、Agent Token Bootstrap CLI | Server Strict YAML 与 CLI>Env>YAML>Default；Agent 无 Schema/YAML，`run` 仅按 `--token`>`XTUNNEL_TOKEN`>OS Service Credential 取值；Linux 使用 systemd Credential，Windows SCM 使用 ProgramData DPAPI Machine-scope Credential；非空、无首尾空白、`xta_` 前缀、8192-byte 上限；未知 Flag/位置参数失败 | `REVIEW` |
 | M0-03 | Server/Agent 进程骨架 | M0-01、M0-02 | `cmd/server/main.go`、`cmd/agent/main.go`、启停生命周期 | 两个进程均可启动；SIGTERM 退出且释放资源 | `DONE` |
 | M0-04 | 结构化日志基座 | M0-01 | 共享 Logging 配置与 JSON Handler | 级别、时间、`request_id/trace_id` 字段稳定；无 Secret 输出 | `DONE` |
 | M0-05 | Server Data Target/External Lock + SQLite/Migration | M0-01、M0-02 | Stable Target/External Lock、`migrations/`、`internal/repository/sqlite` | 数据库访问统一使用 GORM；必须先计算 Stable Data Target 并获取 Data Directory 外的同一把 Lock，再检查 Restore Journal/Open SQLite；双进程在触碰 DB/PKI 前拒绝；新库、幂等启动、中断 Migration 测试；引入依赖前先确认 | `DONE` |
@@ -426,8 +426,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
 
-1. `M0-02` — Token-only Bootstrap 进入既有产物、契约、失败分支与精确 CI 证据复核，当前保持 `IN_PROGRESS`。
-2. `M0-12` — M0-09 已完成；继续等待 M0-02 `DONE` 后执行 M0 总 Gate。
+1. `M0-02` — 产物、失败分支、独立复审与精确 CI 已齐备，当前为 `REVIEW`；等待用户阶段复审结论，未标记 `DONE`。
+2. `M0-12` — M0-09 已完成；继续等待 M0-02 用户复审通过并转为 `DONE` 后执行 M0 总 Gate。
 
 `M0-12` 仍是 Alpha 前 Gate。M0-09、M2、M3、M4、M5 与 M6 已完成；全局完成数为 `83/95`。M0-02 保留独立 Review 边界，M7 继续 `NOT_STARTED`。
 
@@ -1662,3 +1662,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 状态影响：M0-09 从 `REVIEW` 转为 `DONE`，M0 从 `9/12` 更新为 `10/12`，全局从 `82/95` 更新为 `83/95`。本轮不勾选 M0 Gate；M0-12 继续等待 M0-02 `DONE`，M7 继续 `NOT_STARTED`。
 - 下一步边界：当前只进入 M0-02 Token-only Bootstrap 的既有产物、冻结契约、关键失败分支与精确 CI 证据复核，M0-02 暂时保持 `IN_PROGRESS`。复核完成前不转为 `REVIEW/DONE`，不启动 M0-12。
 - 文档同步：仅更新本开发计划的当前阶段、任务状态、计数、队列和用户复审记录。根 README、总技术方案、Proto、OpenAPI、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、权限模型、日志字段与 `AGENTS.md` 无需更新，因为本轮只闭环既有 M0-09 验收证据和用户审批，没有改变产品或机器契约。
+
+## 2026-08-31 · M0-02 Token-only Bootstrap 复核与精确 CI · REVIEW
+
+- 既有产物复核：Server Config 继续由 `configs/server.schema.json` 单一机器权威驱动，Strict YAML、重复 Key、多文档、未知 YAML/Env/CLI、`Default < YAML < Env < CLI`、Schema/Go 字段漂移和跨字段约束均由现有测试覆盖。Agent 无 Schema/YAML/本地业务配置源；前台、容器、Linux systemd 与 Windows SCM 分别使用 `--token`、`XTUNNEL_TOKEN`、LoadCredential 和 ProgramData DPAPI Machine-scope Credential，统一执行非空、无首尾空白、`xta_` 前缀与 8192-byte 上限校验。
+- 复核发现与修复：Windows 独立复审发现 SCM 分支先固定读取 DPAPI，绕过冻结的 `--token`>`XTUNNEL_TOKEN`>OS Service Credential 优先级，记录为 P1。提交 `2115ef12c0cbacf1820562fd402216effcf05af5` 将高优先级来源改为只在真实 Service Context 中惰性解析：有效 CLI/Env Token 在 DPAPI IO 前生效，无 Override 才读取 DPAPI，非法高优先级来源快速失败且不降级；Linux/unsupported 路径不调用 Override Resolver。新增测试证明优先级、低优先级损坏不阻断 Override、无 Override 回退 Credential、非法来源不读取 DPAPI 且不泄露 Secret；SCM Gate 调用同步适配但继续固定 DPAPI 故障注入。
+- 本地验证：Go `go1.27.0`、`GOTOOLCHAIN=local`；定向 `go test -count=1 ./internal/agent/bootstrap ./internal/agent/service`、同范围 Race、定向 Vet、`go test ./...`、`go vet ./...`、`gofmt`、`git diff --check` 均通过；`CGO_ENABLED=0` 的 Linux amd64/arm64、Windows arm64 与 unsupported Darwin amd64 Agent 交叉构建通过。首次未关闭 CGO 的交叉构建因 Windows 缺少目标平台 C Header 失败，使用项目正式无 CGO 构建设置重跑通过，未将失败命令记为通过。
+- 独立复审：Windows、Linux/unsupported 与整体集成三路只读复审均覆盖冻结的 8 文件差异，最终 P0/P1/P2=`0/0/0`，Review gate=`PASSED`、Coverage=`COMPLETE`、Freshness=`FRESH`；原 Windows P1 已关闭。
+- 精确 CI：[CI #33352369265](https://github.com/lifei6671/xtunnel/actions/runs/33352369265) attempt 1 精确绑定 Head `2115ef12c0cbacf1820562fd402216effcf05af5`，最终为 `completed/success`。Windows Agent Service、Linux amd64 与 Linux arm64 三个 Job 全部成功，覆盖全仓 Test/Race/Vet/Build、Windows amd64/arm64、Linux 原生 systemd/OCI/Compose 与工作树清洁。
+- 状态与边界：M0-02 从 `IN_PROGRESS` 转为 `REVIEW` 等待用户阶段复审，在用户明确“通过”前不标记 `DONE`。M0 保持 `10/12`、全局保持 `83/95`；不勾选 M0 Gate，不启动 M0-12，M7 继续 `NOT_STARTED`。
+- 文档同步：仅更新本开发计划的当前阶段、任务状态、队列和证据记录。根 README、总技术方案、Server Schema、Proto/OpenAPI、Migration、依赖/Lockfile、部署资产、CI/CD、权限模型和日志字段无需更新，因为修复恢复既有冻结 Token 来源优先级，没有新增或改变用户可见命令、配置字段或平台支持范围。
