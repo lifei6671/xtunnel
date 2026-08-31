@@ -14,6 +14,9 @@ $ErrorActionPreference = 'Stop'
 $serviceName = 'XTunnelAgent'
 $eventSourceName = 'XTunnelAgent'
 $eventSourceRegistryPath = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EventLog\Application\XTunnelAgent'
+$serviceRegistryPath = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\XTunnelAgent'
+$sessionManagerRegistryPath = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager'
+$pendingRenameValueName = 'PendingFileRenameOperations'
 $managedMarker = 'Managed by xtunnel-agent service install'
 $installDirectory = Join-Path $env:ProgramFiles 'XTunnel'
 $installedBinary = Join-Path $installDirectory 'xtunnel-agent.exe'
@@ -28,6 +31,7 @@ $expectedAgentCommand = '"' + $installedBinary + '" run'
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $installAttempted = $false
 $uninstallCompleted = $false
+$preserveInstalledBinary = $false
 $primaryFailure = $null
 $cleanupFailures = New-Object System.Collections.Generic.List[string]
 $eventQueryStart = [DateTime]::UtcNow.AddSeconds(-2)
@@ -162,6 +166,542 @@ function Invoke-Agent {
     if ($LASTEXITCODE -ne 0) {
         $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
         throw "Agent command failed with exit code $LASTEXITCODE`: $message"
+    }
+}
+
+function Invoke-AgentExpectFailure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$ArgumentList,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedMessage,
+
+        [string[]]$ForbiddenValues = @()
+    )
+
+    $output = & $agentFullPath @ArgumentList 2>&1
+    $exitCode = $LASTEXITCODE
+    $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    foreach ($forbidden in $ForbiddenValues) {
+        if ((-not [string]::IsNullOrEmpty($forbidden)) -and $message.Contains($forbidden)) {
+            throw 'expected Agent command failure exposed a forbidden value'
+        }
+    }
+    if ($exitCode -eq 0) {
+        throw 'Agent command unexpectedly accepted an unmanaged Windows object'
+    }
+    if (-not $message.Contains($ExpectedMessage)) {
+        throw 'Agent command did not report the expected unmanaged-object refusal'
+    }
+}
+
+function Get-AgentServiceSnapshot {
+    $service = Get-AgentService
+    if ($null -eq $service) {
+        return $null
+    }
+    $serviceKey = Get-Item -LiteralPath $serviceRegistryPath
+    $valueSignature = @($serviceKey.GetValueNames() | Sort-Object | ForEach-Object {
+            "$_`:$($serviceKey.GetValueKind($_))"
+        }) -join ';'
+    return [PSCustomObject]@{
+        DisplayName = $service.DisplayName
+        PathName = $service.PathName
+        StartMode = $service.StartMode
+        StartName = $service.StartName
+        State = $service.State
+        Description = $service.Description
+        ServiceType = $service.ServiceType
+        ErrorControl = $service.ErrorControl
+        ValueSignature = $valueSignature
+    }
+}
+
+function Test-AgentServiceSnapshotEqual {
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$Left,
+
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$Right
+    )
+
+    foreach ($property in @(
+            'DisplayName',
+            'PathName',
+            'StartMode',
+            'StartName',
+            'State',
+            'Description',
+            'ServiceType',
+            'ErrorControl',
+            'ValueSignature'
+        )) {
+        if (-not [object]::Equals($Left.$property, $Right.$property)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-UnmanagedServiceBoundary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Token
+    )
+
+    $foreignDisplayName = "XTunnel unmanaged smoke service $PID"
+    $foreignDescription = "XTunnel unmanaged smoke owner $PID"
+    $foreignBinary = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $foreignCommand = '"' + $foreignBinary + '" /c exit 0'
+    $ownedSnapshot = $null
+    $testFailure = $null
+    $cleanupFailure = $null
+
+    try {
+        New-Service -Name $serviceName -BinaryPathName $foreignCommand `
+            -DisplayName $foreignDisplayName -StartupType Manual | Out-Null
+        $ownedSnapshot = Get-AgentServiceSnapshot
+        if ($null -eq $ownedSnapshot) {
+            throw 'unmanaged smoke service was not created'
+        }
+        $descriptionOutput = & sc.exe description $serviceName $foreignDescription 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw 'failed to mark the unmanaged smoke service'
+        }
+        $markedSnapshot = Get-AgentServiceSnapshot
+        if ($null -eq $markedSnapshot) {
+            throw 'unmanaged smoke service disappeared after ownership marking'
+        }
+        $ownedSnapshot = $markedSnapshot
+
+        Invoke-AgentExpectFailure -ArgumentList @('service', 'install', '--token', $Token) `
+            -ExpectedMessage 'refusing to overwrite an unmanaged or modified XTunnelAgent service' `
+            -ForbiddenValues @($Token)
+        $afterInstall = Get-AgentServiceSnapshot
+        if (($null -eq $afterInstall) -or
+            (-not (Test-AgentServiceSnapshotEqual -Left $ownedSnapshot -Right $afterInstall))) {
+            throw 'failed install modified the unmanaged smoke service'
+        }
+        if ((Test-Path -LiteralPath $eventSourceRegistryPath) -or
+            (Test-Path -LiteralPath $installDirectory) -or
+            (Test-Path -LiteralPath $productDataDirectory)) {
+            throw 'failed install created managed artifacts beside the unmanaged smoke service'
+        }
+
+        Invoke-AgentExpectFailure -ArgumentList @('service', 'uninstall') `
+            -ExpectedMessage 'refusing to remove an unmanaged or modified XTunnelAgent service'
+        $afterUninstall = Get-AgentServiceSnapshot
+        if (($null -eq $afterUninstall) -or
+            (-not (Test-AgentServiceSnapshotEqual -Left $ownedSnapshot -Right $afterUninstall))) {
+            throw 'failed uninstall modified the unmanaged smoke service'
+        }
+        if ((Test-Path -LiteralPath $eventSourceRegistryPath) -or
+            (Test-Path -LiteralPath $installDirectory) -or
+            (Test-Path -LiteralPath $productDataDirectory)) {
+            throw 'failed uninstall created managed artifacts beside the unmanaged smoke service'
+        }
+    }
+    catch {
+        $testFailure = $_
+    }
+    finally {
+        $remaining = Get-AgentServiceSnapshot
+        if ($null -ne $remaining) {
+            if (($null -ne $ownedSnapshot) -and
+                (Test-AgentServiceSnapshotEqual -Left $ownedSnapshot -Right $remaining)) {
+                $deleteOutput = & sc.exe delete $serviceName 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    try {
+                        Wait-AgentServiceDeleted
+                    }
+                    catch {
+                        $cleanupFailure = $_
+                    }
+                }
+                else {
+                    $cleanupFailure = [InvalidOperationException]::new('failed to delete the owned unmanaged smoke service')
+                }
+            }
+            else {
+                $cleanupFailure = [InvalidOperationException]::new('refusing to delete an unmanaged smoke service whose ownership changed')
+            }
+        }
+    }
+
+    if ($null -ne $testFailure) {
+        if ($null -ne $cleanupFailure) {
+            throw "unmanaged Service boundary failed: $($testFailure.Exception.Message); cleanup also failed: $($cleanupFailure.Exception.Message)"
+        }
+        throw $testFailure
+    }
+    if ($null -ne $cleanupFailure) {
+        throw $cleanupFailure
+    }
+}
+
+function Get-UnmanagedEventSourceSnapshot {
+    if (-not (Test-Path -LiteralPath $eventSourceRegistryPath)) {
+        return $null
+    }
+    $sourceKey = Get-Item -LiteralPath $eventSourceRegistryPath
+    $source = Get-ItemProperty -LiteralPath $eventSourceRegistryPath
+    $valueSignature = @($sourceKey.GetValueNames() | Sort-Object | ForEach-Object {
+            "$_`:$($sourceKey.GetValueKind($_))"
+        }) -join ';'
+    return [PSCustomObject]@{
+        XTunnelManaged = $source.XTunnelManaged
+        CustomSource = [int]$source.CustomSource
+        EventMessageFile = $source.EventMessageFile
+        TypesSupported = [int]$source.TypesSupported
+        ForeignSmokeOwner = $source.ForeignSmokeOwner
+        ValueSignature = $valueSignature
+    }
+}
+
+function Test-EventSourceSnapshotEqual {
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$Left,
+
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$Right
+    )
+
+    foreach ($property in @(
+            'XTunnelManaged',
+            'CustomSource',
+            'EventMessageFile',
+            'TypesSupported',
+            'ForeignSmokeOwner',
+            'ValueSignature'
+        )) {
+        if (-not [object]::Equals($Left.$property, $Right.$property)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-UnmanagedEventSourceBoundary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Token
+    )
+
+    $foreignOwner = "XTunnel unmanaged Event Source owner $PID"
+    $ownedSnapshot = $null
+    $testFailure = $null
+    $cleanupFailure = $null
+
+    try {
+        New-Item -Path $eventSourceRegistryPath | Out-Null
+        New-ItemProperty -LiteralPath $eventSourceRegistryPath -Name 'ForeignSmokeOwner' `
+            -Value $foreignOwner -PropertyType String | Out-Null
+        New-ItemProperty -LiteralPath $eventSourceRegistryPath -Name 'XTunnelManaged' `
+            -Value $foreignOwner -PropertyType String | Out-Null
+        New-ItemProperty -LiteralPath $eventSourceRegistryPath -Name 'CustomSource' `
+            -Value 0 -PropertyType DWord | Out-Null
+        New-ItemProperty -LiteralPath $eventSourceRegistryPath -Name 'EventMessageFile' `
+            -Value 'foreign-message-file' -PropertyType ExpandString | Out-Null
+        New-ItemProperty -LiteralPath $eventSourceRegistryPath -Name 'TypesSupported' `
+            -Value 1 -PropertyType DWord | Out-Null
+        $ownedSnapshot = Get-UnmanagedEventSourceSnapshot
+
+        Invoke-AgentExpectFailure -ArgumentList @('service', 'install', '--token', $Token) `
+            -ExpectedMessage 'refusing to overwrite an unmanaged or modified XTunnelAgent Event Log Source' `
+            -ForbiddenValues @($Token)
+        $afterInstall = Get-UnmanagedEventSourceSnapshot
+        if (($null -eq $afterInstall) -or
+            (-not (Test-EventSourceSnapshotEqual -Left $ownedSnapshot -Right $afterInstall))) {
+            throw 'failed install modified the unmanaged Event Log Source'
+        }
+        if (($null -ne (Get-AgentService)) -or
+            (Test-Path -LiteralPath $installDirectory) -or
+            (Test-Path -LiteralPath $productDataDirectory)) {
+            throw 'failed install created managed artifacts beside the unmanaged Event Log Source'
+        }
+
+        Invoke-AgentExpectFailure -ArgumentList @('service', 'uninstall') `
+            -ExpectedMessage 'refusing to remove an unmanaged or modified XTunnelAgent Event Log Source'
+        $afterUninstall = Get-UnmanagedEventSourceSnapshot
+        if (($null -eq $afterUninstall) -or
+            (-not (Test-EventSourceSnapshotEqual -Left $ownedSnapshot -Right $afterUninstall))) {
+            throw 'failed uninstall modified the unmanaged Event Log Source'
+        }
+        if (($null -ne (Get-AgentService)) -or
+            (Test-Path -LiteralPath $installDirectory) -or
+            (Test-Path -LiteralPath $productDataDirectory)) {
+            throw 'failed uninstall created managed artifacts beside the unmanaged Event Log Source'
+        }
+    }
+    catch {
+        $testFailure = $_
+    }
+    finally {
+        if (Test-Path -LiteralPath $eventSourceRegistryPath) {
+            $remainingSnapshot = Get-UnmanagedEventSourceSnapshot
+            if (($null -ne $ownedSnapshot) -and
+                (Test-EventSourceSnapshotEqual -Left $ownedSnapshot -Right $remainingSnapshot)) {
+                try {
+                    Remove-Item -LiteralPath $eventSourceRegistryPath -Force
+                }
+                catch {
+                    $cleanupFailure = $_
+                }
+            }
+            else {
+                $cleanupFailure = [InvalidOperationException]::new('refusing to remove an unmanaged Event Source whose ownership changed')
+            }
+        }
+    }
+
+    if ($null -ne $testFailure) {
+        if ($null -ne $cleanupFailure) {
+            throw "unmanaged Event Source boundary failed: $($testFailure.Exception.Message); cleanup also failed: $($cleanupFailure.Exception.Message)"
+        }
+        throw $testFailure
+    }
+    if ($null -ne $cleanupFailure) {
+        throw $cleanupFailure
+    }
+}
+
+function Get-PendingRenameSnapshot {
+    $key = Get-Item -LiteralPath $sessionManagerRegistryPath
+    $valueNames = @($key.GetValueNames())
+    if ($valueNames -notcontains $pendingRenameValueName) {
+        return [PSCustomObject]@{
+            Exists = $false
+            Values = [string[]]@()
+        }
+    }
+
+    $rawValue = $key.GetValue(
+        $pendingRenameValueName,
+        $null,
+        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+    )
+    if ($rawValue -isnot [string[]]) {
+        throw "$pendingRenameValueName is not a REG_MULTI_SZ value"
+    }
+    return [PSCustomObject]@{
+        Exists = $true
+        Values = [string[]]$rawValue
+    }
+}
+
+function Test-PendingRenameSnapshotEqual {
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$Left,
+
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$Right
+    )
+
+    if ($Left.Exists -ne $Right.Exists) {
+        return $false
+    }
+    if ($Left.Values.Count -ne $Right.Values.Count) {
+        return $false
+    }
+    for ($index = 0; $index -lt $Left.Values.Count; $index++) {
+        if (-not [string]::Equals(
+                $Left.Values[$index],
+                $Right.Values[$index],
+                [StringComparison]::Ordinal
+            )) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-PendingDeleteDelta {
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$Before,
+
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$After,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BinaryPath
+    )
+
+    if (-not $After.Exists) {
+        return $false
+    }
+    if (($After.Values.Count -lt ($Before.Values.Count + 1)) -or
+        ($After.Values.Count -gt ($Before.Values.Count + 2))) {
+        return $false
+    }
+    for ($index = 0; $index -lt $Before.Values.Count; $index++) {
+        if (-not [string]::Equals(
+                $Before.Values[$index],
+                $After.Values[$index],
+                [StringComparison]::Ordinal
+            )) {
+            return $false
+        }
+    }
+
+    $scheduledSource = '\??\' + $BinaryPath
+    if (-not [string]::Equals(
+            $After.Values[$Before.Values.Count],
+            $scheduledSource,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        return $false
+    }
+    for ($index = $Before.Values.Count + 1; $index -lt $After.Values.Count; $index++) {
+        if (-not [string]::IsNullOrEmpty($After.Values[$index])) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Restore-PendingRenameSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$Before,
+
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$OwnedAfter
+    )
+
+    $current = Get-PendingRenameSnapshot
+    if (-not (Test-PendingRenameSnapshotEqual -Left $OwnedAfter -Right $current)) {
+        throw 'refusing to restore PendingFileRenameOperations after concurrent modification'
+    }
+    if ($Before.Exists) {
+        $key = Get-Item -LiteralPath $sessionManagerRegistryPath
+        $key.SetValue(
+            $pendingRenameValueName,
+            [string[]]$Before.Values,
+            [Microsoft.Win32.RegistryValueKind]::MultiString
+        )
+    }
+    else {
+        Remove-ItemProperty -LiteralPath $sessionManagerRegistryPath `
+            -Name $pendingRenameValueName
+    }
+
+    $restored = Get-PendingRenameSnapshot
+    if (-not (Test-PendingRenameSnapshotEqual -Left $Before -Right $restored)) {
+        throw 'PendingFileRenameOperations was not restored to its pre-smoke value'
+    }
+}
+
+function Invoke-InstalledAgentSelfUninstall {
+    # All ownership probes are fallible. Fail closed before touching the installed path.
+    $script:preserveInstalledBinary = $true
+    $ownedBinary = Get-Item -LiteralPath $installedBinary
+    $ownedBinaryHash = (Get-FileHash -LiteralPath $installedBinary -Algorithm SHA256).Hash
+    $beforePendingRename = Get-PendingRenameSnapshot
+    $afterPendingRename = $null
+    $ownsPendingDelete = $false
+    $removedOwnedBinary = $false
+    $testFailure = $null
+    $cleanupFailures = New-Object System.Collections.Generic.List[string]
+
+    try {
+        $output = & $installedBinary service uninstall 2>&1
+        $exitCode = $LASTEXITCODE
+        $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+        $afterPendingRename = Get-PendingRenameSnapshot
+        $ownsPendingDelete = Test-PendingDeleteDelta `
+            -Before $beforePendingRename -After $afterPendingRename -BinaryPath $installedBinary
+
+        if ($exitCode -ne 0) {
+            throw "installed Agent self-uninstall failed with exit code $exitCode`: $message"
+        }
+        if ((-not $message.Contains('the running binary will be deleted after the next reboot')) -or
+            (-not $message.Contains('the credential was preserved'))) {
+            throw 'installed Agent self-uninstall did not report delayed binary removal'
+        }
+        Wait-AgentServiceDeleted
+        if (Test-Path -LiteralPath $eventSourceRegistryPath) {
+            throw 'self-uninstall left the managed Windows Event Log Source behind'
+        }
+        if (-not (Test-Path -LiteralPath $credentialPath -PathType Leaf)) {
+            throw 'self-uninstall did not preserve the protected Agent credential'
+        }
+        # The product entry removed the SCM Service and managed Event Source. Later
+        # evidence or cleanup failures must not retry uninstall from the source binary.
+        $script:uninstallCompleted = $true
+        if (-not (Test-Path -LiteralPath $installedBinary -PathType Leaf)) {
+            throw 'self-uninstall reported delayed removal but the running binary disappeared immediately'
+        }
+        if (-not $ownsPendingDelete) {
+            throw 'self-uninstall did not append the expected delayed binary deletion entry'
+        }
+    }
+    catch {
+        $testFailure = $_
+    }
+    finally {
+        # Identity probing and owned cleanup can fail after Test-Path succeeds. Keep the
+        # installed path fail-closed until the exact task-owned binary is gone.
+        $script:preserveInstalledBinary = $true
+        if (Test-Path -LiteralPath $installedBinary -PathType Leaf) {
+            try {
+                $currentBinary = Get-Item -LiteralPath $installedBinary
+                $currentBinaryHash = (Get-FileHash -LiteralPath $installedBinary -Algorithm SHA256).Hash
+                $binaryUnchanged = ($currentBinary.Length -eq $ownedBinary.Length) -and
+                    ($currentBinary.CreationTimeUtc.Ticks -eq $ownedBinary.CreationTimeUtc.Ticks) -and
+                    ($currentBinary.LastWriteTimeUtc.Ticks -eq $ownedBinary.LastWriteTimeUtc.Ticks) -and
+                    [string]::Equals($currentBinaryHash, $ownedBinaryHash, [StringComparison]::OrdinalIgnoreCase)
+                if ($binaryUnchanged) {
+                    Remove-Item -LiteralPath $installedBinary -Force
+                    $removedOwnedBinary = -not (Test-Path -LiteralPath $installedBinary)
+                    if ($removedOwnedBinary) {
+                        $script:preserveInstalledBinary = $false
+                    }
+                    else {
+                        $cleanupFailures.Add('self-uninstalled Agent binary still exists after owned cleanup')
+                    }
+                }
+                else {
+                    $cleanupFailures.Add('refusing to remove a self-uninstalled Agent binary whose identity changed')
+                }
+            }
+            catch {
+                $cleanupFailures.Add("inspect or remove self-uninstalled Agent binary failed: $($_.Exception.Message)")
+            }
+        }
+        else {
+            $cleanupFailures.Add('refusing to restore delayed deletion after the owned Agent binary disappeared')
+        }
+
+        if ($ownsPendingDelete) {
+            if (-not $removedOwnedBinary) {
+                $cleanupFailures.Add('refusing to restore delayed deletion without removing the owned Agent binary')
+            }
+            else {
+                try {
+                    Restore-PendingRenameSnapshot `
+                        -Before $beforePendingRename -OwnedAfter $afterPendingRename
+                }
+                catch {
+                    $cleanupFailures.Add("restore delayed deletion registry state failed: $($_.Exception.Message)")
+                }
+            }
+        }
+    }
+
+    if ($null -ne $testFailure) {
+        if ($cleanupFailures.Count -ne 0) {
+            $cleanupMessage = $cleanupFailures -join [Environment]::NewLine
+            throw "installed Agent self-uninstall failed: $($testFailure.Exception.Message)$([Environment]::NewLine)Cleanup also failed:$([Environment]::NewLine)$cleanupMessage"
+        }
+        throw $testFailure
+    }
+    if ($cleanupFailures.Count -ne 0) {
+        throw ($cleanupFailures -join [Environment]::NewLine)
     }
 }
 
@@ -544,6 +1084,8 @@ if ((Test-Path -LiteralPath $installDirectory) -or (Test-Path -LiteralPath $prod
 
 try {
     $firstToken = New-SmokeToken
+    Test-UnmanagedServiceBoundary -Token $firstToken
+    Test-UnmanagedEventSourceBoundary -Token $firstToken
     $installAttempted = $true
     Invoke-Agent -ArgumentList @('service', 'install', '--token', $firstToken)
     Wait-AgentServiceStatus -Status 'Running'
@@ -637,7 +1179,7 @@ try {
     Remove-Item -LiteralPath $installedGateHelper -Force
     Remove-EmptyDirectory -LiteralPath $gateDirectory
 
-    Invoke-Agent -ArgumentList @('service', 'uninstall')
+    Invoke-InstalledAgentSelfUninstall
     $uninstallCompleted = $true
     Wait-AgentServiceDeleted
     if (Test-Path -LiteralPath $installedBinary) {
@@ -657,15 +1199,20 @@ finally {
     $remainingServiceBeforeUninstall = Get-AgentService
     if (($null -ne $remainingServiceBeforeUninstall) -and
         ($remainingServiceBeforeUninstall.PathName -match ([Regex]::Escape($installedGateHelper)))) {
-        try {
-            Set-AgentServiceCommand -CommandLine $expectedAgentCommand
+        if ($preserveInstalledBinary) {
+            $cleanupFailures.Add('refusing to restore a service command after the installed Agent binary ownership changed')
         }
-        catch {
-            $cleanupFailures.Add("restore service command before uninstall failed: $($_.Exception.Message)")
+        else {
+            try {
+                Set-AgentServiceCommand -CommandLine $expectedAgentCommand
+            }
+            catch {
+                $cleanupFailures.Add("restore service command before uninstall failed: $($_.Exception.Message)")
+            }
         }
     }
 
-    if ($installAttempted -and (-not $uninstallCompleted)) {
+    if ($installAttempted -and (-not $uninstallCompleted) -and (-not $preserveInstalledBinary)) {
         try {
             Invoke-Agent -ArgumentList @('service', 'uninstall')
             $uninstallCompleted = $true
@@ -676,6 +1223,10 @@ finally {
     }
 
     $remainingService = Get-AgentService
+    if (($null -ne $remainingService) -and $preserveInstalledBinary) {
+        $cleanupFailures.Add('refusing to remove a service after the installed Agent binary ownership changed')
+        $remainingService = $null
+    }
     if ($null -ne $remainingService) {
         $escapedBinary = [Regex]::Escape($installedBinary)
         if ($remainingService.PathName -match ('^"' + $escapedBinary + '"\s+run$')) {
@@ -699,7 +1250,10 @@ finally {
         }
     }
 
-    if (Test-Path -LiteralPath $eventSourceRegistryPath) {
+    if ((Test-Path -LiteralPath $eventSourceRegistryPath) -and $preserveInstalledBinary) {
+        $cleanupFailures.Add('refusing to remove an Event Log Source after the installed Agent binary ownership changed')
+    }
+    elseif (Test-Path -LiteralPath $eventSourceRegistryPath) {
         try {
             $source = Get-ItemProperty -LiteralPath $eventSourceRegistryPath
             if ($installAttempted -and ($source.XTunnelManaged -eq $managedMarker)) {
@@ -715,6 +1269,10 @@ finally {
     }
 
     foreach ($path in @($installedGateHelper, $installedBinary, $credentialPath)) {
+        if ($preserveInstalledBinary -and (@($installedBinary, $credentialPath) -contains $path)) {
+            $cleanupFailures.Add("refusing to remove an install artifact after ownership changed: $path")
+            continue
+        }
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             try {
                 Remove-Item -LiteralPath $path -Force
@@ -725,6 +1283,10 @@ finally {
         }
     }
     foreach ($directory in @($gateDirectory, $credentialDirectory, $productDataDirectory, $installDirectory)) {
+        if ($preserveInstalledBinary -and ($directory -ne $gateDirectory)) {
+            $cleanupFailures.Add("refusing to remove an install directory after ownership changed: $directory")
+            continue
+        }
         try {
             Remove-EmptyDirectory -LiteralPath $directory
         }

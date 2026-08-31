@@ -3,12 +3,56 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestRequireSupportedSystemd(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		runErr     error
+		wantErr    string
+		wantSystem string
+	}{
+		{name: "minimum supported version", output: "249", wantSystem: "/usr/bin/systemctl"},
+		{name: "newer version", output: "257 (257.5-2)", wantSystem: "/usr/bin/systemctl"},
+		{name: "old version", output: "248", wantErr: "systemd 249 or newer is required; found 248", wantSystem: "/usr/bin/systemctl"},
+		{name: "query failure", runErr: errors.New("injected query failure"), wantErr: "query running systemd: injected query failure", wantSystem: "/usr/bin/systemctl"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			run := func(_ context.Context, path string, args ...string) (string, error) {
+				calls++
+				if path != test.wantSystem {
+					t.Fatalf("systemctl path = %q, want %q", path, test.wantSystem)
+				}
+				wantArgs := []string{"show", "--property=Version", "--value"}
+				if strings.Join(args, "\x00") != strings.Join(wantArgs, "\x00") {
+					t.Fatalf("systemctl args = %q, want %q", args, wantArgs)
+				}
+				return test.output, test.runErr
+			}
+
+			err := requireSupportedSystemd(context.Background(), test.wantSystem, run)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("requireSupportedSystemd() error = %v", err)
+				}
+			} else if err == nil || err.Error() != test.wantErr {
+				t.Fatalf("requireSupportedSystemd() error = %v, want %q", err, test.wantErr)
+			}
+			if calls != 1 {
+				t.Fatalf("systemctl calls = %d, want 1", calls)
+			}
+		})
+	}
+}
 
 func TestApplyLinuxInstallRollsBackEveryFailureStage(t *testing.T) {
 	tests := []struct {

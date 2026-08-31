@@ -45,16 +45,8 @@ func install(ctx context.Context, token string) error {
 	if err != nil {
 		return errors.New("useradd is required")
 	}
-	versionOutput, err := runExternal(ctx, systemctl, "show", "--property=Version", "--value")
-	if err != nil {
-		return fmt.Errorf("query running systemd: %w", err)
-	}
-	version, err := parseSystemdVersion(versionOutput)
-	if err != nil {
+	if err := requireSupportedSystemd(ctx, systemctl, runExternal); err != nil {
 		return err
-	}
-	if version < minimumSystemdVersion {
-		return fmt.Errorf("systemd %d or newer is required; found %d", minimumSystemdVersion, version)
 	}
 
 	exists, managed, err := inspectManagedUnit(UnitPath)
@@ -318,6 +310,9 @@ func uninstall(ctx context.Context) (UninstallResult, error) {
 	if err != nil {
 		return UninstallResult{}, errors.New("systemctl is required")
 	}
+	if err := requireSupportedSystemd(ctx, systemctl, runExternal); err != nil {
+		return UninstallResult{}, err
+	}
 	exists, managed, err := inspectManagedUnit(UnitPath)
 	if err != nil {
 		return UninstallResult{}, err
@@ -346,6 +341,27 @@ func uninstall(ctx context.Context) (UninstallResult, error) {
 		return UninstallResult{}, fmt.Errorf("reload systemd units: %w", err)
 	}
 	return UninstallResult{}, nil
+}
+
+// install 和 uninstall 都必须在触碰 Unit、Binary、Credential 或服务身份前确认
+// 当前 systemd 处于支持矩阵内，避免旧版本只执行部分服务生命周期操作。
+func requireSupportedSystemd(
+	ctx context.Context,
+	systemctl string,
+	run func(context.Context, string, ...string) (string, error),
+) error {
+	versionOutput, err := run(ctx, systemctl, "show", "--property=Version", "--value")
+	if err != nil {
+		return fmt.Errorf("query running systemd: %w", err)
+	}
+	version, err := parseSystemdVersion(versionOutput)
+	if err != nil {
+		return err
+	}
+	if version < minimumSystemdVersion {
+		return fmt.Errorf("systemd %d or newer is required; found %d", minimumSystemdVersion, version)
+	}
+	return nil
 }
 
 func ensureServiceUser(ctx context.Context, useradd string) error {

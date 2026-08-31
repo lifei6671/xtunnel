@@ -246,6 +246,13 @@ jobs:
           expect_version_rejected invalid --build-arg 'XTUNNEL_VERSION=v0.1.0 invalid'
           expect_version_rejected too-long --build-arg 'XTUNNEL_VERSION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
+      - name: Run native Compose dual-stack build and runtime smoke
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          ./deploy/docker/dualstack-smoke.sh --platform '${{ matrix.platform }}'
+
       - name: Run native M6 Operations systemd fault diagnostics smoke
         shell: bash
         timeout-minutes: 7

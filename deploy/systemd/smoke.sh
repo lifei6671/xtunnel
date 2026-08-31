@@ -79,15 +79,34 @@ done
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
+umask 077
 temp_dir=$(mktemp -d)
+unmanaged_agent_unit_owned=0
+unmanaged_agent_unit_fingerprint=
+
+remove_owned_unmanaged_agent_unit() {
+	[ "$unmanaged_agent_unit_owned" -eq 1 ] || return 0
+	if [ ! -f /etc/systemd/system/xtunnel-agent.service ] \
+		|| ! cmp -s "$temp_dir/unmanaged-xtunnel-agent.service" /etc/systemd/system/xtunnel-agent.service \
+		|| [ "$(stat -c '%a:%u:%g:%s:%i:%y:%z' /etc/systemd/system/xtunnel-agent.service)" != "$unmanaged_agent_unit_fingerprint" ]; then
+		printf '%s\n' "cleanup preserved an unmanaged Agent unit whose identity changed during the smoke" >&2
+		return 1
+	fi
+	rm -f -- /etc/systemd/system/xtunnel-agent.service
+	unmanaged_agent_unit_owned=0
+}
 
 cleanup() {
-	sh "$script_dir/uninstall.sh" server >/dev/null 2>&1 || true
-	if [ -x /usr/local/bin/xtunnel-agent ]; then
-		/usr/local/bin/xtunnel-agent service uninstall >/dev/null 2>&1 || true
+	if ! remove_owned_unmanaged_agent_unit; then
+		printf '%s\n' "cleanup skipped Agent uninstall to avoid deleting a changed unmanaged unit" >&2
 	else
-		"$agent_binary" service uninstall >/dev/null 2>&1 || true
+		if [ -x /usr/local/bin/xtunnel-agent ]; then
+			/usr/local/bin/xtunnel-agent service uninstall >/dev/null 2>&1 || true
+		else
+			"$agent_binary" service uninstall >/dev/null 2>&1 || true
+		fi
 	fi
+	sh "$script_dir/uninstall.sh" server >/dev/null 2>&1 || true
 	for unit in xtunnel-server.service xtunnel-agent.service; do
 		if systemctl is-active --quiet "$unit"; then
 			printf 'cleanup stopped before deleting files because %s is still active\n' "$unit" >&2
@@ -184,7 +203,56 @@ wait_for_unit_property() {
 	return 1
 }
 
-umask 077
+assert_agent_side_effects_absent() {
+	for path in \
+		/usr/local/bin/xtunnel-agent \
+		/etc/xtunnel \
+		/run/xtunnel-agent \
+		/var/lib/xtunnel-agent; do
+		if [ -e "$path" ] || [ -L "$path" ]; then
+			printf 'rejected Agent service operation modified protected path: %s\n' "$path" >&2
+			exit 1
+		fi
+	done
+	if id xtunnel-agent >/dev/null 2>&1 || getent group xtunnel-agent >/dev/null 2>&1; then
+		printf '%s\n' "rejected Agent service operation created the service identity" >&2
+		exit 1
+	fi
+}
+
+assert_agent_targets_absent() {
+	assert_agent_side_effects_absent
+	if [ -e /etc/systemd/system/xtunnel-agent.service ] \
+		|| [ -L /etc/systemd/system/xtunnel-agent.service ]; then
+		printf '%s\n' "rejected Agent service operation created the systemd unit" >&2
+		exit 1
+	fi
+}
+
+expect_agent_failure() {
+	failure_name=$1
+	expected_text=$2
+	shift 2
+	failure_output="$temp_dir/$failure_name.output"
+	set +e
+	"$@" >"$failure_output" 2>&1
+	failure_status=$?
+	set -e
+	if [ "$failure_status" -eq 0 ]; then
+		printf '%s unexpectedly succeeded\n' "$failure_name" >&2
+		exit 1
+	fi
+	if grep -F "$smoke_agent_token" "$failure_output" >/dev/null; then
+		printf '%s leaked the Connection Token in failure output\n' "$failure_name" >&2
+		exit 1
+	fi
+	if ! grep -F "$expected_text" "$failure_output" >/dev/null; then
+		failure_bytes=$(wc -c <"$failure_output" | tr -d ' ')
+		printf '%s did not report the expected failure; output_bytes=%s\n' "$failure_name" "$failure_bytes" >&2
+		exit 1
+	fi
+}
+
 cat >"$temp_dir/server.yaml" <<'EOF'
 management:
   public_url: https://smoke.invalid
@@ -204,6 +272,90 @@ if [ -z "$smoke_agent_token" ] || [ -z "$reinstall_agent_token" ] || [ "$smoke_a
 	printf '%s\n' "systemd smoke Connection Token fixtures must be non-empty and distinct" >&2
 	exit 1
 fi
+
+# 产品入口必须在任何账户、Binary、Credential 或 Unit 写入前拒绝不支持的权限和
+# systemd 版本。复制到可遍历的隔离目录，避免 Runner 临时目录权限掩盖 non-root 断言。
+preflight_agent_binary="$temp_dir/xtunnel-agent-preflight"
+cp "$agent_binary" "$preflight_agent_binary"
+chmod 755 "$preflight_agent_binary"
+chmod 711 "$temp_dir"
+if ! command -v runuser >/dev/null 2>&1; then
+	printf '%s\n' "runuser is required for the Agent non-root preflight smoke" >&2
+	exit 1
+fi
+nonroot_user=nobody
+nonroot_uid=$(id -u "$nonroot_user" 2>/dev/null || true)
+case "$nonroot_uid" in
+	''|*[!0-9]*|0)
+		printf '%s\n' "a real non-root nobody identity is required for the Agent preflight smoke" >&2
+		exit 1
+		;;
+esac
+expect_agent_failure \
+	agent-nonroot-install \
+	'service install must run as root' \
+	runuser -u "$nonroot_user" -- "$preflight_agent_binary" service install --token "$smoke_agent_token"
+assert_agent_targets_absent
+expect_agent_failure \
+	agent-nonroot-uninstall \
+	'service uninstall must run as root' \
+	runuser -u "$nonroot_user" -- "$preflight_agent_binary" service uninstall
+assert_agent_targets_absent
+
+old_systemd_bin="$temp_dir/old-systemd-bin"
+mkdir "$old_systemd_bin"
+cat >"$old_systemd_bin/systemctl" <<'EOF'
+#!/bin/sh
+if [ "$#" -eq 3 ] && [ "$1" = show ] && [ "$2" = '--property=Version' ] && [ "$3" = --value ]; then
+	printf '%s\n' 248
+	exit 0
+fi
+exit 97
+EOF
+chmod 755 "$old_systemd_bin/systemctl"
+expect_agent_failure \
+	agent-old-systemd-install \
+	'systemd 249 or newer is required; found 248' \
+	env PATH="$old_systemd_bin:$PATH" "$agent_binary" service install --token "$smoke_agent_token"
+assert_agent_targets_absent
+expect_agent_failure \
+	agent-old-systemd-uninstall \
+	'systemd 249 or newer is required; found 248' \
+	env PATH="$old_systemd_bin:$PATH" "$agent_binary" service uninstall
+assert_agent_targets_absent
+
+# 同名 Unit 只有首行 managed marker 才属于 XTunnel。用字节、权限、owner、inode 和
+# 纳秒时间戳冻结外来对象，install/uninstall 两条产品路径都必须拒绝且原对象不变。
+cat >"$temp_dir/unmanaged-xtunnel-agent.service" <<'EOF'
+[Unit]
+Description=Foreign xtunnel-agent service owned by the systemd smoke fixture
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+EOF
+install -o root -g root -m 0640 \
+	"$temp_dir/unmanaged-xtunnel-agent.service" \
+	/etc/systemd/system/xtunnel-agent.service
+unmanaged_agent_unit_fingerprint=$(stat -c '%a:%u:%g:%s:%i:%y:%z' /etc/systemd/system/xtunnel-agent.service)
+unmanaged_agent_unit_owned=1
+expect_agent_failure \
+	agent-unmanaged-unit-install \
+	'refusing to overwrite an unmanaged xtunnel-agent.service' \
+	"$agent_binary" service install --token "$smoke_agent_token"
+assert_agent_side_effects_absent
+cmp -s "$temp_dir/unmanaged-xtunnel-agent.service" /etc/systemd/system/xtunnel-agent.service
+test "$(stat -c '%a:%u:%g:%s:%i:%y:%z' /etc/systemd/system/xtunnel-agent.service)" = "$unmanaged_agent_unit_fingerprint"
+expect_agent_failure \
+	agent-unmanaged-unit-uninstall \
+	'refusing to remove an unmanaged xtunnel-agent.service' \
+	"$agent_binary" service uninstall
+assert_agent_side_effects_absent
+cmp -s "$temp_dir/unmanaged-xtunnel-agent.service" /etc/systemd/system/xtunnel-agent.service
+test "$(stat -c '%a:%u:%g:%s:%i:%y:%z' /etc/systemd/system/xtunnel-agent.service)" = "$unmanaged_agent_unit_fingerprint"
+remove_owned_unmanaged_agent_unit
+assert_agent_targets_absent
+printf '%s\n' "Agent service preflight rejection smoke passed"
 
 # 无迁移策略必须表现为安全拒绝，不能留下新 Binary、Config、Unit 或服务身份。
 mkdir -p /var/lib/xtunnel
