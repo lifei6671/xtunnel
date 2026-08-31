@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-08-30
+> **进度基线日期**：2026-08-31
 >
-> **当前阶段**：M0-09 Packaging Closure · IN_PROGRESS（M6 已完成；进入既有部署证据的独立阶段复审）
+> **当前阶段**：M0-09 Packaging Closure · REVIEW（实现、独立复审与精确 CI 已齐备，等待用户阶段复审）
 >
-> **当前结论**：用户已明确确认 M6-07 阶段复审通过，M6 更新为 `7/7 DONE`，全局更新为 `82/95`。M0-09 独立部署复审结论为 `CHANGES_REQUESTED`（P0=0、P1=3、P2=0）：当前 CI 未运行正式 Compose 双栈 Runtime、Windows 卸载未从运行中的 `%ProgramFiles%` 已安装 EXE 触发延迟删除、Linux/Windows 非受管对象与 Linux non-root/systemd<249 失败边界未经过产品入口真实 Smoke。M0-09 保持 `IN_PROGRESS`；下一步涉及部署 Smoke 与 CI Workflow 修改，等待用户明确确认推荐闭环范围，M7 不因 M6 完成而绕过 M0-09/M0-12 依赖。
+> **当前结论**：M0-09 推荐闭环范围已实现并完成多轮独立复审，最终 P0/P1/P2 均为 0。最终 Head `389a15dbd59420449df952e6a5a81ebee8e5d4c0` 的精确 [CI #33349658948](https://github.com/lifei6671/xtunnel/actions/runs/33349658948) attempt 2 为 `completed/success`：Windows 已安装 EXE Self-uninstall、Linux amd64/arm64 正式 Compose 双栈 Build/Runtime、两平台非受管对象拒绝及 Linux non-root/systemd `<249` 产品入口 Smoke 全部通过。M0-09 转为 `REVIEW` 等待用户阶段复审，不提前标记 `DONE`；M0 保持 `9/12`、全局保持 `82/95`，M7 不绕过 M0-09/M0-12 依赖。
 
 ---
 
@@ -132,7 +132,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M0-06 | 锁定 Proto 工具链骨架 | M0-01 | `buf*.yaml`、`tools/versions.env`、`tools/go.mod`、`bootstrap-proto.sh`、`proto.sh` | `tools/go.mod` 与根 Module 使用相同 Go 1.27.x 工具链；`GOTOOLCHAIN=local` 构建 protoc-gen-go；Buf/protoc-gen-go 精确版本与分发包 SHA-256 可校验；不回落 PATH；三个 Wrapper 子命令可运行 | `DONE` |
 | M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `DONE` |
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `DONE` |
-| M0-09 | OCI/Compose 双栈、Server Shell Packaging 与跨平台 Agent Binary Self-install | M0-03、M0-08 | `deploy/docker`、Server-only `deploy/systemd`、Agent `service install/uninstall`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Agent 在 root/systemd>=249 快速失败，原子安装 Binary、root-only Credential 与 Managed Unit；Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；两端持久启动项只含 Binary + `run` 且无 Secret，均以 managed marker 拒绝覆盖/删除非受管同名服务，卸载保留 Credential；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `IN_PROGRESS` |
+| M0-09 | OCI/Compose 双栈、Server Shell Packaging 与跨平台 Agent Binary Self-install | M0-03、M0-08 | `deploy/docker`、Server-only `deploy/systemd`、Agent `service install/uninstall`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Agent 在 root/systemd>=249 快速失败，原子安装 Binary、root-only Credential 与 Managed Unit；Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；两端持久启动项只含 Binary + `run` 且无 Secret，均以 managed marker 拒绝覆盖/删除非受管同名服务，卸载保留 Credential；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `REVIEW` |
 | M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-08 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke。M0-09 的 Compose Runtime Smoke 仍由 M0-09 单独验收 | `DONE` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `DONE` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `NOT_STARTED` |
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
 
-1. `M0-09` — 独立部署复审为 `CHANGES_REQUESTED`（P1=3）；等待确认正式 Compose 双栈 Runtime、Windows 运行中已安装 EXE Self-uninstall，以及平台非受管对象/Preflight 真实 Smoke 的推荐闭环范围。
+1. `M0-09` — 推荐闭环实现、独立复审与精确 CI 已齐备，当前为 `REVIEW`；等待用户阶段复审结论，未标记 `DONE`。
 2. `M0-02` — Token-only Bootstrap 等待用户复审。
 3. `M0-12` — 等待 M0-02 与 M0-09 `DONE` 后执行 M0 总 Gate。
 
-`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6 已完成；全局完成数为 `82/95`。M0-02 与 M0-09 保留各自独立 Review 边界，不因 M6 完成自动转为 `DONE`；M7 继续 `NOT_STARTED`。
+`M0-12` 仍是 Alpha 前 Gate。M2、M3、M4、M5 与 M6 已完成；全局完成数为 `82/95`。M0-02 与 M0-09 保留各自独立 Review 边界；M0-09 在用户明确通过前不转为 `DONE`，M7 继续 `NOT_STARTED`。
 
 推进规则：
 
@@ -1646,3 +1646,13 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - P1 缺口三：Linux/Windows Smoke 没有创建隔离的非受管同名 Unit/Service/Event Log Source，再让产品 `service install/uninstall` 验证拒绝且零修改；Linux non-root 与 systemd `<249` 也只有实现/解析层证据，没有产品入口的真实快速失败与零写入 Smoke。
 - 推荐闭环与授权边界：在 Linux CI 运行当前提交的正式 Compose 双栈 Build/Runtime；Windows 从已安装 EXE 发起 Self-uninstall 并验证延迟删除已调度；隔离 Runner 增加两平台非受管对象拒绝及 Linux non-root/systemd `<249` 零写入检查。范围只修改部署 Smoke、测试辅助逻辑与 CI Workflow，不修改公共 API/Protocol、依赖/Lockfile、Schema/Migration、生产 systemd/SCM 配置、权限模型或日志字段。部署/CI/CD 变更属于 Ask First，用户明确确认前 M0-09 保持 `IN_PROGRESS`，不得转为 `REVIEW/DONE`。
 - 独立复审：`CHANGES_REQUESTED`，P0=0、P1=3、P2=0。未发现已验证路径中的实现错误；三个 P1 均为计划明确要求但缺少真实 Smoke/精确 CI 的证据缺口。
+
+## 2026-08-31 · M0-09 Packaging Closure 实现与精确 CI · REVIEW
+
+- 实现范围：提交 `416c23f44a1d72982e6b3a65c5b9a4eb583f300b` 将正式 Compose 双栈 Build/Runtime 接入 Linux amd64/arm64 CI；补齐 Linux non-root、systemd `<249`、非受管 Unit 的产品入口零写入检查；补齐 Windows 非受管 SCM Service/Event Source 拒绝，以及从 `%ProgramFiles%\XTunnel\xtunnel-agent.exe` 发起 Self-uninstall、验证 `PendingFileRenameOperations` 和 owner-aware 清理。Linux 卸载同步复用 systemd 版本 Preflight。范围未修改公共 API/Protocol、依赖/Lockfile、Schema/Migration、生产 systemd/SCM 配置、权限模型或日志字段。
+- 失败证据与收敛：初始 [CI #33347354309](https://github.com/lifei6671/xtunnel/actions/runs/33347354309) 准确暴露 PowerShell 5.1 预期失败命令的 native stderr 被 `ErrorActionPreference=Stop` 提升，以及 Compose `published: 0` 四映射宿主端口冲突。提交 `59f4814a3fe3b3d759fc208d64e0597c7d586dc3` 以受限 native 调用窗口和项目归属的有界端口重试修复；[CI #33348103279](https://github.com/lifei6671/xtunnel/actions/runs/33348103279) 已证明 Linux 双架构 Compose/systemd 全通过，并继续准确拒绝 Windows 延迟删除条目判定。
+- Windows 真实语义证据：提交 `b992b6c5dbde59344492596a53898933999ff743` 保留唯一 Source、空 Target、原快照前缀和回滚所有权约束；[CI #33348690749](https://github.com/lifei6671/xtunnel/actions/runs/33348690749) 仍在同一点失败。受限诊断提交 `145c73a8f1e43ae4ab80b2f6992664ee7caa32ec` 的 [CI #33349239169](https://github.com/lifei6671/xtunnel/actions/runs/33349239169) 取得精确 Runner 形态：新增值为 `*1\??\C:\Program Files\XTunnel\xtunnel-agent.exe` 与空 Target。最终提交 `389a15dbd59420449df952e6a5a81ebee8e5d4c0` 只接受普通精确 Native Source 或精确 `*1` Link-tracked Source；`*2`、外部同名路径、多 Source、非空 Target、旧前缀变化均继续拒绝，注册表恢复仍要求 `current == OwnedAfter`。
+- 本地验证与独立复审：Go 1.27 固定工具链检查、`go test ./...`、`go vet ./...`、Agent Service 定向 Race、PowerShell 5.1/pwsh Parser 与正反数组用例、ASCII、POSIX sh/dash/bash、ShellCheck、Compose 配置解析、CI YAML 断言及 `git diff --check` 均通过。Linux、Windows 与总集成多轮独立复审最终均为 P0/P1/P2=`0/0/0`。本地 WSL Docker 正式冷构建曾因 Node/V8 `Fatal JavaScript invalid array length 0` 中止且未留下任务归属资源，该结果未记为 Runtime PASS；正式 Runtime 证据由精确 CI 提供。
+- 最终精确 CI：[CI #33349658948](https://github.com/lifei6671/xtunnel/actions/runs/33349658948) 精确绑定 Head `389a15dbd59420449df952e6a5a81ebee8e5d4c0`。Attempt 1 中 Windows Agent Service 与 Linux amd64 全部成功，Linux arm64 的既有 Product Data Plane E2E 出现一次连接时序失败；未修改代码，只重跑失败任务。Attempt 2 的 arm64 全仓 Test/Race/Vet、Product Data Plane、M4/M6 黑盒、OCI、Compose 双栈、systemd 与工作树清洁全部成功，Run 最终为 `completed/success`，三个 Job 均成功。
+- 状态与边界：三个 P1 证据缺口全部关闭，M0-09 从 `IN_PROGRESS` 转为 `REVIEW` 等待用户阶段复审；在用户明确“通过”前不标记 `DONE`。M0 保持 `9/12`、全局保持 `82/95`，M0-12 继续等待 M0-02 与 M0-09 `DONE`，M7 继续 `NOT_STARTED`。
+- 文档同步：仅更新本开发计划的当前阶段、任务状态、队列和证据记录。根 README 与总技术方案无需修改，因为用户可见命令、产品支持矩阵、机器契约和生产配置均未改变，既有文档已覆盖对应部署能力与安全边界。
