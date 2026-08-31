@@ -374,3 +374,98 @@ jobs:
           $status = git status --porcelain --untracked-files=all
           if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
           if ($status) { throw "working tree is dirty after Windows verification`n$status" }
+
+  windows-arm64-agent:
+    name: Windows arm64 Agent runtime
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: '0'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Go 1.27.0
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.0'
+          check-latest: false
+          cache: false
+
+      - name: Verify native arm64 runner and fixed Go toolchain
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $runnerArchitecture = '${{ runner.arch }}'
+          $runtimeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          if ($runnerArchitecture -ne 'ARM64') {
+            throw "GitHub runner architecture must be ARM64, got $runnerArchitecture"
+          }
+          if ($runtimeArchitecture -ne 'Arm64') {
+            throw "Windows runner architecture must be Arm64, got $runtimeArchitecture"
+          }
+          if ((go env GOOS) -ne 'windows') {
+            throw 'Go target OS must be windows'
+          }
+          if ((go env GOHOSTARCH) -ne 'arm64') {
+            throw 'Go host architecture must be arm64'
+          }
+          if ((go env GOARCH) -ne 'arm64') {
+            throw 'Go target architecture must be arm64'
+          }
+          if ((go env GOVERSION) -ne 'go1.27.0') {
+            throw 'Go version must be go1.27.0'
+          }
+          if ((go env GOTOOLCHAIN) -ne 'local') {
+            throw 'GOTOOLCHAIN must be local'
+          }
+          if ((go env CGO_ENABLED) -ne '0') {
+            throw 'CGO_ENABLED must be 0'
+          }
+          ./tools/check-go-version.ps1
+
+      - name: Run native arm64 Bootstrap and DPAPI contract tests
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          go mod verify
+          if ($LASTEXITCODE -ne 0) { throw 'go mod verify failed' }
+
+          go test -v -count=1 -timeout 60s ./internal/agent/bootstrap `
+            -run '^(TestResolveTokenSourcesAndPrecedence|TestRunWaitsForContextCancellationWithoutLeakingToken)$'
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 Bootstrap contract tests failed' }
+
+          go test -v -count=1 -timeout 60s ./internal/agent/service `
+            -run '^(TestWindowsDPAPIRoundTrip|TestLoadWindowsCredentialFile|TestResolveWindowsServiceTokenPrecedence)$'
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 DPAPI contract tests failed' }
+
+      - name: Run native arm64 Agent SCM Token Bootstrap and Shutdown smoke
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent-arm64.exe'
+          $gateHelperPath = Join-Path $env:RUNNER_TEMP 'xtunnel-scm-gate-helper-arm64.exe'
+          $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"
+          $ldflags = "-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$buildVersion"
+
+          go build -trimpath -ldflags $ldflags -o $agentPath ./cmd/agent
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 Agent build failed' }
+          go build -trimpath -o $gateHelperPath ./tests/windows-scm-gate
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 SCM Gate Helper build failed' }
+
+          ./deploy/windows/smoke.ps1 -AgentPath $agentPath -GateHelperPath $gateHelperPath
+
+      - name: Verify working tree remains clean
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed' }
+          $status = git status --porcelain --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
+          if ($status) { throw "working tree is dirty after Windows arm64 verification`n$status" }
