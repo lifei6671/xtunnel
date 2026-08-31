@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-31
 >
-> **当前阶段**：M7 Hardening · READY（M0 完整 Gate 已通过；等待 M7-01 推荐范围确认）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 Benchmark Harness 已实现；等待固定 Linux amd64 正式采样）
 >
-> **当前结论**：用户已明确确认 M0-12 阶段复审通过。实现提交 `93613e4f83f38cafeec1b07f0e1950761c383b3f` 的精确 [CI #33355233841](https://github.com/lifei6671/xtunnel/actions/runs/33355233841) attempt 2，以及 `REVIEW` 证据提交 `2305e7feccae4fbe6073f4c3702e57881684edf5` 的精确 [CI #33356616887](https://github.com/lifei6671/xtunnel/actions/runs/33356616887) attempt 1 均为 `completed/success`，Windows arm64 Runtime、Windows amd64 Service 与 Linux amd64/arm64 四个 Job 全部成功。结合 11/11 Checklist 和独立复审 P0/P1/P2=`0/0/0`，M0-12 从 `REVIEW` 转为 `DONE`，M0 完成度更新为 `12/12 DONE`、全局更新为 `85/95`。M7-01 至 M7-08 的前置依赖均已满足并进入 `READY`；M7-09 继续等待 M7-04，M7-10 继续等待 M7-01 至 M7-09，本轮不启动 M7 实现。
+> **当前结论**：用户已明确确认按推荐范围启动 M7-01。首轮只建立 Proxy Buffer、HTTP/1.1 WorkConn Capacity 与 Connector Selection 三条真实产品路径的 Benchmark，以及固定环境采集和 Windows→Linux amd64 交叉编译入口；未修改生产代码、Server Schema 默认值、CI/CD、依赖或 Lockfile。Windows amd64 与 WSL2 Linux amd64 的 Benchmark Smoke、目标包 Test/Race/Vet、POSIX ShellCheck 和交叉编译均已通过，但正式 2s×5 重复采样、Syscall/RSS/CPU/Heap/GC 证据尚未在相同干净 Commit 的固定 Linux 环境完成，因此 M7-01 保持 `IN_PROGRESS`，不能进入 `REVIEW`。
 
 ---
 
@@ -397,7 +397,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 对 16/32/64 KiB Proxy Buffer、HTTP/1.1 WorkConn Capacity、Connector Selection CPU/Allocation 做 Benchmark；只依据本项目结果调整 Server Schema 默认值，不删除预算维度；记录 CPU/RAM/FD 环境 | `READY` |
+| M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 对 16/32/64 KiB Proxy Buffer、HTTP/1.1 WorkConn Capacity、Connector Selection CPU/Allocation 做 Benchmark；只依据本项目结果调整 Server Schema 默认值，不删除预算维度；记录 CPU/RAM/FD 环境 | `IN_PROGRESS` |
 | M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 100/500/1000 Connector 使用 Stagger + Jitter 重连，无同步 TLS/Auth Storm；永久错误不快速重试；记录 Pending TLS/Auth、`retry_after`、FD/CPU/RAM；Server Restart 后测量 `T_control_reconnect`、`T_config_ready`、`T_workpool_ready`、`T_first_success` 分布，旧 generation 无污染 | `READY` |
 | M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `READY` |
 | M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `READY` |
@@ -426,11 +426,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01` 至 `M0-12`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
 
-1. `M7-01` — 推荐下一项。先审计现有 Benchmark、Schema Limit 权威、CI Runner 环境与 CPU/RAM/FD 记录入口，确认最小实施范围后再开工；若 Benchmark 结果需要调整 Server Schema 默认值，必须另行取得配置契约变更确认。
+1. `M7-01` — 已进入 `IN_PROGRESS`。下一步在相同干净 Commit 的固定 Linux amd64 环境运行正式采样，完成 Throughput、CPU、Syscall、RSS、Heap、GC、FD 与容量解释；若结果需要调整生产复制路径或 Server Schema 默认值，必须另行取得实现或配置契约变更确认。
 2. `M7-02` 至 `M7-08` — 前置依赖均已满足并进入 `READY`，但本轮不并行启动实现。
 3. `M7-09` — 继续等待 M7-04 `DONE`；`M7-10` — 继续等待 M7-01 至 M7-09 全部 `DONE`。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `85/95`。M7 当前为 `READY`，尚未开始任何实现，也未勾选 Alpha Release Gate Checklist。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `85/95`。M7 当前为 `IN_PROGRESS`，仅 M7-01 已启动；尚未新增 `DONE`，也未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -1703,3 +1703,12 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 状态影响：M0-12 从 `REVIEW` 转为 `DONE`，M0 从 `11/12` 更新为 `12/12 DONE`，全局从 `84/95` 更新为 `85/95`。M7-01 至 M7-08 的任务级依赖均已满足并转为 `READY`；M7-09 继续等待 M7-04，M7-10 继续等待 M7-01 至 M7-09。
 - 下一步边界：推荐先对 M7-01 的既有 Benchmark、Limit/Timeout/Rate 权威和可复现环境做只读范围审计，再请求实现确认。本轮不启动 M7-01 至 M7-08，不修改 Server Schema 默认值，不勾选 Alpha Release Gate Checklist。
 - 文档同步：仅更新本开发计划的当前阶段、M0-12/M7 状态、仪表盘、队列和用户复审记录。根 README、总技术方案、Proto、OpenAPI、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、权限模型、日志字段与 `AGENTS.md` 无需更新，因为本轮只闭环既有 Gate 证据和用户审批，没有改变产品或机器契约。
+
+## 2026-08-31 · M7-01 Benchmark Harness · IN_PROGRESS
+
+- 授权与范围：用户明确确认按推荐范围启动 M7-01。首轮只新增 Benchmark、可复现采集入口和未验证边界记录；不修改生产代码、Server Schema/Repository 默认值、公共 API/Protocol、Migration、依赖/Lockfile、CI/CD、权限模型或日志契约。
+- Proxy Buffer：Benchmark 把当前 `io.Copy` TCP `WriterTo/ReaderFrom` 快路径与 Generic Buffered Path 分开，后者明确屏蔽接口快路径后比较 16/32/64 KiB Pool，避免传入 Buffer 被 Go 1.27 快路径忽略。当前 32 KiB 技术基线和生产实现均未改变。
+- HTTP/Connector：HTTP/1.1 Benchmark 通过真实 `transportPool → http.Transport.RoundTrip` 路径覆盖并发 1/16/64/100/128，记录 Dial、复用率、峰值 WorkConn、吞吐、Allocation 与清理归零；Connector Benchmark 通过真实 `Proxy.selectConnector` 路径覆盖 1/8/32/100 Connector，包含 `Sessions.Pools()` 副本、Registry eligibility/least-active/RR 与 `Pool.Snapshot()`，不吸收 M7-05 的并行锁竞争测量。
+- 可复现入口：POSIX Runner 分开执行主吞吐、`strace` Syscall、GNU `time` CPU/RSS 与 CPU/Heap Profile；环境记录 Commit、工作区、Go/OS/CPU/RAM/FD/GOMAXPROCS。Windows 入口使用项目固定 Go 1.27、`GOTOOLCHAIN=local` 交叉编译 Linux amd64 测试二进制，Manifest 记录 Commit、干净状态、目标平台和 SHA-256；正式模式拒绝脏工作区、Commit 不一致或二进制哈希漂移，不会下载或切换工具链。
+- 当前验证：Go `go1.27.0`、`GOTOOLCHAIN=local`；三个目标包 Test/Race/Vet、Windows Benchmark `1x`、WSL2 Linux amd64 Prebuilt Benchmark `1x`、Linux 交叉编译、dash 语法和 ShellCheck 均通过。三组 Benchmark 的独立分区复审 P0/P1/P2=`0/0/0`；这些 Smoke 只证明路径、指标和资源生命周期可执行，不能作为稳定性能结论。
+- Evidence Gap：尚未在相同干净 Commit 的固定 Linux amd64 环境完成 2s×5 重复采样，以及 Syscall、RSS、CPU、Heap、GC 和 FD 正式证据；`tests/benchmark/m7-01-evidence.md` 因此保持 `PENDING_FIXED_LINUX_RUN`。M7-01 只转为 `IN_PROGRESS`，不进入 `REVIEW`，全局 `DONE` 仍为 `85/95`。若数据支持修改产品 Buffer/选择算法或 Server 默认值，必须分别重新取得生产实现或配置契约授权。
