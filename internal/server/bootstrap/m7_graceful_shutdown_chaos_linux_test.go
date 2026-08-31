@@ -164,6 +164,15 @@ func testM7TCPHalfCloseNaturalDrain(t *testing.T) {
 
 	public := dialProductGateTCP(t, fixture.publicTCP, "127.0.0.1")
 	origin := fixture.tcpOrigin.next(t, "M7-03 TCP Half-Close")
+	var originCloseOnce sync.Once
+	closeOrigin := func() {
+		originCloseOnce.Do(func() {
+			if err := origin.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("close M7-03 TCP Origin: %v", err)
+			}
+		})
+	}
+	t.Cleanup(closeOrigin)
 	originReceived := make(chan []byte, 1)
 	releaseOrigin := make(chan struct{})
 	var releaseOriginOnce sync.Once
@@ -178,12 +187,20 @@ func testM7TCPHalfCloseNaturalDrain(t *testing.T) {
 			_, writeErr := origin.Write([]byte("origin-tail"))
 			readErr = errors.Join(writeErr, origin.(*net.TCPConn).CloseWrite())
 		}
-		originDone <- errors.Join(readErr, origin.Close())
+		// CloseWrite 已为反向流发布 EOF；延后整个 Socket 的 Close，避免尾部
+		// 字节尚未被 Public 确认时产生 RST，干扰自然排空断言。
+		originDone <- readErr
 	}()
 
 	if _, err := public.Write([]byte("public-head")); err != nil {
 		t.Fatalf("write M7-03 TCP request: %v", err)
 	}
+	// TCP Listener 的探测连接本身会进入生产 OPEN 路径，不能用重试 Dial 判断
+	// StopAccepting 是否完成，否则探针可能变成无人接管的第二条 Origin 连接。
+	m7StopTCPAccepting(t, fixture)
+	shutdownDone := m7StartServerClose(fixture)
+	m7AssertShutdownPending(t, shutdownDone)
+
 	if err := public.CloseWrite(); err != nil {
 		t.Fatalf("half-close M7-03 public TCP: %v", err)
 	}
@@ -196,9 +213,6 @@ func testM7TCPHalfCloseNaturalDrain(t *testing.T) {
 		t.Fatal("M7-03 TCP Origin did not observe public Half-Close")
 	}
 
-	shutdownDone := m7StartServerClose(fixture)
-	m7WaitForListenerClosed(t, fixture.publicTCP)
-	m7AssertShutdownPending(t, shutdownDone)
 	release()
 	tail, err := io.ReadAll(public)
 	if err != nil || !bytes.Equal(tail, []byte("origin-tail")) {
@@ -209,6 +223,7 @@ func testM7TCPHalfCloseNaturalDrain(t *testing.T) {
 	}
 	m7RequireResult(t, originDone, "TCP Origin", false)
 	m7RequireResult(t, shutdownDone, "Server graceful shutdown", false)
+	closeOrigin()
 
 	fixture.cleanup(t)
 	m7AssertShutdownQuiescent(t, fixture, baseline)
@@ -431,6 +446,18 @@ func m7StartServerClose(fixture *m7ShutdownFixture) <-chan error {
 	done := make(chan error, 1)
 	go func() { done <- fixture.closeServer() }()
 	return done
+}
+
+func m7StopTCPAccepting(t *testing.T, fixture *m7ShutdownFixture) {
+	t.Helper()
+	if err := fixture.runtime.tcpIngress.StopAccepting(); err != nil {
+		t.Fatalf("stop M7-03 TCP listener: %v", err)
+	}
+	connection, err := net.DialTimeout("tcp", fixture.publicTCP, 50*time.Millisecond)
+	if err == nil {
+		_ = connection.Close()
+		t.Fatalf("M7-03 TCP listener %s still accepted a connection after StopAccepting", fixture.publicTCP)
+	}
 }
 
 func m7WaitForListenerClosed(t *testing.T, address string) {
