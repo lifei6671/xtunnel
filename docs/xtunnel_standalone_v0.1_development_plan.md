@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M0-09 Packaging Closure · IN_PROGRESS（M6 已完成；进入既有部署证据的独立阶段复审）
 >
-> **当前结论**：用户已明确确认 M6-07 阶段复审通过。实现与修复提交 `4a011f5`、`2606a19` 已由最终证据提交 `aab58a6` 的精确 [CI #33320100334](https://github.com/lifei6671/xtunnel/actions/runs/33320100334) 再次覆盖；Windows Agent Service、Linux amd64 与 Linux arm64 三个 Job 全部成功，M6 六项 Checklist 全部闭环。M6-07 转为 `DONE`，M6 更新为 `7/7 DONE`，全局更新为 `82/95`。下一步只复审仍为 `IN_PROGRESS` 的 M0-09 部署证据；M7 不因 M6 完成而绕过 M0-09/M0-12 依赖。
+> **当前结论**：用户已明确确认 M6-07 阶段复审通过，M6 更新为 `7/7 DONE`，全局更新为 `82/95`。M0-09 独立部署复审结论为 `CHANGES_REQUESTED`（P0=0、P1=3、P2=0）：当前 CI 未运行正式 Compose 双栈 Runtime、Windows 卸载未从运行中的 `%ProgramFiles%` 已安装 EXE 触发延迟删除、Linux/Windows 非受管对象与 Linux non-root/systemd<249 失败边界未经过产品入口真实 Smoke。M0-09 保持 `IN_PROGRESS`；下一步涉及部署 Smoke 与 CI Workflow 修改，等待用户明确确认推荐闭环范围，M7 不因 M6 完成而绕过 M0-09/M0-12 依赖。
 
 ---
 
@@ -426,7 +426,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01`、`M0-03` 至 `M0-08`、`M0-10`、`M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
 
-1. `M0-09` — 正式 Dockerfile 双架构、Windows SCM 与双架构 systemd Packaging Smoke 均已有精确 CI，当前进入独立部署阶段复审；复审前不标记 `DONE`。
+1. `M0-09` — 独立部署复审为 `CHANGES_REQUESTED`（P1=3）；等待确认正式 Compose 双栈 Runtime、Windows 运行中已安装 EXE Self-uninstall，以及平台非受管对象/Preflight 真实 Smoke 的推荐闭环范围。
 2. `M0-02` — Token-only Bootstrap 等待用户复审。
 3. `M0-12` — 等待 M0-02 与 M0-09 `DONE` 后执行 M0 总 Gate。
 
@@ -1637,3 +1637,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 状态影响：M6-07 从 `REVIEW` 转为 `DONE`，M6 从 `6/7` 更新为 `7/7 DONE`，全局从 `81/95` 更新为 `82/95`；六项 M6 Gate Checklist 保持全部勾选。M7 继续 `NOT_STARTED`，因为 M7-01/M7-09/M7-10 仍受 M0-09/M0-12 等依赖约束。
 - 下一步：当前只进入 M0-09 既有部署证据的独立阶段复审，不在本记录中把 M0-09、M0-02 或 M0-12 标记完成。M0-09 若复审通过并由用户确认后，再处理 M0-02 与 M0-12 的剩余复审/Gate。
 - 文档同步：根 README 与本开发计划同步 M6-07 用户复审、最终证据、任务状态、仪表盘和队列。总技术方案、Runbook、Proto、OpenAPI/生成物、Server Schema、Agent 本地业务配置、Database Schema/Migration、依赖/Lockfile、部署资产、CI/CD、权限模型、日志字段与 `AGENTS.md` 无需更新，因为本轮只闭环既有 Gate 证据和用户审批，没有改变产品或机器契约。
+
+## 2026-08-31 · M0-09 部署证据独立复审 · IN_PROGRESS
+
+- 已通过证据：最终实现证据 Head `aab58a635d3bef24140cce83674fee410139064f` 的 [CI #33320100334](https://github.com/lifei6671/xtunnel/actions/runs/33320100334) 已覆盖 Linux amd64/arm64 正式 OCI Runtime、双架构 systemd Server/Agent Packaging、Windows amd64 SCM/DPAPI/LocalService/重装/30 秒 Stop/恢复/Event Log、Windows arm64 Cross-build、Server Shell Packaging、原生 tcp4/tcp6、全仓 Test/Race/Vet/Build 与工作树清洁。当前 M6 状态提交未改变部署树，不能补充 Workflow 中不存在的 Compose Gate。
+- P1 缺口一：`.github/workflows/ci.yml` 只运行 OCI 与 systemd Smoke，未调用 `deploy/docker/dualstack-smoke.sh`。历史 `--skip-build` 本地结果早于后续 Compose Build Args 与 `XTUNNEL_VERSION` 接线，不能证明当前正式 Dockerfile、当前提交镜像和 IPv4/IPv6 Compose Runtime 的组合路径。
+- P1 缺口二：Windows Harness 的 `Invoke-Agent` 始终调用 Runner 临时目录中的源 Agent，`service uninstall` 没有从 `%ProgramFiles%\XTunnel\xtunnel-agent.exe` 运行中已安装 EXE 发起，因此未真实触发并证明 `MOVEFILE_DELAY_UNTIL_REBOOT`；现有注入单测不能替代计划要求的 Self-uninstall Smoke。
+- P1 缺口三：Linux/Windows Smoke 没有创建隔离的非受管同名 Unit/Service/Event Log Source，再让产品 `service install/uninstall` 验证拒绝且零修改；Linux non-root 与 systemd `<249` 也只有实现/解析层证据，没有产品入口的真实快速失败与零写入 Smoke。
+- 推荐闭环与授权边界：在 Linux CI 运行当前提交的正式 Compose 双栈 Build/Runtime；Windows 从已安装 EXE 发起 Self-uninstall 并验证延迟删除已调度；隔离 Runner 增加两平台非受管对象拒绝及 Linux non-root/systemd `<249` 零写入检查。范围只修改部署 Smoke、测试辅助逻辑与 CI Workflow，不修改公共 API/Protocol、依赖/Lockfile、Schema/Migration、生产 systemd/SCM 配置、权限模型或日志字段。部署/CI/CD 变更属于 Ask First，用户明确确认前 M0-09 保持 `IN_PROGRESS`，不得转为 `REVIEW/DONE`。
+- 独立复审：`CHANGES_REQUESTED`，P0=0、P1=3、P2=0。未发现已验证路径中的实现错误；三个 P1 均为计划明确要求但缺少真实 Smoke/精确 CI 的证据缺口。
