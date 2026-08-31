@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01、M7-02 · DONE；M7-03 · IN_PROGRESS）
 >
-> **当前结论**：M7-01、M7-02 均已于 2026-08-31 获用户明确阶段复审通过并转为 `DONE`。M7-03 已启动并完成真实 Linux Socket 下的 Server/Agent Graceful Shutdown Chaos 开发 Harness：TCP Half-Close、HTTP Streaming、WebSocket 自然排空，三类 Transport 的 Hard Deadline Force Close，以及 Agent 两阶段 Drain 均在 WSL2 dirty 开发 Binary 中通过，相关 Windows Owner Test/Race/Vet 与全量 `go test ./...`、`go vet ./...` 通过。由于尚缺 clean Runner `full`、Linux Race、Commit/精确 CI 与最终 commit-bound 复审，M7-03 保持 `IN_PROGRESS`，全局 `DONE` 仍为 `87/95`，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01、M7-02 均已于 2026-08-31 获用户明确阶段复审通过并转为 `DONE`。M7-03 已启动并完成真实 Linux Socket 下的 Server/Agent Graceful Shutdown Chaos Harness：TCP Half-Close、HTTP Streaming、WebSocket 自然排空，三类 Transport 的 Hard Deadline Force Close，以及 Agent 两阶段 Drain 均在 clean Commit `886c727271e11c8e87272fe1a19ef8ec14f465fa` 的 WSL2 Runner `full` 中通过；WSL2 Go 1.27 CGO-off 原生源码测试、相关 Windows Owner Test/Race/Vet 与全量 `go test ./...`、`go vet ./...` 也通过。由于 Linux Race 仍被 WSL2 缺少 C 编译器阻塞，且尚缺精确 CI、最终 commit-bound 复审与用户阶段复审，M7-03 保持 `IN_PROGRESS`，全局 `DONE` 仍为 `87/95`，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -428,7 +428,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 1. `M7-01` — `DONE`。生产 32 KiB Buffer、关键测试、fresh Proxy 正式复验、精确 CI、commit-bound 最终独立复审与用户阶段复审均已闭环。
 2. `M7-02` — `DONE`。Chaos Harness、确定性 Backoff 单测、AUTH Reset 分类修复、WSL2 `/tmp` clean `full`、实现与证据提交的精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
-3. `M7-03` — `IN_PROGRESS`。真实 Server/Agent 产品链路 Harness、Builder/Runner、WSL2 dirty 开发矩阵与分层 Test/Race/Vet 已通过；等待 clean Linux `full`、Linux Race、Commit/精确 CI 与 commit-bound 最终独立复审。
+3. `M7-03` — `IN_PROGRESS`。真实 Server/Agent 产品链路 Harness、Builder/Runner、Commit `886c727271e11c8e87272fe1a19ef8ec14f465fa` 的 WSL2 clean `full`、CGO-off 原生源码测试与分层 Windows Test/Race/Vet 已通过；等待 Linux Race、精确 CI、commit-bound 最终独立复审与用户阶段复审。
 4. `M7-04` 至 `M7-08` — 前置依赖均已满足并保持 `READY`，本轮不启动，也不增加任务表之外的串行依赖。
 5. `M7-09` — 继续等待 M7-04 `DONE`；`M7-10` — 继续等待 M7-03 至 M7-09 全部 `DONE`。
 
@@ -1773,5 +1773,6 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 资源终态：五个 WSL2 dirty 开发场景均清空 Session Snapshot；每场景关闭自有 Server、Agent、Origin、SQLite 后，FD 与 goroutine 回到各自基线。测试 Deadline 为 `250ms`，当前开发观测 Force Close 约 `254ms`；该数值不是生产 30 秒默认值，也不修改任何生产配置。
 - Harness：新增 M7-03 Windows Linux Test Binary Builder、POSIX Runner、Manifest/Commit/SHA-256 校验、Linux-native `/tmp` 执行与 Trap 清理；`smoke` 只运行 TCP 自然排空，`full` 执行完整矩阵并要求 clean Worktree/Manifest。
 - 开发验证：Go `go1.27.0` / `GOTOOLCHAIN=local` 检查通过；Linux/amd64 CGO-off 交叉编译通过；WSL2 dirty 完整矩阵和 Runner `smoke` 通过；`sh -n`、`dash -n`、`shellcheck -s sh` 通过；相关 Owner 的 Windows 定向 Test/Race/Vet 及全量 `go test ./...`、`go vet ./...` 通过。
-- 证据边界：当前 WSL2 未安装 Go，尚未执行 Linux Race；dirty 开发 Binary 不能替代 clean Runner `full`。Commit、精确 CI、commit-bound 最终独立复审与用户阶段复审也尚未形成，因此 M7-03 只进入 `IN_PROGRESS`，全局 `DONE` 保持 `87/95`，不勾选 M7 Alpha Gate。
+- clean 验证与探针修复：首次 clean `full` 暴露 TCP Listener 重试 Dial 探针会被生产 Accept 路径接收并制造第二条无人接管 Origin；Commit `886c727271e11c8e87272fe1a19ef8ec14f465fa` 改为同步 `StopAccepting` 后单次失败断言，仍严格覆盖 Shutdown pending 后 Public `CloseWrite`、Origin EOF 屏障及反向尾部字节。该 Commit 的 clean WSL2 Runner `full` 五场景全部 PASS，FD/goroutine 精确回到 `6/6`、`3/3`；TCP 契约路径 `20/20`、完整矩阵 `5/5` 通过，worktree Tier 3 独立复审为 `PASSED`、P0/P1/P2=`0/0/0`。
+- 证据边界：WSL2 Go `1.27.0` / `GOTOOLCHAIN=local` 检查与 CGO-off M7-03 原生源码测试通过；Linux Race 已尝试，但因当前 WSL2 没有 `gcc`/`cc`/`clang` 而在 `runtime/cgo` 快速失败。精确 CI、commit-bound 最终独立复审与用户阶段复审仍未形成，因此 M7-03 保持 `IN_PROGRESS`，全局 `DONE` 保持 `87/95`，不勾选 M7 Alpha Gate。
 - 文档同步：更新本开发计划、`tests/chaos/README.md` 与 `tests/chaos/m7-03-evidence.md`。总技术方案与根 README 无需更新，因为测试只验证已冻结的 Graceful Shutdown/Half-Close 契约，没有改变产品行为、用户命令、Proto/OpenAPI、Server Schema、Migration、依赖/Lockfile、CI/CD、部署、权限或日志契约。

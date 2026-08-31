@@ -1,7 +1,7 @@
 # M7-03 Graceful Shutdown Chaos 验证证据
 
-> 状态：`IN_PROGRESS`（开发态 Harness 已建立；尚无 clean `full`、Race、精确 CI、
-> commit-bound 最终独立复审或用户阶段复审）
+> 状态：`IN_PROGRESS`（clean `full` 与 WSL2 原生源码测试已通过；尚无 Linux Race、
+> 精确 CI、commit-bound 最终独立复审或用户阶段复审）
 
 ## 证据边界
 
@@ -37,10 +37,23 @@ exactly-once 和真实 SIGTERM 接线继续由对应 owner 测试证明，不由
   Runtime/WorkPool/Session/HTTP/TCP、Agent WorkPool/Connector、Server Usage。
 - Windows 全量 `go test ./...`、`go vet ./...` 通过；Linux build-tag 的 M7-03 产品级
   场景由上述 WSL2 Test Binary 开发运行覆盖。
+- clean Commit `886c727271e11c8e87272fe1a19ef8ec14f465fa` 通过 M7-03 Linux Runner
+  `full`：五个场景全部 PASS，最终 `FD=6/6`、`goroutine=3/3`，Hard Deadline
+  `250ms` 下观测 Force Close 为 `253.320834ms`。Builder Manifest、Runner 与 clean
+  WSL2 `/tmp` checkout 均绑定该 Commit。
+- WSL2 已安装 Go `1.27.0`；`GOTOOLCHAIN=local CGO_ENABLED=0 go test
+  ./internal/server/bootstrap -run '^TestM7GracefulShutdownChaos$' -count=1` 原生源码测试
+  通过。TCP Half-Close 契约路径另连续运行 `20/20`，完整五场景连续运行 `5/5` 通过。
+- 修复前的 clean `full` 暴露 TCP Listener 探针会被生产 Accept 路径接收并制造第二条
+  无人接管 Origin；Commit `886c727271e11c8e87272fe1a19ef8ec14f465fa` 改为同步
+  `StopAccepting` 后单次失败断言，同时保留 Shutdown pending 后 Public `CloseWrite`、
+  Origin EOF 屏障与反向尾部传输。修复后的 worktree Tier 3 独立复审为 `PASSED`，
+  P0/P1/P2=`0/0/0`；该结果不替代最终 commit-bound 复审。
 
 ## 待完成
 
-- clean M7-03 Linux Runner `full` 与 Linux 定向 Race；当前 WSL2 未安装 Go，不能把
-  Windows 相关 owner Race 或 Linux 交叉编译冒充该证据。
-- clean Commit 绑定的正式输出、精确 CI 与 Tier 3 最终独立复审。
+- Linux 定向 Race：`go test -race` 已尝试，但 WSL2 当前没有 `gcc`/`cc`/`clang`，
+  `runtime/cgo` 以 `C compiler "gcc" not found` 快速失败；不得把 CGO-off 原生测试、
+  Windows Race 或 Linux 交叉编译冒充该证据。
+- 精确 CI 与 Tier 3 commit-bound 最终独立复审。
 - 用户明确阶段复审；在此之前不得标记 `DONE` 或勾选 M7 Alpha Gate。
