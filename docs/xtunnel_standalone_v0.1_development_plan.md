@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-08-31
 >
-> **当前阶段**：M0-12 M0 Gate · IN_PROGRESS（M0-02 已完成用户阶段复审；开始逐项复核 M0 Checklist 与可复现证据）
+> **当前阶段**：M0-12 M0 Gate · REVIEW（11 项 Checklist 已全部通过，等待用户阶段复审）
 >
-> **当前结论**：用户已明确确认 M0-02 阶段复审通过。结合实现提交 `2115ef12c0cbacf1820562fd402216effcf05af5` 的精确 [CI #33352369265](https://github.com/lifei6671/xtunnel/actions/runs/33352369265)、`REVIEW` 证据提交 `158711abec17d23410e89be637b1dac3e34d6094` 的精确 [CI #33352964921](https://github.com/lifei6671/xtunnel/actions/runs/33352964921) 与三路独立复审 P0/P1/P2=`0/0/0`，M0-02 从 `REVIEW` 转为 `DONE`。M0 更新为 `11/12`、全局更新为 `84/95`。M0-12 分区复核未发现 P0/P1/P2，但确认 Windows arm64 目前只有 Cross-build/Test Compile，缺少总方案要求的原生或受控 Runner Token Bootstrap + Shutdown Runtime Smoke；该阻塞 Evidence Gap 关闭前，M0-12 保持 `IN_PROGRESS`、11 项 Checklist 保持未勾选，M7 继续等待 M0-12 `DONE`。
+> **当前结论**：Windows arm64 Runtime Evidence Gap 已由实现提交 `93613e4f83f38cafeec1b07f0e1950761c383b3f` 关闭；其精确 [CI #33355233841](https://github.com/lifei6671/xtunnel/actions/runs/33355233841) attempt 2 为 `completed/success`，Linux amd64/arm64、Windows amd64 Service 与 Windows arm64 原生 Agent Runtime 四个 Job 全部成功。Windows arm64 Runner 已实际通过 Token Bootstrap、DPAPI/SCM Self-install、启动、Shutdown、Recovery、Self-uninstall 与清理 Smoke；结合 M0-01 至 M0-11 既有证据和两路分区加总集成独立复审 P0/P1/P2=`0/0/0`，M0 Gate 11 项 Checklist 全部通过，M0-12 转为 `REVIEW`。用户阶段复审前不标记 `DONE`，因此 M0 保持 `11/12`、全局保持 `84/95`，M7 继续等待 M0-12 `DONE`。
 
 ---
 
@@ -103,7 +103,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 
 | 里程碑 | 任务数 | 已完成 | 状态 | 入口依赖 | 退出 Gate |
 | --- | ---: | ---: | --- | --- | --- |
-| M0 工程初始化 | 12 | 11 | `IN_PROGRESS` | 技术方案基线 | M0-12 |
+| M0 工程初始化 | 12 | 11 | `REVIEW` | 技术方案基线 | M0-12 |
 | M0.5 Protocol Freeze | 10 | 10 | `DONE` | M0-06 | M05-10 |
 | M1 Secure TCP Baseline | 14 | 14 | `DONE` | M05-10 | M1-14 |
 | M2 Credential/Failover Hardening | 8 | 8 | `DONE` | M1-14 | M2-08 |
@@ -135,7 +135,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M0-09 | OCI/Compose 双栈、Server Shell Packaging 与跨平台 Agent Binary Self-install | M0-03、M0-08 | `deploy/docker`、Server-only `deploy/systemd`、Agent `service install/uninstall`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Agent 在 root/systemd>=249 快速失败，原子安装 Binary、root-only Credential 与 Managed Unit；Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；两端持久启动项只含 Binary + `run` 且无 Secret，均以 managed marker 拒绝覆盖/删除非受管同名服务，卸载保留 Credential；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `DONE` |
 | M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-08 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke。M0-09 的 Compose Runtime Smoke 仍由 M0-09 单独验收 | `DONE` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `DONE` |
-| M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `IN_PROGRESS` |
+| M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `REVIEW` |
 
 ## 5.2 可并行推进
 
@@ -155,17 +155,17 @@ M0-01 至 M0-11 + M0-10 ── M0-12（完整 M0 / 发布前 Gate）
 
 ## 5.3 M0 Gate Checklist
 
-- [ ] 根 `go.mod` 声明 `go 1.27`，根/工具 Module、CI 和 OCI Builder 使用同一个稳定、精确的 `go1.27.x` 补丁版本；验收设置 `GOTOOLCHAIN=local`，并记录匹配的 `go env GOVERSION`/`GOTOOLCHAIN`。
-- [ ] `go test ./...` 通过。
-- [ ] `go vet ./...` 通过。
-- [ ] Server Config Schema、Strict Decode 与覆盖优先级通过；Agent Token Bootstrap 三种来源、优先级、输入边界与 Secret 不回显测试通过。
-- [ ] Server 在 External Lock 前不触碰 SQLite/PKI，第二进程快速失败。
-- [ ] 全新库进入 `SETUP_REQUIRED`，运行中/离线 `admin create` 与重复拒绝测试通过。
-- [ ] `./tools/proto.sh lint`、`breaking`、`generate-check` 的 M0 骨架流程可执行。
-- [ ] `npm ci` 和 Web Production Build 通过，产物被 Go Embed。
-- [ ] Linux Server/Agent amd64/arm64 与 Windows Agent amd64/arm64 Binary 可构建和启动。
-- [ ] OCI/Compose Smoke、Server Shell Packaging Smoke、Linux Agent root/systemd>=249 Self-install 与 Windows Agent Administrator/SCM/LocalService/DPAPI Self-install 的 Managed Marker、权限、Secret、启动、重复安装 Replace Existing + Write Through、30s Stop/Shutdown、non-crash recovery、卸载及运行中 EXE 延迟删除失败边界通过。
-- [ ] 干净 checkout CI 通过。
+- [x] 根 `go.mod` 声明 `go 1.27`，根/工具 Module、CI 和 OCI Builder 使用同一个稳定、精确的 `go1.27.x` 补丁版本；验收设置 `GOTOOLCHAIN=local`，并记录匹配的 `go env GOVERSION`/`GOTOOLCHAIN`。
+- [x] `go test ./...` 通过。
+- [x] `go vet ./...` 通过。
+- [x] Server Config Schema、Strict Decode 与覆盖优先级通过；Agent Token Bootstrap 三种来源、优先级、输入边界与 Secret 不回显测试通过。
+- [x] Server 在 External Lock 前不触碰 SQLite/PKI，第二进程快速失败。
+- [x] 全新库进入 `SETUP_REQUIRED`，运行中/离线 `admin create` 与重复拒绝测试通过。
+- [x] `./tools/proto.sh lint`、`breaking`、`generate-check` 的 M0 骨架流程可执行。
+- [x] `npm ci` 和 Web Production Build 通过，产物被 Go Embed。
+- [x] Linux Server/Agent amd64/arm64 与 Windows Agent amd64/arm64 Binary 可构建和启动。
+- [x] OCI/Compose Smoke、Server Shell Packaging Smoke、Linux Agent root/systemd>=249 Self-install 与 Windows Agent Administrator/SCM/LocalService/DPAPI Self-install 的 Managed Marker、权限、Secret、启动、重复安装 Replace Existing + Write Through、30s Stop/Shutdown、non-crash recovery、卸载及运行中 EXE 延迟删除失败边界通过。
+- [x] 干净 checkout CI 通过。
 
 ---
 
@@ -426,9 +426,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01` 至 `M0-11`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
 
-1. `M0-12` — M0-01 至 M0-11 已全部 `DONE`；10 项 Checklist 已有通过证据，Windows arm64 原生或受控 Runner Token Bootstrap + Shutdown Runtime Smoke 尚未执行，第 9 项因此不能勾选，任务保持 `IN_PROGRESS`。
+1. `M0-12` — M0-01 至 M0-11 已全部 `DONE`；11 项 Checklist、Windows arm64 原生 Runtime、独立复审与精确 CI 证据均已齐备，任务进入 `REVIEW`，等待用户阶段复审。
 
-`M0-12` 仍是 Alpha 前 Gate。M0-01 至 M0-11、M0.5、M1、M2、M3、M4、M5 与 M6 已完成；全局完成数为 `84/95`。M0-12 保留独立 Review 边界，M7 继续 `NOT_STARTED`。
+`M0-12` 仍是 Alpha 前 Gate。M0-01 至 M0-11、M0.5、M1、M2、M3、M4、M5 与 M6 已完成；全局完成数为 `84/95`。用户明确通过 M0-12 阶段复审前不标记 `DONE`，M7 继续 `NOT_STARTED`。
 
 推进规则：
 
@@ -1685,3 +1685,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - 精确证据边界：当前代码 Head `158711abec17d23410e89be637b1dac3e34d6094` 的 [CI #33352964921](https://github.com/lifei6671/xtunnel/actions/runs/33352964921) attempt 1 为 `completed/success`，Windows Agent Service、Linux amd64 与 Linux arm64 三个 Job 全部成功。该 Run 能证明 Windows arm64 Agent/SCM Helper Cross-build 与 Bootstrap/Service Test Binary Compile，但没有在 Windows arm64 上运行 Binary 或 Test。
 - 阻塞 Evidence Gap：总方案要求 arm64 在原生或受控 Runner 完成 Agent Token Bootstrap 与 Shutdown Smoke；当前 Workflow 的 Windows arm64 步骤只设置 `GOOS=windows`、`GOARCH=arm64` 后 Cross-build Agent/Helper 并执行 `go test -c`，不能证明 Windows arm64 Binary 可启动。因此 11 项 Checklist 当前为 `10 PASS + 1 NOT RUN`，第 9 项及整个 M0 Gate 均不能勾选，M0-12 不转为 `REVIEW/DONE`。
 - 最小解除条件与变更边界：在原生或受控 Windows arm64 Runner 上运行并通过 Agent Token Bootstrap + Shutdown Smoke，再提交最终 Checklist/证据并取得精确 CI。若通过修改 CI/CD 增加受控 Runner 或改动冻结验收契约解除缺口，均须先取得用户明确确认；不得以 Cross-build 或 `go test -c` 冒充 Runtime 证据。M7 继续 `NOT_STARTED`。
+
+## 2026-08-31 · M0-12 Windows arm64 Runtime Gate 闭环 · REVIEW
+
+- 实施范围：用户明确确认按推荐范围解除 Evidence Gap。实现提交 `93613e4f83f38cafeec1b07f0e1950761c383b3f` 仅在既有 CI Workflow 增加独立 `Windows arm64 Agent runtime` Job，固定原生 `ARM64`、Go `go1.27.0`、`GOTOOLCHAIN=local` 与 `CGO_ENABLED=0`，复用现有 Windows Smoke 入口；未修改产品代码、测试语义、公共 API/Protocol、依赖/Lockfile、Schema/Migration、生产配置、权限或日志契约。
+- 原生 Runtime 证据：Windows arm64 Job 原生执行 Token 来源/优先级与取消边界测试、DPAPI Machine-scope Credential 与 Windows Service Token 测试，构建 Agent 和 SCM Gate Helper，并以同一二进制通过真实 SCM/LocalService、DPAPI、Token Bootstrap、启动、Shutdown、non-crash recovery、Self-uninstall 及清理 Smoke；Runner、OS、Go Host/Target Architecture 均采用 fail-closed 断言，工作树最终保持干净。
+- 精确 CI：实现提交的 [CI #33355233841](https://github.com/lifei6671/xtunnel/actions/runs/33355233841) attempt 2 为 `completed/success`，Windows arm64 Agent Runtime、Windows amd64 Agent Service、Linux amd64 与 Linux arm64 四个 Job 全部成功。attempt 1 的 Windows arm64、Windows amd64 与 Linux arm64 Job 已成功，Linux amd64 既有 Race Suite 在 `TestManagerRejectsOldListenerAfterNewRouteSnapshotPublication` 中因已关闭 Pipe 的 `SetReadDeadline` 返回错误而失败；未修改或弱化测试，本地 `-race -count=20` 定向复验通过，失败 Job 重跑后原样通过完整矩阵。
+- 独立复审：Windows/SCM/DPAPI/Secret/Cleanup 分区、CI Contract/Runner/Toolchain/Permissions 分区与最终集成链路均完成只读复审，覆盖度 `COMPLETE`、证据新鲜度 `FRESH`，最终 P0/P1/P2=`0/0/0`，修复轮次为 `0`。
+- 状态与边界：M0 Gate 11 项 Checklist 全部勾选，M0-12 从 `IN_PROGRESS` 转为 `REVIEW` 等待用户阶段复审；用户明确通过前不标记 `DONE`，因此 M0 保持 `11/12`、全局保持 `84/95`，M7 继续 `NOT_STARTED`。
+- 文档同步：仅更新本开发计划的当前阶段、M0-12 状态、Checklist、队列和证据记录。根 README 与总技术方案无需修改，因为产品命令、平台支持矩阵、机器契约和运行行为没有变化；CI Workflow 已由实现提交记录。
