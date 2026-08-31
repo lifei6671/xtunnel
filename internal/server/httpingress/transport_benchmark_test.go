@@ -46,8 +46,10 @@ const (
 		"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" +
 		"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" +
 		"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-	benchmarkHTTPWorkConns = 128
-	benchmarkHTTPTimeout   = 5 * time.Second
+	benchmarkHTTPWorkConns         = 128
+	benchmarkHTTPTimeout           = 5 * time.Second
+	benchmarkHTTPHeartbeatInterval = 10 * time.Minute
+	benchmarkHTTPHeartbeatTimeout  = 30 * time.Minute
 )
 
 // BenchmarkHTTP1WorkConnCapacity 装配生产 transportPool、Tunnel Proxy、Session
@@ -215,6 +217,9 @@ func (dialer *http1WorkConnBenchmarkDialer) Dial(
 func newHTTP1WorkConnBenchmarkFixture(b *testing.B) *http1WorkConnBenchmarkFixture {
 	b.Helper()
 	registry := serverruntime.NewRegistry()
+	// Benchmark fixture 不运行完整 Agent heartbeat writer；长采样及校准可能超过
+	// 生产默认窗口，因此只延长测试 Session 的超时。fixture.close 仍按短 Context
+	// 主动关闭 Transport、WorkPool 与 Control Owner。
 	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
 		HighPriorityCapacity: 16,
 		NormalCapacity:       32,
@@ -223,6 +228,7 @@ func newHTTP1WorkConnBenchmarkFixture(b *testing.B) *http1WorkConnBenchmarkFixtu
 		MaxReplayEntries:     128,
 		MaxWorkTotal:         benchmarkHTTPWorkConns,
 		MaxWorkConnecting:    benchmarkHTTPWorkConns,
+		HeartbeatTimeout:     benchmarkHTTPHeartbeatTimeout,
 		SnapshotProvider:     http1WorkConnBenchmarkSnapshotProvider{},
 		Logger:               slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -561,7 +567,7 @@ func http1WorkConnBenchmarkEstablished(
 	}
 	return servercontrolauth.Established{
 		Session: session, SessionSecret: secret, ProtocolVersion: 1,
-		HeartbeatInterval: 10 * time.Second, Control: control,
+		HeartbeatInterval: benchmarkHTTPHeartbeatInterval, Control: control,
 	}
 }
 

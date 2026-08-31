@@ -20,6 +20,11 @@ import (
 	serverworkauth "github.com/lifei6671/xtunnel/internal/server/workauth"
 )
 
+const (
+	connectorSelectionBenchmarkHeartbeatInterval = 10 * time.Minute
+	connectorSelectionBenchmarkHeartbeatTimeout  = 30 * time.Minute
+)
+
 // BenchmarkConnectorSelection 测量 Proxy.selectConnector 的真实产品路径，包括
 // Session Manager 的 Pools 索引副本、Registry eligibility/least-active/RR 选择，
 // 以及 predicate 内的 WorkPool Snapshot。并发锁争用与 Block Profile 属于 M7-05。
@@ -81,6 +86,9 @@ func newConnectorSelectionBenchmarkFixture(
 ) *connectorSelectionBenchmarkFixture {
 	b.Helper()
 	registry := serverruntime.NewRegistry()
+	// Benchmark fixture 不运行完整 Agent heartbeat writer；正式 2s×5 采样及
+	// 校准可能超过生产默认窗口，因此只延长测试 Session 的超时。Shutdown 仍按
+	// 下方短 Context 主动收敛，不依赖该长 Timer 回收资源。
 	sessions, err := sessionruntime.New(registry, sessionruntime.Options{
 		HighPriorityCapacity: 16,
 		NormalCapacity:       32,
@@ -89,6 +97,7 @@ func newConnectorSelectionBenchmarkFixture(
 		MaxReplayEntries:     128,
 		MaxWorkTotal:         1,
 		MaxWorkConnecting:    1,
+		HeartbeatTimeout:     connectorSelectionBenchmarkHeartbeatTimeout,
 		SnapshotProvider:     connectorSelectionBenchmarkSnapshotProvider{},
 		Logger:               slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -211,7 +220,7 @@ func connectorSelectionBenchmarkEstablished(
 	}
 	return servercontrolauth.Established{
 		Session: session, SessionSecret: secret, ProtocolVersion: 1,
-		HeartbeatInterval: 10 * time.Second, Control: control,
+		HeartbeatInterval: connectorSelectionBenchmarkHeartbeatInterval, Control: control,
 	}
 }
 

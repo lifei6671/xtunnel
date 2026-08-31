@@ -103,10 +103,10 @@ run_smoke_case() {
     if [ -n "$prebuilt_dir" ]; then
         run_and_show "$smoke_file" "$prebuilt_dir/$smoke_binary" \
             -test.run '^$' -test.bench "$smoke_pattern" -test.benchmem \
-            -test.count=1 -test.benchtime=1x
+            -test.count=1 -test.benchtime=1x -test.timeout=1m
     else
         run_and_show "$smoke_file" go test "$smoke_package" -run '^$' \
-            -bench "$smoke_pattern" -benchmem -count=1 -benchtime=1x
+            -bench "$smoke_pattern" -benchmem -count=1 -benchtime=1x -timeout=1m
     fi
 }
 
@@ -126,11 +126,11 @@ run_full_case() {
     if [ -n "$prebuilt_dir" ]; then
         run_and_show "$full_result" /usr/bin/time -v -o "$full_time" \
             "$prebuilt_dir/$full_binary" -test.run '^$' -test.bench "$full_pattern" \
-            -test.benchmem -test.count=5 -test.benchtime=2s
+            -test.benchmem -test.count=5 -test.benchtime=2s -test.timeout=5m
     else
         run_and_show "$full_result" /usr/bin/time -v -o "$full_time" \
             go test "$full_package" -run '^$' -bench "$full_pattern" \
-            -benchmem -count=5 -benchtime=2s
+            -benchmem -count=5 -benchtime=2s -timeout=5m
     fi
 
     [ "$full_analysis" = yes ] || return 0
@@ -138,21 +138,22 @@ run_full_case() {
     if [ -n "$prebuilt_dir" ]; then
         strace -f -c -o "$full_syscalls" \
             "$prebuilt_dir/$full_binary" -test.run '^$' -test.bench "$full_pattern" \
-            -test.count=1 -test.benchtime=1x \
+            -test.count=1 -test.benchtime=1x -test.timeout=5m \
             >"$result_dir/$full_name-strace-run.txt" 2>&1
 
         "$prebuilt_dir/$full_binary" -test.run '^$' -test.bench "$full_pattern" \
             -test.count=1 -test.benchtime=5s -test.cpuprofile "$full_cpu_profile" \
-            -test.memprofile "$full_heap_profile" \
+            -test.memprofile "$full_heap_profile" -test.timeout=5m \
             >"$result_dir/$full_name-profile-run.txt" 2>&1
     else
         strace -f -c -o "$full_syscalls" \
             go test "$full_package" -run '^$' -bench "$full_pattern" \
-            -count=1 -benchtime=1x >"$result_dir/$full_name-strace-run.txt" 2>&1
+            -count=1 -benchtime=1x -timeout=5m \
+            >"$result_dir/$full_name-strace-run.txt" 2>&1
 
         go test "$full_package" -run '^$' -bench "$full_pattern" \
             -count=1 -benchtime=5s -cpuprofile "$full_cpu_profile" \
-            -memprofile "$full_heap_profile" \
+            -memprofile "$full_heap_profile" -timeout=5m \
             >"$result_dir/$full_name-profile-run.txt" 2>&1
     fi
 
@@ -185,38 +186,39 @@ run_proxy_analysis_case() {
     if [ -n "$prebuilt_dir" ]; then
         run_and_show "$analysis_result" /usr/bin/time -v -o "$analysis_time" \
             "$prebuilt_dir/proxy.test" -test.run '^$' -test.bench "$analysis_pattern" \
-            -test.benchmem -test.count=5 -test.benchtime=2s
+            -test.benchmem -test.count=5 -test.benchtime=2s -test.timeout=5m
 
         strace -f -c -o "$analysis_syscalls" \
             "$prebuilt_dir/proxy.test" -test.run '^$' -test.bench "$analysis_pattern" \
-            -test.count=1 -test.benchtime=1x \
+            -test.count=1 -test.benchtime=1x -test.timeout=5m \
             >"$analysis_prefix-strace-run.txt" 2>&1
 
         "$prebuilt_dir/proxy.test" -test.run '^$' -test.bench "$analysis_pattern" \
             -test.count=1 -test.benchtime=5s -test.cpuprofile "$analysis_cpu_profile" \
-            -test.memprofile "$analysis_heap_profile" \
+            -test.memprofile "$analysis_heap_profile" -test.timeout=5m \
             >"$analysis_prefix-profile-run.txt" 2>&1
 
         run_and_show "$analysis_gc" env GODEBUG=gctrace=1 \
             "$prebuilt_dir/proxy.test" -test.run '^$' -test.bench "$analysis_pattern" \
-            -test.count=1 -test.benchtime=5s
+            -test.count=1 -test.benchtime=5s -test.timeout=5m
     else
         run_and_show "$analysis_result" /usr/bin/time -v -o "$analysis_time" \
             go test ./internal/proxy -run '^$' -bench "$analysis_pattern" \
-            -benchmem -count=5 -benchtime=2s
+            -benchmem -count=5 -benchtime=2s -timeout=5m
 
         strace -f -c -o "$analysis_syscalls" \
             go test ./internal/proxy -run '^$' -bench "$analysis_pattern" \
-            -count=1 -benchtime=1x >"$analysis_prefix-strace-run.txt" 2>&1
+            -count=1 -benchtime=1x -timeout=5m \
+            >"$analysis_prefix-strace-run.txt" 2>&1
 
         go test ./internal/proxy -run '^$' -bench "$analysis_pattern" \
             -count=1 -benchtime=5s -cpuprofile "$analysis_cpu_profile" \
-            -memprofile "$analysis_heap_profile" \
+            -memprofile "$analysis_heap_profile" -timeout=5m \
             >"$analysis_prefix-profile-run.txt" 2>&1
 
         run_and_show "$analysis_gc" go test ./internal/proxy -run '^$' \
             -bench "$analysis_pattern" -count=1 -benchtime=5s \
-            -exec 'env GODEBUG=gctrace=1'
+            -timeout=5m -exec 'env GODEBUG=gctrace=1'
     fi
 
     gc_trace_lines=$(grep -c 'gc [0-9][0-9]* @' "$analysis_gc" || true)

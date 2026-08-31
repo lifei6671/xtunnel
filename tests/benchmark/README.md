@@ -41,6 +41,8 @@ Go/OS/CPU/RAM/FD/GOMAXPROCS，并分别采集：
 - GC 汇总文件记录每个尺寸的 `gctrace_lines`，原始文件保留暂停、CPU 和 Heap 变化细节。
 
 分析器会显著改变耗时，因此不得把 `strace`、Profile 或 GC 轮次与主吞吐结果混合比较。
+每个 smoke 测试进程使用 1 分钟超时；`full` 的主结果、`strace`、Profile 和 GC 测试进程
+分别使用 5 分钟超时，超时即失败。该限制按单个测试进程计算，不是整个脚本的总运行时限。
 
 Windows 主机可用项目固定工具链交叉编译 Linux amd64 Benchmark，再交给已有的 Linux
 环境运行；这个路径不会在 Linux 中下载或切换 Go：
