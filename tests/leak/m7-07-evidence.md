@@ -6,6 +6,11 @@
 - 状态：`REVIEW`
 - Delivery 基线：`2bf793bf5a9a51326bbcef1a13dd417a4fa381e0`
 - 正式实现 Commit：`c527265fa165fd08b6c7f14644bd8138d83eea30`
+- 首轮证据 Commit：`d91d43c8b2557b170d0a0edc32ce961fe851a7b4`
+- CI 回归修复 Commit：`bf3554e3d775acbeeca2c770b5b9f3004906bc54`、
+  `2ca093b6c6a892f3a970a565b4077658191ba492`
+- 最新精确 CI：[#33510562933](https://github.com/lifei6671/xtunnel/actions/runs/33510562933)，
+  `completed/success`
 - `DONE` 计数：`91/95`（未变化）
 - M7：`6/10 IN_PROGRESS`（未变化）
 
@@ -21,8 +26,9 @@
   `HeapObjects` 为 3,000，不再使用会放过稳定小泄漏的逐步阈值。
 - 新增 POSIX Runner、Windows-to-Linux development builder 与使用说明。Runner 的
   `smoke`/`full` 规模、超时、clean-tree Gate 和 Artifact SHA-256 均为固定值。
-- 未修改生产代码、Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、
-  配置、权限或日志契约；本轮已获明确授权，把 M7-07 `full` 接入现有 Linux CI 矩阵。
+- 原始 Leak Harness/CI 接线未修改生产代码；精确 CI 暴露 WebSocket Hard Deadline 的
+  生产关停缺口后，只对 `httpingress` WebSocket 生命周期做最小修复。Proto/OpenAPI/
+  生成物、Server Schema、Migration、依赖/Lockfile、配置、权限与日志契约均未修改。
 
 ## 开发验证
 
@@ -96,9 +102,9 @@
   `dash -n` 与 WSL ShellCheck 均 PASS。被复审判定过期的 R1/R2 Docker 候选已停止，不计
   产品失败或 PASS；上述 R3 clean `full` 是修复后的新鲜结果。
 - 修复后工作树 Tier 3 三分区独立复审均为 `COMPLETE/FRESH/PASSED`：Harness、
-  Runner/Builder、状态/证据的 P0/P1/P2 均为 `0/0/0`。正式实现 Commit 的 Runner/CI 与
-  代码/集成 commit-bound 复审没有 P0/P1；唯一剩余项是提交后自然产生的文档时态 P2，
-  即提交内仍写“尚无正式 Commit/精确 CI”，当前 docs-only 收口正在修正。
+  Runner/Builder、状态/证据的 P0/P1/P2 均为 `0/0/0`。最终 WebSocket 生产修复与测试
+  Harness 冻结内容另经两路独立复审，Review mode=`WORKTREE/CHILD_AGENT`、
+  Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`。
 
 ## CI 接线
 
@@ -129,6 +135,38 @@
   普通/Race 分别为 `155.59s`/`90.98s`，Artifact 清单 SHA-256 为
   `76acfa9f82e30feb06145b735ccd075933d5bf96a0cc30978aed54ae76f6bd71`。两个 Job 的
   9/9 Artifact 校验、其余既有 Gate 与最终 clean-tree 检查同样成功。
+- 首轮证据 Commit `d91d43c8b2557b170d0a0edc32ce961fe851a7b4` 的精确
+  [CI #33504366959](https://github.com/lifei6671/xtunnel/actions/runs/33504366959) 为
+  `completed/failure`：arm64 Job `99844797106` 暴露既有 TCP Ingress 测试 oracle 缺口，
+  amd64 Job `99844797616` 暴露 WebSocket Hard Deadline 卡住；两个 Windows Job 成功。
+  这两项均发生在 `Test Go modules and build both processes`，未冒充 Leak Step PASS。
+- Commit `bf3554e3d775acbeeca2c770b5b9f3004906bc54` 最小修正 TCP Ingress oracle；精确
+  [CI #33505969409](https://github.com/lifei6671/xtunnel/actions/runs/33505969409) 中 arm64
+  Job `99849966932` 与两个 Windows Job 成功，amd64 Job `99849967300` 仍由同一 WebSocket
+  Hard Deadline 问题失败，因此该轮仍为 `completed/failure`。
+- 根因是 Origin 已 EOF 后 ReverseProxy 只半关闭 Hijacked Client，Shutdown Context 取消
+  未主动解除剩余 Client→Backend 阻塞。Commit
+  `2ca093b6c6a892f3a970a565b4077658191ba492`（Tree
+  `e6acb622694835fd92e2c8c589e8d371be0d506b`）让 WebSocket owner 在取消时幂等关闭
+  Client 与 Backend，并等待 `context.AfterFunc` 回调退出；同时增加 Origin 先 EOF、Client
+  仍半开的确定性回归，以及 Harness 失败清理和 ACTIVE 发布屏障。
+- 修复提交前验证：Windows Go `go1.27.0/local` 下 WebSocket 回归普通 `count=100` 与
+  Race `count=20`、`httpingress` package 普通 `count=20`、全仓 Test/Vet 均 PASS；Docker
+  Linux amd64 的 WebSocket Hard Deadline 普通 `count=50`/Race `count=20`、TCP Half-Close
+  普通 `count=50`/Race `count=20`、六场景普通 `count=2`/Race `count=1`、全仓 Test/Vet
+  均 PASS。一次六场景 `count=10` 因 300 秒 package 超时预算不足而超时，不记为产品失败；
+  随后的高计数运行暴露并关闭了 ACTIVE 发布测试竞态。
+- 修复提交的精确 [CI #33510562933](https://github.com/lifei6671/xtunnel/actions/runs/33510562933)
+  Head SHA 精确匹配 `2ca093b6c6a892f3a970a565b4077658191ba492`，结论为
+  `completed/success`。Linux amd64 Job `99864922479`（15m02s）、Linux arm64 Job
+  `99864922559`（12m48s）、Windows arm64 Agent runtime Job `99864922226`（4m04s）与
+  Windows Agent service Job `99864922780`（5m05s）全部成功，两个 Linux Job 的既有 Gate
+  与最终 clean-tree 检查也全部成功。
+- 最新 Leak CI 中，amd64 普通/Race 分别为 `155.73s`/`87.71s`，Artifact 清单 SHA-256
+  为 `8d82fe0e9170e5fcd0031ed72ac30503d2aa4e3f7a4ccfea71011b31a691ce6d`；arm64
+  普通/Race 分别为 `155.61s`/`91.09s`，清单 SHA-256 为
+  `bdd94a03c81edb12e51a685911e364d9780a8f5c9c23ab06a5281571aaa23c54`。两边均完成
+  9/9 Artifact 原目录、搬移目录与 CI 读回校验。
 - CI 接线后的工作树 Tier 3 复审由 CI/Runner 静态分区、状态/证据分区和跨分区集成复审
   组成，三路均为 `COMPLETE/FRESH/PASSED`、P0/P1/P2=`0/0/0`。该结果只说明当前工作树
   接线无已知阻断缺陷，不替代正式 Commit 上的 commit-bound 复审或精确 GitHub Actions。
