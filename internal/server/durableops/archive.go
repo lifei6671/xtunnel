@@ -46,10 +46,37 @@ type pendingOutput struct {
 	finalName string
 }
 
+// archiveCreateOps 把归档发布阶段的 write/fsync/rename 边界集中起来。生产入口
+// 始终使用真实文件系统操作；M7 Failpoint 测试通过传入局部副本注入失败，避免
+// 可变全局 Hook 污染并发备份或让测试能力进入公开 API。
+type archiveCreateOps struct {
+	writer        func(*os.File) io.Writer
+	syncFile      func(*os.File) error
+	removePending func(*os.File, string) error
+	syncParent    func(*os.File) error
+	publish       func(*pendingOutput) error
+}
+
+func productionArchiveCreateOps() archiveCreateOps {
+	return archiveCreateOps{
+		writer:        func(file *os.File) io.Writer { return file },
+		syncFile:      func(file *os.File) error { return file.Sync() },
+		removePending: removePendingOutput,
+		syncParent:    func(parent *os.File) error { return parent.Sync() },
+		publish:       publishPendingOutput,
+	}
+}
+
 // Create 使用 0700 临时目录捕获数据边界，并先把 0600 归档写入输出父目录中的
 // 隐藏候选文件。候选完整 fsync 且在线 Barrier Release ACK 成功后，才以 Linux
 // no-replace rename 原子发布最终路径；失败时只按固定父目录 FD 删除本次候选。
 func Create(ctx context.Context, options CreateOptions) (result Manifest, resultErr error) {
+	return createWithOps(ctx, options, productionArchiveCreateOps())
+}
+
+// createWithOps 保持 Create 的完整状态机，只允许包内测试替换发布阶段的单个
+// 文件系统动作。调用方必须从 productionArchiveCreateOps 复制，避免遗漏真实步骤。
+func createWithOps(ctx context.Context, options CreateOptions, ops archiveCreateOps) (result Manifest, resultErr error) {
 	if !platformSupported() {
 		return Manifest{}, ErrUnsupported
 	}
@@ -134,10 +161,10 @@ func Create(ctx context.Context, options CreateOptions) (result Manifest, result
 			}
 		}
 		if !published {
-			if err := removePendingOutput(pending.parent, pending.name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := ops.removePending(pending.parent, pending.name); err != nil && !errors.Is(err, os.ErrNotExist) {
 				resultErr = errors.Join(resultErr, fmt.Errorf("remove failed pending backup output: %w", err))
 			}
-			if err := pending.parent.Sync(); err != nil {
+			if err := ops.syncParent(pending.parent); err != nil {
 				resultErr = errors.Join(resultErr, fmt.Errorf("sync backup output parent after cleanup: %w", err))
 			}
 		}
@@ -148,11 +175,11 @@ func Create(ctx context.Context, options CreateOptions) (result Manifest, result
 	if err := pending.file.Chmod(0o600); err != nil {
 		return Manifest{}, fmt.Errorf("set backup output permissions: %w", err)
 	}
-	manifest, _, err := createArchive(ctx, pending.file, snapshot, schemaVersion, options.TLSMode)
+	manifest, _, err := createArchive(ctx, ops.writer(pending.file), snapshot, schemaVersion, options.TLSMode)
 	if err != nil {
 		return Manifest{}, err
 	}
-	if err := pending.file.Sync(); err != nil {
+	if err := ops.syncFile(pending.file); err != nil {
 		return Manifest{}, fmt.Errorf("sync backup output: %w", err)
 	}
 	if err := pending.file.Close(); err != nil {
@@ -170,13 +197,13 @@ func Create(ctx context.Context, options CreateOptions) (result Manifest, result
 			return Manifest{}, fmt.Errorf("confirm backup publication barrier: %w", err)
 		}
 	}
-	if err := publishPendingOutput(pending); err != nil {
+	if err := ops.publish(pending); err != nil {
 		return Manifest{}, fmt.Errorf("publish backup output: %w", err)
 	}
 	// rename 后候选名已不存在；先标记已发布，避免后续目录 fsync 失败时清理逻辑
 	// 误把一个完整且已对外可见的归档当成半成品处理。
 	published = true
-	if err := pending.parent.Sync(); err != nil {
+	if err := ops.syncParent(pending.parent); err != nil {
 		return Manifest{}, fmt.Errorf("sync published backup output parent: %w", err)
 	}
 	return manifest, nil

@@ -1,7 +1,7 @@
 # M7-03 Graceful Shutdown Chaos 验证证据
 
-> 状态：`REVIEW`（六场景 clean `full`、Bootstrap Linux Race、精确 CI 与 commit-bound
-> 最终独立复审均已通过；等待用户阶段复审）
+> 状态：`DONE`（六场景 clean `full`、Bootstrap Linux Race、精确 CI、commit-bound
+> 最终独立复审与用户阶段复审均已通过）
 
 ## 证据边界
 
@@ -107,6 +107,12 @@ exactly-once 和真实 SIGTERM 接线继续由对应 owner 测试证明，不由
   Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`。累计 Repair rounds=`4`，
   Target 冻结后 Repair rounds=`0`。
 
-## 剩余审批
+## 用户阶段复审
 
-- 用户明确阶段复审；在此之前不得标记 `DONE` 或勾选 M7 Alpha Gate。
+- 用户已明确回复“`M7-03 阶段复审通过`”。最终实现 Commit
+  `cc1e668c8450fa6f1834ea646c21a9b4265fa33a`、六场景 WSL2 clean Runner `full`、
+  [CI #33460324750](https://github.com/lifei6671/xtunnel/actions/runs/33460324750)、
+  commit-bound Tier 3 最终独立复审，以及证据 Head
+  `17b94968b117de9002c25e3f427c0dc956ee9faf` 的
+  [CI #33461097851](https://github.com/lifei6671/xtunnel/actions/runs/33461097851)
+  均已闭环，因此本任务转为 `DONE`。该批准不勾选 M7 Alpha Gate。

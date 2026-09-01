@@ -11,10 +11,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,6 +27,14 @@ import (
 	"github.com/lifei6671/xtunnel/internal/server/datadir"
 	"github.com/lifei6671/xtunnel/migrations"
 	"golang.org/x/sys/unix"
+)
+
+const (
+	restoreSwitchSIGKILLHelperEnv   = "XTUNNEL_RESTORE_SWITCH_SIGKILL_HELPER"
+	restoreSwitchSIGKILLTargetEnv   = "XTUNNEL_RESTORE_SWITCH_SIGKILL_TARGET"
+	restoreSwitchSIGKILLArchiveEnv  = "XTUNNEL_RESTORE_SWITCH_SIGKILL_ARCHIVE"
+	restoreSwitchSIGKILLBoundaryEnv = "XTUNNEL_RESTORE_SWITCH_SIGKILL_BOUNDARY"
+	restoreSwitchSIGKILLPipeFD      = 3
 )
 
 func TestRestoreInstallsValidatedArchiveWithoutMerging(t *testing.T) {
@@ -151,6 +162,233 @@ func TestRestoreRejectsBytesAfterCanonicalTarEnd(t *testing.T) {
 	}
 }
 
+func TestRestoreDirectorySwitchSIGKILLRecovers(t *testing.T) {
+	if os.Getenv(restoreSwitchSIGKILLHelperEnv) == "1" {
+		runRestoreSwitchSIGKILLHelper(t)
+		return
+	}
+
+	// Restore 崩溃证据只在 Linux-native /tmp 中构造，避免把 DrvFS/v9fs
+	// 的可见性和持久化语义混入目录切换结论。
+	t.Setenv("TMPDIR", "/tmp")
+	if temporaryRoot := filepath.Clean(os.TempDir()); temporaryRoot != "/tmp" {
+		t.Fatalf("os.TempDir() = %q, want /tmp", temporaryRoot)
+	}
+
+	tests := []struct {
+		name               string
+		boundary           string
+		wantBarrier        byte
+		wantJournalPhase   restorePhase
+		wantTargetBefore   bool
+		wantStagingBefore  bool
+		wantRollbackBefore bool
+		wantAdmin          bool
+	}{
+		{
+			name:               "target to rollback rename restores old target",
+			boundary:           "target-to-rollback",
+			wantBarrier:        1,
+			wantJournalPhase:   phasePrepared,
+			wantStagingBefore:  true,
+			wantRollbackBefore: true,
+			wantAdmin:          true,
+		},
+		{
+			name:               "staging to target rename completes new target",
+			boundary:           "staging-to-target",
+			wantBarrier:        2,
+			wantJournalPhase:   phaseRollbackReady,
+			wantTargetBefore:   true,
+			wantRollbackBefore: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := t.TempDir()
+			target, err := datadir.Resolve(filepath.Join(parent, "data"))
+			if err != nil {
+				t.Fatalf("datadir.Resolve() error = %v", err)
+			}
+			writeValidStateDirectory(t, target.Path, true)
+			archivePath := createPublicArchiveFile(t)
+			paths, err := pathsForTarget(target)
+			if err != nil {
+				t.Fatalf("pathsForTarget() error = %v", err)
+			}
+
+			readPipe, writePipe, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("os.Pipe() error = %v", err)
+			}
+			command := exec.Command(os.Args[0], "-test.run=^TestRestoreDirectorySwitchSIGKILLRecovers$")
+			command.Env = append(os.Environ(),
+				restoreSwitchSIGKILLHelperEnv+"=1",
+				restoreSwitchSIGKILLTargetEnv+"="+target.Path,
+				restoreSwitchSIGKILLArchiveEnv+"="+archivePath,
+				restoreSwitchSIGKILLBoundaryEnv+"="+test.boundary,
+			)
+			command.ExtraFiles = []*os.File{writePipe}
+			var output bytes.Buffer
+			command.Stdout = &output
+			command.Stderr = &output
+			if err := command.Start(); err != nil {
+				_ = readPipe.Close()
+				_ = writePipe.Close()
+				t.Fatalf("start Restore SIGKILL helper error = %v", err)
+			}
+			// 父测试是 helper 和 pipe 的唯一 owner；任何断言路径都会先杀死并
+			// Wait 子进程，避免超时或 pipe 错误留下阻塞的 Restore。
+			waited := false
+			abortChild := func() error {
+				if waited {
+					return nil
+				}
+				killErr := command.Process.Kill()
+				waitErr := command.Wait()
+				waited = true
+				return errors.Join(killErr, waitErr)
+			}
+			t.Cleanup(func() {
+				_ = readPipe.Close()
+				_ = writePipe.Close()
+				_ = abortChild()
+			})
+			if err := writePipe.Close(); err != nil {
+				stopErr := abortChild()
+				t.Fatalf("close parent Restore SIGKILL barrier writer error = %v; stop helper = %v; output = %s", err, stopErr, output.String())
+			}
+			if err := readPipe.SetReadDeadline(time.Now().Add(20 * time.Second)); err != nil {
+				stopErr := abortChild()
+				t.Fatalf("set Restore SIGKILL barrier deadline error = %v; stop helper = %v; output = %s", err, stopErr, output.String())
+			}
+			var barrier [1]byte
+			if _, err := io.ReadFull(readPipe, barrier[:]); err != nil {
+				stopErr := abortChild()
+				t.Fatalf("wait for Restore SIGKILL barrier error = %v; stop helper = %v; output = %s", err, stopErr, output.String())
+			}
+			if barrier[0] != test.wantBarrier {
+				stopErr := abortChild()
+				t.Fatalf("Restore SIGKILL barrier = %d, want %d; stop helper = %v; output = %s", barrier[0], test.wantBarrier, stopErr, output.String())
+			}
+			if err := command.Process.Kill(); err != nil {
+				stopErr := abortChild()
+				t.Fatalf("kill Restore switch helper error = %v; stop helper = %v; output = %s", err, stopErr, output.String())
+			}
+			waitErr := command.Wait()
+			waited = true
+			var exitErr *exec.ExitError
+			if !errors.As(waitErr, &exitErr) {
+				t.Fatalf("Restore switch helper Wait() error = %v, want SIGKILL; output = %s", waitErr, output.String())
+			}
+			waitStatus, ok := exitErr.Sys().(syscall.WaitStatus)
+			if !ok || !waitStatus.Signaled() || waitStatus.Signal() != syscall.SIGKILL {
+				t.Fatalf("Restore switch helper WaitStatus = %#v, want SIGKILL; output = %s", exitErr.Sys(), output.String())
+			}
+
+			beforeRecovery := []struct {
+				name   string
+				path   string
+				exists bool
+			}{
+				{name: "target", path: paths.target, exists: test.wantTargetBefore},
+				{name: "staging", path: paths.staging, exists: test.wantStagingBefore},
+				{name: "rollback", path: paths.rollback, exists: test.wantRollbackBefore},
+				{name: "journal", path: paths.journal, exists: true},
+			}
+			for _, state := range beforeRecovery {
+				_, statErr := os.Lstat(state.path)
+				if state.exists && statErr != nil {
+					t.Fatalf("Restore artifact %s before recovery missing: %v", state.name, statErr)
+				}
+				if !state.exists && !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("Restore artifact %s before recovery exists or stat failed: %v", state.name, statErr)
+				}
+			}
+			journalData, err := os.ReadFile(paths.journal)
+			if err != nil {
+				t.Fatalf("os.ReadFile(Restore SIGKILL journal) error = %v", err)
+			}
+			journal, err := parseJournal(journalData, paths)
+			if err != nil {
+				t.Fatalf("parseJournal(Restore SIGKILL) error = %v", err)
+			}
+			if journal.Phase != test.wantJournalPhase {
+				t.Fatalf("Restore SIGKILL journal phase = %q, want %q", journal.Phase, test.wantJournalPhase)
+			}
+
+			recovered, err := RecoverPendingRestore(context.Background(), target)
+			if err != nil {
+				t.Fatalf("RecoverPendingRestore(after SIGKILL) error = %v", err)
+			}
+			if !recovered {
+				t.Fatal("RecoverPendingRestore(after SIGKILL) recovered = false, want true")
+			}
+			assertStateHasAdmin(t, paths.target, test.wantAdmin)
+			for _, path := range []string{paths.staging, paths.rollback, paths.journal} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("Restore artifact %q remained after SIGKILL recovery: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func runRestoreSwitchSIGKILLHelper(t *testing.T) {
+	t.Helper()
+	targetPath := os.Getenv(restoreSwitchSIGKILLTargetEnv)
+	archivePath := os.Getenv(restoreSwitchSIGKILLArchiveEnv)
+	if targetPath == "" || archivePath == "" {
+		t.Fatal("Restore SIGKILL helper paths are missing")
+	}
+	crashAfterRename := 0
+	switch os.Getenv(restoreSwitchSIGKILLBoundaryEnv) {
+	case "target-to-rollback":
+		crashAfterRename = 1
+	case "staging-to-target":
+		crashAfterRename = 2
+	default:
+		t.Fatal("Restore SIGKILL helper boundary is invalid")
+	}
+	target, err := datadir.Resolve(targetPath)
+	if err != nil {
+		t.Fatalf("datadir.Resolve(Restore SIGKILL helper) error = %v", err)
+	}
+	paths, err := pathsForTarget(target)
+	if err != nil {
+		t.Fatalf("pathsForTarget(Restore SIGKILL helper) error = %v", err)
+	}
+	barrier := os.NewFile(uintptr(restoreSwitchSIGKILLPipeFD), "restore-switch-sigkill-barrier")
+	if barrier == nil {
+		t.Fatal("Restore SIGKILL helper barrier is unavailable")
+	}
+	defer func() { _ = barrier.Close() }()
+
+	// 先执行真实 rename，再通知父进程并阻塞。父进程因此杀死的是
+	// 目录项已切换、但该次父目录 fsync 尚未开始的真实子进程。
+	switchOps := productionRestoreSwitchOps()
+	renameCalls := 0
+	switchOps.rename = func(oldPath, newPath string) error {
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return err
+		}
+		renameCalls++
+		if renameCalls != crashAfterRename {
+			return nil
+		}
+		if _, err := barrier.Write([]byte{byte(renameCalls)}); err != nil {
+			return err
+		}
+		select {}
+	}
+	if _, err := restorePlatformWithSwitchOps(
+		context.Background(), paths, archivePath, sqlite.CurrentSchemaVersion(), TLSModePublic, switchOps,
+	); err != nil {
+		t.Fatalf("restorePlatformWithSwitchOps(SIGKILL helper) error = %v", err)
+	}
+	t.Fatal("restorePlatformWithSwitchOps(SIGKILL helper) returned before SIGKILL")
+}
+
 func TestRecoverPendingRestoreConvergesInterruptedRenameStates(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -221,6 +459,101 @@ func TestRecoverPendingRestoreConvergesInterruptedRenameStates(t *testing.T) {
 			for _, path := range []string{paths.staging, paths.rollback, paths.journal} {
 				if _, err := os.Lstat(path); !os.IsNotExist(err) {
 					t.Fatalf("recovery artifact %q remained: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWriteJournalFilesystemFailpointsPreserveRecoverablePhase(t *testing.T) {
+	tests := []struct {
+		name      string
+		inject    func(*journalWriteOps)
+		wantErr   error
+		wantPhase restorePhase
+	}{
+		{
+			name: "temporary write disk full keeps old phase",
+			inject: func(ops *journalWriteOps) {
+				ops.write = func(*os.File, []byte) (int, error) { return 0, syscall.ENOSPC }
+			},
+			wantErr:   syscall.ENOSPC,
+			wantPhase: phasePrepared,
+		},
+		{
+			name: "temporary fsync EIO keeps old phase",
+			inject: func(ops *journalWriteOps) {
+				ops.syncFile = func(*os.File) error { return syscall.EIO }
+			},
+			wantErr:   syscall.EIO,
+			wantPhase: phasePrepared,
+		},
+		{
+			name: "publish rename EIO keeps old phase",
+			inject: func(ops *journalWriteOps) {
+				ops.rename = func(string, string) error { return syscall.EIO }
+			},
+			wantErr:   syscall.EIO,
+			wantPhase: phasePrepared,
+		},
+		{
+			name: "parent fsync EIO leaves new visible phase",
+			inject: func(ops *journalWriteOps) {
+				ops.syncParent = func(string) error { return syscall.EIO }
+			},
+			wantErr:   syscall.EIO,
+			wantPhase: phaseRollbackReady,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := t.TempDir()
+			target, err := datadir.Resolve(filepath.Join(parent, "data"))
+			if err != nil {
+				t.Fatalf("datadir.Resolve() error = %v", err)
+			}
+			paths, err := pathsForTarget(target)
+			if err != nil {
+				t.Fatalf("pathsForTarget() error = %v", err)
+			}
+			manifest := writeValidStateDirectory(t, paths.target, false)
+			writeRestoreJournalForTest(t, paths, manifest, phasePrepared)
+
+			manifestData, err := json.Marshal(manifest)
+			if err != nil {
+				t.Fatalf("json.Marshal(manifest) error = %v", err)
+			}
+			digest := sha256.Sum256(manifestData)
+			journal := restoreJournal{
+				Version: 1, ManifestSHA256: hex.EncodeToString(digest[:]), Manifest: manifest,
+				StableTarget: paths.target, Staging: paths.staging, Rollback: paths.rollback,
+				Phase: phaseRollbackReady,
+			}
+			ops := productionJournalWriteOps()
+			test.inject(&ops)
+			err = writeJournalWithOps(paths, journal, os.Getuid(), os.Getgid(), ops)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("writeJournalWithOps() error = %v, want %v", err, test.wantErr)
+			}
+			data, err := os.ReadFile(paths.journal)
+			if err != nil {
+				t.Fatalf("os.ReadFile(journal) error = %v", err)
+			}
+			got, err := parseJournal(data, paths)
+			if err != nil {
+				t.Fatalf("parseJournal() error = %v", err)
+			}
+			if got.Phase != test.wantPhase {
+				t.Fatalf("journal phase = %q, want %q", got.Phase, test.wantPhase)
+			}
+			entries, err := os.ReadDir(parent)
+			if err != nil {
+				t.Fatalf("os.ReadDir(parent) error = %v", err)
+			}
+			temporaryPrefix := filepath.Base(paths.journal) + ".tmp-"
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), temporaryPrefix) {
+					t.Fatalf("journal failpoint left temporary file %q", entry.Name())
 				}
 			}
 		})

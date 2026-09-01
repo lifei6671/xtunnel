@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +29,29 @@ import (
 var testMasterKey = bytes.Repeat([]byte{0x42}, 32)
 
 const archiveHardExitHelperEnv = "XTUNNEL_ARCHIVE_HARD_EXIT_HELPER"
+
+type failAfterWriter struct {
+	writer    io.Writer
+	remaining int
+	err       error
+}
+
+func (writer *failAfterWriter) Write(data []byte) (int, error) {
+	if writer.remaining <= 0 {
+		return 0, writer.err
+	}
+	if len(data) <= writer.remaining {
+		count, err := writer.writer.Write(data)
+		writer.remaining -= count
+		return count, err
+	}
+	count, err := writer.writer.Write(data[:writer.remaining])
+	writer.remaining -= count
+	if err != nil {
+		return count, err
+	}
+	return count, writer.err
+}
 
 func TestCreateOwnsExclusiveOutputAndRemovesFailedArchive(t *testing.T) {
 	if runtime.GOOS != "linux" {
@@ -112,6 +136,119 @@ func TestCreateOwnsExclusiveOutputAndRemovesFailedArchive(t *testing.T) {
 	}
 	if len(publicationEntries) != 0 {
 		t.Fatalf("publication failure left pending outputs: %#v", publicationEntries)
+	}
+}
+
+func TestCreateFilesystemFailpointsPreservePublicationBoundary(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("atomic backup publication is supported only on Linux")
+	}
+	dataDir := t.TempDir()
+	initializeValidBackupState(t, dataDir, false)
+
+	tests := []struct {
+		name         string
+		inject       func(*archiveCreateOps)
+		wantErr      error
+		finalVisible bool
+	}{
+		{
+			name: "archive write EIO",
+			inject: func(ops *archiveCreateOps) {
+				ops.writer = func(file *os.File) io.Writer {
+					return &failAfterWriter{writer: file, remaining: 512, err: syscall.EIO}
+				}
+			},
+			wantErr: syscall.EIO,
+		},
+		{
+			name: "candidate fsync disk full",
+			inject: func(ops *archiveCreateOps) {
+				ops.syncFile = func(*os.File) error { return syscall.ENOSPC }
+			},
+			wantErr: syscall.ENOSPC,
+		},
+		{
+			name: "publication rename EIO",
+			inject: func(ops *archiveCreateOps) {
+				ops.publish = func(*pendingOutput) error { return syscall.EIO }
+			},
+			wantErr: syscall.EIO,
+		},
+		{
+			name: "published parent fsync EIO",
+			inject: func(ops *archiveCreateOps) {
+				ops.syncParent = func(*os.File) error { return syscall.EIO }
+			},
+			wantErr:      syscall.EIO,
+			finalVisible: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			outputDir := t.TempDir()
+			outputPath := filepath.Join(outputDir, "backup.tar")
+			ops := productionArchiveCreateOps()
+			test.inject(&ops)
+
+			_, err := createWithOps(context.Background(), CreateOptions{
+				DataDir: dataDir, TLSMode: TLSModePublic, OutputPath: outputPath,
+				BackupDatabase: func(ctx context.Context, destination string) (int, error) {
+					return sqlite.CurrentSchemaVersion(), createValidSQLiteDatabase(ctx, destination)
+				},
+			}, ops)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("createWithOps() error = %v, want %v", err, test.wantErr)
+			}
+			_, statErr := os.Lstat(outputPath)
+			if test.finalVisible {
+				if statErr != nil {
+					t.Fatalf("published output is not visible after parent fsync failure: %v", statErr)
+				}
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("final output became visible before durable publication: %v", statErr)
+			}
+			entries, readErr := os.ReadDir(outputDir)
+			if readErr != nil {
+				t.Fatalf("os.ReadDir(output parent) error = %v", readErr)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), pendingOutputPrefix) {
+					t.Fatalf("failpoint left live-process pending output %q", entry.Name())
+				}
+			}
+		})
+	}
+}
+
+func TestCreateDoesNotBlindlyDeleteHistoricalPendingOutput(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("atomic backup publication is supported only on Linux")
+	}
+	dataDir := t.TempDir()
+	initializeValidBackupState(t, dataDir, false)
+	outputDir := t.TempDir()
+	historicalPath := filepath.Join(outputDir, pendingOutputPrefix+"historical")
+	historical := []byte("private orphan requiring explicit operator review")
+	if err := os.WriteFile(historicalPath, historical, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(historical pending output) error = %v", err)
+	}
+	outputPath := filepath.Join(outputDir, "backup.tar")
+
+	if _, err := Create(context.Background(), CreateOptions{
+		DataDir: dataDir, TLSMode: TLSModePublic, OutputPath: outputPath,
+		BackupDatabase: func(ctx context.Context, destination string) (int, error) {
+			return sqlite.CurrentSchemaVersion(), createValidSQLiteDatabase(ctx, destination)
+		},
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	got, err := os.ReadFile(historicalPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(historical pending output) error = %v", err)
+	}
+	if !bytes.Equal(got, historical) {
+		t.Fatalf("historical pending output = %q, want %q", got, historical)
 	}
 }
 

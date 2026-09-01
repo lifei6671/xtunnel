@@ -26,7 +26,34 @@ const maxRestoreJournalSize = 64 << 10
 // restorePlatform 在调用方持有 External Lock 时完成恢复事务。
 // 数据先在同盘 staging 中提取、fsync 并通过可启动语义校验，随后以两次 rename
 // 发布；每个不可逆边界前后都持久化 Journal，使任意崩溃点都能确定回滚或收尾。
-func restorePlatform(ctx context.Context, paths restorePaths, inputPath string, currentSchemaVersion int, expectedTLSMode TLSMode) (result restoreResult, resultErr error) {
+func restorePlatform(ctx context.Context, paths restorePaths, inputPath string, currentSchemaVersion int, expectedTLSMode TLSMode) (restoreResult, error) {
+	return restorePlatformWithSwitchOps(
+		ctx, paths, inputPath, currentSchemaVersion, expectedTLSMode, productionRestoreSwitchOps(),
+	)
+}
+
+// restoreSwitchOps 只承载 Restore 的两次目录切换及其父目录持久化屏障。
+// 该组操作按值传递，测试可在真实 rename 后暂停子进程，不会污染其他 Restore。
+type restoreSwitchOps struct {
+	rename     func(string, string) error
+	syncParent func(string) error
+}
+
+func productionRestoreSwitchOps() restoreSwitchOps {
+	return restoreSwitchOps{
+		rename:     os.Rename,
+		syncParent: syncDirectory,
+	}
+}
+
+func restorePlatformWithSwitchOps(
+	ctx context.Context,
+	paths restorePaths,
+	inputPath string,
+	currentSchemaVersion int,
+	expectedTLSMode TLSMode,
+	switchOps restoreSwitchOps,
+) (result restoreResult, resultErr error) {
 	if expectedTLSMode != TLSModePinned && expectedTLSMode != TLSModePublic {
 		return restoreResult{}, fmt.Errorf("expected TLS mode %q is invalid", expectedTLSMode)
 	}
@@ -118,20 +145,20 @@ func restorePlatform(ctx context.Context, paths restorePaths, inputPath string, 
 	// 在同一外部锁下按 Journal 与三个目录的实际状态收敛。
 	cleanupStaging = false
 
-	if err := os.Rename(paths.target, paths.rollback); err != nil {
+	if err := switchOps.rename(paths.target, paths.rollback); err != nil {
 		return restoreResult{}, fmt.Errorf("rename restore target to rollback: %w", err)
 	}
-	if err := syncDirectory(filepath.Dir(paths.target)); err != nil {
+	if err := switchOps.syncParent(filepath.Dir(paths.target)); err != nil {
 		return restoreResult{}, fmt.Errorf("sync stable data parent after rollback rename: %w", err)
 	}
 	journal.Phase = phaseRollbackReady
 	if err := writeJournal(paths, journal, int(owner.Uid), int(owner.Gid)); err != nil {
 		return restoreResult{}, err
 	}
-	if err := os.Rename(paths.staging, paths.target); err != nil {
+	if err := switchOps.rename(paths.staging, paths.target); err != nil {
 		return restoreResult{}, fmt.Errorf("rename restore staging to target: %w", err)
 	}
-	if err := syncDirectory(filepath.Dir(paths.target)); err != nil {
+	if err := switchOps.syncParent(filepath.Dir(paths.target)); err != nil {
 		return restoreResult{}, fmt.Errorf("sync stable data parent after target install: %w", err)
 	}
 	if err := validateRestoredState(ctx, paths.target, manifest); err != nil {
@@ -548,6 +575,30 @@ func removeCompletedJournal(paths restorePaths) error {
 // 调用方只有在本函数成功后才能把对应目录操作视为可恢复承诺；临时文件失败时
 // 会尽力清理，但绝不覆盖一个未持久化成功的 Journal 内容。
 func writeJournal(paths restorePaths, journal restoreJournal, uid, gid int) error {
+	return writeJournalWithOps(paths, journal, uid, gid, productionJournalWriteOps())
+}
+
+// journalWriteOps 只封装 Journal 发布的故障边界。生产路径使用真实系统调用；
+// M7 Failpoint 测试传入局部副本，确定性证明旧 phase 与新 phase 的可恢复边界。
+type journalWriteOps struct {
+	write      func(*os.File, []byte) (int, error)
+	syncFile   func(*os.File) error
+	rename     func(string, string) error
+	remove     func(string) error
+	syncParent func(string) error
+}
+
+func productionJournalWriteOps() journalWriteOps {
+	return journalWriteOps{
+		write:      func(file *os.File, data []byte) (int, error) { return file.Write(data) },
+		syncFile:   func(file *os.File) error { return file.Sync() },
+		rename:     os.Rename,
+		remove:     os.Remove,
+		syncParent: syncDirectory,
+	}
+}
+
+func writeJournalWithOps(paths restorePaths, journal restoreJournal, uid, gid int, ops journalWriteOps) error {
 	data, err := json.Marshal(journal)
 	if err != nil {
 		return fmt.Errorf("marshal restore journal: %w", err)
@@ -558,7 +609,7 @@ func writeJournal(paths restorePaths, journal restoreJournal, uid, gid int) erro
 	}
 	temporaryPath := temporary.Name()
 	writeErr := func() error {
-		if _, err := temporary.Write(data); err != nil {
+		if _, err := ops.write(temporary, data); err != nil {
 			return err
 		}
 		if err := temporary.Chmod(0o600); err != nil {
@@ -567,18 +618,18 @@ func writeJournal(paths restorePaths, journal restoreJournal, uid, gid int) erro
 		if err := temporary.Chown(uid, gid); err != nil {
 			return err
 		}
-		return temporary.Sync()
+		return ops.syncFile(temporary)
 	}()
 	closeErr := temporary.Close()
 	if err := errors.Join(writeErr, closeErr); err != nil {
-		cleanupErr := os.Remove(temporaryPath)
+		cleanupErr := ops.remove(temporaryPath)
 		return fmt.Errorf("write restore journal temporary file: %w", errors.Join(err, cleanupErr))
 	}
-	if err := os.Rename(temporaryPath, paths.journal); err != nil {
-		cleanupErr := os.Remove(temporaryPath)
+	if err := ops.rename(temporaryPath, paths.journal); err != nil {
+		cleanupErr := ops.remove(temporaryPath)
 		return fmt.Errorf("publish restore journal: %w", errors.Join(err, cleanupErr))
 	}
-	if err := syncDirectory(filepath.Dir(paths.target)); err != nil {
+	if err := ops.syncParent(filepath.Dir(paths.target)); err != nil {
 		return fmt.Errorf("sync restore journal parent: %w", err)
 	}
 	return nil

@@ -161,3 +161,51 @@ Binary 和输出复制到 Linux-native `/tmp/xtunnel-m7-03.XXXXXX`，并在退�
   Test/Race/Vet、精确 CI 和独立交付复审。
 - Runner 不调整 30 秒生产 Drain 默认值，不修改 Proto、Schema、CI、网络 namespace、
   `tc netem` 或 `nftables`；特权网络故障注入属于 M7-08。
+
+---
+
+# M7-04 Server Persistence/Filesystem Failpoints
+
+M7-04 Runner 按 SQLite Migration、Gateway Rotation Journal、Backup/Restore 三个分区调度
+现有测试。`smoke` 覆盖 SQLite 原生 `SQLITE_FULL` 回滚重试，以及 Gateway、Backup、
+Restore 在 write/fsync/rename 边界的确定性故障注入；`full` 额外运行 Backup ACK 前
+hard-exit、Gateway Key/Certificate rename 后真实子进程 `SIGKILL`、Restore 两次目录
+切换后真实子进程 `SIGKILL`，以及 Restore interrupted-state 恢复矩阵。
+
+直接在装有项目固定 Go `go1.27.0` 的 Linux 环境运行：
+
+```sh
+./tests/chaos/run-m7-04.sh -m smoke
+./tests/chaos/run-m7-04.sh -m full
+```
+
+Linux 没有 Go 时，可在 Windows 生成三个 `linux/amd64`、`GOAMD64=v1`、
+`CGO_ENABLED=0` Test Binary 与 Manifest：
+
+```powershell
+./tests/chaos/build-m7-04-linux.ps1 -OutputDirectory C:\Temp\xtunnel-m7-04-bin
+```
+
+然后在 Linux/WSL2 中运行：
+
+```sh
+./tests/chaos/run-m7-04.sh -m smoke -b /mnt/c/Temp/xtunnel-m7-04-bin
+./tests/chaos/run-m7-04.sh -m full -b /mnt/c/Temp/xtunnel-m7-04-bin
+```
+
+Runner 校验 Manifest 中的 Commit、clean 状态、固定工具链、目标平台与三个 Binary 的
+SHA-256，并把 Binary 和输出复制到 Linux-native `/tmp/xtunnel-m7-04.XXXXXX`；Trap 在
+退出时精确清理。`full` 要求当前工作区和预编译 Manifest 都为 clean，Builder 的
+`-AllowDirty` 只用于开发态 Smoke。
+
+## M7-04 证据边界
+
+- 确定性 Hook 证明应用在 syscall 边界收到 `EIO`/`ENOSPC` 后的状态收敛；它不等于
+  Linux Kernel 或真实存储设备产生的 EIO，也不证明物理介质耐久性。
+- SQLite 分区使用 SQLite 原生 `SQLITE_FULL`；Backup hard-exit 证明 ACK 前最终路径
+  不可见；Gateway/Restore 子进程测试证明真实 `SIGKILL` 后可按 Journal 收敛，但进程
+  死亡不等于真实断电、缓存丢失或断电后的文件系统恢复。
+- Restore interrupted-state matrix 从可达 Journal/rename 状态验证启动恢复；它不模拟
+  存储控制器写乱序。Windows 交叉编译也不构成 Linux Runtime 证据。
+- `smoke` 只用于开发反馈；`full` 仍需结合 Linux Race、全仓 Test/Vet、精确 CI 与独立
+  交付复审，不能单独作为 M7-04 或 Alpha Gate 通过证据。

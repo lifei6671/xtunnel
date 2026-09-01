@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,8 @@ import (
 	libsqlite "github.com/libtnb/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+	modernsqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func TestOpenCreatesAndReusesMigratedDatabase(t *testing.T) {
@@ -664,6 +667,124 @@ func TestRunMigrationsRollsBackFailedMigration(t *testing.T) {
 		if version != index+1 {
 			t.Fatalf("repaired versions = %#v, want contiguous versions", versions)
 		}
+	}
+}
+
+func TestRunMigrationsRollsBackSQLiteFullAndCanRetry(t *testing.T) {
+	database := openUnmigratedDatabase(t)
+	pool, err := database.DB()
+	if err != nil {
+		t.Fatalf("database.DB() error = %v", err)
+	}
+	// max_page_count 由数据库连接执行。测试固定单连接，确保故障注入和 Migration
+	// 使用同一 SQLite 连接，不把连接池调度误当成磁盘满语义。
+	pool.SetMaxOpenConns(1)
+	if err := runMigrations(context.Background(), database, productionMigrations, testNow); err != nil {
+		t.Fatalf("initial runMigrations() error = %v", err)
+	}
+
+	var pageCount, pageSize, freePages int64
+	for pragma, target := range map[string]*int64{
+		"page_count":     &pageCount,
+		"page_size":      &pageSize,
+		"freelist_count": &freePages,
+	} {
+		if err := database.Raw("PRAGMA " + pragma).Scan(target).Error; err != nil {
+			t.Fatalf("read PRAGMA %s error = %v", pragma, err)
+		}
+	}
+	maxPageCount := pageCount + 1
+	var limitedPageCount int64
+	if err := database.Raw(fmt.Sprintf("PRAGMA max_page_count = %d", maxPageCount)).Scan(&limitedPageCount).Error; err != nil {
+		t.Fatalf("limit SQLite max_page_count error = %v", err)
+	}
+	if limitedPageCount != maxPageCount {
+		t.Fatalf("limited max_page_count = %d, want %d", limitedPageCount, maxPageCount)
+	}
+
+	// 上限预留一个 page 让 DDL 先成功进入事务；负载再超过全部空闲页和新增
+	// page，保证后续写入由 SQLite 原生返回 SQLITE_FULL，而不是用伪造 EIO
+	// 或无效 SQL 模拟存储失败。
+	payloadBytes := (freePages + 3) * pageSize
+	tableCreatedInTransaction := false
+	available := append([]migration{}, productionMigrations...)
+	available = append(available, migration{
+		version: CurrentSchemaVersion() + 1,
+		prepare: func(_ context.Context, transaction *gorm.DB) error {
+			if err := transaction.Exec(
+				"CREATE TABLE full_migration (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)",
+			).Error; err != nil {
+				return err
+			}
+			tableCreatedInTransaction = true
+			return nil
+		},
+		statements: []string{
+			fmt.Sprintf("INSERT INTO full_migration(payload) VALUES (zeroblob(%d))", payloadBytes),
+		},
+	})
+	err = runMigrations(context.Background(), database, available, testNow)
+	if err == nil {
+		t.Fatal("runMigrations() under max_page_count error = nil")
+	}
+	var sqliteErr *modernsqlite.Error
+	if !errors.As(err, &sqliteErr) || sqliteErr.Code()&0xff != sqlite3.SQLITE_FULL {
+		t.Fatalf("runMigrations() error = %v, want SQLITE_FULL", err)
+	}
+	if !tableCreatedInTransaction {
+		t.Fatal("full_migration was not created before SQLITE_FULL")
+	}
+
+	var tableCount, versionCount int64
+	if err := database.Raw(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'full_migration'",
+	).Scan(&tableCount).Error; err != nil {
+		t.Fatalf("inspect full_migration after SQLITE_FULL error = %v", err)
+	}
+	if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
+		t.Fatalf("count schema versions after SQLITE_FULL error = %v", err)
+	}
+	if tableCount != 0 || versionCount != int64(CurrentSchemaVersion()) {
+		t.Fatalf(
+			"state after SQLITE_FULL = table:%d versions:%d, want 0/%d",
+			tableCount,
+			versionCount,
+			CurrentSchemaVersion(),
+		)
+	}
+
+	var restoredPageLimit int64
+	if err := database.Raw("PRAGMA max_page_count = 1073741823").Scan(&restoredPageLimit).Error; err != nil {
+		t.Fatalf("restore SQLite max_page_count error = %v", err)
+	}
+	if restoredPageLimit <= pageCount {
+		t.Fatalf("restored max_page_count = %d, want greater than %d", restoredPageLimit, pageCount)
+	}
+	if err := runMigrations(context.Background(), database, available, testNow); err != nil {
+		t.Fatalf("runMigrations() retry after SQLITE_FULL error = %v", err)
+	}
+
+	var rowCount int64
+	if err := database.Table("full_migration").Count(&rowCount).Error; err != nil {
+		t.Fatalf("count full_migration rows after retry error = %v", err)
+	}
+	if err := database.Table("schema_migrations").Count(&versionCount).Error; err != nil {
+		t.Fatalf("count schema versions after retry error = %v", err)
+	}
+	if rowCount != 1 || versionCount != int64(CurrentSchemaVersion()+1) {
+		t.Fatalf(
+			"state after retry = rows:%d versions:%d, want 1/%d",
+			rowCount,
+			versionCount,
+			CurrentSchemaVersion()+1,
+		)
+	}
+	var integrity string
+	if err := database.Raw("PRAGMA integrity_check").Scan(&integrity).Error; err != nil {
+		t.Fatalf("run SQLite integrity_check error = %v", err)
+	}
+	if integrity != "ok" {
+		t.Fatalf("SQLite integrity_check = %q, want ok", integrity)
 	}
 }
 

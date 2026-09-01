@@ -190,6 +190,15 @@ func LoadOrCreatePinnedIdentity(dataDir, hostname string, mayCreate bool, now ti
 // RotatePinnedIdentity 在已持有 Server External Lock 的离线维护窗口内轮换 SPKI。
 // Journal 在两个原子替换之间保持存在，使崩溃后的启动能够完成同一组替换而非加载错配文件。
 func RotatePinnedIdentity(dataDir, hostname string, now time.Time, audit RotationAuditMetadata) (Identity, error) {
+	return rotatePinnedIdentity(dataDir, hostname, now, audit, defaultRotationFileOps())
+}
+
+func rotatePinnedIdentity(
+	dataDir, hostname string,
+	now time.Time,
+	audit RotationAuditMetadata,
+	fileOps rotationFileOps,
+) (Identity, error) {
 	if hostname == "" {
 		return Identity{}, errors.New("gateway public hostname must not be empty")
 	}
@@ -197,7 +206,7 @@ func RotatePinnedIdentity(dataDir, hostname string, now time.Time, audit Rotatio
 		return Identity{}, errors.New("gateway rotation audit metadata is invalid")
 	}
 	paths := identityPaths(dataDir)
-	if err := RecoverRotation(dataDir); err != nil {
+	if err := recoverRotation(dataDir, fileOps); err != nil {
 		return Identity{}, err
 	}
 	if _, exists, err := PendingRotationAuditEvent(dataDir); err != nil {
@@ -213,8 +222,9 @@ func RotatePinnedIdentity(dataDir, hostname string, now time.Time, audit Rotatio
 	if err != nil {
 		return Identity{}, err
 	}
-	if err := writeKeyPair(paths.keyTemp, paths.certTemp, certificate); err != nil {
-		return Identity{}, err
+	if err := writeKeyPairWith(paths.keyTemp, paths.certTemp, certificate, fileOps.writeFileSync); err != nil {
+		cleanupErr := rollbackRotationPreparation(paths, fileOps)
+		return Identity{}, errors.Join(err, cleanupErr)
 	}
 	journal := rotationJournal{
 		Version: 2, KeyTemporary: paths.keyTemp, CertificateTemporary: paths.certTemp,
@@ -225,10 +235,11 @@ func RotatePinnedIdentity(dataDir, hostname string, now time.Time, audit Rotatio
 			AfterStateDigest:  sha256.Sum256(certificate.leaf.RawSubjectPublicKeyInfo),
 		},
 	}
-	if err := writeJournal(paths.journal, journal); err != nil {
-		return Identity{}, err
+	if err := writeJournalWith(paths.journal, journal, fileOps); err != nil {
+		cleanupErr := rollbackRotationPreparation(paths, fileOps)
+		return Identity{}, errors.Join(err, cleanupErr)
 	}
-	if err := completeRotation(paths, journal, false); err != nil {
+	if err := completeRotationWith(paths, journal, false, fileOps); err != nil {
 		return Identity{}, err
 	}
 	return LoadPinnedIdentity(dataDir)
@@ -236,6 +247,10 @@ func RotatePinnedIdentity(dataDir, hostname string, now time.Time, audit Rotatio
 
 // RecoverRotation 完成已经落盘的轮换 Journal；没有 Journal 时绝不修改身份文件。
 func RecoverRotation(dataDir string) error {
+	return recoverRotation(dataDir, defaultRotationFileOps())
+}
+
+func recoverRotation(dataDir string, fileOps rotationFileOps) error {
 	paths := identityPaths(dataDir)
 	journal, exists, err := readJournal(paths.journal)
 	if err != nil || !exists {
@@ -246,12 +261,12 @@ func RecoverRotation(dataDir string) error {
 	}
 	switch journal.Version {
 	case 1:
-		return completeRotation(paths, journal, true)
+		return completeRotationWith(paths, journal, true, fileOps)
 	case 2:
 		if err := validateRotationAuditJournal(journal.Audit); err != nil {
 			return err
 		}
-		return completeRotation(paths, journal, false)
+		return completeRotationWith(paths, journal, false, fileOps)
 	default:
 		return errors.New("gateway rotation journal is invalid")
 	}
@@ -532,6 +547,14 @@ func writeIdentity(keyPath, certPath string, certificate tlsCertificate) error {
 }
 
 func writeKeyPair(keyPath, certPath string, certificate tlsCertificate) error {
+	return writeKeyPairWith(keyPath, certPath, certificate, writeFileSync)
+}
+
+func writeKeyPairWith(
+	keyPath, certPath string,
+	certificate tlsCertificate,
+	writeSyncedFile func(string, []byte, os.FileMode) error,
+) error {
 	privateKey, ok := certificate.privateKey.(*ecdsa.PrivateKey)
 	if !ok {
 		return errors.New("gateway private key is not ECDSA P-256")
@@ -542,10 +565,10 @@ func writeKeyPair(keyPath, certPath string, certificate tlsCertificate) error {
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.certificate[0]})
-	if err := writeFileSync(keyPath, keyPEM, 0o600); err != nil {
+	if err := writeSyncedFile(keyPath, keyPEM, 0o600); err != nil {
 		return fmt.Errorf("write gateway private key: %w", err)
 	}
-	if err := writeFileSync(certPath, certPEM, 0o644); err != nil {
+	if err := writeSyncedFile(certPath, certPEM, 0o644); err != nil {
 		return fmt.Errorf("write gateway certificate: %w", err)
 	}
 	return nil
@@ -565,6 +588,44 @@ type rotationAuditJournal struct {
 	ResourceID        string            `json:"resource_id"`
 	BeforeStateDigest [sha256.Size]byte `json:"before_state_digest"`
 	AfterStateDigest  [sha256.Size]byte `json:"after_state_digest"`
+}
+
+// rotationFileOps 只承载离线换钥的文件系统提交点。调用链按值传递该组操作，
+// 使失败注入不会污染并发测试或其他 Gateway 身份生命周期。
+type rotationFileOps struct {
+	writeFileSync func(string, []byte, os.FileMode) error
+	rename        func(string, string) error
+	remove        func(string) error
+	syncDirectory func(string) error
+}
+
+func defaultRotationFileOps() rotationFileOps {
+	return rotationFileOps{
+		writeFileSync: writeFileSync,
+		rename:        os.Rename,
+		remove:        os.Remove,
+		syncDirectory: syncDirectory,
+	}
+}
+
+// rollbackRotationPreparation 只在 Journal 发布返回错误、身份 rename 尚未开始时调用。
+// 这些路径均由当前操作精确拥有，因此可以逐个删除；禁止扫描前缀猜测其他操作的产物。
+func rollbackRotationPreparation(paths identityFilePaths, fileOps rotationFileOps) error {
+	var cleanupErr error
+	removed := false
+	for _, path := range []string{paths.journal, paths.keyTemp, paths.certTemp} {
+		if err := fileOps.remove(path); err == nil {
+			removed = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove failed gateway rotation preparation %q: %w", filepath.Base(path), err))
+		}
+	}
+	if removed {
+		if err := fileOps.syncDirectory(paths.directory); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("sync gateway rotation preparation rollback: %w", err))
+		}
+	}
+	return cleanupErr
 }
 
 func validateRotationAuditJournal(audit *rotationAuditJournal) error {
@@ -587,14 +648,18 @@ func validateRotationAuditMetadata(audit RotationAuditMetadata) error {
 }
 
 func writeJournal(path string, journal rotationJournal) error {
+	return writeJournalWith(path, journal, defaultRotationFileOps())
+}
+
+func writeJournalWith(path string, journal rotationJournal, fileOps rotationFileOps) error {
 	data, err := json.Marshal(journal)
 	if err != nil {
 		return fmt.Errorf("marshal gateway rotation journal: %w", err)
 	}
-	if err := writeFileSync(path, data, 0o600); err != nil {
+	if err := fileOps.writeFileSync(path, data, 0o600); err != nil {
 		return fmt.Errorf("write gateway rotation journal: %w", err)
 	}
-	if err := syncDirectory(filepath.Dir(path)); err != nil {
+	if err := fileOps.syncDirectory(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("sync gateway rotation journal directory: %w", err)
 	}
 	return nil
@@ -616,15 +681,24 @@ func readJournal(path string) (rotationJournal, bool, error) {
 }
 
 func completeRotation(paths identityFilePaths, journal rotationJournal, removeJournal bool) error {
+	return completeRotationWith(paths, journal, removeJournal, defaultRotationFileOps())
+}
+
+func completeRotationWith(
+	paths identityFilePaths,
+	journal rotationJournal,
+	removeJournal bool,
+	fileOps rotationFileOps,
+) error {
 	for _, replacement := range []struct{ temporary, destination string }{
 		{journal.KeyTemporary, paths.key},
 		{journal.CertificateTemporary, paths.cert},
 	} {
 		if _, err := os.Stat(replacement.temporary); err == nil {
-			if err := os.Rename(replacement.temporary, replacement.destination); err != nil {
+			if err := fileOps.rename(replacement.temporary, replacement.destination); err != nil {
 				return fmt.Errorf("atomically replace gateway identity file: %w", err)
 			}
-			if err := syncDirectory(paths.directory); err != nil {
+			if err := fileOps.syncDirectory(paths.directory); err != nil {
 				return fmt.Errorf("sync gateway identity replacement: %w", err)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -638,7 +712,7 @@ func completeRotation(paths identityFilePaths, journal rotationJournal, removeJo
 		if err := os.Remove(paths.journal); err != nil {
 			return fmt.Errorf("remove gateway rotation journal: %w", err)
 		}
-		if err := syncDirectory(paths.directory); err != nil {
+		if err := fileOps.syncDirectory(paths.directory); err != nil {
 			return fmt.Errorf("sync completed gateway rotation: %w", err)
 		}
 	}
