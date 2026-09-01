@@ -139,9 +139,11 @@ func TestOpenTelemetryTraceEndToEnd(t *testing.T) {
 		)
 	}
 
-	// HTTP Transport 会复用已经 ACTIVE 的 WorkConn；停止 Agent 才是生产生命周期中
-	// 结束该双向 Proxy 的 owner 路径。先确认请求成功，再排空 Agent，随后第五个
-	// Span 必须随 WorkConn 关闭而结束。
+	// HTTP/1.1 Origin 可能保留空闲 keep-alive；先由测试关闭自己拥有的 Origin
+	// 连接，再等待 Agent 侧 Handler 完成 ACTIVE 收敛并排空 Agent。第五个 Span
+	// 必须随该 WorkConn 的自然关闭而结束，而不是依赖 30 秒强关补齐。
+	httpOrigin.CloseClientConnections()
+	waitForProductGateNoActiveWork(t, serverRuntime)
 	stopAgent()
 	spans := waitForTraceGateSpans(t, recorder)
 	traceID := assertTraceGateSpanChain(t, spans)

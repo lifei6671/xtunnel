@@ -192,6 +192,12 @@ func TestProductDataPlaneEndToEnd(t *testing.T) {
 	})
 	t.Run("public TCP Pending OPEN capacity", testProductGatePendingOpen)
 
+	// 各子场景已关闭自己创建的公网连接，但 Agent 侧 Handler 的 ACTIVE -> closed
+	// 收敛是异步的；HTTP/1.1 Origin 还可能保留空闲 keep-alive。先关闭测试拥有的
+	// Origin 连接并观察生产状态归零，再取消 Agent，避免把普通清理误测成 30 秒
+	// 硬 Deadline 强关路径。
+	httpOrigin.CloseClientConnections()
+	waitForProductGateNoActiveWork(t, serverRuntime)
 	stopAgent()
 	if err := closer.Close(); err != nil {
 		t.Fatalf("close Product Gate Server runtime: %v", err)
@@ -731,6 +737,45 @@ func waitForProductGateIdleWork(t *testing.T, runtime *gatewayBootstrapCloser, w
 		select {
 		case <-deadline.C:
 			t.Fatalf("Product Gate Agent did not replenish %d IDLE Work connections", want)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForProductGateNoActiveWork(t *testing.T, runtime *gatewayBootstrapCloser) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		for _, snapshot := range runtime.sessions.RuntimeStatusSnapshots() {
+			if snapshot.TunnelID == productGateTunnelID && snapshot.CurrentControlSession &&
+				snapshot.WorkPool.Active == 0 {
+				return
+			}
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("Product Gate Agent ACTIVE Work did not settle before graceful shutdown")
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForProductGateNoPendingOpen(t *testing.T, runtime *gatewayBootstrapCloser) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if runtime.limits.Snapshot().PendingOpens == 0 {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("Product Gate Pending OPEN did not settle before ACTIVE release: %+v", runtime.limits.Snapshot())
 		case <-ticker.C:
 		}
 	}

@@ -168,7 +168,13 @@ func TestErrorStatusObservabilityEndToEnd(t *testing.T) {
 	if err := pending.Close(); err != nil {
 		t.Fatalf("close Diagnostics Pending OPEN: %v", err)
 	}
+	// Pending 客户端关闭到 Server owner 释放配额是异步的；必须先确认取消已经
+	// 收敛，再释放唯一 ACTIVE，避免已取消请求抢到刚补回的 Work 后转成孤立 ACTIVE。
+	waitForProductGateNoPendingOpen(t, runtime)
 	finishProductGateTCP(t, active, activeEchoDone, "Diagnostics capacity holder")
+	if err := active.Close(); err != nil {
+		t.Fatalf("close Diagnostics capacity holder: %v", err)
+	}
 	waitForDiagnosticsMetricDelta(
 		t, runtime, config.Metrics.Path, capacityMetrics, "xtunnel_open_total", "", 2,
 	)
@@ -186,6 +192,7 @@ func TestErrorStatusObservabilityEndToEnd(t *testing.T) {
 	drainSpanStart := len(traceRecorder.Ended())
 	drainLogStart := len(diagnosticsLogRecords(t, serverLogs))
 	drainMetrics := readDiagnosticsMetrics(t, runtime, config.Metrics.Path)
+	waitForProductGateNoActiveWork(t, runtime)
 	stopAgent()
 	agentStopped = true
 	waitForUsageAgentOffline(t, runtime)
@@ -316,6 +323,7 @@ func TestErrorStatusObservabilityEndToEnd(t *testing.T) {
 	assertDiagnosticsTraceLink(t, originSpans, originServerLog, originAgentLog)
 
 	// 结束第二代正常 Agent，确保协议故障测试只有一个 Current Connector。
+	waitForProductGateNoActiveWork(t, runtime)
 	stopAgent()
 	agentStopped = true
 	waitForUsageAgentOffline(t, runtime)
