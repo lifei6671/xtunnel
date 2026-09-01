@@ -125,9 +125,11 @@ func TestBackupBarrierBlocksCreateFirstAdmin(t *testing.T) {
 		t.Fatalf("AcquireBackupBarrier() error = %v", err)
 	}
 
+	createContext, cancelCreate := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelCreate()
 	result := make(chan error, 1)
 	go func() {
-		result <- store.CreateFirstAdmin(context.Background(), "admin", "test-password")
+		result <- store.CreateFirstAdmin(createContext, "admin", "test-password")
 	}()
 	waitForGateWaiters(t, store.writeGate, 1)
 	select {
@@ -137,8 +139,13 @@ func TestBackupBarrierBlocksCreateFirstAdmin(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 	barrier.Release()
-	if err := waitForResult(t, result, "first-admin creation"); err != nil {
-		t.Fatalf("CreateFirstAdmin() error = %v", err)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("CreateFirstAdmin() error = %v", err)
+		}
+	case <-createContext.Done():
+		t.Fatalf("timed out waiting for first-admin creation: %v", createContext.Err())
 	}
 }
 

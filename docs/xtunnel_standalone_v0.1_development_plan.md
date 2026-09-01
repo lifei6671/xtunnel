@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-04 · DONE；M7-05 · IN_PROGRESS；M7-06 至 M7-09 · READY）
 >
-> **当前结论**：M7-01 至 M7-04 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `89/95`，M7 为 `4/10 IN_PROGRESS`。M7-05 已补齐 SQLite 三路组合竞争、Pinned/Public TLS 并发回归、真实 Connector Selection 并发 Benchmark、fail-closed Profile Runner，并在用户明确确认后把 Linux amd64/arm64 `verify` 的 Race 从九包白名单升级为 `go test -race -count=1 -timeout 600s ./...`；Windows `go1.27.0/local` 全仓 Race/Vet 与隔离快照 Commit `b99bdca7ba599f6bde939421f7a86eccc6de3cfd` 的 Docker Desktop Linux amd64/CGO=1 clean `full` 均通过。当前 CI Workflow 静态解析与精确命令断言已通过，但正式项目 Commit、精确 CI 与 commit-bound 最终复审尚未完成，因此 M7-05 保持 `IN_PROGRESS`，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01 至 M7-04 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `89/95`，M7 为 `4/10 IN_PROGRESS`。M7-05 正式实现 Commit `af3c92d755fb9a27f3e95c85428d26e0852dd95f` 已推送并通过 commit-bound Tier 3 独立复审，Runner mode=`100755`；Windows `go1.27.0/local` 全仓 Race/Vet、隔离 Docker Linux amd64/CGO=1 clean `full` 与精确 CI #33477763140 的 Linux amd64/两个 Windows Job 通过。该 CI 的 Linux arm64 在新增全仓 Race 中暴露 `TestBackupBarrierBlocksCreateFirstAdmin` 的 1 秒测试等待不足，Run 整体失败；当前 10 秒 Context 修复候选已通过目标 Race `count=20`、SQLite 整包 Race `count=3` 与 Vet，但尚待后续 Commit、四 Job 全绿精确 CI 和最终 Head 复审。因此 M7-05 保持 `IN_PROGRESS`，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -1878,3 +1878,11 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 根因与最小修复：定向 Race `count=50` 复现 4 次；3 秒 Go test timeout 的 goroutine dump 证明续签失败后阻塞在 `recordRenewalFailure` 的 `identityMu.Lock`。测试此前每毫秒调用 `LoadPinnedIdentity`，在 Windows 上与正式续签的原子证书替换竞争。当前只修改测试同步方式：用 `identityMu.TryRLock` 确认正式续签已离开无锁磁盘阶段并排队写入成功身份或失败状态，释放跨发布 reader 后等待续签完成，再通过 `LastRenewalError` 与磁盘回读验证新证书和旧 SPKI。未修改生产代码、锁语义、公共 API、配置、依赖或日志契约。
 - 修复后验证：目标 Race `count=50`、Gateway package 普通测试、Gateway package Race `count=5`、Gateway Vet、全仓 `go test -race -count=1 -timeout 600s ./...` 与 `go vet ./...` 均通过。原 Gateway 与 8 路径未提交候选复审因测试 blob 变化而 stale，必须在正式 Commit 上重新执行 commit-bound 独立复审。
 - 状态与剩余 Gate：M7-05 继续 `IN_PROGRESS`。下一步只按已授权范围暂存八个 M7-05 路径并固定 Runner mode=`100755`，创建并推送正式项目 Commit；随后仍须取得 Head SHA 精确 CI、commit-bound 最终独立复审与用户阶段批准。本次不启动 M7-06，不勾选 Alpha Release Gate Checklist。
+
+## 2026-09-01 · M7-05 正式 Commit 与首次精确 CI arm64 修复 · IN_PROGRESS
+
+- 正式提交与复审：用户明确授权暂存、提交并推送 M7-05；八路径 Commit `af3c92d755fb9a27f3e95c85428d26e0852dd95f` 已推送至 `origin/master`，Tree=`6380338b98cb11bee3e61692fecab03f23fce405`，Runner mode=`100755`。该 Commit 的 commit-bound Tier 3 独立复审 Gate=`PASSED`，Coverage=`COMPLETE`、Freshness=`FRESH`、P0/P1/P2=`0/0/0`。
+- 精确 CI：Head SHA 精确匹配的 [CI #33477763140](https://github.com/lifei6671/xtunnel/actions/runs/33477763140) 中 Linux amd64 与两个 Windows Job 通过；Linux arm64 的普通 `go test ./...` 通过，但新增全仓 Race 在 `internal/repository/sqlite.TestBackupBarrierBlocksCreateFirstAdmin` 失败，错误为等待首管创建 1 秒超时。该 Run 整体失败，不记录为 CI PASS；`actions/setup-go` 的 Node 20 deprecation annotation 是既有 Action 提示，不归因于本次 M7-05 改动。
+- 归因与最小修复：`CreateFirstAdmin` 在取得 Backup Barrier 后的写租约后，于事务内执行密码哈希；arm64 Race 下该步骤可超过测试通用 1 秒结果等待。当前只修改 `backup_test.go`：为该首管创建传入 10 秒 Context，并以同一 Context Deadline 等待结果；不改产品实现、密码参数、Backup Barrier/writeGate 语义，也不放宽其他通用测试等待。
+- 修复后验证：Windows `go1.27.0/local` 目标 Race `count=20`、SQLite package Race `count=3`（163.150s）、SQLite Vet、全仓 `go test -race -count=1 -timeout 600s ./...` 与 `go vet ./...` 均通过。后续仍须形成并推送 follow-up Commit、取得新 Head SHA 四 Job 全绿精确 CI，并对最终 Head 做 fresh commit-bound 独立复审。
+- 状态影响：M7-05 保持 `IN_PROGRESS`，不转 `REVIEW`/`DONE`；M7-06 至 M7-09 不启动，M7-10 与 Alpha Release Gate Checklist 不变。本次未勾选任何产品任务。

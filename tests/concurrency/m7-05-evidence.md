@@ -1,8 +1,9 @@
 # M7-05 Race/Concurrency Suite 交付证据
 
-> 状态：`IN_PROGRESS`（实现、Windows 全仓 Race、隔离 Linux clean `full`、
-> 全仓 Race CI 接线与分区独立复审已完成；正式项目 Commit、精确 CI、
-> commit-bound 最终复审及用户阶段复审尚未完成）
+> 状态：`IN_PROGRESS`（正式实现 Commit、Windows 全仓 Race、隔离 Linux clean
+> `full`、全仓 Race CI 接线与 commit-bound 独立复审已完成；首次精确 CI 的 Linux
+> arm64 全仓 Race 暴露既有 Backup Barrier 测试超时，修复候选尚待提交与重新运行精确
+> CI；用户阶段复审尚未完成）
 
 ## 证据边界
 
@@ -52,8 +53,16 @@ Connector Selection 算法、公共 API、Schema、Migration、依赖、配置�
   `smoke` 通过，非空结果目录在写入前拒绝且保留原内容。
 - 用户明确确认 CI/CD 修改后，Linux amd64/arm64 `verify` 的 Race 已从九包白名单替换为
   `go test -race -count=1 -timeout 600s ./...`。PyYAML 6.0.3 解析通过，精确文本断言确认
-  新命令恰好一处、旧 `300s` Race 命令为零，Workflow diff-check 通过；尚未运行包含
-  当前未提交 Workflow 的 GitHub Actions，不能记录为 CI PASS。
+  新命令恰好一处、旧 `300s` Race 命令为零，Workflow diff-check 通过。
+- 正式实现 Commit `af3c92d755fb9a27f3e95c85428d26e0852dd95f` 已推送；精确
+  [CI #33477763140](https://github.com/lifei6671/xtunnel/actions/runs/33477763140)
+  中 Linux amd64 与两个 Windows Job 通过，Linux arm64 在新增的全仓 Race 阶段失败：
+  `TestBackupBarrierBlocksCreateFirstAdmin` 的通用 1 秒结果等待不足以覆盖 arm64 Race 下
+  事务内密码哈希，普通 `go test ./...` 已先通过。该 Run 整体为失败，不能记录为 CI PASS。
+- arm64 修复候选只为该测试的首管创建增加 10 秒 Context，并以 Context Deadline 等待
+  结果，不改变产品代码或其他通用同步断言。修复后 Windows 目标 Race `count=20`、
+  SQLite package Race `count=3`、SQLite Vet、全仓 Race 与全仓 Vet 均通过；仍须提交并由
+  新的精确 CI 证明 Linux arm64 全仓 Race 通过。
 - 当时六个实现/状态文档路径复制到隔离 clone，以一次性本地快照 Commit
   `b99bdca7ba599f6bde939421f7a86eccc6de3cfd`、Tree
   `3f96e44aef2bc70eaff9666c3fde619211e25218` 冻结。该 Commit 不在项目 refs 中，
@@ -107,14 +116,16 @@ Connector Selection 算法、公共 API、Schema、Migration、依赖、配置�
   P0/P1/P2=`0/0/0`，确认 M7-05、M7 与 Alpha Gate 均未越权晋级。
 - CI 接线前的 7 路径未提交候选曾通过集成复审；因 CI 与文档随后纳入 Target，该结论
   不再覆盖完整 8 路径候选，只保留为未变分区的历史证据。
-- 完整 Target 的 commit-bound 最终独立复审尚未执行，不能把分区复审冒充最终 Gate。
+- 正式实现 Commit `af3c92d755fb9a27f3e95c85428d26e0852dd95f` 的 commit-bound
+  Tier 3 独立复审已通过，Coverage=`COMPLETE`、Freshness=`FRESH`、
+  P0/P1/P2=`0/0/0`，提交树中 Runner mode=`100755`。后续 arm64 Race 修复候选不在该
+  Commit 内，必须形成新 Commit 并接受 fresh commit-bound 复审。
 
 ## 尚待闭环
 
-- `.github/workflows/ci.yml` 的候选已按用户明确授权升级为 Linux amd64/arm64 全仓 Race；
-  当前仍需正式 Commit 与 Head SHA 精确匹配的 GitHub Actions Run 证明该命令在两个
-  原生 Linux Runner 上通过。
-- 当前项目工作区尚未形成正式 Commit；Windows 上未跟踪脚本不能可靠表达 executable
-  bit，正式暂存/提交时必须以 `git add --chmod=+x` 固定并核对 `100755`。
-- 正式 Commit、精确 CI、commit-bound 最终独立复审与用户阶段复审均未完成；M7-05
-  保持 `IN_PROGRESS`，不得标记 `REVIEW`/`DONE`，不得勾选 Alpha Release Gate。
+- Runner 已在正式实现 Commit 中固定为 `100755`；当前 arm64 Race 修复候选仍须形成
+  后续 Commit 并推送。
+- 新 Head SHA 必须取得 GitHub Actions 四 Job 全部成功，尤其证明两个原生 Linux
+  Runner 的全仓 Race 均通过；随后对最终 Head 执行 fresh commit-bound 独立复审。
+- 精确 CI、最终 Head 复审与用户阶段复审尚未闭环；M7-05 保持 `IN_PROGRESS`，不得标记
+  `REVIEW`/`DONE`，不得勾选 Alpha Release Gate。
