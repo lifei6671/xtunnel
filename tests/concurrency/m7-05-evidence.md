@@ -1,8 +1,8 @@
 # M7-05 Race/Concurrency Suite 交付证据
 
-> 状态：`REVIEW`（正式实现与 Linux arm64 Race 超时修复 Commit 均已推送；Windows
-> 全仓 Race/Vet、隔离 Linux clean `full`、Linux amd64/arm64 全仓 Race 精确 CI 与独立
-> 复审已闭环；等待用户阶段复审）
+> 状态：`DONE`（正式实现与 Linux arm64 Race 超时修复 Commit 均已推送；Windows
+> 全仓 Race/Vet、隔离 Linux clean `full`、Linux amd64/arm64 全仓 Race、修复与证据
+> Head 精确 CI、commit-bound Tier 3 最终全范围独立复审及用户阶段复审均已通过）
 
 ## 证据边界
 
@@ -125,9 +125,23 @@ Connector Selection 算法、公共 API、Schema、Migration、依赖、配置�
   的 commit-bound 读回未发现代码问题，但因提交树仍写“修复候选尚待提交”记录 1 项
   文档 P2；当前 docs-only 收口已修正该时态并记录实际推送与精确 CI，不修改实现。
 
+## 用户阶段复审
+
+- 用户已明确回复“`M7-05 阶段复审通过`”。正式实现 Commit
+  `af3c92d755fb9a27f3e95c85428d26e0852dd95f`、Linux arm64 Race 超时修复 Commit
+  `dcd0f551f7c37a70d303ebe06cf69734bfc718cb`、Windows 全仓 Race/Vet、隔离 Docker
+  Linux amd64/CGO=1 clean `full`、
+  [CI #33479628065](https://github.com/lifei6671/xtunnel/actions/runs/33479628065)、
+  最终证据 Head `f5c1d0154685372605437518b32f247b7941d085` 的
+  [CI #33480689510](https://github.com/lifei6671/xtunnel/actions/runs/33480689510)，以及
+  commit-bound Tier 3 最终全范围独立复审共同构成 M7-05 `DONE` 证据。
+- 状态影响：M7-05 从 `REVIEW` 转为 `DONE`，M7 为 `5/10 IN_PROGRESS`，全局
+  `DONE` 更新为 `90/95`。M7-06 至 M7-09 保持 `READY`，本轮未启动；M7-10 与
+  Alpha Release Gate Checklist 保持不变。
+
 ## 阶段边界
 
 - Runner 已在正式实现 Commit 中固定为 `100755`；修复 Commit 已推送，精确 CI 四 Job
   全部成功，两个原生 Linux Runner 的全仓 Race 均通过。
-- M7-05 当前为 `REVIEW`，仅等待用户阶段复审；用户明确批准前不得标记 `DONE`，不得
-  启动 M7-06，也不得勾选 Alpha Release Gate。
+- M7-05 已 `DONE`；Race、SQLite 调度覆盖与 Docker Profile 的证据边界不因用户批准而
+  扩大。M7-06 至 M7-09 尚未启动，Alpha Release Gate Checklist 未勾选。
