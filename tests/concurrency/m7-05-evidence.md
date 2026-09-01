@@ -1,9 +1,8 @@
 # M7-05 Race/Concurrency Suite 交付证据
 
-> 状态：`IN_PROGRESS`（正式实现 Commit、Windows 全仓 Race、隔离 Linux clean
-> `full`、全仓 Race CI 接线与 commit-bound 独立复审已完成；首次精确 CI 的 Linux
-> arm64 全仓 Race 暴露既有 Backup Barrier 测试超时，修复候选尚待提交与重新运行精确
-> CI；用户阶段复审尚未完成）
+> 状态：`REVIEW`（正式实现与 Linux arm64 Race 超时修复 Commit 均已推送；Windows
+> 全仓 Race/Vet、隔离 Linux clean `full`、Linux amd64/arm64 全仓 Race 精确 CI 与独立
+> 复审已闭环；等待用户阶段复审）
 
 ## 证据边界
 
@@ -59,10 +58,13 @@ Connector Selection 算法、公共 API、Schema、Migration、依赖、配置�
   中 Linux amd64 与两个 Windows Job 通过，Linux arm64 在新增的全仓 Race 阶段失败：
   `TestBackupBarrierBlocksCreateFirstAdmin` 的通用 1 秒结果等待不足以覆盖 arm64 Race 下
   事务内密码哈希，普通 `go test ./...` 已先通过。该 Run 整体为失败，不能记录为 CI PASS。
-- arm64 修复候选只为该测试的首管创建增加 10 秒 Context，并以 Context Deadline 等待
+- arm64 修复只为该测试的首管创建增加 10 秒 Context，并以 Context Deadline 等待
   结果，不改变产品代码或其他通用同步断言。修复后 Windows 目标 Race `count=20`、
-  SQLite package Race `count=3`、SQLite Vet、全仓 Race 与全仓 Vet 均通过；仍须提交并由
-  新的精确 CI 证明 Linux arm64 全仓 Race 通过。
+  SQLite package Race `count=3`、SQLite Vet、全仓 Race 与全仓 Vet 均通过。修复 Commit
+  `dcd0f551f7c37a70d303ebe06cf69734bfc718cb` 已推送，Tree
+  `0325cfc87190ddac117a64ba761ca7c4d7f4edc0`；Head SHA 精确匹配的
+  [CI #33479628065](https://github.com/lifei6671/xtunnel/actions/runs/33479628065)
+  四 Job 全部成功，Linux amd64/arm64 的全仓 Race 均通过。
 - 当时六个实现/状态文档路径复制到隔离 clone，以一次性本地快照 Commit
   `b99bdca7ba599f6bde939421f7a86eccc6de3cfd`、Tree
   `3f96e44aef2bc70eaff9666c3fde619211e25218` 冻结。该 Commit 不在项目 refs 中，
@@ -118,14 +120,14 @@ Connector Selection 算法、公共 API、Schema、Migration、依赖、配置�
   不再覆盖完整 8 路径候选，只保留为未变分区的历史证据。
 - 正式实现 Commit `af3c92d755fb9a27f3e95c85428d26e0852dd95f` 的 commit-bound
   Tier 3 独立复审已通过，Coverage=`COMPLETE`、Freshness=`FRESH`、
-  P0/P1/P2=`0/0/0`，提交树中 Runner mode=`100755`。后续 arm64 Race 修复候选不在该
-  Commit 内，必须形成新 Commit 并接受 fresh commit-bound 复审。
+  P0/P1/P2=`0/0/0`，提交树中 Runner mode=`100755`。
+- arm64 修复候选独立复审为 `PASSED`、P0/P1/P2=`0/0/0`。修复 Commit `dcd0f55...`
+  的 commit-bound 读回未发现代码问题，但因提交树仍写“修复候选尚待提交”记录 1 项
+  文档 P2；当前 docs-only 收口已修正该时态并记录实际推送与精确 CI，不修改实现。
 
-## 尚待闭环
+## 阶段边界
 
-- Runner 已在正式实现 Commit 中固定为 `100755`；当前 arm64 Race 修复候选仍须形成
-  后续 Commit 并推送。
-- 新 Head SHA 必须取得 GitHub Actions 四 Job 全部成功，尤其证明两个原生 Linux
-  Runner 的全仓 Race 均通过；随后对最终 Head 执行 fresh commit-bound 独立复审。
-- 精确 CI、最终 Head 复审与用户阶段复审尚未闭环；M7-05 保持 `IN_PROGRESS`，不得标记
-  `REVIEW`/`DONE`，不得勾选 Alpha Release Gate。
+- Runner 已在正式实现 Commit 中固定为 `100755`；修复 Commit 已推送，精确 CI 四 Job
+  全部成功，两个原生 Linux Runner 的全仓 Race 均通过。
+- M7-05 当前为 `REVIEW`，仅等待用户阶段复审；用户明确批准前不得标记 `DONE`，不得
+  启动 M7-06，也不得勾选 Alpha Release Gate。

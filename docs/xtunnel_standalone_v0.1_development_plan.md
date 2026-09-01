@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-01
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-04 · DONE；M7-05 · IN_PROGRESS；M7-06 至 M7-09 · READY）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-04 · DONE；M7-05 · REVIEW；M7-06 至 M7-09 · READY）
 >
-> **当前结论**：M7-01 至 M7-04 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `89/95`，M7 为 `4/10 IN_PROGRESS`。M7-05 正式实现 Commit `af3c92d755fb9a27f3e95c85428d26e0852dd95f` 已推送并通过 commit-bound Tier 3 独立复审，Runner mode=`100755`；Windows `go1.27.0/local` 全仓 Race/Vet、隔离 Docker Linux amd64/CGO=1 clean `full` 与精确 CI #33477763140 的 Linux amd64/两个 Windows Job 通过。该 CI 的 Linux arm64 在新增全仓 Race 中暴露 `TestBackupBarrierBlocksCreateFirstAdmin` 的 1 秒测试等待不足，Run 整体失败；当前 10 秒 Context 修复候选已通过目标 Race `count=20`、SQLite 整包 Race `count=3` 与 Vet，但尚待后续 Commit、四 Job 全绿精确 CI 和最终 Head 复审。因此 M7-05 保持 `IN_PROGRESS`，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01 至 M7-04 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `89/95`，M7 为 `4/10 IN_PROGRESS`。M7-05 正式实现 Commit `af3c92d755fb9a27f3e95c85428d26e0852dd95f` 与 Linux arm64 Race 超时修复 Commit `dcd0f551f7c37a70d303ebe06cf69734bfc718cb` 均已推送；Runner mode=`100755`，Windows `go1.27.0/local` 全仓 Race/Vet、隔离 Docker Linux amd64/CGO=1 clean `full` 均通过。修复 Commit 的精确 [CI #33479628065](https://github.com/lifei6671/xtunnel/actions/runs/33479628065) 四 Job 全部成功，Linux amd64/arm64 的全仓 Race 均通过；实现 Commit 的 commit-bound Tier 3 独立复审与 arm64 修复候选复审均无代码发现，后续提交复审指出的证据时态 P2 已在当前 docs-only 收口中修正。因此 M7-05 转为 `REVIEW` 等待用户阶段复审，不转 `DONE`，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -401,7 +401,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 100/500/1000 Connector 使用 Stagger + Jitter 重连，无同步 TLS/Auth Storm；永久错误不快速重试；记录 Pending TLS/Auth、`retry_after`、FD/CPU/RAM；Server Restart 后测量 `T_control_reconnect`、`T_config_ready`、`T_workpool_ready`、`T_first_success` 分布，旧 generation 无污染 | `DONE` |
 | M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `DONE` |
 | M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `DONE` |
-| M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `IN_PROGRESS` |
+| M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `REVIEW` |
 | M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `READY` |
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `READY` |
 | M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `READY` |
@@ -430,11 +430,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 2. `M7-02` — `DONE`。Chaos Harness、确定性 Backoff 单测、AUTH Reset 分类修复、WSL2 `/tmp` clean `full`、实现与证据提交的精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
 3. `M7-03` — `DONE`。真实 Server/Agent 产品链路 Harness、Builder/Runner、最终 Commit `cc1e668c8450fa6f1834ea646c21a9b4265fa33a` 的 WSL2 clean `full`、Linux amd64/arm64 Bootstrap Race、精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
 4. `M7-04` — `DONE`。最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6` 的 clean `full`、Docker Linux amd64/CGO=1 三包 Race、精确 CI `#33468280052`、Tier 3 commit-bound 最终独立复审、证据 Head `806bfa0d719259642dc152a0b96f80894b0cd637` 的精确 CI `#33469332157` 与用户阶段复审均已闭环。真实存储层故障继续作为未验证证据边界。
-5. `M7-05` — `IN_PROGRESS`。实现、Windows 全仓 Race/Vet、隔离 Linux clean `full`、全仓 Race CI 接线与分区独立复审均已完成；当前继续正式 Commit、精确 CI 与 commit-bound 最终复审。
+5. `M7-05` — `REVIEW`。实现与 arm64 测试超时修复均已提交并推送；Windows 全仓 Race/Vet、隔离 Linux clean `full`、Linux amd64/arm64 全仓 Race 精确 CI 与独立复审已闭环，等待用户阶段复审。
 6. `M7-06` 至 `M7-09` — `READY`，本轮不启动。
 7. `M7-10` — 继续等待 M7-05 至 M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `89/95`。M7 当前为 `4/10 IN_PROGRESS`，M7-01 至 M7-04 已 `DONE`，M7-05 为 `IN_PROGRESS`，M7-06 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `89/95`。M7 当前为 `4/10 IN_PROGRESS`，M7-01 至 M7-04 已 `DONE`，M7-05 为 `REVIEW`，M7-06 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -1884,5 +1884,12 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 正式提交与复审：用户明确授权暂存、提交并推送 M7-05；八路径 Commit `af3c92d755fb9a27f3e95c85428d26e0852dd95f` 已推送至 `origin/master`，Tree=`6380338b98cb11bee3e61692fecab03f23fce405`，Runner mode=`100755`。该 Commit 的 commit-bound Tier 3 独立复审 Gate=`PASSED`，Coverage=`COMPLETE`、Freshness=`FRESH`、P0/P1/P2=`0/0/0`。
 - 精确 CI：Head SHA 精确匹配的 [CI #33477763140](https://github.com/lifei6671/xtunnel/actions/runs/33477763140) 中 Linux amd64 与两个 Windows Job 通过；Linux arm64 的普通 `go test ./...` 通过，但新增全仓 Race 在 `internal/repository/sqlite.TestBackupBarrierBlocksCreateFirstAdmin` 失败，错误为等待首管创建 1 秒超时。该 Run 整体失败，不记录为 CI PASS；`actions/setup-go` 的 Node 20 deprecation annotation 是既有 Action 提示，不归因于本次 M7-05 改动。
 - 归因与最小修复：`CreateFirstAdmin` 在取得 Backup Barrier 后的写租约后，于事务内执行密码哈希；arm64 Race 下该步骤可超过测试通用 1 秒结果等待。当前只修改 `backup_test.go`：为该首管创建传入 10 秒 Context，并以同一 Context Deadline 等待结果；不改产品实现、密码参数、Backup Barrier/writeGate 语义，也不放宽其他通用测试等待。
-- 修复后验证：Windows `go1.27.0/local` 目标 Race `count=20`、SQLite package Race `count=3`（163.150s）、SQLite Vet、全仓 `go test -race -count=1 -timeout 600s ./...` 与 `go vet ./...` 均通过。后续仍须形成并推送 follow-up Commit、取得新 Head SHA 四 Job 全绿精确 CI，并对最终 Head 做 fresh commit-bound 独立复审。
-- 状态影响：M7-05 保持 `IN_PROGRESS`，不转 `REVIEW`/`DONE`；M7-06 至 M7-09 不启动，M7-10 与 Alpha Release Gate Checklist 不变。本次未勾选任何产品任务。
+- 修复后验证：Windows `go1.27.0/local` 目标 Race `count=20`、SQLite package Race `count=3`（163.150s）、SQLite Vet、全仓 `go test -race -count=1 -timeout 600s ./...` 与 `go vet ./...` 均通过。后续修复 Commit 与精确 CI 结果见下一条执行记录。
+- 状态影响：本记录形成时 M7-05 保持 `IN_PROGRESS`；后续 `REVIEW` 收口见下一条执行记录。M7-06 至 M7-09 不启动，M7-10 与 Alpha Release Gate Checklist 不变。本次未勾选任何产品任务。
+
+## 2026-09-01 · M7-05 arm64 修复精确 CI 与 REVIEW 收口 · REVIEW
+
+- 修复提交：测试等待修复 Commit `dcd0f551f7c37a70d303ebe06cf69734bfc718cb` 已推送至 `origin/master`，Tree=`0325cfc87190ddac117a64ba761ca7c4d7f4edc0`，Parent=`af3c92d755fb9a27f3e95c85428d26e0852dd95f`；只修改 `backup_test.go` 与两份 M7-05 状态/证据文档，不改变产品实现、依赖、CI、公共契约、配置或日志语义。
+- 精确 CI：Head SHA 精确匹配的 [CI #33479628065](https://github.com/lifei6671/xtunnel/actions/runs/33479628065) 结论为 `success`；Linux amd64 `verify`、Linux arm64 `verify`、Windows Agent service、Windows arm64 Agent runtime 四 Job 全部成功。两个原生 Linux `verify` 均执行并通过 `go test -race -count=1 -timeout 600s ./...`，首次 Run #33477763140 的 arm64 超时已闭环。
+- 复审收口：`af3c92d...` 的八路径实现 commit-bound Tier 3 Gate=`PASSED`，Coverage=`COMPLETE`、Freshness=`FRESH`、P0/P1/P2=`0/0/0`；arm64 修复候选独立复审同样为 `PASSED`、P0/P1/P2=`0/0/0`。`dcd0f55...` 的 commit-bound 读回未发现代码问题，但因提交内仍写“修复候选尚待提交”记录 1 项文档 P2；当前 docs-only 收口修正该时态并记录实际推送与精确 CI，不修改实现。
+- 状态影响：M7-05 从 `IN_PROGRESS` 转为 `REVIEW`，等待用户明确阶段复审批准；在批准前不得转 `DONE`。全局 `DONE` 保持 `89/95`，M7 保持 `4/10 IN_PROGRESS`；M7-06 至 M7-09 不启动，M7-10 与 Alpha Release Gate Checklist 保持不变。
