@@ -71,16 +71,16 @@ exactly-once 和真实 SIGTERM 接线继续由对应 owner 测试证明，不由
 
 ## 正式收口证据
 
-- 实现与 CI 修复的最终 Commit 为 `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`
-  （Tree `9ad761688e2455f495e25eaeb087d930710be02a`）。Windows Builder 在 clean
+- 实现与 CI 修复的最终 Commit 为 `cc1e668c8450fa6f1834ea646c21a9b4265fa33a`
+  （Tree `9254a765df29765d4a610301299ce19006563e63`）。Windows Builder 在 clean
   Worktree 生成 `linux/amd64`、`GOAMD64=v1`、`CGO_ENABLED=0` Test Binary；Manifest
   记录 `worktree_clean=true`、Go `go1.27.0`、`GOTOOLCHAIN=local`，Binary SHA-256 为
-  `1a5f04d40b333cd7289428ea323a38a9bdb633871e419596118ff2b5fa16d29d`，Manifest
-  SHA-256 为 `039FB5E014EE4525C99C50A00015B94B295CE4058B779855B48B42CE9F856221`。
+  `bfc50a38c7a8b9af67ceb815e79065eeadbb9093fb7e8b2efd84ab7066a84e07`，Manifest
+  SHA-256 为 `3D6BCACC18BE7DEF1EA0714BA2919E9045D5BDC4C066D0C448B571F1C39FDFE4`。
 - WSL2 Linux-native `/tmp` 精确克隆在该 Commit 上执行 Runner `full`，六个场景全部
   PASS，Runner 终态为 `M7-03 chaos run completed.`、Exit Status `0`。Server 250ms
-  Hard Deadline 观测为 `253.592029ms`，Agent 30 秒默认窗口观测为 `30.00122165s`；
-  每场景 Session/Quota 清零，FD 与 goroutine 精确回到 `6/6`、`3/3`。该结果是 WSL2
+  Hard Deadline 观测为 `252.79489ms`，Agent 30 秒默认窗口观测为 `30.001164068s`；
+  每场景 Session/Quota 清零，FD 与 goroutine 精确回到 `7/7`、`3/3`。该结果是 WSL2
   Linux 内核运行证据，不描述为独立原生 Linux 主机或代表性网络条件。
 - 首次精确 CI [#33455091131](https://github.com/lifei6671/xtunnel/actions/runs/33455091131)
   绑定 Commit `80142e593e2e32b773d8f21dfad7dd4fd412d676`，Linux amd64/arm64 在 Product、
@@ -88,16 +88,23 @@ exactly-once 和真实 SIGTERM 接线继续由对应 owner 测试证明，不由
   竞态，Windows Job 通过。修复提交 `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`
   在释放场景资源后等待 Server 当前 generation 的权威 Runtime Snapshot 归零；未改变生产
   Shutdown、Hard Deadline 或 Half-Close 契约。
-- 最终精确 CI [#33457845746](https://github.com/lifei6671/xtunnel/actions/runs/33457845746)
-  的 Head SHA 精确为 `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`，结论
+- 中间精确 CI [#33457845746](https://github.com/lifei6671/xtunnel/actions/runs/33457845746)
+  绑定 Commit `45c6be28bd2fef6f802fbc2719bf5e6952f7728d` 并全绿。后置证据提交
+  `deabfa68d9190d10963aad27c78c854803c1804d` 的精确 CI
+  [#33459088020](https://github.com/lifei6671/xtunnel/actions/runs/33459088020) 又在双 Linux
+  Job 暴露进程级 goroutine 合法下降 `5→4` 被误判为泄漏，以及 Origin 强关在 Linux
+  上可能返回 EOF/nil 或 RST。最终修复只允许 FD/goroutine 不高于基线，Session/Quota
+  仍精确归零；Origin 强关只接受及时 EOF/RST 并拒绝 Timeout，Public/traffic 主断言不放宽。
+- 最终精确 CI [#33460324750](https://github.com/lifei6671/xtunnel/actions/runs/33460324750)
+  的 Head SHA 精确为 `cc1e668c8450fa6f1834ea646c21a9b4265fa33a`，结论
   `completed/success`；Linux amd64、Linux arm64、Windows Agent service 与 Windows
   arm64 Agent runtime 四个 Job 全部成功。两个 Linux Job 均通过 `go test ./...`、
   `go test -race -count=1 -timeout 300s ./internal/server/bootstrap ...`、`go vet ./...`
   及 Product、Trace、Diagnostics 原生 E2E，因此 Bootstrap Linux Race 已有正式 CI 证据。
 - 最终独立复审为 `CHILD_AGENT / Standard Mode / Tier 3 / Go / FULL_SCOPE`，覆盖
   Baseline `1babca3290447b33b02ae126c9d03c532c97ff8a` 至 Target Commit
-  `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`，Coverage=`COMPLETE`、
-  Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`。累计 Repair rounds=`3`，
+  `cc1e668c8450fa6f1834ea646c21a9b4265fa33a`，Coverage=`COMPLETE`、
+  Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`。累计 Repair rounds=`4`，
   Target 冻结后 Repair rounds=`0`。
 
 ## 剩余审批

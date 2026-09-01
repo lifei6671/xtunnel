@@ -6,7 +6,7 @@
 >
 > **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01、M7-02 · DONE；M7-03 · REVIEW）
 >
-> **当前结论**：M7-01、M7-02 均已获用户明确阶段复审通过并转为 `DONE`。M7-03 已补齐由生产 Shutdown 建立 TCP Admission Fence、Agent 真实 30 秒 Hard Deadline、Session/Quota/FD/goroutine 精确归零，并修复 Agent 匹配 DrainAck 后等待 ACTIVE 时 Control Owner 停止 Heartbeat 的生产缺陷。最终 Commit `45c6be28bd2fef6f802fbc2719bf5e6952f7728d` 的六场景 WSL2 clean Runner `full`、Linux amd64/arm64 Bootstrap Race、精确 CI `#33457845746` 与 Tier 3 commit-bound 最终独立复审均已通过，M7-03 进入 `REVIEW`。全局 `DONE` 仍为 `87/95`；尚待用户阶段复审，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01、M7-02 均已获用户明确阶段复审通过并转为 `DONE`。M7-03 已补齐由生产 Shutdown 建立 TCP Admission Fence、Agent 真实 30 秒 Hard Deadline、Session/Quota/FD/goroutine 收敛，并修复 Agent 匹配 DrainAck 后等待 ACTIVE 时 Control Owner 停止 Heartbeat 的生产缺陷。最终 Commit `cc1e668c8450fa6f1834ea646c21a9b4265fa33a` 的六场景 WSL2 clean Runner `full`、Linux amd64/arm64 Bootstrap Race、精确 CI `#33460324750` 与 Tier 3 commit-bound 最终独立复审均已通过，M7-03 进入 `REVIEW`。全局 `DONE` 仍为 `87/95`；尚待用户阶段复审，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -428,7 +428,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 1. `M7-01` — `DONE`。生产 32 KiB Buffer、关键测试、fresh Proxy 正式复验、精确 CI、commit-bound 最终独立复审与用户阶段复审均已闭环。
 2. `M7-02` — `DONE`。Chaos Harness、确定性 Backoff 单测、AUTH Reset 分类修复、WSL2 `/tmp` clean `full`、实现与证据提交的精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
-3. `M7-03` — `REVIEW`。真实 Server/Agent 产品链路 Harness、Builder/Runner、最终 Commit `45c6be28bd2fef6f802fbc2719bf5e6952f7728d` 的 WSL2 clean `full`、Linux amd64/arm64 Bootstrap Race、精确 CI 与 Tier 3 commit-bound 最终独立复审已通过；等待用户阶段复审。
+3. `M7-03` — `REVIEW`。真实 Server/Agent 产品链路 Harness、Builder/Runner、最终 Commit `cc1e668c8450fa6f1834ea646c21a9b4265fa33a` 的 WSL2 clean `full`、Linux amd64/arm64 Bootstrap Race、精确 CI 与 Tier 3 commit-bound 最终独立复审已通过；等待用户阶段复审。
 4. `M7-04` 至 `M7-08` — 前置依赖均已满足并保持 `READY`，本轮不启动，也不增加任务表之外的串行依赖。
 5. `M7-09` — 继续等待 M7-04 `DONE`；`M7-10` — 继续等待 M7-03 至 M7-09 全部 `DONE`。
 
@@ -1790,10 +1790,11 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 
 ## 2026-09-01 · M7-03 精确 CI 修复与最终交付复审 · REVIEW
 
-- 正式产物：实现与 CI teardown 修复的最终 Commit 为 `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`（Tree `9ad761688e2455f495e25eaeb087d930710be02a`），已推送并与 `origin/master` 精确一致。该提交只补齐既有 Graceful Shutdown/Half-Close 契约及测试资源所有权，不改变公共 API/Protocol、Schema、Migration、依赖、CI/CD、生产配置、权限或日志契约。
-- clean `full`：Windows Go `go1.27.0`、`GOTOOLCHAIN=local` 在 clean Worktree 生成 `linux/amd64`、`GOAMD64=v1`、`CGO_ENABLED=0` Test Binary；Manifest 绑定最终 Commit、`worktree_clean=true` 与 Binary SHA-256 `1a5f04d40b333cd7289428ea323a38a9bdb633871e419596118ff2b5fa16d29d`。WSL2 Linux-native `/tmp` 精确克隆执行 Runner `full`，六场景全部 PASS，Server 250ms Hard Deadline 观测 `253.592029ms`，Agent 30 秒默认窗口观测 `30.00122165s`，每场景 Session/Quota 清零，FD/goroutine 精确回到 `6/6`、`3/3`。该结果只描述为 WSL2 Linux 内核运行证据。
+- 正式产物：实现、CI teardown 与跨 Linux 关闭语义修复的最终 Commit 为 `cc1e668c8450fa6f1834ea646c21a9b4265fa33a`（Tree `9254a765df29765d4a610301299ce19006563e63`），已推送并与 `origin/master` 精确一致。该提交只补齐既有 Graceful Shutdown/Half-Close 契约及测试资源所有权，不改变公共 API/Protocol、Schema、Migration、依赖、CI/CD、生产配置、权限或日志契约。
+- clean `full`：Windows Go `go1.27.0`、`GOTOOLCHAIN=local` 在 clean Worktree 生成 `linux/amd64`、`GOAMD64=v1`、`CGO_ENABLED=0` Test Binary；Manifest 绑定最终 Commit、`worktree_clean=true` 与 Binary SHA-256 `bfc50a38c7a8b9af67ceb815e79065eeadbb9093fb7e8b2efd84ab7066a84e07`。WSL2 Linux-native `/tmp` 精确克隆执行 Runner `full`，六场景全部 PASS，Server 250ms Hard Deadline 观测 `252.79489ms`，Agent 30 秒默认窗口观测 `30.001164068s`，每场景 Session/Quota 清零，FD/goroutine 精确回到 `7/7`、`3/3`。该结果只描述为 WSL2 Linux 内核运行证据。
 - CI Repair：首次精确 CI [#33455091131](https://github.com/lifei6671/xtunnel/actions/runs/33455091131) 绑定 Commit `80142e593e2e32b773d8f21dfad7dd4fd412d676`，Linux 双架构在 Product、Trace、Diagnostics E2E teardown 暴露测试自有 HTTP keep-alive 与 Pending Open 取消竞态；Windows Job 通过。最终提交在释放测试自有资源后等待 Server 当前 generation 的权威 Runtime Snapshot 归零，没有缩短或绕过生产 Hard Deadline。
-- 精确 CI：[GitHub Actions #33457845746](https://github.com/lifei6671/xtunnel/actions/runs/33457845746) 的 Head SHA 精确为 `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`，结论 `completed/success`；Linux amd64、Linux arm64、Windows Agent service 与 Windows arm64 Agent runtime 四个 Job 全部成功。两个 Linux Job 均通过全仓 Test、Bootstrap 定向 Race、Vet 与 Product/Trace/Diagnostics 原生 E2E，因此此前缺失的 Bootstrap Linux Race 已由精确 CI 补齐。
-- 最终独立复审：`CHILD_AGENT / Standard Mode / Tier 3 / Go / FULL_SCOPE` 对 Baseline `1babca3290447b33b02ae126c9d03c532c97ff8a` 至 Target Commit `45c6be28bd2fef6f802fbc2719bf5e6952f7728d` 完成 commit-bound 覆盖，Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`；累计 Repair rounds=`3`，Target 冻结后的 Repair rounds=`0`。
+- 跨环境断言修复：Commit `45c6be28bd2fef6f802fbc2719bf5e6952f7728d` 的精确 CI [#33457845746](https://github.com/lifei6671/xtunnel/actions/runs/33457845746) 曾全绿；后置证据提交 `deabfa68d9190d10963aad27c78c854803c1804d` 的精确 CI [#33459088020](https://github.com/lifei6671/xtunnel/actions/runs/33459088020) 在双 Linux Job 暴露 goroutine 合法下降 `5→4` 被误判为泄漏，以及 Origin 强关可能返回 EOF/nil 或 RST。最终测试只允许进程级 FD/goroutine 不高于基线，Session/Quota 仍精确归零；Origin 强关必须在 5 秒内以 EOF/RST 解阻并拒绝 Timeout，Public/traffic 主断言不放宽。
+- 精确 CI：[GitHub Actions #33460324750](https://github.com/lifei6671/xtunnel/actions/runs/33460324750) 的 Head SHA 精确为 `cc1e668c8450fa6f1834ea646c21a9b4265fa33a`，结论 `completed/success`；Linux amd64、Linux arm64、Windows Agent service 与 Windows arm64 Agent runtime 四个 Job 全部成功。两个 Linux Job 均通过全仓 Test、Bootstrap 定向 Race、Vet 与 Product/Trace/Diagnostics 原生 E2E，因此此前缺失的 Bootstrap Linux Race 已由最终精确 CI 补齐。
+- 最终独立复审：`CHILD_AGENT / Standard Mode / Tier 3 / Go / FULL_SCOPE` 对 Baseline `1babca3290447b33b02ae126c9d03c532c97ff8a` 至 Target Commit `cc1e668c8450fa6f1834ea646c21a9b4265fa33a` 完成 commit-bound 覆盖，Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`；累计 Repair rounds=`4`，Target 冻结后的 Repair rounds=`0`。
 - 状态影响：M7-03 从 `IN_PROGRESS` 进入 `REVIEW`，等待用户明确阶段复审通过；M7 仍为 `2/10 IN_PROGRESS`，全局 `DONE` 保持 `87/95`。本次未勾选任何 Alpha Release Gate；M7-04 至 M7-08 保持 `READY`，M7-09/M7-10 的依赖状态不变。
 - 文档同步：更新本开发计划与 `tests/chaos/m7-03-evidence.md`。总技术方案、根 README 与 `tests/chaos/README.md` 无需更新，因为本轮只闭环既有契约和已有 Runner 用法；Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、权限模型、日志字段与 `AGENTS.md` 均未改变。
