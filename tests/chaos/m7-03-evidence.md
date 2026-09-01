@@ -1,7 +1,7 @@
 # M7-03 Graceful Shutdown Chaos 验证证据
 
-> 状态：`IN_PROGRESS`（五场景 clean `full` 与六场景 WSL2 开发运行已通过；尚无 Bootstrap Linux Race、
-> 精确 CI、commit-bound 最终独立复审或用户阶段复审）
+> 状态：`REVIEW`（六场景 clean `full`、Bootstrap Linux Race、精确 CI 与 commit-bound
+> 最终独立复审均已通过；等待用户阶段复审）
 
 ## 证据边界
 
@@ -69,12 +69,37 @@ exactly-once 和真实 SIGTERM 接线继续由对应 owner 测试证明，不由
   必要相邻 owner，Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`，
   P0/P1/P2=`0/0/0`。这是 dirty worktree checkpoint，不替代 commit-bound 最终复审。
 
-## 待完成
+## 正式收口证据
 
-- Linux 定向 Race：WSL2 已具备 GCC `11.4.0`，Agent Connector 新回归测试的原生 Race
-  已通过；但 Bootstrap M7-03 Race 在 Linux-native `/tmp` checkout 中未产出测试结果，
-  约 900 秒后 WSL2 连 `ps`/`find` 也无法完成并以 Exit `1` 收敛，发行版已被终止回收。
-  这是环境阻塞，不得把 Connector Race、Windows Race、CGO-off 运行或交叉编译冒充
-  Bootstrap Linux Race 通过。
-- 精确 CI 与 Tier 3 commit-bound 最终独立复审。
+- 实现与 CI 修复的最终 Commit 为 `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`
+  （Tree `9ad761688e2455f495e25eaeb087d930710be02a`）。Windows Builder 在 clean
+  Worktree 生成 `linux/amd64`、`GOAMD64=v1`、`CGO_ENABLED=0` Test Binary；Manifest
+  记录 `worktree_clean=true`、Go `go1.27.0`、`GOTOOLCHAIN=local`，Binary SHA-256 为
+  `1a5f04d40b333cd7289428ea323a38a9bdb633871e419596118ff2b5fa16d29d`，Manifest
+  SHA-256 为 `039FB5E014EE4525C99C50A00015B94B295CE4058B779855B48B42CE9F856221`。
+- WSL2 Linux-native `/tmp` 精确克隆在该 Commit 上执行 Runner `full`，六个场景全部
+  PASS，Runner 终态为 `M7-03 chaos run completed.`、Exit Status `0`。Server 250ms
+  Hard Deadline 观测为 `253.592029ms`，Agent 30 秒默认窗口观测为 `30.00122165s`；
+  每场景 Session/Quota 清零，FD 与 goroutine 精确回到 `6/6`、`3/3`。该结果是 WSL2
+  Linux 内核运行证据，不描述为独立原生 Linux 主机或代表性网络条件。
+- 首次精确 CI [#33455091131](https://github.com/lifei6671/xtunnel/actions/runs/33455091131)
+  绑定 Commit `80142e593e2e32b773d8f21dfad7dd4fd412d676`，Linux amd64/arm64 在 Product、
+  Trace、Diagnostics E2E teardown 暴露测试自有 HTTP keep-alive 与 Pending Open 取消
+  竞态，Windows Job 通过。修复提交 `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`
+  在释放场景资源后等待 Server 当前 generation 的权威 Runtime Snapshot 归零；未改变生产
+  Shutdown、Hard Deadline 或 Half-Close 契约。
+- 最终精确 CI [#33457845746](https://github.com/lifei6671/xtunnel/actions/runs/33457845746)
+  的 Head SHA 精确为 `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`，结论
+  `completed/success`；Linux amd64、Linux arm64、Windows Agent service 与 Windows
+  arm64 Agent runtime 四个 Job 全部成功。两个 Linux Job 均通过 `go test ./...`、
+  `go test -race -count=1 -timeout 300s ./internal/server/bootstrap ...`、`go vet ./...`
+  及 Product、Trace、Diagnostics 原生 E2E，因此 Bootstrap Linux Race 已有正式 CI 证据。
+- 最终独立复审为 `CHILD_AGENT / Standard Mode / Tier 3 / Go / FULL_SCOPE`，覆盖
+  Baseline `1babca3290447b33b02ae126c9d03c532c97ff8a` 至 Target Commit
+  `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`，Coverage=`COMPLETE`、
+  Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`。累计 Repair rounds=`3`，
+  Target 冻结后 Repair rounds=`0`。
+
+## 剩余审批
+
 - 用户明确阶段复审；在此之前不得标记 `DONE` 或勾选 M7 Alpha Gate。

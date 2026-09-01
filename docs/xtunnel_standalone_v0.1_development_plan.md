@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-01
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01、M7-02 · DONE；M7-03 · IN_PROGRESS）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01、M7-02 · DONE；M7-03 · REVIEW）
 >
-> **当前结论**：M7-01、M7-02 均已获用户明确阶段复审通过并转为 `DONE`。M7-03 的五场景 clean Commit `886c727271e11c8e87272fe1a19ef8ec14f465fa` WSL2 Runner `full` 已通过；本轮又补齐由生产 Shutdown 自己建立 TCP Admission Fence、Agent 真实 30 秒 Hard Deadline、Session/Quota/FD/goroutine 精确归零，并修复 Agent 匹配 DrainAck 后等待 ACTIVE 时 Control Owner 停止 Heartbeat 的生产缺陷。更新后的六场景 WSL2 dirty 开发运行、Windows 定向 Test/Race/Vet、全量 `go test ./...` 与 `go vet ./...` 通过；Bootstrap Linux Race 因 WSL2 运行环境失去响应仍无结论。M7-03 继续保持 `IN_PROGRESS`，全局 `DONE` 仍为 `87/95`，尚缺新实现的 clean `full`、Bootstrap Linux Race、精确 CI、最终 commit-bound 复审与用户阶段复审，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01、M7-02 均已获用户明确阶段复审通过并转为 `DONE`。M7-03 已补齐由生产 Shutdown 建立 TCP Admission Fence、Agent 真实 30 秒 Hard Deadline、Session/Quota/FD/goroutine 精确归零，并修复 Agent 匹配 DrainAck 后等待 ACTIVE 时 Control Owner 停止 Heartbeat 的生产缺陷。最终 Commit `45c6be28bd2fef6f802fbc2719bf5e6952f7728d` 的六场景 WSL2 clean Runner `full`、Linux amd64/arm64 Bootstrap Race、精确 CI `#33457845746` 与 Tier 3 commit-bound 最终独立复审均已通过，M7-03 进入 `REVIEW`。全局 `DONE` 仍为 `87/95`；尚待用户阶段复审，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -399,7 +399,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | --- | --- | --- | --- | --- | --- |
 | M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 对 16/32/64 KiB Proxy Buffer、HTTP/1.1 WorkConn Capacity、Connector Selection CPU/Allocation 做 Benchmark；只依据本项目结果调整 Server Schema 默认值，不删除预算维度；记录 CPU/RAM/FD 环境 | `DONE` |
 | M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 100/500/1000 Connector 使用 Stagger + Jitter 重连，无同步 TLS/Auth Storm；永久错误不快速重试；记录 Pending TLS/Auth、`retry_after`、FD/CPU/RAM；Server Restart 后测量 `T_control_reconnect`、`T_config_ready`、`T_workpool_ready`、`T_first_success` 分布，旧 generation 无污染 | `DONE` |
-| M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `IN_PROGRESS` |
+| M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `REVIEW` |
 | M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `READY` |
 | M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `READY` |
 | M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `READY` |
@@ -428,11 +428,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 1. `M7-01` — `DONE`。生产 32 KiB Buffer、关键测试、fresh Proxy 正式复验、精确 CI、commit-bound 最终独立复审与用户阶段复审均已闭环。
 2. `M7-02` — `DONE`。Chaos Harness、确定性 Backoff 单测、AUTH Reset 分类修复、WSL2 `/tmp` clean `full`、实现与证据提交的精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
-3. `M7-03` — `IN_PROGRESS`。真实 Server/Agent 产品链路 Harness、Builder/Runner、Commit `886c727271e11c8e87272fe1a19ef8ec14f465fa` 的 WSL2 clean `full`、CGO-off 原生源码测试与分层 Windows Test/Race/Vet 已通过；等待 Linux Race、精确 CI、commit-bound 最终独立复审与用户阶段复审。
+3. `M7-03` — `REVIEW`。真实 Server/Agent 产品链路 Harness、Builder/Runner、最终 Commit `45c6be28bd2fef6f802fbc2719bf5e6952f7728d` 的 WSL2 clean `full`、Linux amd64/arm64 Bootstrap Race、精确 CI 与 Tier 3 commit-bound 最终独立复审已通过；等待用户阶段复审。
 4. `M7-04` 至 `M7-08` — 前置依赖均已满足并保持 `READY`，本轮不启动，也不增加任务表之外的串行依赖。
 5. `M7-09` — 继续等待 M7-04 `DONE`；`M7-10` — 继续等待 M7-03 至 M7-09 全部 `DONE`。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `87/95`。M7 当前为 `IN_PROGRESS`，M7-01、M7-02 已 `DONE`，M7-03 为 `IN_PROGRESS`；尚未勾选 Alpha Release Gate Checklist。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `87/95`。M7 当前为 `IN_PROGRESS`，M7-01、M7-02 已 `DONE`，M7-03 为 `REVIEW`；尚未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -1787,3 +1787,13 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - Repair round 1：修复后复审发现 SessionDone 与进程取消竞态会先把 ACTIVE 转入 `detachedActive` 并让 `Wait` 返回，而当前 Session owner 未等待代表全部 worker/FD 退出的 `Done`。新增 `finishSessionPool`：普通 Control 断开仍 `Wait` 后登记 retired Pool，不阻塞重连；进程取消或业务错误分支则取消 Pool、等待 `Done`，再读取 `Wait` 结果。确定性回归在普通/Race 模式分别重复 `50/20` 次通过，Connector/Bootstrap 包级 Race、全仓 Test/Vet 与 `git diff --check` 通过。
 - Repair round 1 独立复审：`CHILD_AGENT / Standard Mode / Tier 3 / Go / FULL_SCOPE` 覆盖全部交付路径与必要相邻 owner，Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`；累计 Repair rounds=`1`。该结论绑定 dirty worktree checkpoint，不替代 commit-bound 最终复审。
 - 状态与下一步：当前产物仍是 dirty worktree 开发态，M7-03 保持 `IN_PROGRESS`、全局 `DONE` 保持 `87/95`，不勾选 M7 Alpha Gate。仍需新实现 clean `full`、Bootstrap Linux Race、精确 Commit/CI、commit-bound 最终独立复审及用户阶段复审。
+
+## 2026-09-01 · M7-03 精确 CI 修复与最终交付复审 · REVIEW
+
+- 正式产物：实现与 CI teardown 修复的最终 Commit 为 `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`（Tree `9ad761688e2455f495e25eaeb087d930710be02a`），已推送并与 `origin/master` 精确一致。该提交只补齐既有 Graceful Shutdown/Half-Close 契约及测试资源所有权，不改变公共 API/Protocol、Schema、Migration、依赖、CI/CD、生产配置、权限或日志契约。
+- clean `full`：Windows Go `go1.27.0`、`GOTOOLCHAIN=local` 在 clean Worktree 生成 `linux/amd64`、`GOAMD64=v1`、`CGO_ENABLED=0` Test Binary；Manifest 绑定最终 Commit、`worktree_clean=true` 与 Binary SHA-256 `1a5f04d40b333cd7289428ea323a38a9bdb633871e419596118ff2b5fa16d29d`。WSL2 Linux-native `/tmp` 精确克隆执行 Runner `full`，六场景全部 PASS，Server 250ms Hard Deadline 观测 `253.592029ms`，Agent 30 秒默认窗口观测 `30.00122165s`，每场景 Session/Quota 清零，FD/goroutine 精确回到 `6/6`、`3/3`。该结果只描述为 WSL2 Linux 内核运行证据。
+- CI Repair：首次精确 CI [#33455091131](https://github.com/lifei6671/xtunnel/actions/runs/33455091131) 绑定 Commit `80142e593e2e32b773d8f21dfad7dd4fd412d676`，Linux 双架构在 Product、Trace、Diagnostics E2E teardown 暴露测试自有 HTTP keep-alive 与 Pending Open 取消竞态；Windows Job 通过。最终提交在释放测试自有资源后等待 Server 当前 generation 的权威 Runtime Snapshot 归零，没有缩短或绕过生产 Hard Deadline。
+- 精确 CI：[GitHub Actions #33457845746](https://github.com/lifei6671/xtunnel/actions/runs/33457845746) 的 Head SHA 精确为 `45c6be28bd2fef6f802fbc2719bf5e6952f7728d`，结论 `completed/success`；Linux amd64、Linux arm64、Windows Agent service 与 Windows arm64 Agent runtime 四个 Job 全部成功。两个 Linux Job 均通过全仓 Test、Bootstrap 定向 Race、Vet 与 Product/Trace/Diagnostics 原生 E2E，因此此前缺失的 Bootstrap Linux Race 已由精确 CI 补齐。
+- 最终独立复审：`CHILD_AGENT / Standard Mode / Tier 3 / Go / FULL_SCOPE` 对 Baseline `1babca3290447b33b02ae126c9d03c532c97ff8a` 至 Target Commit `45c6be28bd2fef6f802fbc2719bf5e6952f7728d` 完成 commit-bound 覆盖，Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`；累计 Repair rounds=`3`，Target 冻结后的 Repair rounds=`0`。
+- 状态影响：M7-03 从 `IN_PROGRESS` 进入 `REVIEW`，等待用户明确阶段复审通过；M7 仍为 `2/10 IN_PROGRESS`，全局 `DONE` 保持 `87/95`。本次未勾选任何 Alpha Release Gate；M7-04 至 M7-08 保持 `READY`，M7-09/M7-10 的依赖状态不变。
+- 文档同步：更新本开发计划与 `tests/chaos/m7-03-evidence.md`。总技术方案、根 README 与 `tests/chaos/README.md` 无需更新，因为本轮只闭环既有契约和已有 Runner 用法；Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、权限模型、日志字段与 `AGENTS.md` 均未改变。
