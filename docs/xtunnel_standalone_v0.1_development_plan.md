@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-01
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-05 · DONE；M7-06 · IN_PROGRESS；M7-07 至 M7-09 · READY）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-05 · DONE；M7-06 · REVIEW；M7-07 至 M7-09 · READY）
 >
-> **当前结论**：M7-01 至 M7-05 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `90/95`，M7 为 `5/10 IN_PROGRESS`。用户已按任务序授权启动 M7-06，并明确授权最小修改 CI；当前已完成 8 个 Protocol/Parser Fuzz 目标、IPv6 zone XFF 最小契约修正、独立审计修复、隔离 Linux amd64 clean 候选 `full` 8/8 和 CI Short Fuzz 接线。本地隔离 Linux amd64 的 CI 命令形状验证 8/8 PASS，但正式 Commit、精确 GitHub CI 与 commit-bound Tier 3 最终复审尚未完成，因此 M7-06 保持 `IN_PROGRESS`。M7-07 至 M7-09 保持 `READY`，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01 至 M7-05 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `90/95`，M7 为 `5/10 IN_PROGRESS`。M7-06 的 8 个 Protocol/Parser Fuzz 目标、IPv6 zone XFF 最小契约修正、统一 Runner 与 CI Short Fuzz 已进入正式 Commit `5b88b46f29be882525038ea3f2c749fd24a53646`；精确 GitHub Actions [#33492076511](https://github.com/lifei6671/xtunnel/actions/runs/33492076511) 四 Job 全绿，Linux amd64/arm64 Short Fuzz 均通过，commit-bound Tier 3 实现/Runner/契约复审无 P0/P1。M7-06 已转为 `REVIEW`，等待用户阶段复审；M7-07 至 M7-09 保持 `READY`，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -402,7 +402,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `DONE` |
 | M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `DONE` |
 | M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `DONE` |
-| M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `IN_PROGRESS` |
+| M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `REVIEW` |
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `READY` |
 | M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `READY` |
 | M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；两端 Agent Binary `service install/uninstall` 的安装/升级/卸载覆盖 Managed Marker、Binary 替换、Secret 不落 SCM/argv 和非托管 Unit/Service 拒绝边界；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `READY` |
@@ -431,11 +431,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 3. `M7-03` — `DONE`。真实 Server/Agent 产品链路 Harness、Builder/Runner、最终 Commit `cc1e668c8450fa6f1834ea646c21a9b4265fa33a` 的 WSL2 clean `full`、Linux amd64/arm64 Bootstrap Race、精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
 4. `M7-04` — `DONE`。最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6` 的 clean `full`、Docker Linux amd64/CGO=1 三包 Race、精确 CI `#33468280052`、Tier 3 commit-bound 最终独立复审、证据 Head `806bfa0d719259642dc152a0b96f80894b0cd637` 的精确 CI `#33469332157` 与用户阶段复审均已闭环。真实存储层故障继续作为未验证证据边界。
 5. `M7-05` — `DONE`。实现与 arm64 测试超时修复均已提交并推送；Windows 全仓 Race/Vet、隔离 Linux clean `full`、Linux amd64/arm64 全仓 Race、修复与证据 Head 精确 CI、commit-bound Tier 3 最终独立复审及用户阶段复审均已闭环。
-6. `M7-06` — `IN_PROGRESS`。8 个最小 Fuzz 目标、统一 Runner、IPv6 zone XFF 修正与 CI Short Fuzz 接线已完成开发验证；正式 Commit、精确 GitHub CI 和 commit-bound 最终复审仍待闭环。
+6. `M7-06` — `REVIEW`。正式 Commit `5b88b46f29be882525038ea3f2c749fd24a53646`、隔离 Linux amd64 clean `full`、精确 CI `#33492076511` 的 Linux amd64/arm64 Short Fuzz 与 commit-bound Tier 3 独立复审均已闭环；等待用户阶段复审。
 7. `M7-07` 至 `M7-09` — `READY`，本轮不启动。
 8. `M7-10` — 继续等待 M7-05 至 M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `90/95`。M7 当前为 `5/10 IN_PROGRESS`，M7-01 至 M7-05 已 `DONE`，M7-06 为 `IN_PROGRESS`，M7-07 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `90/95`。M7 当前为 `5/10 IN_PROGRESS`，M7-01 至 M7-05 已 `DONE`，M7-06 为 `REVIEW`，M7-07 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -1930,3 +1930,13 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - Repair round 1 最终工作树复审：Runner 原 P1 已关闭；实现、Runner、状态契约三路独立复审均为 Gate=`PASSED`、Coverage=`COMPLETE`、Freshness=`FRESH`、P0/P1/P2=`0/0/0`。该结论绑定当前工作树内容，不是正式 Commit 上的 commit-bound 复审。
 - 状态与剩余 Gate：CI 接线已经实现，但当前没有正式项目 Commit，精确 GitHub CI 为 `NOT RUN`；正式 Commit 上的 commit-bound Tier 3 最终复审也尚不存在。M7-06 保持 `IN_PROGRESS`，全局 `DONE` 保持 `90/95`、M7 保持 `5/10 IN_PROGRESS`；本次不启动 M7-07、不勾选 Alpha Release Gate Checklist。
 - 文档同步：只更新本开发计划与 `tests/fuzz/m7-06-evidence.md`。总技术方案和根 README 无需更新，因为本次只把已冻结的 M7-06 Short Fuzz 验收接入 CI，不改变产品行为、用户命令、Proto/OpenAPI、Server Schema、Migration、依赖、部署、权限或日志契约。
+
+## 2026-09-01 · M7-06 正式 Commit、精确 CI 与 REVIEW 收口 · REVIEW
+
+- 正式提交：用户明确回复“确认暂存、提交并推送 M7-06”。10 个 delivery-owned 路径以 Commit `5b88b46f29be882525038ea3f2c749fd24a53646` 推送至 `origin/master`，Parent=`207dcd96aa04ac41255e9c53956059cfbabaf73d`，Tree=`dcc9908b6769477610a28cd58f69aea46ace3347`，Runner mode=`100755`；提交信息为 `test(fuzz): add protocol and parser fuzz coverage`，提交后工作区干净。首次推送因用户级 Git 代理 `127.0.0.1:3067` 不可连接而在访问 GitHub 前失败，随后仅对单次命令临时绕过失效代理后正常推送，未修改 Git 配置。
+- 提交前验证：Windows Go `go1.27.0/local` 版本检查、改动 Go 文件 `gofmt -d`、PyYAML Workflow 解析、Runner `sh -n`、全仓 `go test -count=1 -timeout=300s ./...`、全仓 `go vet ./...`、三个相关 package 的 `go test -race -count=1 -timeout=120s`、`git diff --cached --check` 与定向 Secret 扫描均通过；暂存区精确包含上述 10 路径，没有删除项或额外文件。
+- 精确 CI：GitHub Actions [#33492076511](https://github.com/lifei6671/xtunnel/actions/runs/33492076511) 的 Head SHA 精确匹配 `5b88b46f...`，结论为 `completed/success`；Linux arm64 Job `99805637990`、Linux amd64 Job `99805637995`、Windows arm64 Agent runtime Job `99805637734` 与 Windows Agent service Job `99805638004` 均成功。
+- Short Fuzz CI 证据：两个原生 Linux Job 均执行 8/8 Short Fuzz 并通过，Artifact 清单 12/12 条目均返回 `OK`；arm64 清单 SHA-256 为 `416ff4111685323897683d2fe0261528b2c566cd58e771e0ce9372be2d9e60b7`，amd64 为 `2f39550390f0e899294ee5eee25158d50e3c7ff891de40d1291c8e0f65469cf3`。两个 Linux Job 的其余既有 Gate 与最终 clean-tree 检查同样成功；Node 20 deprecation 为既有 `actions/setup-go` 注解，不归因于本轮修改。
+- commit-bound Tier 3 复审：正式实现 Commit 的代码/集成与 CI/Runner 分区均未发现代码、安全或契约缺陷，Runner 分区 P0/P1/P2=`0/0/0`；状态契约分区仅发现 1 项提交后自然产生的文档时态 P2，即提交内仍写“尚无正式 Commit/精确 CI”。当前 docs-only 收口修正该时态，完整范围无 P0/P1，仍须对修正文档做 freshness 读回。
+- 状态影响：M7-06 从 `IN_PROGRESS` 转为 `REVIEW`，等待用户明确阶段复审批准；在批准前不得转为 `DONE`。全局 `DONE` 保持 `90/95`，M7 保持 `5/10 IN_PROGRESS`；本次不启动 M7-07、不勾选 Alpha Release Gate Checklist。
+- 文档影响：只同步本开发计划与 `tests/fuzz/m7-06-evidence.md` 的 Commit、CI、复审和状态证据。根 README 与总技术方案无需更新，因为产品行为、用户命令和冻结的 Fuzz 范围未变化；Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署、生产配置、权限与日志契约均未改变。

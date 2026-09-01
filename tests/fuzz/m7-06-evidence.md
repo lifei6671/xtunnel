@@ -2,11 +2,12 @@
 
 ## 当前状态
 
-- 状态：`IN_PROGRESS`
+- 状态：`REVIEW`
 - 基线 Commit：`207dcd96aa04ac41255e9c53956059cfbabaf73d`
 - 起始工作区：clean
 - 用户授权：“继续下一步”与随后“继续”授权启动和实现 M7-06；用户随后明确回复
-  “确认修改CI”，授权最小接入 CI Short Fuzz。仍未授权暂存、提交或推送。
+  “确认修改CI”授权最小接入 CI Short Fuzz，并明确回复“确认暂存、提交并推送 M7-06”
+  授权固定 10 路径正式提交与推送。
 
 ## 范围与修正
 
@@ -86,8 +87,18 @@ go test <package> -run '^$' -fuzz '^<exact-target>$' \
   三路均为 Gate=`PASSED`、Coverage=`COMPLETE`、Freshness=`FRESH`、
   P0/P1/P2=`0/0/0`。该结论绑定当前工作树 Blob，不替代正式 Commit 上的 commit-bound
   最终复审。
-- 正式 Commit / 精确 GitHub CI：不存在 / `NOT RUN`
+- 正式 Commit：`5b88b46f29be882525038ea3f2c749fd24a53646`；Parent
+  `207dcd96aa04ac41255e9c53956059cfbabaf73d`；Tree
+  `dcc9908b6769477610a28cd58f69aea46ace3347`；Runner mode=`100755`；已推送至
+  `origin/master`，提交后工作区 clean。
+- 精确 GitHub CI：[Run #33492076511](https://github.com/lifei6671/xtunnel/actions/runs/33492076511)
+  Head SHA 精确匹配，四 Job 全部 `success`。原生 Linux arm64/amd64 均执行 8/8
+  Short Fuzz 并通过，Artifact 清单 12/12 条目为 `OK`；清单 SHA-256 分别为
+  `416ff4111685323897683d2fe0261528b2c566cd58e771e0ce9372be2d9e60b7` 与
+  `2f39550390f0e899294ee5eee25158d50e3c7ff891de40d1291c8e0f65469cf3`。
+- commit-bound Tier 3：实现/集成和 CI/Runner 分区均通过，完整范围无 P0/P1；状态
+  契约分区发现 1 项提交后自然产生的文档时态 P2，当前 docs-only 收口已修正，待
+  freshness 读回。
 
-因此 M7-06 仍只能保持 `IN_PROGRESS`：临时候选 clean `full` 与本地 CI 命令形状验证
-不替代正式 Commit、精确 GitHub CI 与 commit-bound Tier 3 最终复审，不得转为 `REVIEW`/`DONE`，
-也不得勾选 Alpha Release Gate Checklist。
+因此 M7-06 已转为 `REVIEW`，等待用户明确阶段复审；用户批准前不得转为 `DONE`。
+全局 `DONE` 保持 `90/95`，本次不启动 M7-07，也不得勾选 Alpha Release Gate Checklist。
