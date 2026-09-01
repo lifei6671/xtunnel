@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-01
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-04 · DONE；M7-05 至 M7-09 · READY）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-04 · DONE；M7-05 · IN_PROGRESS；M7-06 至 M7-09 · READY）
 >
-> **当前结论**：M7-01 至 M7-04 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `89/95`，M7 为 `4/10 IN_PROGRESS`。M7-04 最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6` 的 WSL2 clean Runner `full`、Docker Linux amd64/CGO=1 三包 Race、精确 CI `#33468280052` 与 Tier 3 commit-bound 最终独立复审均已通过；证据 Head `806bfa0d719259642dc152a0b96f80894b0cd637` 的精确 CI `#33469332157` 四个 Job 也全部成功，用户已明确回复“`M7-04 阶段复审通过`”。M7-09 的任务级依赖现已满足并转为 `READY`；真实块设备 EIO/ENOSPC、物理断电、SQLite WAL/COMMIT fsync 中断与任意时刻崩溃仍是未验证证据边界，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01 至 M7-04 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `89/95`，M7 为 `4/10 IN_PROGRESS`。M7-05 已补齐 SQLite 三路组合竞争、Pinned/Public TLS 并发回归、真实 Connector Selection 并发 Benchmark、fail-closed Profile Runner，并在用户明确确认后把 Linux amd64/arm64 `verify` 的 Race 从九包白名单升级为 `go test -race -count=1 -timeout 600s ./...`；Windows `go1.27.0/local` 全仓 Race/Vet 与隔离快照 Commit `b99bdca7ba599f6bde939421f7a86eccc6de3cfd` 的 Docker Desktop Linux amd64/CGO=1 clean `full` 均通过。当前 CI Workflow 静态解析与精确命令断言已通过，但正式项目 Commit、精确 CI 与 commit-bound 最终复审尚未完成，因此 M7-05 保持 `IN_PROGRESS`，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -401,7 +401,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 100/500/1000 Connector 使用 Stagger + Jitter 重连，无同步 TLS/Auth Storm；永久错误不快速重试；记录 Pending TLS/Auth、`retry_after`、FD/CPU/RAM；Server Restart 后测量 `T_control_reconnect`、`T_config_ready`、`T_workpool_ready`、`T_first_success` 分布，旧 generation 无污染 | `DONE` |
 | M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `DONE` |
 | M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `DONE` |
-| M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `READY` |
+| M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `IN_PROGRESS` |
 | M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `READY` |
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `READY` |
 | M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `READY` |
@@ -430,10 +430,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 2. `M7-02` — `DONE`。Chaos Harness、确定性 Backoff 单测、AUTH Reset 分类修复、WSL2 `/tmp` clean `full`、实现与证据提交的精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
 3. `M7-03` — `DONE`。真实 Server/Agent 产品链路 Harness、Builder/Runner、最终 Commit `cc1e668c8450fa6f1834ea646c21a9b4265fa33a` 的 WSL2 clean `full`、Linux amd64/arm64 Bootstrap Race、精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
 4. `M7-04` — `DONE`。最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6` 的 clean `full`、Docker Linux amd64/CGO=1 三包 Race、精确 CI `#33468280052`、Tier 3 commit-bound 最终独立复审、证据 Head `806bfa0d719259642dc152a0b96f80894b0cd637` 的精确 CI `#33469332157` 与用户阶段复审均已闭环。真实存储层故障继续作为未验证证据边界。
-5. `M7-05` 至 `M7-09` — `READY`。M7-09 的 M0-09、M3-12、M7-04 任务级依赖均已 `DONE`；本轮只解锁，不启动任一新任务。
-6. `M7-10` — 继续等待 M7-05 至 M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
+5. `M7-05` — `IN_PROGRESS`。实现、Windows 全仓 Race/Vet、隔离 Linux clean `full`、全仓 Race CI 接线与分区独立复审均已完成；当前继续正式 Commit、精确 CI 与 commit-bound 最终复审。
+6. `M7-06` 至 `M7-09` — `READY`，本轮不启动。
+7. `M7-10` — 继续等待 M7-05 至 M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `89/95`。M7 当前为 `4/10 IN_PROGRESS`，M7-01 至 M7-04 已 `DONE`，M7-05 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `89/95`。M7 当前为 `4/10 IN_PROGRESS`，M7-01 至 M7-04 已 `DONE`，M7-05 为 `IN_PROGRESS`，M7-06 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -1845,3 +1846,35 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 状态影响：M7-04 从 `REVIEW` 转为 `DONE`，M7 从 `3/10` 更新为 `4/10 IN_PROGRESS`，全局从 `88/95` 更新为 `89/95`。M7-09 的 M0-09、M3-12、M7-04 依赖均已 `DONE`，因此从 `NOT_STARTED` 转为 `READY`；M7-05 至 M7-08 继续保持 `READY`，M7-10 继续等待 M7-05 至 M7-09。
 - 证据边界：用户阶段批准不扩大已验证范围；真实块设备 EIO/ENOSPC、物理断电、SQLite WAL/COMMIT fsync 中断与任意时刻崩溃耐久性仍未获得专用环境证据。本次未勾选 Alpha Release Gate Checklist，也未启动 M7-05 至 M7-09 的任何新任务。
 - 文档同步：只更新本开发计划与 `tests/chaos/m7-04-evidence.md` 的状态、批准证据和依赖解锁。总技术方案、根 README 与 `tests/chaos/README.md` 无需更新，因为没有改变产品行为、用户命令或验证入口；Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、生产配置、权限模型、日志字段与 `AGENTS.md` 均未改变。
+
+## 2026-09-01 · M7-05 Race/Concurrency 范围审计 · IN_PROGRESS
+
+- 启动边界：用户明确回复“继续下一步”，因此按任务序启动 M7-05；基线 Commit 为 `10a6df1001c7614e6af273bc114f04f455639d16`，起始工作区干净。M7-06 至 M7-09 保持 `READY`，本轮不启动；M7-10 与 Alpha Release Gate Checklist 不变。
+- 基线验证：Windows `go1.27.0`、`GOTOOLCHAIN=local`；`go test -race -count=1 -timeout=300s ./...` 全仓通过。该结果证明 Windows 当前已执行路径未观测到 data race，不替代 Linux Race、死锁证明或所有调度交错。
+- Race 审计：Session Replacement、Config Apply、Usage Flush 与 Listener Reconcile 已有强确定性并发测试；当前 Linux CI 仅对九个包运行 Race，遗漏 `internal/server/runtime`、`internal/server/sessionruntime`、`internal/agent/configruntime`、`internal/server/usage` 与 `internal/server/gateway` 等关键 owner。冻结技术方案另要求 Config Write + Usage Flush + Token Rotate 不产生未处理 `SQLITE_BUSY`；共享 TLS 身份发布也缺少与并发握手真实重叠的回归。
+- Profile 审计：M7-01 的 `BenchmarkConnectorSelection` 已调用真实产品路径，但保持串行并明确把锁争用留给 M7-05。当前仓库没有并发 Connector Selection Benchmark、Mutex Profile 或 Block Profile 入口；M7-01 CPU/Allocation 结果不能替代 M7-05 并发 Profile。
+- 下一步：在不改生产行为、公共 API、Schema、Migration、依赖、默认值与日志契约的前提下，补最小组合并发测试、TLS 并发握手回归、并发 Selection Benchmark、独立 Runner 与证据。将 CI Race 升级为全仓属于 CI/CD 变更，已按 Ask First 边界请求用户明确确认，确认前不修改 `.github/workflows/ci.yml`。
+
+## 2026-09-01 · M7-05 非 CI 实现与 clean Profile · IN_PROGRESS
+
+- 实现范围：新增真实 SQLite 上 Config Write + Usage Flush + Token Rotate 同屏障组合测试；Gateway Pinned 正式续签发布跨 32 reader，分别验证 `GetCertificate`、Metric 与真实 TLS 握手的完整旧、新代，Public 24 reader 只验证启动时不可变身份的并发读取；Connector Selection 新增 `b.RunParallel` 的 1/8/32/100 Connector Benchmark；新增严格 POSIX `sh` Runner、README 与任务证据。未修改生产代码、公共 API、Schema、Migration、依赖、配置、日志契约或 CI。
+- Windows 证据：固定 Go `1.27.0/local`；最终实现树 `go test -race -count=1 -timeout=600s ./...` 与 `go vet ./...` 通过。Gateway 目标 Race `count=5`、SQLite 组合 Race `count=20`、并发 Benchmark Race 也通过。
+- Linux clean 证据：当时六个实现/状态文档候选路径在隔离 clone 冻结为一次性本地 Commit `b99bdca7ba599f6bde939421f7a86eccc6de3cfd`、Tree `3f96e44aef2bc70eaff9666c3fde619211e25218`，Runner mode=`100755`。Docker Desktop LinuxKit amd64、Go `1.27.0/local`、CGO=1、Node `24.19.0`、npm `11.17.0` 的 `full` 已通过 Web 构建、全仓 Race、60 组主 Benchmark及独立 CPU/Mutex/Block Profile；运行后快照工作树干净且仓库根无 `tunnel.test`。该一次性 Commit 不在项目 refs 中，不替代正式项目 Commit 或 CI；本执行记录与任务证据文件随后根据验证结果补写，不在该快照 Tree 内。
+- Profile 边界：100 Connector 的本次虚拟化样本在 CPU=1/8/32 下约为 35.5-36.2、30.2-31.0、31.0-32.8 us/op，均为 10 allocs/op、约 19.3 KB/op。Mutex/Block Focus 已记录 Selection/Pools/Lease 调用栈；Block 完整摘要主要包含 fixture Control Session 等待。当前不设置阈值，也不据此修改生产锁或选择算法。
+- 复审：Gateway 初审 1 项 P1 在 Repair round 1 关闭；Runner 初审 2 项 P2 在 Repair round 1 关闭，内容 Gate 通过；SQLite 分区直接通过。三个分区均为 `Coverage=COMPLETE`、`Freshness=FRESH`，当前内容 P0/P1/P2=`0/0/0`；隔离快照已满足 Runner mode 条件。完整 Target 的 commit-bound 最终独立复审仍须等待正式项目 Commit。
+- 状态与阻断：本记录形成时 `.github/workflows/ci.yml` 仍只对九个 Linux 包运行 Race，CI/CD 修改尚待用户确认；后续确认与实际接线见下一条执行记录。M7-05 继续 `IN_PROGRESS`，不转 `REVIEW`/`DONE`，不启动 M7-06，不勾选 Alpha Release Gate Checklist。
+
+## 2026-09-01 · M7-05 全仓 Race CI 接线 · IN_PROGRESS
+
+- 授权：用户明确回复“确认修改 CI”，授权把 M7-05 的 Linux Race 从九包白名单升级为冻结的全仓 Race；本轮不修改 Runner 矩阵、权限、工具链版本、依赖/Lockfile、生产配置或其他 CI Gate。
+- 实现：`.github/workflows/ci.yml` 的 Linux amd64/arm64 `verify` 保留 `go test ./...` 与 `go vet ./...`，只把 Race 命令替换为 `go test -race -count=1 -timeout 600s ./...`。Job 继续使用原生 `ubuntu-24.04`/`ubuntu-24.04-arm`、Go `1.27.0`、`GOTOOLCHAIN=local` 与既有 45 分钟总超时。
+- 当前验证：PyYAML 6.0.3 对 Workflow 解析通过；精确文本断言确认全仓 Race 命令恰好出现一次、旧 `300s` Race 命令为零；该文件 `git diff --check` 通过。最终实现内容此前已在 Windows 执行同一全仓 Race，并在隔离 Docker Desktop Linux amd64/CGO=1 clean `full` 执行全仓 Race，均通过；这些本地结果不冒充 GitHub Actions。
+- 状态与剩余 Gate：当前尚无包含本次 Workflow 的正式项目 Commit，也未产生精确 GitHub Actions Run；因此不把 YAML 静态解析或本地等价命令写成 CI PASS。M7-05 保持 `IN_PROGRESS`，等待正式暂存时固定 Runner mode=`100755`、创建项目 Commit、运行精确 CI 与 commit-bound 最终独立复审；不启动 M7-06，不勾选 Alpha Release Gate Checklist。
+- 文档同步：只更新本开发计划与 `tests/concurrency/m7-05-evidence.md`。总技术方案和根 README 无需更新，因为本次只让 CI 执行已经冻结的 M7-05 全仓 Race 验收，不改变产品行为、用户命令、Proto/OpenAPI、Server Schema、Migration、依赖、部署、权限或日志契约。
+
+## 2026-09-01 · M7-05 提交前 Windows Race 重验修复 · IN_PROGRESS
+
+- 触发：用户明确授权暂存、提交并推送后，提交前重新执行 Windows `go1.27.0/local` 全仓 Race；首次运行在 `TestServerPinnedRenewalPublishesCompleteIdentityToConcurrentHandshakes` 等待续签证书落盘 10 秒后失败，因此立即停止暂存、提交与推送，没有把失败写成 PASS。
+- 根因与最小修复：定向 Race `count=50` 复现 4 次；3 秒 Go test timeout 的 goroutine dump 证明续签失败后阻塞在 `recordRenewalFailure` 的 `identityMu.Lock`。测试此前每毫秒调用 `LoadPinnedIdentity`，在 Windows 上与正式续签的原子证书替换竞争。当前只修改测试同步方式：用 `identityMu.TryRLock` 确认正式续签已离开无锁磁盘阶段并排队写入成功身份或失败状态，释放跨发布 reader 后等待续签完成，再通过 `LastRenewalError` 与磁盘回读验证新证书和旧 SPKI。未修改生产代码、锁语义、公共 API、配置、依赖或日志契约。
+- 修复后验证：目标 Race `count=50`、Gateway package 普通测试、Gateway package Race `count=5`、Gateway Vet、全仓 `go test -race -count=1 -timeout 600s ./...` 与 `go vet ./...` 均通过。原 Gateway 与 8 路径未提交候选复审因测试 blob 变化而 stale，必须在正式 Commit 上重新执行 commit-bound 独立复审。
+- 状态与剩余 Gate：M7-05 继续 `IN_PROGRESS`。下一步只按已授权范围暂存八个 M7-05 路径并固定 Runner mode=`100755`，创建并推送正式项目 Commit；随后仍须取得 Head SHA 精确 CI、commit-bound 最终独立复审与用户阶段批准。本次不启动 M7-06，不勾选 Alpha Release Gate Checklist。

@@ -115,16 +115,7 @@ jobs:
             go build -mod=readonly ./...
           )
           go test ./...
-          go test -race -count=1 -timeout 300s \
-            ./internal/server/bootstrap \
-            ./internal/agent/bootstrap \
-            ./internal/server/config \
-            ./internal/agent/service \
-            ./internal/server/route \
-            ./internal/server/httpingress \
-            ./internal/server/tcpingress \
-            ./internal/tunnel \
-            ./tests/integration
+          go test -race -count=1 -timeout 600s ./...
           go vet ./...
           build_version="v0.1.0-ci.${GITHUB_SHA}"
           go build -ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$build_version" ./cmd/server ./cmd/agent

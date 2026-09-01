@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -52,6 +53,62 @@ func BenchmarkConnectorSelection(b *testing.B) {
 			b.ReportMetric(float64(connectors), "connectors")
 		})
 	}
+}
+
+// BenchmarkConnectorSelectionConcurrent 在真实选择路径上并行施加压力，让 M7-05
+// 可以分别归因 Session Manager、TunnelRuntime 与 WorkPool 的锁等待。该基准只测量
+// 已就绪 Pool 的成功选择；每次迭代都必须归还 Lease，避免样本之间累积虚假负载。
+func BenchmarkConnectorSelectionConcurrent(b *testing.B) {
+	for _, connectors := range []int{1, 8, 32, 100} {
+		b.Run(fmt.Sprintf("connectors_%d", connectors), func(b *testing.B) {
+			fixture := newConnectorSelectionBenchmarkFixture(b, connectors)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(parallel *testing.PB) {
+				for parallel.Next() {
+					if err := runConcurrentConnectorSelection(fixture); err != nil {
+						b.Errorf("concurrent select connector: %v", err)
+						return
+					}
+				}
+			})
+			b.StopTimer()
+			b.ReportMetric(float64(connectors), "connectors")
+		})
+	}
+}
+
+func runConcurrentConnectorSelection(fixture *connectorSelectionBenchmarkFixture) error {
+	lease, _, pool, membership, err := fixture.proxy.selectConnector(
+		context.Background(), testTunnelID, testServiceID, 0,
+	)
+	if err != nil {
+		if lease != nil && !lease.Release() {
+			err = errors.Join(err, errors.New("release Connector Lease after selection failure"))
+		}
+		if membership != nil {
+			err = errors.Join(err, membership.Release())
+		}
+		return err
+	}
+	if lease == nil || pool == nil || membership != nil {
+		var cleanupErr error
+		if lease != nil && !lease.Release() {
+			cleanupErr = errors.New("release unexpected Connector Lease")
+		}
+		if membership != nil {
+			cleanupErr = errors.Join(cleanupErr, membership.Release())
+		}
+		return errors.Join(
+			fmt.Errorf("selection returned lease=%p pool=%p membership=%p, want idle pool without pending membership", lease, pool, membership),
+			cleanupErr,
+		)
+	}
+	if !lease.Release() {
+		return errors.New("release selected Connector Lease")
+	}
+	return nil
 }
 
 type connectorSelectionBenchmarkSnapshotProvider struct{}

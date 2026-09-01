@@ -3,9 +3,12 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"sync"
@@ -405,30 +408,371 @@ func TestServerRenewsRunningPinnedIdentityAndHotLoadsNewHandshakes(t *testing.T)
 	}
 }
 
+func TestServerPinnedRenewalPublishesCompleteIdentityToConcurrentHandshakes(t *testing.T) {
+	const (
+		readerCount = 32
+		readRounds  = 4
+	)
+	dataDir := t.TempDir()
+	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	identity, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
+	}
+	releaseHandlers := make(chan struct{})
+	server, err := NewServer(ServerOptions{
+		Listen:                  "127.0.0.1:0",
+		Identity:                identity,
+		MaxPendingTLSHandshakes: readerCount * readRounds,
+		renewalCheckInterval:    time.Hour,
+		now:                     func() time.Time { return createdAt.Add(367 * 24 * time.Hour) },
+		Handle: func(context.Context, *tls.Conn, Protocol) {
+			<-releaseHandlers
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatalf("Server.Start() error = %v", err)
+	}
+	t.Cleanup(func() {
+		close(releaseHandlers)
+		_ = server.Close()
+	})
+
+	oldConnection, err := dialTLS(server.Addr().String(), ControlALPN)
+	if err != nil {
+		t.Fatalf("dialTLS(before concurrent renewal) error = %v", err)
+	}
+	t.Cleanup(func() { _ = oldConnection.Close() })
+	oldCertificate := bytes.Clone(oldConnection.ConnectionState().PeerCertificates[0].Raw)
+	if !bytes.Equal(oldCertificate, identity.Leaf().Raw) {
+		t.Fatal("old TLS handshake did not receive the original certificate")
+	}
+
+	type observation struct {
+		kind        string
+		certificate []byte
+		expiry      int64
+	}
+	observations := make(chan observation, readerCount*(readRounds*3+4)+4)
+	observations <- observation{kind: "TLS handshake", certificate: bytes.Clone(oldCertificate)}
+	errorsByReader := make(chan error, readerCount)
+	readersHoldingIdentity := make(chan struct{}, readerCount)
+	releaseIdentityReaders := make(chan struct{})
+	var releaseIdentityReadersOnce sync.Once
+	renewalDone := make(chan struct{})
+	var readers sync.WaitGroup
+	readers.Add(readerCount)
+	for reader := 0; reader < readerCount; reader++ {
+		go func(reader int) {
+			defer readers.Done()
+			// 每个 reader 在续签启动前先通过三条正式读取路径观察旧代，再持有
+			// 身份锁跨越发布边界；释放后继续通过同样入口读取，避免手工锁读取
+			// 代偿 GetCertificate、Metric 或真实 TLS 握手的覆盖。
+			certificateBeforePublish, getErr := server.getCertificate(&tls.ClientHelloInfo{})
+			if getErr != nil {
+				errorsByReader <- fmt.Errorf("reader %d GetCertificate before publication: %w", reader, getErr)
+				return
+			}
+			if validationErr := validateCompleteTLSIdentity(certificateBeforePublish); validationErr != nil {
+				errorsByReader <- fmt.Errorf("reader %d GetCertificate before publication: %w", reader, validationErr)
+				return
+			}
+			observations <- observation{kind: "GetCertificate", certificate: bytes.Clone(certificateBeforePublish.Certificate[0])}
+			observations <- observation{kind: "Metric", expiry: server.MetricsSnapshot().CertificateExpiryUnixSeconds}
+			connectionBeforePublish, dialErr := dialTLSWithTimeout(server.Addr().String(), ControlALPN, 5*time.Second)
+			if dialErr != nil {
+				errorsByReader <- fmt.Errorf("reader %d TLS handshake before publication: %w", reader, dialErr)
+				return
+			}
+			observations <- observation{
+				kind:        "TLS handshake",
+				certificate: bytes.Clone(connectionBeforePublish.ConnectionState().PeerCertificates[0].Raw),
+			}
+			_ = connectionBeforePublish.Close()
+
+			server.identityMu.RLock()
+			observedBeforePublish := server.identity
+			readersHoldingIdentity <- struct{}{}
+			<-releaseIdentityReaders
+			server.identityMu.RUnlock()
+			beforePublish := &tls.Certificate{
+				Certificate: observedBeforePublish.CertificateChain(),
+				PrivateKey:  observedBeforePublish.PrivateKey(),
+				Leaf:        observedBeforePublish.Leaf(),
+			}
+			if validationErr := validateCompleteTLSIdentity(beforePublish); validationErr != nil {
+				errorsByReader <- fmt.Errorf("reader %d identity held across publication: %w", reader, validationErr)
+				return
+			}
+			observations <- observation{kind: "identity reader", certificate: bytes.Clone(beforePublish.Certificate[0])}
+			for round := 0; round < readRounds; round++ {
+				certificate, getErr := server.getCertificate(&tls.ClientHelloInfo{})
+				if getErr != nil {
+					errorsByReader <- fmt.Errorf("reader %d round %d GetCertificate: %w", reader, round, getErr)
+					return
+				}
+				if validationErr := validateCompleteTLSIdentity(certificate); validationErr != nil {
+					errorsByReader <- fmt.Errorf("reader %d round %d GetCertificate: %w", reader, round, validationErr)
+					return
+				}
+				observations <- observation{kind: "GetCertificate", certificate: bytes.Clone(certificate.Certificate[0])}
+				observations <- observation{kind: "Metric", expiry: server.MetricsSnapshot().CertificateExpiryUnixSeconds}
+
+				connection, dialErr := dialTLSWithTimeout(server.Addr().String(), ControlALPN, 5*time.Second)
+				if dialErr != nil {
+					errorsByReader <- fmt.Errorf("reader %d round %d TLS handshake: %w", reader, round, dialErr)
+					return
+				}
+				peerCertificate := bytes.Clone(connection.ConnectionState().PeerCertificates[0].Raw)
+				_ = connection.Close()
+				observations <- observation{kind: "TLS handshake", certificate: peerCertificate}
+			}
+			errorsByReader <- nil
+		}(reader)
+	}
+	readersFinished := make(chan struct{})
+	go func() {
+		readers.Wait()
+		close(readersFinished)
+	}()
+	defer func() {
+		releaseIdentityReadersOnce.Do(func() { close(releaseIdentityReaders) })
+		select {
+		case <-readersFinished:
+		case <-time.After(20 * time.Second):
+		}
+	}()
+	readyTimeout := time.NewTimer(5 * time.Second)
+	defer readyTimeout.Stop()
+	for reader := 0; reader < readerCount; reader++ {
+		select {
+		case <-readersHoldingIdentity:
+		case <-readyTimeout.C:
+			t.Fatal("concurrent pinned TLS identity readers did not acquire the publication barrier")
+		}
+	}
+
+	// 所有 reader 均持有读锁后才启动正式续签。TryRLock 失败证明续签已离开无锁的
+	// 磁盘阶段并排队写入成功身份或失败状态；完成后的断言再确认落盘成功。
+	// 这样无需循环打开证书文件，避免测试与 Windows 原子替换竞争。
+	renewalContext, cancelRenewal := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelRenewal()
+	go func() {
+		defer close(renewalDone)
+		server.renewPinnedIdentity(renewalContext)
+	}()
+	defer func() {
+		releaseIdentityReadersOnce.Do(func() { close(releaseIdentityReaders) })
+		cancelRenewal()
+		select {
+		case <-renewalDone:
+		case <-time.After(10 * time.Second):
+		}
+	}()
+	publicationDeadline := time.Now().Add(10 * time.Second)
+	for {
+		if !server.identityMu.TryRLock() {
+			break
+		}
+		server.identityMu.RUnlock()
+		if time.Now().After(publicationDeadline) {
+			t.Fatal("timed out waiting for pinned renewal to reach the identity publication barrier")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-renewalDone:
+		t.Fatal("pinned renewal published while certificate readers still held identityMu")
+	default:
+	}
+	releaseIdentityReadersOnce.Do(func() { close(releaseIdentityReaders) })
+
+	select {
+	case <-readersFinished:
+	case <-time.After(20 * time.Second):
+		t.Fatal("concurrent pinned TLS identity readers did not finish")
+	}
+	select {
+	case <-renewalDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("pinned identity renewal did not finish")
+	}
+	for reader := 0; reader < readerCount; reader++ {
+		if readerErr := <-errorsByReader; readerErr != nil {
+			t.Fatal(readerErr)
+		}
+	}
+	if err := server.LastRenewalError(); err != nil {
+		t.Fatalf("Server.LastRenewalError() = %v", err)
+	}
+	renewedOnDisk, err := LoadPinnedIdentity(dataDir)
+	if err != nil {
+		t.Fatalf("LoadPinnedIdentity() after concurrent renewal error = %v", err)
+	}
+	if renewedOnDisk.Leaf() == nil || bytes.Equal(renewedOnDisk.Leaf().Raw, identity.Leaf().Raw) {
+		t.Fatal("pinned identity did not persist a distinct renewed certificate")
+	}
+	if renewedOnDisk.SPKIHash() != identity.SPKIHash() {
+		t.Fatal("pinned renewal changed the private key/SPKI")
+	}
+	certificateAfterPublish, err := server.getCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("GetCertificate(after concurrent renewal) error = %v", err)
+	}
+	if validationErr := validateCompleteTLSIdentity(certificateAfterPublish); validationErr != nil {
+		t.Fatalf("GetCertificate(after concurrent renewal): %v", validationErr)
+	}
+	observations <- observation{
+		kind:        "GetCertificate",
+		certificate: bytes.Clone(certificateAfterPublish.Certificate[0]),
+	}
+	observations <- observation{kind: "Metric", expiry: server.MetricsSnapshot().CertificateExpiryUnixSeconds}
+	newConnection, err := dialTLSWithTimeout(server.Addr().String(), ControlALPN, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dialTLS(after concurrent renewal) error = %v", err)
+	}
+	observations <- observation{
+		kind:        "TLS handshake",
+		certificate: bytes.Clone(newConnection.ConnectionState().PeerCertificates[0].Raw),
+	}
+	_ = newConnection.Close()
+
+	close(observations)
+	oldObservations := make(map[string]int)
+	newObservations := make(map[string]int)
+	for observed := range observations {
+		switch observed.kind {
+		case "Metric":
+			switch observed.expiry {
+			case identity.Leaf().NotAfter.Unix():
+				oldObservations[observed.kind]++
+			case renewedOnDisk.Leaf().NotAfter.Unix():
+				newObservations[observed.kind]++
+			default:
+				t.Fatalf("concurrent Metric expiry = %d, want complete old or new identity expiry", observed.expiry)
+			}
+		case "identity reader":
+			if !bytes.Equal(observed.certificate, identity.Leaf().Raw) {
+				t.Fatal("identity reader held across publication did not retain the complete old identity")
+			}
+		case "GetCertificate", "TLS handshake":
+			switch {
+			case bytes.Equal(observed.certificate, identity.Leaf().Raw):
+				oldObservations[observed.kind]++
+			case bytes.Equal(observed.certificate, renewedOnDisk.Leaf().Raw):
+				newObservations[observed.kind]++
+			default:
+				t.Fatalf("concurrent %s observed a certificate outside the complete old/new identity set", observed.kind)
+			}
+		default:
+			t.Fatalf("unexpected observation kind %q", observed.kind)
+		}
+	}
+	for _, kind := range []string{"GetCertificate", "Metric", "TLS handshake"} {
+		if oldObservations[kind] == 0 || newObservations[kind] == 0 {
+			t.Fatalf("%s observations old/new = %d/%d, want both generations", kind, oldObservations[kind], newObservations[kind])
+		}
+	}
+	if !bytes.Equal(oldConnection.ConnectionState().PeerCertificates[0].Raw, oldCertificate) {
+		t.Fatal("pinned renewal changed the certificate already negotiated by an old connection")
+	}
+}
+
+func TestServerPublicIdentitySupportsConcurrentHandshakeAndStatusReads(t *testing.T) {
+	const (
+		readerCount = 24
+		readRounds  = 4
+	)
+	issuedAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	identity := testPublicIdentity(t, issuedAt)
+	// Public 身份由外部证书系统负责，Gateway 当前没有运行时发布入口；本用例只验证
+	// 启动时载入的不可变身份可被握手、GetCertificate 与状态采集安全并发读取。
+	server, err := NewServer(ServerOptions{
+		Listen:                  "127.0.0.1:0",
+		Identity:                identity,
+		MaxPendingTLSHandshakes: readerCount * readRounds,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatalf("Server.Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	readersStart := make(chan struct{})
+	errorsByReader := make(chan error, readerCount)
+	var readers sync.WaitGroup
+	readers.Add(readerCount)
+	for reader := 0; reader < readerCount; reader++ {
+		go func(reader int) {
+			defer readers.Done()
+			<-readersStart
+			for round := 0; round < readRounds; round++ {
+				certificate, getErr := server.getCertificate(&tls.ClientHelloInfo{})
+				if getErr != nil {
+					errorsByReader <- fmt.Errorf("reader %d round %d GetCertificate: %w", reader, round, getErr)
+					return
+				}
+				if validationErr := validateCompleteTLSIdentity(certificate); validationErr != nil {
+					errorsByReader <- fmt.Errorf("reader %d round %d GetCertificate: %w", reader, round, validationErr)
+					return
+				}
+				if !bytes.Equal(certificate.Certificate[0], identity.Leaf().Raw) {
+					errorsByReader <- fmt.Errorf("reader %d round %d observed a different public certificate", reader, round)
+					return
+				}
+				if expiry := server.MetricsSnapshot().CertificateExpiryUnixSeconds; expiry != identity.Leaf().NotAfter.Unix() {
+					errorsByReader <- fmt.Errorf("reader %d round %d public Metric expiry = %d, want %d", reader, round, expiry, identity.Leaf().NotAfter.Unix())
+					return
+				}
+				connection, dialErr := dialTLSWithTimeout(server.Addr().String(), ControlALPN, 5*time.Second)
+				if dialErr != nil {
+					errorsByReader <- fmt.Errorf("reader %d round %d TLS handshake: %w", reader, round, dialErr)
+					return
+				}
+				peerCertificate := bytes.Clone(connection.ConnectionState().PeerCertificates[0].Raw)
+				_ = connection.Close()
+				if !bytes.Equal(peerCertificate, identity.Leaf().Raw) {
+					errorsByReader <- fmt.Errorf("reader %d round %d TLS handshake observed a different public certificate", reader, round)
+					return
+				}
+			}
+			errorsByReader <- nil
+		}(reader)
+	}
+	close(readersStart)
+	readersFinished := make(chan struct{})
+	go func() {
+		readers.Wait()
+		close(readersFinished)
+	}()
+	select {
+	case <-readersFinished:
+	case <-time.After(20 * time.Second):
+		t.Fatal("concurrent public TLS identity readers did not finish")
+	}
+	for reader := 0; reader < readerCount; reader++ {
+		if readerErr := <-errorsByReader; readerErr != nil {
+			t.Fatal(readerErr)
+		}
+	}
+}
+
 func TestServerMetricsSnapshotReadsPublicIdentityExpiry(t *testing.T) {
 	issuedAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
-	certificate, err := newSelfSignedCertificate("public-gateway.example.test", issuedAt)
-	if err != nil {
-		t.Fatalf("newSelfSignedCertificate() error = %v", err)
-	}
-	directory := t.TempDir()
-	keyPath := filepath.Join(directory, "public.key")
-	certPath := filepath.Join(directory, "public.crt")
-	if err := writeKeyPair(keyPath, certPath, certificate); err != nil {
-		t.Fatalf("writeKeyPair() error = %v", err)
-	}
-	identity, err := LoadPublicIdentity(certPath, keyPath)
-	if err != nil {
-		t.Fatalf("LoadPublicIdentity() error = %v", err)
-	}
+	identity := testPublicIdentity(t, issuedAt)
 	server, err := NewServer(ServerOptions{
 		Listen: "127.0.0.1:0", Identity: identity, MaxPendingTLSHandshakes: 1,
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
-	if got := server.MetricsSnapshot().CertificateExpiryUnixSeconds; got != certificate.leaf.NotAfter.Unix() {
-		t.Fatalf("public certificate expiry = %d, want %d", got, certificate.leaf.NotAfter.Unix())
+	if got := server.MetricsSnapshot().CertificateExpiryUnixSeconds; got != identity.Leaf().NotAfter.Unix() {
+		t.Fatalf("public certificate expiry = %d, want %d", got, identity.Leaf().NotAfter.Unix())
 	}
 }
 
@@ -625,6 +969,61 @@ func testIdentity(t *testing.T) Identity {
 		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
 	}
 	return identity
+}
+
+func testPublicIdentity(t *testing.T, issuedAt time.Time) Identity {
+	t.Helper()
+	certificate, err := newSelfSignedCertificate("public-gateway.example.test", issuedAt)
+	if err != nil {
+		t.Fatalf("newSelfSignedCertificate() error = %v", err)
+	}
+	directory := t.TempDir()
+	keyPath := filepath.Join(directory, "public.key")
+	certPath := filepath.Join(directory, "public.crt")
+	if err := writeKeyPair(keyPath, certPath, certificate); err != nil {
+		t.Fatalf("writeKeyPair() error = %v", err)
+	}
+	identity, err := LoadPublicIdentity(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("LoadPublicIdentity() error = %v", err)
+	}
+	return identity
+}
+
+func validateCompleteTLSIdentity(certificate *tls.Certificate) error {
+	if certificate == nil || certificate.Leaf == nil || len(certificate.Certificate) == 0 || certificate.PrivateKey == nil {
+		return errors.New("TLS identity is incomplete")
+	}
+	if !bytes.Equal(certificate.Certificate[0], certificate.Leaf.Raw) {
+		return errors.New("TLS certificate chain and parsed leaf belong to different identities")
+	}
+	signer, ok := certificate.PrivateKey.(crypto.Signer)
+	if !ok {
+		return fmt.Errorf("TLS private key type %T does not implement crypto.Signer", certificate.PrivateKey)
+	}
+	leafSPKI, err := x509.MarshalPKIXPublicKey(certificate.Leaf.PublicKey)
+	if err != nil {
+		return fmt.Errorf("marshal TLS leaf public key: %w", err)
+	}
+	privateSPKI, err := x509.MarshalPKIXPublicKey(signer.Public())
+	if err != nil {
+		return fmt.Errorf("marshal TLS private key public component: %w", err)
+	}
+	if !bytes.Equal(leafSPKI, privateSPKI) {
+		return errors.New("TLS certificate and private key belong to different identities")
+	}
+	return nil
+}
+
+func dialTLSWithTimeout(address, alpn string, timeout time.Duration) (*tls.Conn, error) {
+	config := &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: true, // #nosec G402 -- 本测试只验证服务端证书发布与 ALPN 边界。
+	}
+	if alpn != "" {
+		config.NextProtos = []string{alpn}
+	}
+	return tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", address, config)
 }
 
 func dialTLS(address, alpn string) (*tls.Conn, error) {
