@@ -120,6 +120,17 @@ jobs:
           build_version="v0.1.0-ci.${GITHUB_SHA}"
           go build -ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$build_version" ./cmd/server ./cmd/agent
 
+      - name: Run M7 protocol and parser short fuzz
+        shell: bash
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          result_dir="$RUNNER_TEMP/m7-06-fuzz-${{ matrix.arch }}"
+          sh ./tests/fuzz/run-m7-06.sh -m smoke -o "$result_dir"
+          test -s "$result_dir/artifact-sha256.txt"
+          sha256sum -c "$result_dir/artifact-sha256.txt"
+          sha256sum "$result_dir/artifact-sha256.txt"
+
       - name: Run native M4 product data plane E2E
         shell: bash
         timeout-minutes: 5

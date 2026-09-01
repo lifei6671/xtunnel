@@ -160,7 +160,9 @@ func parseForwardedFor(value string) ([]netip.Addr, error) {
 		}
 		part, rest, found := strings.Cut(remaining, ",")
 		address, err := netip.ParseAddr(strings.TrimSpace(part))
-		if err != nil {
+		// X-Forwarded-For 冻结为纯 IP 列表。IPv6 zone 只在本机链路范围内有意义，
+		// 不能由受信代理替公网 Client 指定后再静默剥离。
+		if err != nil || address.Zone() != "" {
 			return nil, errInvalidForwardedHeader
 		}
 		chain = append(chain, address.WithZone("").Unmap())
