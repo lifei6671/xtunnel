@@ -14,9 +14,25 @@ import (
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	"github.com/lifei6671/xtunnel/internal/server/externallock"
+	serverservice "github.com/lifei6671/xtunnel/internal/server/service"
 )
 
 var errServerCLIHelp = errors.New("Server CLI help requested")
+
+type serverServiceOperations interface {
+	Install(context.Context, string) error
+	Uninstall(context.Context) error
+}
+
+type platformServerServiceOperations struct{}
+
+func (platformServerServiceOperations) Install(ctx context.Context, configSource string) error {
+	return serverservice.Install(ctx, configSource)
+}
+
+func (platformServerServiceOperations) Uninstall(ctx context.Context) error {
+	return serverservice.Uninstall(ctx)
+}
 
 type configFlagValues struct {
 	path      string
@@ -98,6 +114,17 @@ func newServerCommand(
 	stderr io.Writer,
 	runner func(context.Context, baseconfig.Options, io.Writer) error,
 ) *cli.Command {
+	return newServerCommandWithServices(program, args, environ, stderr, runner, platformServerServiceOperations{})
+}
+
+func newServerCommandWithServices(
+	program string,
+	args []string,
+	environ []string,
+	stderr io.Writer,
+	runner func(context.Context, baseconfig.Options, io.Writer) error,
+	services serverServiceOperations,
+) *cli.Command {
 	rootConfig := &configFlagValues{}
 	command := &cli.Command{
 		Name:                      program,
@@ -174,10 +201,80 @@ func newServerCommand(
 		}),
 	}
 
-	if len(args) == 0 || args[0] == "admin" || args[0] == "gateway" || args[0] == "backup" || args[0] == "-h" || args[0] == "--help" {
-		command.Commands = []*cli.Command{admin, gateway, backup}
+	service := newServerServiceCommand(program, stderr, services)
+
+	if len(args) == 0 || args[0] == "admin" || args[0] == "gateway" || args[0] == "backup" || args[0] == "service" || args[0] == "-h" || args[0] == "--help" {
+		command.Commands = []*cli.Command{admin, gateway, backup, service}
 	}
 	return command
+}
+
+func newServerServiceCommand(program string, stderr io.Writer, services serverServiceOperations) *cli.Command {
+	var configSource string
+	service := &cli.Command{
+		Name:         "service",
+		Usage:        "install or uninstall the native Server service",
+		UsageText:    program + " service <command> [options]",
+		StopOnNthArg: stopOnFirstArgument(),
+		Before:       serverHelpBefore,
+		OnUsageError: passthroughUsageError,
+		Action: func(_ context.Context, current *cli.Command) error {
+			if current.NArg() == 0 {
+				if err := cli.ShowSubcommandHelp(current); err != nil {
+					return fmt.Errorf("show Server service help: %w", err)
+				}
+				return errors.New("service command is required")
+			}
+			return errors.New("unknown service command")
+		},
+	}
+	service.Commands = []*cli.Command{
+		{
+			Name:            "install",
+			Usage:           "install and start the native Server service",
+			UsageText:       program + " service install --config path",
+			HideHelpCommand: true,
+			StopOnNthArg:    stopOnFirstArgument(),
+			Before:          serverHelpBefore,
+			OnUsageError:    passthroughUsageError,
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "config", Usage: "Server YAML configuration file", Destination: &configSource, Local: true},
+			},
+			Action: func(ctx context.Context, current *cli.Command) error {
+				if current.NArg() != 0 {
+					return errors.New("service install does not accept positional arguments")
+				}
+				if !current.IsSet("config") || strings.TrimSpace(configSource) == "" {
+					return errors.New("service install requires --config")
+				}
+				if err := services.Install(ctx, configSource); err != nil {
+					return fmt.Errorf("install Server service: %w", err)
+				}
+				fmt.Fprintf(stderr, "installed and started %s\n", serverservice.UnitName)
+				return nil
+			},
+		},
+		{
+			Name:            "uninstall",
+			Usage:           "uninstall the native Server service",
+			UsageText:       program + " service uninstall",
+			HideHelpCommand: true,
+			StopOnNthArg:    stopOnFirstArgument(),
+			Before:          serverHelpBefore,
+			OnUsageError:    passthroughUsageError,
+			Action: func(ctx context.Context, current *cli.Command) error {
+				if current.NArg() != 0 {
+					return errors.New("service uninstall does not accept arguments")
+				}
+				if err := services.Uninstall(ctx); err != nil {
+					return fmt.Errorf("uninstall Server service: %w", err)
+				}
+				fmt.Fprintf(stderr, "uninstalled %s; configuration, credentials, data, and service identity were preserved\n", serverservice.UnitName)
+				return nil
+			},
+		},
+	}
+	return service
 }
 
 func parseServerConfigOptions(program string, args, environ []string, stderr io.Writer) (baseconfig.Options, error) {

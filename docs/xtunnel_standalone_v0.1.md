@@ -5934,7 +5934,7 @@ OCI/Compose 直接把部署环境中的 Secret 映射为容器内 `XTUNNEL_TOKEN
 
 ---
 
-# 145. Agent Service Self-install
+# 145. Service Self-install
 
 V0.1 官方支持矩阵固定为：
 
@@ -5948,11 +5948,13 @@ Service Manager: Linux systemd >= 249；Windows SCM
 Container: OCI 前台进程模式 + Compose v2 双栈部署 Profile
 ```
 
-macOS launchd、Alpine OpenRC 和其他 Unix Service Manager 不属于 V0.1 支持范围。Linux Agent `service install/uninstall` 要求 root、Linux 和 systemd 249 及以上；Windows Agent 要求 amd64/arm64、提升权限的 Administrator 和可用 SCM。平台、架构、权限或 Service Manager 不满足时，必须在创建账户、注册服务或写任何目标文件前快速失败。Alpha 发布和验收只对上述矩阵作承诺。
+macOS launchd、Alpine OpenRC 和其他 Unix Service Manager 不属于 V0.1 支持范围。Linux Server/Agent `service install/uninstall` 要求 root、amd64/arm64 和 systemd 249 及以上；Windows Agent 要求 amd64/arm64、提升权限的 Administrator 和可用 SCM。平台、架构、权限或 Service Manager 不满足时，必须在创建账户、注册服务或写任何目标文件前快速失败。Alpha 发布和验收只对上述矩阵作承诺。
 
-Server 继续使用 `deploy/systemd/install.sh server ...` 与 `uninstall.sh server` Shell 包装。Agent 在 Linux 与 Windows 都不公开或调用用户安装脚本，全部服务生命周期由同一个 Agent Binary 的 `service install/uninstall` 管理。
+Server 与 Agent 在 Linux 都不公开或调用用户安装脚本，全部服务生命周期由对应 Binary 的 `service install/uninstall` 管理；Windows 仍只支持 Agent SCM 自安装。Server 不新增 `run` 子命令，官方 Unit 继续用根命令 `--config /etc/xtunnel/server.yaml` 启动。
 
-`service install` 创建 `xtunnel-agent:xtunnel-agent` 系统用户/组，把当前可执行文件原子安装到 `/usr/local/bin/xtunnel-agent`，创建 root-only Credential Source，写入 Binary 内嵌的 managed Unit，然后执行 daemon-reload、enable、restart 与 is-active 检查。即使服务已经运行，重复安装也必须重启，使新的 Binary、Token 和 Unit 立即生效。Agent 只使用可清理的 `/run/xtunnel-agent` Runtime Directory，不创建 StateDirectory。目标 Unit 不是普通文件，或内容不以 `# Managed by xtunnel-agent service install` 开头时必须拒绝覆盖；更新 Binary、Token 或 Unit 时不得留下部分安装。
+Server `service install --config PATH` 创建 `xtunnel-server:xtunnel-server` 系统用户/组，把当前可执行文件、指定配置和内嵌 Unit 原子安装到 `/usr/local/bin/xtunnel-server`、`/etc/xtunnel/server.yaml` 与 `/etc/systemd/system/xtunnel-server.service`；配置权限为 `root:xtunnel-server 0640`，`/var/lib/xtunnel/data` 为服务身份所有的 `0700` Canonical Data Target。Unit 首行 marker 精确为 `# Managed by xtunnel-server service install`。上一版官方 Shell Unit 只能按完整规范化字节精确匹配后接管；其他无 marker、被修改、symlink、目录或外来同名 Unit 必须拒绝覆盖和卸载。安装完成执行 daemon-reload、enable、restart 与 is-active；文件发布或激活失败必须恢复此前 Binary、配置、Unit 和受管服务状态。
+
+`service install` 创建 `xtunnel-agent:xtunnel-agent` 系统用户/组，把当前可执行文件原子安装到 `/usr/local/bin/xtunnel-agent`，创建 root-only Credential Source，写入 Binary 内嵌的 managed Unit，然后执行 daemon-reload、enable、restart 与 is-active 检查。即使服务已经运行，重复安装也必须重启，使新的 Binary、Token 和 Unit 立即生效。Agent 只使用可清理的 `/run/xtunnel-agent` Runtime Directory，不创建 StateDirectory。目标 Unit 不是普通文件，或首行不精确等于 `# Managed by xtunnel-agent service install` 时必须拒绝覆盖；更新 Binary、Token 或 Unit 时不得留下部分安装。
 
 Windows `service install` 把当前可执行文件安装到 `%ProgramFiles%\XTunnel\xtunnel-agent.exe`，写入 DPAPI Machine-scope Credential，再通过 SCM 创建或更新 `XTunnelAgent`。Service 使用 `NT AUTHORITY\LocalService`，ImagePath 只执行 `"%ProgramFiles%\XTunnel\xtunnel-agent.exe" run`。Binary 内嵌的 Description managed marker 精确为 `Managed by xtunnel-agent service install`；同名 Service 缺少该 marker 时拒绝覆盖或卸载。重复安装使用 Windows `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)` 语义分别原子替换 Binary/Credential，更新受管 SCM 配置并重启服务；任一步失败必须明确返回，不得静默报告安装成功。
 
@@ -5961,8 +5963,10 @@ Agent OCI Image 固定 `CMD ["run"]`，容器只运行数据面进程，不允�
 Linux 安装命令：
 
 ```bash
+sudo ./xtunnel-server service install --config ./server.yaml
 sudo xtunnel-agent service install --token 'xta_...'
 
+sudo /usr/local/bin/xtunnel-server service uninstall
 sudo xtunnel-agent service uninstall
 ```
 
@@ -6006,7 +6010,7 @@ Start/Restart + Query Running
 
 Windows SCM 的 Stop/Shutdown 最多等待 30 秒；Agent 运行回调异常必须返回非零 Service Exit，SCM 同时为 non-crash failure 配置恢复重启，避免错误退出被伪装成成功。`service install` 在 `Application` 日志下注册唯一 `XTunnelAgent` Event Source，并用与 SCM Service 相同的 managed marker 证明归属；同名 Source 缺失 marker、标准值被修改或不受管理时拒绝覆盖/删除。SCM 模式把共享 JSON Handler 的完整单行记录按 `debug/info→Information`、`warn→Warning`、`error→Error` 映射到该 Source；Source 缺失、被修改、打不开或写入失败时服务启动/运行必须失败，不得静默退回 stderr。`service uninstall` 只删除确认受管的 Source，Windows Smoke 必须查询真实 Application Event、解析 JSON 固定字段并确认 Token 未出现。
 
-Linux `service uninstall` 只在 Unit 带匹配 managed marker 时停止、禁用并删除 Unit 与 `/usr/local/bin/xtunnel-agent`；Windows `service uninstall` 只在 `XTunnelAgent` 带匹配 Description marker 时停止并删除 SCM Service。Windows 随后删除 `%ProgramFiles%\XTunnel\xtunnel-agent.exe`；若卸载命令正由该已安装 EXE 自身执行，文件锁导致无法立即删除时，必须使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排在下次系统重启删除，不能虚假报告已即时消失。未知或人工管理的同名 Unit/Service 必须拒绝删除。两端卸载都保留平台 Credential；Linux 另保留 `xtunnel-agent` 用户/组，Windows 继续使用内建 `NT AUTHORITY\LocalService`。Server Shell 包装及其资产不受影响。
+Linux `service uninstall` 只在 Unit 带匹配 managed marker 时停止、禁用并删除对应 Unit 与已安装 Binary；Server 还允许精确识别上一版官方 Shell Unit。Server 保留配置、凭据、数据和服务用户/组；Agent 保留平台 Credential 与服务用户/组。Windows `service uninstall` 只在 `XTunnelAgent` 带匹配 Description marker 时停止并删除 SCM Service，随后删除 `%ProgramFiles%\XTunnel\xtunnel-agent.exe`；若命令正由该已安装 EXE 自身执行，文件锁导致无法立即删除时，必须使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排在下次系统重启删除，不能虚假报告已即时消失。未知或人工管理的同名 Unit/Service 必须拒绝删除。
 
 ---
 
@@ -7003,10 +7007,7 @@ xtunnel/
 ├── deploy/
 │   ├── docker/
 │   ├── systemd/
-│   │   ├── install.sh              # Server-only
-│   │   ├── uninstall.sh            # Server-only
-│   │   ├── smoke.sh                # Server Shell + Linux Agent Binary Self-install
-│   │   └── xtunnel-server.service
+│   │   └── smoke.sh                # Linux Server/Agent Binary Self-install 隔离验收
 │   └── windows/
 │       └── smoke.ps1               # Windows Agent SCM Self-install
 │
@@ -7764,7 +7765,7 @@ node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba32756
 golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466
 gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
-Server Shell Packaging + Linux systemd / Windows SCM Agent Binary Self-install Smoke Harness
+Linux Server/Agent systemd 与 Windows Agent SCM Binary Self-install Smoke Harness
 
 Server Config + Agent Token Bootstrap
 
@@ -7804,7 +7805,7 @@ Compose v2 Profile 为 Server/Agent 分配 IPv4/IPv6 地址，建立 Management 
 
 双栈监听原语完成原生 tcp4/tcp6 Dial/Accept、同端口、IPV6_V6ONLY 与第二地址族绑定失败清理测试；真实产品 Listener 连通仍留到 M1/M4
 
-Server Shell install/uninstall；Linux Agent `service install/uninstall`、managed marker、systemd >=249、LoadCredential、start/restart/stop Smoke；Windows Agent SCM/LocalService、ProgramFiles Binary、ProgramData DPAPI Machine-scope Credential、Description marker、Replace Existing + Write Through、30s Stop/Shutdown、non-crash recovery、install/reinstall/restart/uninstall 与按需延迟到重启删除 Binary Smoke
+Linux Server/Agent Binary `service install/uninstall`、managed marker、systemd >=249、原子发布/回滚、start/restart/stop Smoke；Server 配置/Data Target/上一版官方 Unit 接管；Agent LoadCredential；Windows Agent SCM/LocalService、ProgramFiles Binary、ProgramData DPAPI Machine-scope Credential、Description marker、Replace Existing + Write Through、30s Stop/Shutdown、non-crash recovery、install/reinstall/restart/uninstall 与按需延迟到重启删除 Binary Smoke
 
 全新 checkout 按固定顺序完成 Web Build 和 Go Build
 

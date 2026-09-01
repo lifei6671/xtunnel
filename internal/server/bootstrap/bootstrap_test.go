@@ -112,6 +112,78 @@ func TestServerCLIParsesRootOptionsAndRejectsCommandsAfterFlags(t *testing.T) {
 	})
 }
 
+func TestServerCLIServiceInstallAndUninstall(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "server.yaml")
+	services := &fakeServerServiceOperations{}
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "install", args: []string{"service", "install", "--config", configPath}},
+		{name: "uninstall", args: []string{"service", "uninstall"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			command := newServerCommandWithServices(
+				"xtunnel-server",
+				test.args,
+				nil,
+				&output,
+				func(context.Context, baseconfig.Options, io.Writer) error {
+					t.Fatal("service command invoked Server runner")
+					return nil
+				},
+				services,
+			)
+			if err := command.Run(context.Background(), append([]string{"xtunnel-server"}, test.args...)); err != nil {
+				t.Fatalf("command.Run() error = %v", err)
+			}
+			if !strings.Contains(output.String(), "xtunnel-server.service") {
+				t.Fatalf("output = %q", output.String())
+			}
+		})
+	}
+	if services.installCalls != 1 || services.configSource != configPath {
+		t.Fatalf("install calls = %d, config = %q", services.installCalls, services.configSource)
+	}
+	if services.uninstallCalls != 1 {
+		t.Fatalf("uninstall calls = %d", services.uninstallCalls)
+	}
+}
+
+func TestServerCLIServiceRejectsInvalidInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		match string
+	}{
+		{name: "missing config", args: []string{"service", "install"}, match: "requires --config"},
+		{name: "install positional", args: []string{"service", "install", "extra"}, match: "does not accept positional"},
+		{name: "uninstall positional", args: []string{"service", "uninstall", "extra"}, match: "does not accept arguments"},
+		{name: "unknown service command", args: []string{"service", "replace"}, match: "unknown service command"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			services := &fakeServerServiceOperations{}
+			command := newServerCommandWithServices(
+				"xtunnel-server", test.args, nil, &bytes.Buffer{},
+				func(context.Context, baseconfig.Options, io.Writer) error {
+					t.Fatal("invalid service command invoked Server runner")
+					return nil
+				},
+				services,
+			)
+			err := command.Run(context.Background(), append([]string{"xtunnel-server"}, test.args...))
+			if err == nil || !strings.Contains(err.Error(), test.match) {
+				t.Fatalf("command.Run() error = %v, want substring %q", err, test.match)
+			}
+			if services.installCalls != 0 || services.uninstallCalls != 0 {
+				t.Fatalf("service calls = install %d uninstall %d", services.installCalls, services.uninstallCalls)
+			}
+		})
+	}
+}
+
 func TestParseConfigOptionsRejectsInvalidCommandLine(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -388,6 +460,23 @@ func assertLifecycleLogs(t *testing.T, output, component string) {
 type fakeStorage struct {
 	closed   bool
 	closeErr error
+}
+
+type fakeServerServiceOperations struct {
+	installCalls   int
+	uninstallCalls int
+	configSource   string
+}
+
+func (operations *fakeServerServiceOperations) Install(_ context.Context, configSource string) error {
+	operations.installCalls++
+	operations.configSource = configSource
+	return nil
+}
+
+func (operations *fakeServerServiceOperations) Uninstall(context.Context) error {
+	operations.uninstallCalls++
+	return nil
 }
 
 func (storage *fakeStorage) Close() error {

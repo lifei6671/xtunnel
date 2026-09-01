@@ -135,9 +135,9 @@ M4-09 已把 Public Ingress 限额接入真实入口。Raw TCP 在 `Accept` 后�
 
 收到 `SIGINT` 或 `SIGTERM` 后，Server 先停止 Metrics、Management、TCP/HTTP/Gateway 新入口并关闭 idle HTTP WorkConn，再在同一个固定 Deadline 内并行排空 Metrics/Management 抓取与请求、TCP/HTTP 请求和 Session ACTIVE；到期后主动关闭残留 Socket，随后关闭 Gateway、Route Owner、SQLite 并释放 External Lock。XTunnel V0.1 Server 的生产运行边界仍为 Linux amd64/arm64，不提供 Windows Server External Lock；Agent 支持 Linux amd64/arm64 与 Windows amd64/arm64。Registry 已按 Tunnel 对 Current Connector Session 先执行未排空、Pool Idle 与容量过滤，再用 Least Active + 稳定 Round Robin 取得原子连接租约，并保留旧 generation ActiveWork tombstone。M2 的 Token Rotate/Revoke、跨 Connector 故障切换策略和在线生命周期可观测性已通过阶段 Review 与全绿 CI，M2 当前为 `DONE`；这些实现不重复 M1 已有的默认负载选择。
 
-## OCI 与 Agent Service Self-install
+## OCI 与 Service Self-install
 
-当前提供 Linux `amd64`/`arm64` 的 OCI 构建骨架，以及 Server Shell 包装和 Agent Binary 自管理的 systemd 服务。Builder 与 Runtime Base 均以不可变摘要固定。Agent OCI Image 的默认命令是 `run`，容器不执行 `service install/uninstall`；镜像固定使用非 root `UID:GID 65532:65532`。只有 Server 使用 `/var/lib/xtunnel` 稳定父目录 Volume 和 `/run/xtunnel` 可写 tmpfs；镜像在 Volume 首次 copy-up 前预创建权限 `0700` 的 `/var/lib/xtunnel/data` leaf。Agent 不声明持久 Volume，通过 `XTUNNEL_TOKEN` 环境变量接收 Token。
+当前提供 Linux `amd64`/`arm64` 的 OCI 构建骨架，以及 Server/Agent Binary 自管理的 systemd 服务。Builder 与 Runtime Base 均以不可变摘要固定。Agent OCI Image 的默认命令是 `run`，容器不执行 `service install/uninstall`；镜像固定使用非 root `UID:GID 65532:65532`。只有 Server 使用 `/var/lib/xtunnel` 稳定父目录 Volume 和 `/run/xtunnel` 可写 tmpfs；镜像在 Volume 首次 copy-up 前预创建权限 `0700` 的 `/var/lib/xtunnel/data` leaf。Agent 不声明持久 Volume，通过 `XTUNNEL_TOKEN` 环境变量接收 Token。
 
 Server 默认配置的启动 FD 预算为 `137192`。其中 TCP Listener 按默认逻辑端口池 `10000..60000` 的最大占用量和一个原子换口候选计入峰值预算，但启动时只绑定已启用 Route 的具体端口。仓库提供的 Compose 和 systemd Unit 将 `nofile` soft/hard limit 固定为 `1048576`；若绕过这些入口直接运行 Server OCI 镜像，也必须向容器提供同等上限，例如 `--ulimit nofile=1048576:1048576`。应用仍按配置预算限制实际连接数，不会因为提高进程上限而无界占用 FD。
 
@@ -165,17 +165,19 @@ sh deploy/docker/dualstack-smoke.sh --platform linux/amd64
 
 Compose 内部使用 `:8080`、`:7443` 表示双栈通配监听。Server 的底层监听原语会为这种空 Host 地址分别创建原生 `tcp4`、`tcp6` Socket；显式 IPv4 或 IPv6 地址仍保持单一地址族。Management、HTTP/TCP Ingress 与 Agent Gateway 均已接入生产启动生命周期，但该双栈监听原语尚未接入这些产品 Listener，也尚未取得 Compose 双栈应用连通证据。因此现阶段的 Compose Smoke 只证明双栈网络、宿主端口绑定、OCI 安全边界与进程生命周期，不代表 Management、Ingress 或 Agent Gateway 已通过双栈应用连接验收，也不证明公网 IPv6 路由或防火墙已经就绪。
 
-Agent systemd 自安装只支持 root、Linux 和 systemd 249 及以上；任一条件不满足都会在写文件或创建用户前快速失败。Binary 内嵌首行为 `# Managed by xtunnel-agent service install` 的 Unit，`service install` 创建 `xtunnel-agent` 系统用户/组，把当前 Binary 原子安装到 `/usr/local/bin/xtunnel-agent`，并创建 `/etc/xtunnel/credentials/agent.token`（父目录 `root:root 0700`、文件 `root:root 0600`）。Unit 使用 `LoadCredential` 注入 Token，`ExecStart=/usr/local/bin/xtunnel-agent run`，不含 Secret。已有 Unit 不是普通文件或缺少该 marker 时拒绝覆盖或卸载。
+Server 与 Agent 的 systemd 自安装只支持 root、Linux amd64/arm64 和 systemd 249 及以上；任一条件不满足都会在写文件或创建用户前快速失败。Server `service install --config` 把当前 Binary、指定配置和内嵌 Unit 原子安装到 `/usr/local/bin/xtunnel-server`、`/etc/xtunnel/server.yaml` 与 `/etc/systemd/system/xtunnel-server.service`，配置权限固定为 `root:xtunnel-server 0640`，并预创建 `xtunnel-server:xtunnel-server 0700` 的 `/var/lib/xtunnel/data`。Unit 首行为 `# Managed by xtunnel-server service install`；仅上一版官方 Shell Unit 的精确完整内容可被一次性接管，其他无 marker、被修改或非普通的同名 Unit 均拒绝覆盖或卸载。
+
+Agent Binary 内嵌首行为 `# Managed by xtunnel-agent service install` 的 Unit，`service install` 创建 `xtunnel-agent` 系统用户/组，把当前 Binary 原子安装到 `/usr/local/bin/xtunnel-agent`，并创建 `/etc/xtunnel/credentials/agent.token`（父目录 `root:root 0700`、文件 `root:root 0600`）。Unit 使用 `LoadCredential` 注入 Token，`ExecStart=/usr/local/bin/xtunnel-agent run`，不含 Secret。已有 Unit 不是普通文件或首行不精确等于该 marker 时拒绝覆盖或卸载。
 
 ```sh
-sudo ./deploy/systemd/install.sh server --binary ./xtunnel-server --config ./server.yaml
+sudo ./xtunnel-server service install --config ./server.yaml
 sudo xtunnel-agent service install --token 'xta_...'
 
-sudo ./deploy/systemd/uninstall.sh server
+sudo /usr/local/bin/xtunnel-server service uninstall
 sudo xtunnel-agent service uninstall
 ```
 
-Agent 卸载只删除由 managed marker 确认归属的 Unit 和已安装 Binary，保留 root-only Credential Source 与 `xtunnel-agent` 用户/组，便于安全重装；`deploy/systemd` Shell 包装仅服务于 Server。
+Server 卸载只删除确认归属的 Unit 和已安装 Binary，保留配置、凭据、数据及 `xtunnel-server` 用户/组；Agent 卸载保留 root-only Credential Source 与 `xtunnel-agent` 用户/组。`deploy/systemd/smoke.sh` 仅是隔离验收入口，不是安装依赖。
 
 Windows Agent 使用同一组 `service install/uninstall` 子命令，不提供 PowerShell、批处理或 MSI 安装脚本。管理员在提升权限的 PowerShell 中执行：
 

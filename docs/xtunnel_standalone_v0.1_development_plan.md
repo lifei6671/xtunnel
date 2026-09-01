@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-01
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-06 · DONE；M7-07 · REVIEW；M7-08 至 M7-09 · READY）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-07 · DONE；M7-08 至 M7-09 · READY）
 >
-> **当前结论**：M7-01 至 M7-06 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `91/95`，M7 为 `6/10 IN_PROGRESS`。M7-07 Linux-only Leak Test Harness、Runner 与 Linux amd64/arm64 CI `full` 接线已由正式实现 Commit `c527265fa165fd08b6c7f14644bd8138d83eea30` 提交并推送；精确 GitHub Actions `#33502663587` 四 Job 全绿，两个原生 Linux Job 的普通与 Race 三分区 Leak Gate、Artifact 校验及最终 clean-tree 均通过。正式实现 Commit 的 commit-bound 复审无 P0/P1，提交后自然产生的文档时态 P2 正由 docs-only 收口修正，因此 M7-07 转为 `REVIEW`，等待用户明确阶段复审批准。M7-08 至 M7-09 保持 `READY`，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01 至 M7-07 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `92/95`，M7 为 `7/10 IN_PROGRESS`。M7-07 Linux-only Leak Test Harness、Runner、Linux amd64/arm64 CI `full` 接线、两轮 CI 回归修复与最终独立复审已经闭环；精确 GitHub Actions `#33510562933` 和 docs-only `#33512711172` 均为 `completed/success`。M7-08 至 M7-09 保持 `READY`，M7-10 继续等待二者 `DONE`，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -111,8 +111,8 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 7 | `DONE` | M5-11 | M6-07 |
-| M7 Hardening/Alpha | 10 | 6 | `IN_PROGRESS` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **91** |  |  |  |
+| M7 Hardening/Alpha | 10 | 7 | `IN_PROGRESS` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
+| **合计** | **95** | **92** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -132,7 +132,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M0-06 | 锁定 Proto 工具链骨架 | M0-01 | `buf*.yaml`、`tools/versions.env`、`tools/go.mod`、`bootstrap-proto.sh`、`proto.sh` | `tools/go.mod` 与根 Module 使用相同 Go 1.27.x 工具链；`GOTOOLCHAIN=local` 构建 protoc-gen-go；Buf/protoc-gen-go 精确版本与分发包 SHA-256 可校验；不回落 PATH；三个 Wrapper 子命令可运行 | `DONE` |
 | M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `DONE` |
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `DONE` |
-| M0-09 | OCI/Compose 双栈、Server Shell Packaging 与跨平台 Agent Binary Self-install | M0-03、M0-08 | `deploy/docker`、Server-only `deploy/systemd`、Agent `service install/uninstall`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Agent 在 root/systemd>=249 快速失败，原子安装 Binary、root-only Credential 与 Managed Unit；Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；两端持久启动项只含 Binary + `run` 且无 Secret，均以 managed marker 拒绝覆盖/删除非受管同名服务，卸载保留 Credential；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `DONE` |
+| M0-09 | OCI/Compose 双栈与 Server/Agent Binary Service Self-install | M0-03、M0-08 | `deploy/docker`、Server/Agent `service install/uninstall`、隔离 `deploy/systemd/smoke.sh`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Server/Agent 在 root/systemd>=249 快速失败，原子安装 Binary/Managed Unit，Server 另安装 `root:xtunnel-server 0640` 配置并预建 Data Target，Agent 另安装 root-only Credential；上一版官方 Server Shell Unit 只按精确内容接管，非托管 Unit 拒绝覆盖/删除。Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；卸载保留持久配置/凭据/数据/服务身份；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `DONE` |
 | M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-08 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke。M0-09 的 Compose Runtime Smoke 仍由 M0-09 单独验收 | `DONE` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `DONE` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `DONE` |
@@ -164,7 +164,7 @@ M0-01 至 M0-11 + M0-10 ── M0-12（完整 M0 / 发布前 Gate）
 - [x] `./tools/proto.sh lint`、`breaking`、`generate-check` 的 M0 骨架流程可执行。
 - [x] `npm ci` 和 Web Production Build 通过，产物被 Go Embed。
 - [x] Linux Server/Agent amd64/arm64 与 Windows Agent amd64/arm64 Binary 可构建和启动。
-- [x] OCI/Compose Smoke、Server Shell Packaging Smoke、Linux Agent root/systemd>=249 Self-install 与 Windows Agent Administrator/SCM/LocalService/DPAPI Self-install 的 Managed Marker、权限、Secret、启动、重复安装 Replace Existing + Write Through、30s Stop/Shutdown、non-crash recovery、卸载及运行中 EXE 延迟删除失败边界通过。
+- [x] OCI/Compose 与历史 Server Shell Packaging、Linux Agent root/systemd>=249 Self-install、Windows Agent Administrator/SCM/LocalService/DPAPI Self-install 的既有验收通过；Server Binary Self-install 的替换实现与新证据作为 2026-09-01 追补记录单独跟踪，不改写原始 Gate 历史。
 - [x] 干净 checkout CI 通过。
 
 ---
@@ -403,9 +403,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `DONE` |
 | M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `DONE` |
 | M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `DONE` |
-| M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `REVIEW` |
+| M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `DONE` |
 | M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `READY` |
-| M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；两端 Agent Binary `service install/uninstall` 的安装/升级/卸载覆盖 Managed Marker、Binary 替换、Secret 不落 SCM/argv 和非托管 Unit/Service 拒绝边界；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `READY` |
+| M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；Server/Agent Binary `service install/uninstall` 安装、升级、卸载覆盖 Managed Marker、三文件原子发布/回滚、Server 旧官方 Unit 接管、配置/凭据权限、Secret 不落 argv 和非托管 Unit/Service 拒绝边界；Agent 前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `READY` |
 | M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `NOT_STARTED` |
 
 ## 13.2 Alpha Release Gate Checklist
@@ -413,7 +413,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - [ ] 干净 checkout 完整 CI 通过。
 - [ ] Unit、Integration、E2E、Contract、Golden、Race、Fuzz 全部通过。
 - [ ] Privileged Network Chaos 与所有 Server Durable Operation Crash/Filesystem Failpoint 通过。
-- [ ] Linux amd64/arm64 Binary/OCI/Server Shell Packaging/systemd Agent 与 Windows Agent amd64/arm64 SCM Self-install/升级/卸载通过，Windows 延迟到重启的 EXE 删除最终收敛，且非托管 Unit/Service 不被覆盖或删除。
+- [ ] Linux amd64/arm64 Binary/OCI/Server 与 Agent systemd Binary Self-install、升级、卸载及 Windows Agent amd64/arm64 SCM Self-install/升级/卸载通过，Server 上一版官方 Unit 完成精确接管，Windows 延迟到重启的 EXE 删除最终收敛，且非托管 Unit/Service 不被覆盖或删除。
 - [ ] SQLite Backup→Migration→Restore→Agent Reconnect 并重新获取完整配置通过。
 - [ ] 满负载和重连风暴下无负计数、超额资源、FD/goroutine 泄漏。
 - [ ] 日志、镜像、Server 配置、systemd Unit/ExecStart、Windows SCM ImagePath/Registry、Backup 和测试 Fixture 中无 Connection Token/Secret；ProgramData 只保留 ACL 受限的 DPAPI Machine-scope 密文。
@@ -432,11 +432,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 4. `M7-04` — `DONE`。最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6` 的 clean `full`、Docker Linux amd64/CGO=1 三包 Race、精确 CI `#33468280052`、Tier 3 commit-bound 最终独立复审、证据 Head `806bfa0d719259642dc152a0b96f80894b0cd637` 的精确 CI `#33469332157` 与用户阶段复审均已闭环。真实存储层故障继续作为未验证证据边界。
 5. `M7-05` — `DONE`。实现与 arm64 测试超时修复均已提交并推送；Windows 全仓 Race/Vet、隔离 Linux clean `full`、Linux amd64/arm64 全仓 Race、修复与证据 Head 精确 CI、commit-bound Tier 3 最终独立复审及用户阶段复审均已闭环。
 6. `M7-06` — `DONE`。正式 Commit `5b88b46f29be882525038ea3f2c749fd24a53646`、隔离 Linux amd64 clean `full`、实现与证据 Head 的精确 CI `#33492076511`、`#33493628266`、Linux amd64/arm64 Short Fuzz、commit-bound Tier 3 独立复审及用户阶段复审均已闭环。
-7. `M7-07` — `REVIEW`。Linux-only 产品 Leak Harness、Runner、Builder 与 CI full 接线已由正式实现 Commit `c527265fa165fd08b6c7f14644bd8138d83eea30` 推送；WSL2 开发 Smoke、隔离 Docker Linux amd64 clean `full`、原生 Linux amd64/arm64 完整三分区普通与 Race、Artifact 校验及精确 CI `#33502663587` 均通过，等待证据 Commit 的精确 CI、最终 freshness 读回与用户阶段复审。
+7. `M7-07` — `DONE`。Linux-only 产品 Leak Harness、Runner、Builder 与 CI full 接线、两轮 CI 回归修复、原生 Linux amd64/arm64 完整三分区普通与 Race、Artifact 校验、精确 CI `#33510562933`、docs-only CI `#33512711172` 与最终独立复审均已通过；用户已明确阶段复审通过。
 8. `M7-08` 至 `M7-09` — `READY`，本轮不启动。
-9. `M7-10` — 继续等待 M7-07 至 M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
+9. `M7-10` — 继续等待 M7-08、M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `91/95`。M7 当前为 `6/10 IN_PROGRESS`，M7-01 至 M7-06 已 `DONE`，M7-07 为 `REVIEW`，M7-08 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `92/95`。M7 当前为 `7/10 IN_PROGRESS`，M7-01 至 M7-07 已 `DONE`，M7-08 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -459,7 +459,7 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 | Buf/protoc-gen-go 精确版本 | M0-06 完成前 | 记录版本、下载源、分发包 SHA-256 和生成结果 |
 | OpenAPI Validator/Generator | M0-07/M5-02 开工前 | M0-07 已批准并锁定 vacuum `v0.30.0` 官方 Linux amd64/arm64 归档与二进制 SHA-256；M5-02 已批准并锁定 `oapi-codegen v2.8.0`、`oapi-codegen/runtime v1.6.0`、`nullable v1.1.0`、`openapi-typescript 7.13.0`、工具侧 TypeScript `5.9.3` 与 `openapi-fetch 0.17.0`。唯一入口为 `tools/openapi.sh validate|breaking|generate|generate-check`，CI 不维护第二套方式；TypeScript Generator 因 Web TypeScript 6 Peer Range 冲突隔离在 `tools/openapi-ts`，不得使用 `--force` 或 `--legacy-peer-deps` 绕过。 |
 | Web 依赖与 Node 版本 | M0-08 开工前 | 已批准 Node `24.19.0`、npm `11.17.0`、React/React DOM `19.2.8`、Vite `8.2.2`、Plugin React `6.1.0`、TypeScript `6.0.2` 与对应类型包；用户在管理菜单出现真实图标需求后追加批准 `lucide-react 1.34.0`，并在 M5-10 追加批准 `@playwright/test 1.62.1`；直接依赖精确锁定，npm 11 生成并提交 Lockfile，CI 只运行 `npm ci`，再通过本地锁定的 Playwright CLI 安装对应 Chromium；Tailwind/shadcn/Router/Query 等继续等待 M5 真实使用点 |
-| OCI 基础镜像、Compose 双栈与跨平台 Agent Service 权限模型 | M0-09 开工前 | 已批准三个固定多架构基础镜像摘要、Compose 双栈 Profile 与原生 tcp4/tcp6 监听原语；OCI 使用 `65532:65532` 与只读根，只有 Server 挂载 Data Volume 和 `/run/xtunnel` tmpfs，Agent 无 Volume，从 `XTUNNEL_TOKEN` 取得 Token 并默认执行 `run`；Compose 输入 `XTUNNEL_AGENT_TOKEN` 映射到容器环境；Server 保留 Shell 包装。Agent 在 Linux/Windows 统一使用 Binary `service install --token` 与 `service uninstall`，不提供用户安装脚本。Linux 要求 root/systemd>=249，原子安装到 `/usr/local/bin/xtunnel-agent`，Credential 目录/Source 为 `root:root 0700/0600`，Unit 首行为 `# Managed by xtunnel-agent service install` 且 `ExecStart=/usr/local/bin/xtunnel-agent run`。Windows 支持 amd64/arm64，要求提升权限的 Administrator 与 SCM；ServiceName=`XTunnelAgent`、DisplayName=`XTunnel Agent`、账户=`NT AUTHORITY\LocalService`，Binary=`%ProgramFiles%\XTunnel\xtunnel-agent.exe`，Credential=`%ProgramData%\XTunnel\credentials\agent.token.dpapi` 并使用 `CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN`，SCM ImagePath 仅含安装 Binary + `run`，Description marker 精确为 `Managed by xtunnel-agent service install`；重复安装使用 `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)`，Stop/Shutdown 最多 30s，运行异常返回非零并配置 non-crash recovery。两端均拒绝覆盖/删除非受管同名服务，卸载删除受管服务并保留平台 Credential；Windows 从运行中已安装 EXE 自卸载时使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排重启删除 Binary，Linux 另保留服务用户 |
+| OCI 基础镜像、Compose 双栈与跨平台 Service 权限模型 | M0-09 开工前；Server Binary 追补于 2026-09-01 获用户明确授权 | 已批准三个固定多架构基础镜像摘要、Compose 双栈 Profile 与原生 tcp4/tcp6 监听原语；OCI 使用 `65532:65532` 与只读根，只有 Server 挂载 Data Volume 和 `/run/xtunnel` tmpfs，Agent 无 Volume，从 `XTUNNEL_TOKEN` 取得 Token 并默认执行 `run`；Compose 输入 `XTUNNEL_AGENT_TOKEN` 映射到容器环境。Linux Server/Agent 统一使用各自 Binary 的 `service install/uninstall`，不提供用户安装脚本，要求 root、amd64/arm64、systemd>=249。Server 原子安装当前 Binary、显式 `--config` 输入和内嵌 Managed Unit，保留配置/数据/服务身份，且只按精确完整内容接管上一版官方 Shell Unit；Agent 原子安装 Binary、root-only Credential 与 Managed Unit。Windows Agent 继续使用 SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential；重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery。所有平台拒绝覆盖/删除非受管同名服务，卸载保留持久配置或 Credential 与服务身份；Windows 从运行中已安装 EXE 自卸载时使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排重启删除 Binary。 |
 | Minimal Security Audit Event Contract | M1-04 收口前 | 用户于 2026-08-26 明确确认数据库 Schema 变更；已冻结 bounded/nullable、`event_id`/`operation_id`、`event`/`action` 枚举、actor/resource/result、稳定失败语义和幂等边界，并以 `000003_security_audit_events.sql`、Repository 校验和 v2 Rotation Journal 落地。Security Audit append-only，禁止 UPDATE/DELETE，Secret/Credential/Private Key/Cookie 禁止入库；M1 写事件，M5 提供只读查询，M6 提供结构化导出、Dashboard 和 Runbook |
 | 首次 Buf Breaking Baseline | M05-04 完成前 | 显式记录“无历史前代”，禁止与当前文件自比较 |
 | CI/arm64/Privileged Runner | M0-10/M7-08 开工前 | 记录 Runner 架构和权限；特权 Chaos 不得静默跳过 |
@@ -1992,3 +1992,19 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 最终独立复审：WebSocket 生产修复与测试 Harness 冻结内容经两路独立复审，Review mode=`WORKTREE/CHILD_AGENT`、Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`。Node 20 deprecation 仍是既有 `actions/setup-go` 注解，不归因于本轮修改。
 - 状态影响：M7-07 保持 `REVIEW`，等待用户明确“`M7-07 阶段复审通过`”；在批准前不得转为 `DONE`。全局 `DONE` 保持 `91/95`、M7 保持 `6/10 IN_PROGRESS`；不启动 M7-08，不勾选 Alpha Release Gate Checklist。
 - 文档影响：只同步本开发计划与 `tests/leak/m7-07-evidence.md` 的失败链、修复 Commit、最终 CI、Artifact 与复审证据。根 README 与总技术方案无需更新；Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署、生产配置、权限与日志契约均未改变。
+
+## 2026-09-01 · M7-07 用户阶段复审批准 · DONE
+
+- 用户明确回复“`M7-07 阶段复审通过`”，批准对象是已经完成正式实现、CI 回归修复、精确 CI 和最终独立复审的 M7-07 冻结范围。
+- 状态影响：M7-07 从 `REVIEW` 转为 `DONE`，M7 从 `6/10` 更新为 `7/10 IN_PROGRESS`，全局从 `91/95` 更新为 `92/95`。M7-08、M7-09 保持 `READY`，M7-10 继续等待二者 `DONE`；Alpha Release Gate Checklist 保持未勾选。
+- 证据边界：用户批准不改写 CI `#33504366959`、`#33505969409` 的历史失败结论，也不扩大 Leak Gate 已验证范围。正式修复 CI `#33510562933` 与证据文档 CI `#33512711172` 均为 `completed/success`。
+
+## 2026-09-01 · Server Binary systemd Self-install 追补 · IN_PROGRESS
+
+- 授权与边界：用户在批准 M7-07 后明确要求 Linux systemd 安装不再依赖 Shell 脚本，Server 与 Agent 都必须直接通过各自 Binary 命令安装。该回复明确授权新增 Server 公共 CLI、替换生产 systemd 安装入口和权限/部署契约；不授权修改 CI/CD、真实宿主安装、暂存、提交或推送。Agent Linux/Windows Binary Self-install 已存在，本轮不重写其 owner。
+- 公共命令：新增 `xtunnel-server service install --config PATH` 与 `xtunnel-server service uninstall`；Server 保持根命令前台运行，不新增 `run`。Linux Agent 继续使用 `xtunnel-agent service install --token TOKEN` 与 `service uninstall`，Windows Agent SCM 契约不变。
+- Server 实现：新增独立 `internal/server/service` owner，Linux 仅支持 amd64/arm64、root 和 systemd>=249；在任何服务写入前检查 config、工具、旧数据布局和 Unit 归属。当前 Binary、显式 config 与内嵌 Unit 通过同目录临时文件、fsync、rename 和旧文件快照发布，激活顺序固定为 daemon-reload、enable、restart、is-active，失败时恢复文件和既有受管服务。配置固定为 `root:xtunnel-server 0640`，Data Target 固定为 `xtunnel-server:xtunnel-server 0700`；外部命令有 30 秒上限。
+- 归属与升级：新 Unit 首行为 `# Managed by xtunnel-server service install`。上一版官方 Shell Unit 只在完整规范化内容精确匹配时允许一次性接管；人工修改、外来普通文件、symlink 或目录一律拒绝覆盖/删除。卸载只删除确认归属的 Unit 和已安装 Binary，保留配置、凭据、数据及服务用户/组。原公开 `install.sh`、`uninstall.sh` 与独立 Server Unit 资产已删除，`deploy/systemd/smoke.sh` 只保留为隔离验收工具。
+- 已执行验证：Windows `go1.27.0/local` 下定向 Server service/bootstrap Test+Vet、全仓 `go test ./...`、`go vet ./...`、Linux amd64/arm64 Server+Agent Cross-build 与 CLI Help 读回均 PASS；Docker Linux amd64 下 Server service/bootstrap 普通测试与 Race 均 PASS；Git Bash 与 Debian dash 的 `sh -n deploy/systemd/smoke.sh` 均 PASS；`git diff --check` PASS。ShellCheck/shfmt 在当前宿主不可用，未冒充已运行。
+- 独立复审：最终冻结 22 路径经 `WORKTREE/CHILD_AGENT`、`FULL_SCOPE / Tier 3` 复审，Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`；确认 Agent→Server 共享目录权限、enabled/disabled/enabled-runtime 与 active/inactive 回滚、精确 marker、legacy Unit 接管、symlink/目录拒绝和 M7-07 状态均一致。暂存区未改变。
+- 状态与剩余 Gate：真实 root/systemd 安装、旧官方 Unit 接管、重装、故障回滚、卸载保留语义及 Linux amd64/arm64 隔离 Smoke 尚未运行；本工作树也没有正式 Commit 或精确 CI，因此本追补保持 `IN_PROGRESS`。M7-07 继续 `DONE`，M7-08/M7-09 继续 `READY`，全局 `92/95` 与 M7 `7/10 IN_PROGRESS` 不变，Alpha Release Gate Checklist 不勾选。

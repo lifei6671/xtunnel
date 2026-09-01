@@ -3,7 +3,7 @@
 ## 当前状态
 
 - 任务：`M7-07`
-- 状态：`REVIEW`
+- 状态：`DONE`
 - Delivery 基线：`2bf793bf5a9a51326bbcef1a13dd417a4fa381e0`
 - 正式实现 Commit：`c527265fa165fd08b6c7f14644bd8138d83eea30`
 - 首轮证据 Commit：`d91d43c8b2557b170d0a0edc32ce961fe851a7b4`
@@ -11,8 +11,8 @@
   `2ca093b6c6a892f3a970a565b4077658191ba492`
 - 最新精确 CI：[#33510562933](https://github.com/lifei6671/xtunnel/actions/runs/33510562933)，
   `completed/success`
-- `DONE` 计数：`91/95`（未变化）
-- M7：`6/10 IN_PROGRESS`（未变化）
+- `DONE` 计数：`92/95`
+- M7：`7/10 IN_PROGRESS`
 
 ## 实现范围
 
@@ -173,3 +173,11 @@
 - M7-07 从 `IN_PROGRESS` 转为 `REVIEW`，等待用户明确阶段复审批准；在批准前不得转为
   `DONE`。全局 `DONE` 保持 `91/95`、M7 保持 `6/10 IN_PROGRESS`；M7-08 不启动，
   Alpha Release Gate Checklist 不变。
+
+## 用户阶段复审批准
+
+- 2026-09-01，用户明确回复“`M7-07 阶段复审通过`”。
+- M7-07 从 `REVIEW` 转为 `DONE`；全局 `DONE` 从 `91/95` 更新为 `92/95`，M7 从
+  `6/10` 更新为 `7/10 IN_PROGRESS`。
+- M7-08、M7-09 保持 `READY`，M7-10 继续等待二者 `DONE`；Alpha Release Gate
+  Checklist 保持未勾选。历史失败 CI 及其结论保持原样。

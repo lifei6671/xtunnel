@@ -88,6 +88,8 @@ func TestInspectManagedUnit(t *testing.T) {
 	}{
 		{name: "missing"},
 		{name: "managed", content: stringPointer(ManagedUnitMarker + "\n[Unit]\n"), wantExists: true, wantManaged: true},
+		{name: "marker suffix", content: stringPointer(ManagedUnitMarker + " forged\n[Unit]\n"), wantExists: true},
+		{name: "marker only", content: stringPointer(ManagedUnitMarker), wantExists: true},
 		{name: "unmanaged", content: stringPointer("[Unit]\nDescription=foreign\n"), wantExists: true},
 	}
 	for _, test := range tests {

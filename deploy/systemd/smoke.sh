@@ -81,8 +81,22 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 umask 077
 temp_dir=$(mktemp -d)
+unmanaged_server_unit_owned=0
+unmanaged_server_unit_fingerprint=
 unmanaged_agent_unit_owned=0
 unmanaged_agent_unit_fingerprint=
+
+remove_owned_unmanaged_server_unit() {
+	[ "$unmanaged_server_unit_owned" -eq 1 ] || return 0
+	if [ ! -f /etc/systemd/system/xtunnel-server.service ] \
+		|| ! cmp -s "$temp_dir/unmanaged-xtunnel-server.service" /etc/systemd/system/xtunnel-server.service \
+		|| [ "$(stat -c '%a:%u:%g:%s:%i:%y:%z' /etc/systemd/system/xtunnel-server.service)" != "$unmanaged_server_unit_fingerprint" ]; then
+		printf '%s\n' "cleanup preserved an unmanaged Server unit whose identity changed during the smoke" >&2
+		return 1
+	fi
+	rm -f -- /etc/systemd/system/xtunnel-server.service
+	unmanaged_server_unit_owned=0
+}
 
 remove_owned_unmanaged_agent_unit() {
 	[ "$unmanaged_agent_unit_owned" -eq 1 ] || return 0
@@ -97,6 +111,13 @@ remove_owned_unmanaged_agent_unit() {
 }
 
 cleanup() {
+	if ! remove_owned_unmanaged_server_unit; then
+		printf '%s\n' "cleanup skipped Server uninstall to avoid deleting a changed unmanaged unit" >&2
+	elif [ -x /usr/local/bin/xtunnel-server ]; then
+		/usr/local/bin/xtunnel-server service uninstall >/dev/null 2>&1 || true
+	else
+		"$server_binary" service uninstall >/dev/null 2>&1 || true
+	fi
 	if ! remove_owned_unmanaged_agent_unit; then
 		printf '%s\n' "cleanup skipped Agent uninstall to avoid deleting a changed unmanaged unit" >&2
 	else
@@ -106,7 +127,6 @@ cleanup() {
 			"$agent_binary" service uninstall >/dev/null 2>&1 || true
 		fi
 	fi
-	sh "$script_dir/uninstall.sh" server >/dev/null 2>&1 || true
 	for unit in xtunnel-server.service xtunnel-agent.service; do
 		if systemctl is-active --quiet "$unit"; then
 			printf 'cleanup stopped before deleting files because %s is still active\n' "$unit" >&2
@@ -220,6 +240,52 @@ assert_agent_side_effects_absent() {
 	fi
 }
 
+assert_server_side_effects_absent() {
+	for path in \
+		/usr/local/bin/xtunnel-server \
+		/etc/xtunnel \
+		/run/xtunnel \
+		/var/lib/xtunnel; do
+		if [ -e "$path" ] || [ -L "$path" ]; then
+			printf 'rejected Server service operation modified protected path: %s\n' "$path" >&2
+			exit 1
+		fi
+	done
+	if id xtunnel-server >/dev/null 2>&1 || getent group xtunnel-server >/dev/null 2>&1; then
+		printf '%s\n' "rejected Server service operation created the service identity" >&2
+		exit 1
+	fi
+}
+
+assert_server_targets_absent() {
+	assert_server_side_effects_absent
+	if [ -e /etc/systemd/system/xtunnel-server.service ] \
+		|| [ -L /etc/systemd/system/xtunnel-server.service ]; then
+		printf '%s\n' "rejected Server service operation created the systemd unit" >&2
+		exit 1
+	fi
+}
+
+expect_server_failure() {
+	failure_name=$1
+	expected_text=$2
+	shift 2
+	failure_output="$temp_dir/$failure_name.output"
+	set +e
+	"$@" >"$failure_output" 2>&1
+	failure_status=$?
+	set -e
+	if [ "$failure_status" -eq 0 ]; then
+		printf '%s unexpectedly succeeded\n' "$failure_name" >&2
+		exit 1
+	fi
+	if ! grep -F "$expected_text" "$failure_output" >/dev/null; then
+		failure_bytes=$(wc -c <"$failure_output" | tr -d ' ')
+		printf '%s did not report the expected failure; output_bytes=%s\n' "$failure_name" "$failure_bytes" >&2
+		exit 1
+	fi
+}
+
 assert_agent_targets_absent() {
 	assert_agent_side_effects_absent
 	if [ -e /etc/systemd/system/xtunnel-agent.service ] \
@@ -291,6 +357,19 @@ case "$nonroot_uid" in
 		exit 1
 		;;
 esac
+preflight_server_binary="$temp_dir/xtunnel-server-preflight"
+cp "$server_binary" "$preflight_server_binary"
+chmod 755 "$preflight_server_binary"
+expect_server_failure \
+	server-nonroot-install \
+	'service install must run as root' \
+	runuser -u "$nonroot_user" -- "$preflight_server_binary" service install --config "$temp_dir/server.yaml"
+assert_server_targets_absent
+expect_server_failure \
+	server-nonroot-uninstall \
+	'service uninstall must run as root' \
+	runuser -u "$nonroot_user" -- "$preflight_server_binary" service uninstall
+assert_server_targets_absent
 expect_agent_failure \
 	agent-nonroot-install \
 	'service install must run as root' \
@@ -313,6 +392,16 @@ fi
 exit 97
 EOF
 chmod 755 "$old_systemd_bin/systemctl"
+expect_server_failure \
+	server-old-systemd-install \
+	'systemd 249 or newer is required; found 248' \
+	env PATH="$old_systemd_bin:$PATH" "$server_binary" service install --config "$temp_dir/server.yaml"
+assert_server_targets_absent
+expect_server_failure \
+	server-old-systemd-uninstall \
+	'systemd 249 or newer is required; found 248' \
+	env PATH="$old_systemd_bin:$PATH" "$server_binary" service uninstall
+assert_server_targets_absent
 expect_agent_failure \
 	agent-old-systemd-install \
 	'systemd 249 or newer is required; found 248' \
@@ -323,6 +412,37 @@ expect_agent_failure \
 	'systemd 249 or newer is required; found 248' \
 	env PATH="$old_systemd_bin:$PATH" "$agent_binary" service uninstall
 assert_agent_targets_absent
+
+cat >"$temp_dir/unmanaged-xtunnel-server.service" <<'EOF'
+[Unit]
+Description=Foreign xtunnel-server service owned by the systemd smoke fixture
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+EOF
+install -o root -g root -m 0640 \
+	"$temp_dir/unmanaged-xtunnel-server.service" \
+	/etc/systemd/system/xtunnel-server.service
+unmanaged_server_unit_fingerprint=$(stat -c '%a:%u:%g:%s:%i:%y:%z' /etc/systemd/system/xtunnel-server.service)
+unmanaged_server_unit_owned=1
+expect_server_failure \
+	server-unmanaged-unit-install \
+	'refusing to overwrite an unmanaged xtunnel-server.service' \
+	"$server_binary" service install --config "$temp_dir/server.yaml"
+assert_server_side_effects_absent
+cmp -s "$temp_dir/unmanaged-xtunnel-server.service" /etc/systemd/system/xtunnel-server.service
+test "$(stat -c '%a:%u:%g:%s:%i:%y:%z' /etc/systemd/system/xtunnel-server.service)" = "$unmanaged_server_unit_fingerprint"
+expect_server_failure \
+	server-unmanaged-unit-uninstall \
+	'refusing to remove an unmanaged xtunnel-server.service' \
+	"$server_binary" service uninstall
+assert_server_side_effects_absent
+cmp -s "$temp_dir/unmanaged-xtunnel-server.service" /etc/systemd/system/xtunnel-server.service
+test "$(stat -c '%a:%u:%g:%s:%i:%y:%z' /etc/systemd/system/xtunnel-server.service)" = "$unmanaged_server_unit_fingerprint"
+remove_owned_unmanaged_server_unit
+assert_server_targets_absent
+printf '%s\n' "Server service preflight rejection smoke passed"
 
 # 同名 Unit 只有首行 managed marker 才属于 XTunnel。用字节、权限、owner、inode 和
 # 纳秒时间戳冻结外来对象，install/uninstall 两条产品路径都必须拒绝且原对象不变。
@@ -360,7 +480,7 @@ printf '%s\n' "Agent service preflight rejection smoke passed"
 # 无迁移策略必须表现为安全拒绝，不能留下新 Binary、Config、Unit 或服务身份。
 mkdir -p /var/lib/xtunnel
 printf '%s\n' legacy > /var/lib/xtunnel/xtunnel.db
-if sh "$script_dir/install.sh" server --binary "$server_binary" --config "$temp_dir/server.yaml" >/dev/null 2>&1; then
+if "$server_binary" service install --config "$temp_dir/server.yaml" >/dev/null 2>&1; then
 	printf '%s\n' "server install unexpectedly accepted the legacy data layout" >&2
 	exit 1
 fi
@@ -375,7 +495,6 @@ if id xtunnel-server >/dev/null 2>&1 || getent group xtunnel-server >/dev/null 2
 fi
 rm -rf -- /var/lib/xtunnel
 
-sh "$script_dir/install.sh" server --binary "$server_binary" --config "$temp_dir/server.yaml"
 if "$agent_binary" service install >/dev/null 2>&1; then
 	printf '%s\n' "agent install unexpectedly accepted a missing --token" >&2
 	exit 1
@@ -400,6 +519,10 @@ if [ "$first_agent_pid" -eq "$second_agent_pid" ]; then
 	exit 1
 fi
 
+# Agent 先安装会先创建 /etc/xtunnel；Server 安装必须把共享父目录修正为可穿透的
+# root:root 0755，同时保持 Agent Credential 子目录 root-only 0700。
+"$server_binary" service install --config "$temp_dir/server.yaml"
+
 for unit in xtunnel-server.service xtunnel-agent.service; do
 	systemctl is-enabled --quiet "$unit"
 	systemctl is-active --quiet "$unit"
@@ -408,6 +531,7 @@ for unit in xtunnel-server.service xtunnel-agent.service; do
 done
 
 test "$(stat -c '%a:%U:%G' /etc/xtunnel/server.yaml)" = '640:root:xtunnel-server'
+test "$(stat -c '%a:%U:%G' /etc/xtunnel)" = '755:root:root'
 test ! -e /etc/xtunnel/agent.yaml
 test ! -e /etc/xtunnel/agent.token
 test "$(stat -c '%a:%U:%G' /etc/xtunnel/credentials)" = '700:root:root'
@@ -423,6 +547,7 @@ test "$(stat -c '%a:%U:%G' /usr/local/bin/xtunnel-agent)" = '755:root:root'
 cmp -s "$agent_binary" /usr/local/bin/xtunnel-agent
 test "$(stat -c '%a:%U:%G' /etc/systemd/system/xtunnel-server.service)" = '644:root:root'
 test "$(stat -c '%a:%U:%G' /etc/systemd/system/xtunnel-agent.service)" = '644:root:root'
+test "$(sed -n '1p' /etc/systemd/system/xtunnel-server.service)" = '# Managed by xtunnel-server service install'
 test "$(systemctl show --property=LimitNOFILE --value xtunnel-server.service)" = 1048576
 test -f /var/lib/xtunnel/data/xtunnel.db
 test "$(sed -n '1p' /etc/systemd/system/xtunnel-agent.service)" = '# Managed by xtunnel-agent service install'
@@ -576,7 +701,7 @@ for unit in xtunnel-server.service xtunnel-agent.service; do
 	systemctl is-active --quiet "$unit"
 done
 
-sh "$script_dir/uninstall.sh" server
+/usr/local/bin/xtunnel-server service uninstall
 /usr/local/bin/xtunnel-agent service uninstall
 
 for path in \

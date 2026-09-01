@@ -68,7 +68,12 @@ func inspectManagedUnit(path string) (exists bool, managed bool, err error) {
 	if err != nil {
 		return true, false, fmt.Errorf("read service unit: %w", err)
 	}
-	return true, bytes.HasPrefix(content, []byte(ManagedUnitMarker)), nil
+	firstLine, remainder, found := bytes.Cut(content, []byte{'\n'})
+	if !found || len(remainder) == 0 {
+		return true, false, nil
+	}
+	firstLine = bytes.TrimSuffix(firstLine, []byte{'\r'})
+	return true, bytes.Equal(firstLine, []byte(ManagedUnitMarker)), nil
 }
 
 func atomicWriteFile(path string, mode os.FileMode, uid, gid int, write func(*os.File) error) error {
