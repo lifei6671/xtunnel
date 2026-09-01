@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-01
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-06 · DONE；M7-07 至 M7-09 · READY）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-06 · DONE；M7-07 · IN_PROGRESS；M7-08 至 M7-09 · READY）
 >
-> **当前结论**：M7-01 至 M7-06 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `91/95`，M7 为 `6/10 IN_PROGRESS`。M7-06 的正式实现 Commit `5b88b46f29be882525038ea3f2c749fd24a53646` 与证据 Commit `6f2a8f688dfba4954edc1d6ea9e8b8d5bc14a29a` 均已推送；精确 GitHub Actions [#33492076511](https://github.com/lifei6671/xtunnel/actions/runs/33492076511) 和 [#33493628266](https://github.com/lifei6671/xtunnel/actions/runs/33493628266) 四 Job 全绿，Linux amd64/arm64 Short Fuzz 均通过，最终 commit-bound Tier 3 复审 P0/P1/P2=`0/0/0`。M7-07 至 M7-09 保持 `READY`，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01 至 M7-06 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `91/95`，M7 为 `6/10 IN_PROGRESS`。M7-07 已启动 Linux-only Leak Test Harness，实现 connection churn、Cancel/Drain、Reconnect 和完整 Drain Matrix 的多 epoch FD/goroutine/GC 后 live heap 收敛检查；Linux amd64 交叉编译、WSL2 Runner smoke、隔离 Docker Linux amd64 clean `full` 与完整三分区 Race 已通过，Linux amd64/arm64 CI `full` 接线也已实现，但独立原生 Linux arm64、正式 Commit/精确 CI 和最终 commit-bound Tier 3 复审尚未完成，因此 M7-07 保持 `IN_PROGRESS`。M7-08 至 M7-09 保持 `READY`，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -403,7 +403,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `DONE` |
 | M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `DONE` |
 | M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `DONE` |
-| M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `READY` |
+| M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `IN_PROGRESS` |
 | M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `READY` |
 | M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；两端 Agent Binary `service install/uninstall` 的安装/升级/卸载覆盖 Managed Marker、Binary 替换、Secret 不落 SCM/argv 和非托管 Unit/Service 拒绝边界；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `READY` |
 | M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `NOT_STARTED` |
@@ -432,10 +432,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 4. `M7-04` — `DONE`。最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6` 的 clean `full`、Docker Linux amd64/CGO=1 三包 Race、精确 CI `#33468280052`、Tier 3 commit-bound 最终独立复审、证据 Head `806bfa0d719259642dc152a0b96f80894b0cd637` 的精确 CI `#33469332157` 与用户阶段复审均已闭环。真实存储层故障继续作为未验证证据边界。
 5. `M7-05` — `DONE`。实现与 arm64 测试超时修复均已提交并推送；Windows 全仓 Race/Vet、隔离 Linux clean `full`、Linux amd64/arm64 全仓 Race、修复与证据 Head 精确 CI、commit-bound Tier 3 最终独立复审及用户阶段复审均已闭环。
 6. `M7-06` — `DONE`。正式 Commit `5b88b46f29be882525038ea3f2c749fd24a53646`、隔离 Linux amd64 clean `full`、实现与证据 Head 的精确 CI `#33492076511`、`#33493628266`、Linux amd64/arm64 Short Fuzz、commit-bound Tier 3 独立复审及用户阶段复审均已闭环。
-7. `M7-07` 至 `M7-09` — `READY`，本轮不启动。
-8. `M7-10` — 继续等待 M7-07 至 M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
+7. `M7-07` — `IN_PROGRESS`。Linux-only 产品 Leak Harness、Runner、Builder 与证据已实现；WSL2 开发 Smoke、隔离 Docker Linux amd64 clean `full` 与完整三分区 Race 通过，独立原生 Linux arm64、正式 Commit、精确 CI 与最终 commit-bound Tier 3 复审待完成。
+8. `M7-08` 至 `M7-09` — `READY`，本轮不启动。
+9. `M7-10` — 继续等待 M7-07 至 M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `91/95`。M7 当前为 `6/10 IN_PROGRESS`，M7-01 至 M7-06 已 `DONE`，M7-07 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `91/95`。M7 当前为 `6/10 IN_PROGRESS`，M7-01 至 M7-06 已 `DONE`，M7-07 为 `IN_PROGRESS`，M7-08 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -1947,3 +1948,25 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 状态影响：M7-06 从 `REVIEW` 转为 `DONE`，M7 从 `5/10` 更新为 `6/10 IN_PROGRESS`，全局从 `90/95` 更新为 `91/95`。M7-07 至 M7-09 继续保持 `READY`，本轮不启动；M7-10 继续等待 M7-07 至 M7-09 全部 `DONE`。
 - 证据边界：用户阶段批准不扩大已验证范围；Short Fuzz 与 60 秒单目标 `full` 未穷举全部输入空间，WSL/Docker 开发反馈也不替代已记录的原生 Linux CI。Alpha Release Gate Checklist 继续保持未勾选。
 - 文档同步：只更新本开发计划与 `tests/fuzz/m7-06-evidence.md` 的状态、批准证据和计数。根 README、总技术方案、Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、生产配置、权限模型、日志字段与 `AGENTS.md` 无需更新，因为本轮没有改变产品行为、用户命令、机器契约或验证入口。
+
+## 2026-09-01 · M7-07 Leak Test Harness 开发 Smoke · IN_PROGRESS
+
+- 授权与范围：用户在 M7-06 阶段复审通过后明确要求继续推进。本轮只启动 M7-07，不进入 M7-08，不修改生产代码、协议、Schema、依赖、配置、权限、日志契约或 CI/CD，也未暂存、提交或推送。
+- 实现：新增 Linux-only `TestM7ResourceLeak`，复用真实 Bootstrap、TLS Gateway、Token-only Agent、Public Listener 与 Origin。Harness 按 connection churn/Cancel-Drain、Server Restart/Reconnect、完整 Drain Matrix 分区执行一个 warmed epoch 和后续等量 epoch；业务 Session、WorkPool、Pending、Active 与 Limit Map 继续精确归零，进程层 FD/goroutine 不高于 warmed baseline。
+- 内存判据：每个 epoch 的子测试 Cleanup 完成后执行两轮 GC，再记录 `HeapAlloc`、`HeapObjects`、`HeapInuse`、`StackInuse`、RSS 与 GC 次数。Repair round 2 将判据收紧为 Full 的三个等量测量 epoch 相对 warmed baseline 累计 `HeapAlloc +1 MiB`、`HeapObjects +3,000`，并补“小步稳定增长”合成回归；FD/goroutine 的 warmed 与终态均要求连续三次稳定。RSS 只记录诊断趋势，不要求 Go allocator 把 arena 字节级归还 OS，也不调用 `debug.FreeOSMemory` 美化结果。
+- Runner/Builder：新增 `tests/leak/run-m7-07.sh`、Windows-to-Linux development builder、README 与独立 evidence。`smoke` 固定为 2 epoch × 20 TCP；`full` 固定为 4 epoch × 100 TCP，先按仓库规则执行 Web `npm ci/check/build`，再执行全部三分区并追加缩小规模的完整三分区 Race。Full 要求 clean worktree，Runner 冻结前后 Commit/状态并校验 Artifact SHA-256；预编译 Binary 只允许 smoke。
+- WSL2 开发反馈：Linux amd64 交叉编译、Runner/Builder 语法检查通过；churn、reconnect、完整 Drain 三分区的 2-epoch 手工运行均通过，FD/goroutine 回到 7/3，GC 后 heap 未持续增长。Repair round 2 后的统一 Runner `smoke` 也通过，连续稳定资源采样、相对完整 Artifact 与第二目录搬移读回均成功；新清单 SHA-256 为 `272a7086d303cc32b980cf3fd6f34707b4030220d254df952522fc15cd614790`。此前 `2fa8cc...` 仅是修复前历史开发反馈。WSL2/脏工作区结果不冒充原生 Linux、clean full 或 CI。
+- Repair round 1：隔离 Docker 首次因 Windows checkout 的 CRLF 在 Linux bind mount 下触发 clean-tree Gate、第二次因 Linux-native clean clone 缺少被忽略的 `web/dist`，均在产品测试启动前失败。当前不放宽 Gate，改为容器内 clone，并在 Full Runner 最小补充 Web 前置构建及对应 Artifact 日志；两次不记为产品失败或 PASS。
+- Repair round 2：Tier 3 复审发现 heap oracle/单点 warmed baseline、Builder freshness/输出边界、硬 watchdog、Artifact 可搬移性/覆盖、Reconnect/Drain Race 与失败码/工具证据缺口。当前最小改为累计 heap 预算与合成回归、连续稳定样本、仓库外空 Builder 目录与前后 Commit/Tree/status freeze、TERM 后 15 秒 KILL、相对完整 Artifact 的第二目录读回、缩小规模的完整三分区 Race，并保留原始失败码与 GNU coreutils 版本。
+- Repair round 3：独立复审补充发现 Builder 个别 Git 命令未立即检查退出码、Web 三步骤未受进程 watchdog 约束、Artifact 搬移校验临时目录只在成功路径清理。当前分别改为每条 Git 命令立即 fail-closed、Web 10/5/5 分钟且 TERM 后 15 秒 KILL、EXIT/Signal trap 精确清理并保留原始失败码；PowerShell AST、POSIX Shell 语法、WSL ShellCheck、Builder 正向/仓库内输出负向检查与新 Runner smoke 均通过。
+- 隔离 clean `full`：仓库外临时候选 Commit `23b0f282df66aa12e1b8ac642794ea17be3d6884`、Tree `b5ec2be7e4bd67359776e2c18a8092dfaeb58377`、Runner mode=`100755`，在 Docker LinuxKit amd64、Go `1.27.0/local`、CGO=1、Node `24.19.0`、npm `11.17.0` 中执行。Web `ci/check/build`、4 epoch × 100 全三分区普通测试与 2 epoch × 20 完整三分区 Race 均 PASS；运行前后 Commit/Tree/status 相同且 clean，9 项 Artifact 在原目录与搬移目录两次逐项校验通过，清单 SHA-256=`be05b98b892331f281eb21308d30e68385afc2fab614760a71df75ca22d1dc66`。该一次性候选不写入项目历史，Docker LinuxKit 不替代正式 Commit、独立原生主机/arm64 或 CI。
+- 工作树复审：Harness、Runner/Builder、状态/证据三个 Tier 3 独立分区均为 `COMPLETE/FRESH/PASSED`，P0/P1/P2=`0/0/0`。该结论绑定当前工作树，不替代正式 Commit 上的最终 commit-bound 复审。
+- 状态与剩余 Gate：Windows 全仓 Test/Vet 与上述 Linux amd64 clean `full`/Race 已通过；独立原生 Linux arm64、正式 Commit、精确 CI 与最终 commit-bound Tier 3 复审尚未完成。M7-07 保持 `IN_PROGRESS`；全局 `DONE` 保持 `91/95`，M7 保持 `6/10 IN_PROGRESS`，M7-08 不启动，Alpha Release Gate Checklist 不变。
+
+## 2026-09-01 · M7-07 Linux CI full 矩阵接线 · IN_PROGRESS
+
+- 授权：用户在获知两个 Linux Job 各增加约 4–8 分钟、可能提高 45 分钟 Job 超时风险后，明确回复“确认修改 M7-07 CI”。本授权只覆盖当前 M7-07 CI 接线，不包含暂存、提交或推送。
+- 实现：现有 Linux `verify` amd64/arm64 矩阵新增 15 分钟 `Run native M7 resource leak full` Step；按架构写入 `$RUNNER_TEMP/m7-07-leak-<arch>`，执行统一 Runner `full`，要求 Artifact 清单存在，在结果目录逐项 `sha256sum -c` 后输出清单自身 Hash。现有 45 分钟 Job 总上限、固定 Go/Node 工具链、Runner、权限、其他 Linux Gate 与 Windows Job 均不修改。
+- 本地验证：PyYAML `6.0.3` 解析和精确矩阵/命令/超时断言通过；Workflow Diff Check 通过；新增 CI Artifact 读回块对 R3 Linux amd64 clean `full` 的 9/9 条目再次返回 `OK`，清单 SHA-256 仍为 `be05b98b892331f281eb21308d30e68385afc2fab614760a71df75ca22d1dc66`。本机无 `actionlint`，该项为 `UNAVAILABLE`，未临时安装或绕过仓库工具链。
+- 工作树复审：CI/Runner 静态分区、状态/证据分区与 Harness→Runner→双架构矩阵→Artifact 的集成分区均为 `COMPLETE/FRESH/PASSED`，P0/P1/P2=`0/0/0`。该结论只绑定当前未提交工作树，不替代正式 Commit 上的 commit-bound 复审或精确 GitHub Actions。
+- 状态与剩余 Gate：Workflow 只处于未提交工作树，精确 GitHub Actions 为 `NOT RUN`，原生 Linux arm64 也尚无本轮运行证据；不得把本地解析、Docker amd64 或 Artifact 读回冒充 CI。M7-07 继续 `IN_PROGRESS`，全局 `DONE` 保持 `91/95`、M7 保持 `6/10 IN_PROGRESS`；M7-08 不启动，Alpha Release Gate Checklist 不变。

@@ -131,6 +131,20 @@ jobs:
           sha256sum -c "$result_dir/artifact-sha256.txt"
           sha256sum "$result_dir/artifact-sha256.txt"
 
+      - name: Run native M7 resource leak full
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          result_dir="$RUNNER_TEMP/m7-07-leak-${{ matrix.arch }}"
+          sh ./tests/leak/run-m7-07.sh -m full -o "$result_dir"
+          test -s "$result_dir/artifact-sha256.txt"
+          (
+            cd "$result_dir"
+            sha256sum -c artifact-sha256.txt
+            sha256sum artifact-sha256.txt
+          )
+
       - name: Run native M4 product data plane E2E
         shell: bash
         timeout-minutes: 5
