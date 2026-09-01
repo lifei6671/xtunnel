@@ -482,6 +482,71 @@ func TestWebSocketShutdownDeadlineForceClosesHijackedConnection(t *testing.T) {
 	assertConnectionClosed(t, origin, originReader, "Origin")
 }
 
+func TestWebSocketShutdownDeadlineForceClosesClientAfterOriginHalfClose(t *testing.T) {
+	server, dialer := startWebSocketServer(t, loopbackTCPConnectionPair)
+	client, clientReader, origin, _, _ := openWebSocket(t, server, dialer)
+	defer client.Close()
+
+	// 先让真实 TCP Origin 以 EOF 结束。ReverseProxy 会把它传播为 client
+	// CloseWrite 并继续等待 client 输入，稳定进入曾使 Shutdown 永久等待的状态。
+	if err := origin.Close(); err != nil {
+		t.Fatalf("close WebSocket Origin before shutdown: %v", err)
+	}
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set WebSocket Client half-close deadline: %v", err)
+	}
+	if _, err := clientReader.ReadByte(); !errors.Is(err, io.EOF) {
+		t.Fatalf("WebSocket Client read after Origin close = %v, want EOF", err)
+	}
+	if err := client.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear WebSocket Client half-close deadline: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- server.Shutdown(ctx) }()
+	select {
+	case err := <-shutdownResult:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Shutdown() error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(time.Second):
+		// 先解除可能仍阻塞的旧实现，避免失败断言再卡在 Server Cleanup。
+		_ = client.Close()
+		select {
+		case <-shutdownResult:
+			t.Fatal("Shutdown required the client to close itself after Origin half-close")
+		case <-time.After(time.Second):
+			t.Fatal("Shutdown remained blocked after the client fallback close")
+		}
+	}
+}
+
+func TestWebSocketForceCloseRejectsConnectionsBoundAfterCancellation(t *testing.T) {
+	owner := newWebSocketIdleOwner(time.Minute)
+	if err := owner.forceClose(); err != nil {
+		t.Fatalf("forceClose() before bind error = %v", err)
+	}
+
+	for _, test := range []struct {
+		name string
+		bind func(net.Conn) error
+	}{
+		{name: "client", bind: owner.bindClient},
+		{name: "backend", bind: owner.bindBackend},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			connection, peer := net.Pipe()
+			defer peer.Close()
+			if err := test.bind(connection); !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("bind after forceClose() error = %v, want net.ErrClosed", err)
+			}
+			assertConnectionClosed(t, peer, bufio.NewReader(peer), test.name+" peer")
+		})
+	}
+}
+
 func TestWebSocketCloseForceClosesActiveHijackedConnection(t *testing.T) {
 	server, dialer := startWebSocketServer(t, pipeConnectionPair)
 	client, clientReader, origin, originReader, _ := openWebSocket(t, server, dialer)

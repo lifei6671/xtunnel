@@ -26,6 +26,7 @@ import (
 const (
 	m7ShutdownGracePeriod = 2 * time.Second
 	m7ShutdownHardPeriod  = 250 * time.Millisecond
+	m7ShutdownSocketLimit = 10 * time.Second
 )
 
 // TestM7GracefulShutdownChaos 只从真实公网 Listener 进入生产 Bootstrap、Gateway、
@@ -197,6 +198,10 @@ func testM7TCPHalfCloseNaturalDrain(t *testing.T) {
 	if _, err := public.Write([]byte("public-head")); err != nil {
 		t.Fatalf("write M7-03 TCP request: %v", err)
 	}
+	// Origin 已接受连接不等于 Agent WorkPool 的 ACTIVE 计数已经发布。Shutdown
+	// 以该 owner 状态决定是否排空，必须先观察线性化后的 ACTIVE 再启动关闭，
+	// 否则测试可能把尚未发布的流量误当成“关闭过早返回”。
+	m7WaitForAgentActiveWork(t, fixture, 1)
 	shutdownDone := m7StartServerClose(fixture)
 	// 先观察生产 StopAccepting 发布的空 Actual，证明 admission fence 已建立；
 	// 此后 Listener 关闭探针即使在内核队列中完成握手，也不会进入 Handler/OPEN。
@@ -347,7 +352,9 @@ func testM7HardDeadlineForceClose(t *testing.T) {
 	waitForProductGateIdleWork(t, fixture.runtime, 3)
 
 	publicTCP := dialProductGateTCP(t, fixture.publicTCP, "127.0.0.1")
+	t.Cleanup(func() { _ = publicTCP.Close() })
 	originTCP := fixture.tcpOrigin.next(t, "M7-03 hard deadline")
+	t.Cleanup(func() { _ = originTCP.Close() })
 	if _, err := publicTCP.Write([]byte("x")); err != nil {
 		t.Fatalf("prime M7-03 hard-deadline TCP: %v", err)
 	}
@@ -361,7 +368,9 @@ func testM7HardDeadlineForceClose(t *testing.T) {
 		originTCPDone <- errors.Join(readErr, originTCP.Close())
 	}()
 
-	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	clientTransport := &http.Transport{DisableKeepAlives: true}
+	t.Cleanup(clientTransport.CloseIdleConnections)
+	client := &http.Client{Transport: clientTransport}
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
 		"http://"+fixture.publicHTTP+"/gate/slow", nil)
 	if err != nil {
@@ -372,6 +381,7 @@ func testM7HardDeadlineForceClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start M7-03 hard-deadline HTTP request: %v", err)
 	}
+	t.Cleanup(func() { _ = response.Body.Close() })
 	select {
 	case <-httpReady:
 	case <-time.After(3 * time.Second):
@@ -379,6 +389,7 @@ func testM7HardDeadlineForceClose(t *testing.T) {
 	}
 
 	webSocket, webSocketReader := m7DialShutdownWebSocket(t, fixture.publicHTTP)
+	t.Cleanup(func() { _ = webSocket.Close() })
 	select {
 	case <-webSocketReady:
 	case <-time.After(3 * time.Second):
@@ -708,6 +719,27 @@ func m7WaitForAgentDraining(t *testing.T, fixture *m7ShutdownFixture) {
 	}
 }
 
+func m7WaitForAgentActiveWork(t *testing.T, fixture *m7ShutdownFixture, want uint32) {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		for _, snapshot := range fixture.runtime.sessions.RuntimeStatusSnapshots() {
+			if snapshot.TunnelID == productGateTunnelID && snapshot.CurrentControlSession &&
+				snapshot.WorkPool.Active >= want {
+				return
+			}
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("M7-03 Agent did not publish %d ACTIVE Work connections", want)
+		case <-ticker.C:
+		}
+	}
+}
+
 func m7AssertNewOpenRejected(t *testing.T, fixture *m7ShutdownFixture) {
 	t.Helper()
 	connection := dialProductGateTCP(t, fixture.publicTCP, "127.0.0.2")
@@ -733,7 +765,7 @@ func m7ServeShutdownWebSocket(writer http.ResponseWriter, request *http.Request,
 		return fmt.Errorf("hijack M7-03 WebSocket Origin: %w", err)
 	}
 	defer connection.Close()
-	if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := connection.SetDeadline(time.Now().Add(m7ShutdownSocketLimit)); err != nil {
 		return err
 	}
 	accept := productGateWebSocketAccept(request.Header.Get("Sec-WebSocket-Key"))
@@ -765,7 +797,7 @@ func m7DialShutdownWebSocket(t *testing.T, address string) (net.Conn, *bufio.Rea
 	if err != nil {
 		t.Fatalf("dial M7-03 WebSocket listener: %v", err)
 	}
-	if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := connection.SetDeadline(time.Now().Add(m7ShutdownSocketLimit)); err != nil {
 		_ = connection.Close()
 		t.Fatalf("set M7-03 WebSocket deadline: %v", err)
 	}

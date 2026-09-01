@@ -169,8 +169,9 @@ func (server *Server) Shutdown(ctx context.Context) error {
 			cancel := server.cancel
 			server.mu.Unlock()
 			if cancel != nil {
-				// ReverseProxy 观察 Request Context 取消后先关闭 Tunnel backend，
-				// 双向复制随即退出并 defer 关闭 Hijacked client socket。
+				// ReverseProxy 会观察 Request Context 取消并关闭 Tunnel backend；
+				// WebSocket owner 同时关闭已 Hijack 的 client/backend，确保 backend
+				// 已先 EOF/CloseWrite 时仍能解除反向复制。
 				cancel()
 			}
 			drainErr = errors.Join(drainErr, normalizeClosedError(httpServer.Close()))

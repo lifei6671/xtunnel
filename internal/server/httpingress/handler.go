@@ -228,8 +228,24 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	proxyWriter := writer
 	if webSocket {
 		// Upgrade 使用 fresh、不可重试的单请求 Transport；普通请求继续使用按
-		// Tunnel/Service/Revision 隔离的 HTTP/1.1 KeepAlive 池。
+		// Tunnel/Service/Revision 隔离的 HTTP/1.1 KeepAlive 池。Request Context
+		// 取消时必须同时强关 Hijack client 和 backend；只关闭 backend 会在真实
+		// CloseWrite 连接上留下仍等待 client 输入的复制 goroutine。
 		idle := newWebSocketIdleOwner(handler.webSocketIdleTimeout)
+		forceCloseDone := make(chan struct{})
+		stopForceClose := context.AfterFunc(request.Context(), func() {
+			defer close(forceCloseDone)
+			// 取消后的强关只负责解除 IO；Handler 返回和 ACTIVE 归零是 Shutdown
+			// 的权威收敛结果，因此这里不把重复 Close 错误提升为新的公开失败。
+			_ = idle.forceClose()
+		})
+		defer func() {
+			if !stopForceClose() {
+				// Stop 返回 false 时回调可能仍在调度或执行；显式等待 owner
+				// 完成双端 Close，Handler 返回后不遗留取消 goroutine。
+				<-forceCloseDone
+			}
+		}()
 		transport = handler.pools.webSocketTransport(match.Route, idle)
 		proxyWriter = &webSocketResponseWriter{ResponseWriter: writer, idle: idle}
 	} else {

@@ -21,9 +21,12 @@ type webSocketIdleOwner struct {
 	mu              sync.Mutex
 	client          net.Conn
 	backend         net.Conn
+	closed          bool
 	deadline        time.Time
 	deadlineVersion uint64
 	applying        bool
+	closeOnce       sync.Once
+	closeErr        error
 }
 
 func newWebSocketIdleOwner(timeout time.Duration) *webSocketIdleOwner {
@@ -32,6 +35,10 @@ func newWebSocketIdleOwner(timeout time.Duration) *webSocketIdleOwner {
 
 func (owner *webSocketIdleOwner) bindClient(connection net.Conn) error {
 	owner.mu.Lock()
+	if owner.closed {
+		owner.mu.Unlock()
+		return errors.Join(net.ErrClosed, connection.Close())
+	}
 	owner.client = connection
 	owner.mu.Unlock()
 	return owner.touch()
@@ -39,6 +46,10 @@ func (owner *webSocketIdleOwner) bindClient(connection net.Conn) error {
 
 func (owner *webSocketIdleOwner) bindBackend(connection net.Conn) error {
 	owner.mu.Lock()
+	if owner.closed {
+		owner.mu.Unlock()
+		return errors.Join(net.ErrClosed, connection.Close())
+	}
 	owner.backend = connection
 	owner.mu.Unlock()
 	return owner.touch()
@@ -46,6 +57,10 @@ func (owner *webSocketIdleOwner) bindBackend(connection net.Conn) error {
 
 func (owner *webSocketIdleOwner) touch() error {
 	owner.mu.Lock()
+	if owner.closed {
+		owner.mu.Unlock()
+		return net.ErrClosed
+	}
 	if owner.timeout <= 0 {
 		owner.mu.Unlock()
 		return errors.New("websocket idle timeout is invalid")
@@ -90,6 +105,33 @@ func (owner *webSocketIdleOwner) touch() error {
 		}
 		owner.mu.Unlock()
 	}
+}
+
+// forceClose 在 Request Context 取消时同步关闭已经 Hijack 的 client 与 Tunnel
+// backend。标准库不再拥有 Hijack 后的 client；若 backend 先以 EOF 结束，
+// ReverseProxy 只会半关闭 client 写侧并继续等待反向输入，因此 Shutdown 必须由
+// 这个 owner 同时解除两个复制方向。closed 门禁保证取消早于 bind 时，迟到连接也
+// 会立即失败并自行关闭。
+func (owner *webSocketIdleOwner) forceClose() error {
+	owner.closeOnce.Do(func() {
+		owner.mu.Lock()
+		owner.closed = true
+		client := owner.client
+		backend := owner.backend
+		owner.client = nil
+		owner.backend = nil
+		owner.mu.Unlock()
+
+		var clientErr, backendErr error
+		if client != nil {
+			clientErr = client.Close()
+		}
+		if backend != nil {
+			backendErr = backend.Close()
+		}
+		owner.closeErr = errors.Join(clientErr, backendErr)
+	})
+	return owner.closeErr
 }
 
 // webSocketActivityConn 保留 net.Conn/CloseWrite 能力，只在真实字节进展后续期。
