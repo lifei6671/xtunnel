@@ -3,6 +3,7 @@ package tcpingress
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -1251,14 +1252,55 @@ func (limiter *recordingSourceLimiter) callsSnapshot() []netip.Addr {
 	return append([]netip.Addr(nil), limiter.calls...)
 }
 
+func TestWaitForPeerClosedAcceptsConnectionClosedBeforeDeadline(t *testing.T) {
+	serverConnection, peer := net.Pipe()
+	if err := peer.Close(); err != nil {
+		t.Fatalf("peer.Close() error = %v", err)
+	}
+	defer serverConnection.Close()
+
+	if err := waitForPeerClosed(peer, time.Second); err != nil {
+		t.Fatalf("waitForPeerClosed() error = %v", err)
+	}
+}
+
+func TestWaitForPeerClosedRejectsOpenConnectionAtDeadline(t *testing.T) {
+	serverConnection, peer := net.Pipe()
+	defer serverConnection.Close()
+	defer peer.Close()
+
+	err := waitForPeerClosed(peer, 10*time.Millisecond)
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("waitForPeerClosed() error = %v, want deadline exceeded", err)
+	}
+}
+
 func assertPeerClosed(t *testing.T, connection net.Conn) {
 	t.Helper()
 	defer connection.Close()
-	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatalf("SetReadDeadline() error = %v", err)
+	if err := waitForPeerClosed(connection, time.Second); err != nil {
+		t.Fatal(err)
 	}
+}
+
+func waitForPeerClosed(connection net.Conn, timeout time.Duration) error {
+	if err := connection.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) {
+			return nil
+		}
+		return fmt.Errorf("set peer read deadline: %w", err)
+	}
+
 	buffer := make([]byte, 1)
-	if _, err := connection.Read(buffer); err == nil {
-		t.Fatal("peer remained open")
+	_, err := connection.Read(buffer)
+	if err == nil {
+		return errors.New("peer remained open")
 	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return fmt.Errorf("peer remained open until read deadline: %w", err)
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return fmt.Errorf("read peer close: %w", err)
 }
