@@ -1,8 +1,7 @@
-# M7-04 Server Persistence/Filesystem Failpoints 开发证据
+# M7-04 Server Persistence/Filesystem Failpoints 交付证据
 
-> 状态：`IN_PROGRESS`（SQLite、Gateway Rotation、Backup/Restore 的确定性
-> Failpoint 与目录切换真实子进程 `SIGKILL` 已实现，隔离 clean `full` 与 Tier 3
-> 集成复审已通过；最终项目 Commit/CI 与 Linux Race 尚未闭环）
+> 状态：`REVIEW`（最终实现 Commit、commit-bound clean `full`、原生 Linux Race、
+> 精确 CI 与 Tier 3 commit-bound 最终独立复审已通过，等待用户阶段复审）
 
 ## 证据边界
 
@@ -34,6 +33,9 @@ write/fsync/rename 边界返回 `EIO` 或 `ENOSPC`；默认入口仍调用原有
 ## 当前验证
 
 - 起始基线：`HEAD 17b94968b117de9002c25e3f427c0dc956ee9faf`，任务开始时工作区干净。
+- 最终实现 Commit：`fdb7b3d02b72094564c417205b682b5fc9f71cf6`，Tree
+  `1d96dc2986e57b861711f8f90eff77cdc9d9bf17`，Parent 为起始基线；已推送且
+  远端 `master` 精确一致。Commit 恰好包含 14 个任务路径，Runner mode=`100755`。
 - 工具链：Windows `go1.27.0`、`GOTOOLCHAIN=local` 检查通过。
 - Windows 三包定向验证通过：
 
@@ -46,7 +48,6 @@ write/fsync/rename 边界返回 `EIO` 或 `ENOSPC`；默认入口仍调用原有
 - SQLite 目标测试 `count=20`、目标 Race `count=10` 与包级 Test/Vet 通过。
 - Gateway 分区的 Windows Test/Race/Vet 通过；Linux amd64、`CGO_ENABLED=0` Test
   Binary 在 WSL2 Linux-native `/tmp` 的目标测试与包级测试通过，Linux Vet 通过。
-  当前 WSL2 未安装 Go，Linux Race 为 `UNAVAILABLE`，仍需最终 CI 补齐。
 - Durableops `linux/amd64`、`GOAMD64=v1`、`CGO_ENABLED=0` Test Binary 在 WSL2
   运行五个定向场景并返回 `PASS`，包括 Backup hard-exit、发布 Failpoint、历史候选保留、
   Restore Journal Failpoint 与 interrupted-state matrix。
@@ -61,7 +62,26 @@ write/fsync/rename 边界返回 `EIO` 或 `ENOSPC`；默认入口仍调用原有
   rename 后 `SIGKILL` 场景；`full.log` SHA-256 为
   `15121d2491d83c3471a69fe580c10f1562e4fbcea9cc5112b218971e76b6dd40`。
   该一次性本地 Commit 不在项目 refs 中，不替代最终项目 Commit 或 CI。
-- `git diff --check` 通过；当前只出现仓库既有的 Windows LF/CRLF 工作树提示。
+- 正式 Commit 另以固定 Go `1.27.0`、`GOTOOLCHAIN=local` 构建 `linux/amd64`、
+  `GOAMD64=v1`、`CGO_ENABLED=0` 三个 Test Binary；Manifest
+  `85226DD2269515798DEB33596738737E997EE308376216F08578113F9C003565`
+  记录 `worktree_clean=true`。同一产物在 WSL2 Linux-native `/tmp` 的 `full`
+  三分区全部通过，包含四个真实 rename 后 `SIGKILL` 场景。
+- 官方 `golang:1.27.0-bookworm` 镜像 Digest
+  `sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452`，
+  Linux amd64、CGO=1、`GOTOOLCHAIN=local`。对正式 Commit 的 `git archive`
+  快照执行以下 Race，三包全部通过：
+
+  ```text
+  go test -race -count=1 -timeout 300s ./internal/repository/sqlite ./internal/server/gateway ./internal/server/durableops
+  ```
+
+- [GitHub Actions #33468280052](https://github.com/lifei6671/xtunnel/actions/runs/33468280052)
+  的 Head SHA 精确匹配正式 Commit，结论 `completed/success`；Linux amd64、Linux
+  arm64、Windows Agent service 与 Windows arm64 Agent runtime 四个 Job 全部成功。
+  CI 自身的 Linux Race 白名单不包含本次三个包，因此本任务 Race 结论来自上一条
+  独立原生 Linux 运行，不混同为 CI Race。
+- 正式 Commit 范围 `git diff --check` 通过；工作区在提交、推送与复审时干净。
 
 ## Checkpoint 复审
 
@@ -86,6 +106,11 @@ write/fsync/rename 边界返回 `EIO` 或 `ENOSPC`；默认入口仍调用原有
   PARTITIONED_PLUS_INTEGRATION`，Integration mode=`CHILD_AGENT`，Gate=`PASSED`，
   Coverage=`COMPLETE`、Freshness=`FRESH`，P0/P1/P2=`0/0/0`。首轮发现一项证据
   P1：误把不可用的 Linux Race 写为已通过；修复后 Repair round 1 复审关闭。
+- 正式 Commit-bound 最终复审：`CHILD_AGENT / Standard Mode / Tier 3 /
+  PARTITIONED_PLUS_INTEGRATION`，Gate=`PASSED`，Coverage=`COMPLETE`、
+  Freshness=`FRESH`，P0/P1/P2=`0/0/0`，无 Finding。复审确认正式 Commit tree、
+  14 个任务路径、14/14 Git Blob、Runner mode、远端 SHA、精确 CI 与独立 Linux
+  Race 一致；该结论只支持进入 `REVIEW`，不替代用户阶段批准。
 
 ## 隐藏候选清理策略评估
 
@@ -98,8 +123,8 @@ M7-04 的安全结论是继续保留 fail-closed 行为：生产代码不自动�
 ## 剩余边界
 
 - 仍缺真实存储层的 `EIO/ENOSPC`、SQLite WAL/COMMIT fsync 中断、断电恢复与任意时刻
-  崩溃证据；当前环境无提权、挂载和隔离块设备权限，不能安全补齐这些证据。
-- 隔离开发态 clean `full` 与终态集成复审已通过；仍缺最终项目 Commit、精确 CI 与
-  Linux Race。
-- M7-04 保持 `IN_PROGRESS`；M7 Alpha Gate Checklist 不勾选，M7-09 继续等待
-  M7-04 `DONE`。
+  崩溃证据；本轮未在专用可销毁块设备或断电仿真环境运行，不记录为通过。
+- 最终项目 Commit、commit-bound clean `full`、原生 Linux Race、精确 CI 与最终独立
+  复审均已通过；仍等待用户阶段复审。
+- M7-04 进入 `REVIEW`；全局 `DONE` 保持 `88/95`，M7 Alpha Gate Checklist 不勾选，
+  M7-09 继续等待 M7-04 `DONE`。
