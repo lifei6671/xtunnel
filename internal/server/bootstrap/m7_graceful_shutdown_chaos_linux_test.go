@@ -397,7 +397,7 @@ func testM7HardDeadlineForceClose(t *testing.T) {
 	}
 
 	m7AssertConnectionClosed(t, publicTCP, "public TCP")
-	m7RequireResult(t, originTCPDone, "TCP Origin force close", true)
+	m7RequireTransportUnblocked(t, originTCPDone, "TCP Origin force close")
 	m7AssertHTTPBodyClosed(t, response.Body)
 	m7RequireResult(t, httpCanceled, "HTTP Origin cancellation", true)
 	if err := webSocket.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -489,7 +489,7 @@ func testM7AgentHardDeadlineForceClose(t *testing.T) {
 	}
 	m7RequireResult(t, trafficDone, "Agent hard-deadline active traffic force close", true)
 	m7AssertConnectionClosed(t, public, "Agent hard-deadline public TCP")
-	m7RequireResult(t, originDone, "Agent hard-deadline Origin unblock", false)
+	m7RequireTransportUnblocked(t, originDone, "Agent hard-deadline Origin force close")
 	_ = public.Close()
 
 	if err := fixture.closeServer(); err != nil {
@@ -675,6 +675,16 @@ func m7RequireResult(t *testing.T, done <-chan error, operation string, wantErro
 	}
 	if !wantError && err != nil && !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("M7-03 %s: %v", operation, err)
+	}
+}
+
+func m7RequireTransportUnblocked(t *testing.T, done <-chan error, operation string) {
+	t.Helper()
+	err := m7ReceiveResult(t, done, operation)
+	// TCP 对端被主动关闭时，Linux 可能把结果呈现为 EOF（io.Copy 返回 nil），
+	// 也可能呈现为 RST。两者都证明阻塞 IO 已解除；只有超时才违反 Shutdown 契约。
+	if m7IsTimeoutError(err) {
+		t.Fatalf("M7-03 %s timed out instead of observing transport close: %v", operation, err)
 	}
 }
 
@@ -870,8 +880,11 @@ func m7AssertShutdownQuiescent(t *testing.T, fixture *m7ShutdownFixture, baselin
 			limits.WorkTotal == 0 && limits.WorkConnecting == 0 && limits.WorkIdle == 0 &&
 			limits.PendingOpens == 0 && limits.ActiveTotal == 0 && len(limits.ActiveByTunnel) == 0 &&
 			len(limits.ActiveByService) == 0 && len(limits.ActiveBySource) == 0
-		if len(snapshots) == 0 && limitsZero && current.FDs == baseline.FDs &&
-			current.Goroutines == baseline.Goroutines {
+		// Session 与 Quota 是本场景拥有的资源，必须精确归零。进程级 FD/goroutine
+		// 基线还包含 Go test 运行时和先前用例的异步清理；终态低于基线不是泄漏，
+		// 但任何高于基线的结果都必须继续等待并最终失败。
+		if len(snapshots) == 0 && limitsZero && current.FDs <= baseline.FDs &&
+			current.Goroutines <= baseline.Goroutines {
 			t.Logf("M7-03 resources: baseline_fd=%d final_fd=%d baseline_goroutines=%d final_goroutines=%d",
 				baseline.FDs, current.FDs, baseline.Goroutines, current.Goroutines)
 			return
