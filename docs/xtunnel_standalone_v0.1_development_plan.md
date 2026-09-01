@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-01
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-03 · DONE；M7-04 · REVIEW）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-04 · DONE；M7-05 至 M7-09 · READY）
 >
-> **当前结论**：M7-01 至 M7-03 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `88/95`。M7-04 最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6` 已完成 SQLite 原生 `SQLITE_FULL`、Gateway Rotation、Backup/Restore write/fsync/rename 确定性 Failpoint、Backup ACK 前 hard-exit、Gateway/Restore rename 后真实子进程 `SIGKILL` 与 Linux Builder/Runner；该 Commit 的 WSL2 clean Runner `full`、Docker Linux amd64/CGO=1 三包 Race、精确 CI `#33468280052` 与 Tier 3 commit-bound 最终独立复审均已通过。M7-04 进入 `REVIEW`，等待用户明确阶段复审；真实块设备 EIO/ENOSPC、物理断电、SQLite WAL/COMMIT fsync 中断与任意时刻崩溃仍是未验证边界，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01 至 M7-04 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `89/95`，M7 为 `4/10 IN_PROGRESS`。M7-04 最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6` 的 WSL2 clean Runner `full`、Docker Linux amd64/CGO=1 三包 Race、精确 CI `#33468280052` 与 Tier 3 commit-bound 最终独立复审均已通过；证据 Head `806bfa0d719259642dc152a0b96f80894b0cd637` 的精确 CI `#33469332157` 四个 Job 也全部成功，用户已明确回复“`M7-04 阶段复审通过`”。M7-09 的任务级依赖现已满足并转为 `READY`；真实块设备 EIO/ENOSPC、物理断电、SQLite WAL/COMMIT fsync 中断与任意时刻崩溃仍是未验证证据边界，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -111,8 +111,8 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 7 | `DONE` | M5-11 | M6-07 |
-| M7 Hardening/Alpha | 10 | 3 | `IN_PROGRESS` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **88** |  |  |  |
+| M7 Hardening/Alpha | 10 | 4 | `IN_PROGRESS` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
+| **合计** | **95** | **89** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -400,12 +400,12 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-01 | Limits/Timeout/Rate Benchmark | M1-12、M3-10、M4-09 | `tests/benchmark` + 调优证据 | 对 16/32/64 KiB Proxy Buffer、HTTP/1.1 WorkConn Capacity、Connector Selection CPU/Allocation 做 Benchmark；只依据本项目结果调整 Server Schema 默认值，不删除预算维度；记录 CPU/RAM/FD 环境 | `DONE` |
 | M7-02 | Reconnect Storm/Backoff/Fencing | M2-07、M6-02 | Chaos Test | 100/500/1000 Connector 使用 Stagger + Jitter 重连，无同步 TLS/Auth Storm；永久错误不快速重试；记录 Pending TLS/Auth、`retry_after`、FD/CPU/RAM；Server Restart 后测量 `T_control_reconnect`、`T_config_ready`、`T_workpool_ready`、`T_first_success` 分布，旧 generation 无污染 | `DONE` |
 | M7-03 | Graceful Shutdown Chaos | M1-13、M4-10 | Server/Agent Drain Test | 使用真实 TCP Half-Close、HTTP Streaming、WebSocket 和 Slow Origin 覆盖每个 Drain 阶段的丢包、延迟与对端消失；Graceful Period 后进入 Hard Deadline 并主动 Force Close；最终 FD/goroutine/计数归零 | `DONE` |
-| M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `REVIEW` |
+| M7-04 | Server Persistence/Filesystem Failpoints | M0-05、M1-04、M3-12 | Crash/EIO/Disk-full Suite | Server SQLite Migration、Gateway Rotation Journal、Backup/Restore 的 write/fsync/rename 断点；验证 Backup ACK 前最终路径不可见，并评估 SIGKILL 遗留私有隐藏候选的显式安全清理策略，禁止并发 Create 下按前缀盲删；只验证 Server durable operation 的异常注入和恢复收敛，不首次实现维护命令 | `DONE` |
 | M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `READY` |
 | M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `READY` |
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `READY` |
 | M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `READY` |
-| M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；两端 Agent Binary `service install/uninstall` 的安装/升级/卸载覆盖 Managed Marker、Binary 替换、Secret 不落 SCM/argv 和非托管 Unit/Service 拒绝边界；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `NOT_STARTED` |
+| M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；两端 Agent Binary `service install/uninstall` 的安装/升级/卸载覆盖 Managed Marker、Binary 替换、Secret 不落 SCM/argv 和非托管 Unit/Service 拒绝边界；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `READY` |
 | M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `NOT_STARTED` |
 
 ## 13.2 Alpha Release Gate Checklist
@@ -429,10 +429,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 1. `M7-01` — `DONE`。生产 32 KiB Buffer、关键测试、fresh Proxy 正式复验、精确 CI、commit-bound 最终独立复审与用户阶段复审均已闭环。
 2. `M7-02` — `DONE`。Chaos Harness、确定性 Backoff 单测、AUTH Reset 分类修复、WSL2 `/tmp` clean `full`、实现与证据提交的精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
 3. `M7-03` — `DONE`。真实 Server/Agent 产品链路 Harness、Builder/Runner、最终 Commit `cc1e668c8450fa6f1834ea646c21a9b4265fa33a` 的 WSL2 clean `full`、Linux amd64/arm64 Bootstrap Race、精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
-4. `M7-04` — `REVIEW`。最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6` 的 clean `full`、Docker Linux amd64/CGO=1 三包 Race、精确 CI `#33468280052` 与 Tier 3 commit-bound 最终独立复审均已通过，等待用户明确阶段复审。真实存储层故障继续作为未验证证据边界；不首次实现维护命令，不默认修改 Schema/Migration、公共 API/Protocol、依赖、CI/CD、生产配置、权限或日志契约。`M7-05` 至 `M7-08` 继续保持 `READY`。
-5. `M7-09` — 继续等待 M7-04 `DONE`；`M7-10` — 继续等待 M7-04 至 M7-09 全部 `DONE`。
+4. `M7-04` — `DONE`。最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6` 的 clean `full`、Docker Linux amd64/CGO=1 三包 Race、精确 CI `#33468280052`、Tier 3 commit-bound 最终独立复审、证据 Head `806bfa0d719259642dc152a0b96f80894b0cd637` 的精确 CI `#33469332157` 与用户阶段复审均已闭环。真实存储层故障继续作为未验证证据边界。
+5. `M7-05` 至 `M7-09` — `READY`。M7-09 的 M0-09、M3-12、M7-04 任务级依赖均已 `DONE`；本轮只解锁，不启动任一新任务。
+6. `M7-10` — 继续等待 M7-05 至 M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `88/95`。M7 当前为 `IN_PROGRESS`，M7-01 至 M7-03 已 `DONE`，M7-04 为 `REVIEW`；尚未勾选 Alpha Release Gate Checklist。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `89/95`。M7 当前为 `4/10 IN_PROGRESS`，M7-01 至 M7-04 已 `DONE`，M7-05 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -1837,3 +1838,10 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 最终独立复审：`CHILD_AGENT / Standard Mode / Tier 3 / PARTITIONED_PLUS_INTEGRATION` 对正式 Commit 完成 commit-bound 覆盖，Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`；无 Finding。复审确认 Commit tree、14 个任务路径、14/14 Blob、脚本 mode、远端 SHA、CI 与独立 Linux Race 一致。
 - 状态与边界：M7-04 从 `IN_PROGRESS` 进入 `REVIEW`，等待用户明确阶段复审通过；M7 仍为 `3/10 IN_PROGRESS`，全局 `DONE` 保持 `88/95`。当前证据不证明真实块设备 EIO/ENOSPC、物理断电、SQLite WAL/COMMIT fsync 中断或任意时刻崩溃耐久性；本次未勾选 Alpha Release Gate，M7-09 继续等待 M7-04 `DONE`。
 - 文档同步：更新本开发计划与 `tests/chaos/m7-04-evidence.md`。总技术方案、根 README 与 `tests/chaos/README.md` 无需更新，因为本轮只闭环既有契约和已有 Runner 用法；Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、生产配置、权限模型、日志字段与 `AGENTS.md` 均未改变。
+
+## 2026-09-01 · M7-04 用户阶段复审 · DONE；M7-09 · READY
+
+- 批准证据：用户明确回复“`M7-04 阶段复审通过`”。该批准与最终实现 Commit `fdb7b3d02b72094564c417205b682b5fc9f71cf6`、WSL2 clean Runner `full`、Docker Linux amd64/CGO=1 三包 Race、[CI #33468280052](https://github.com/lifei6671/xtunnel/actions/runs/33468280052) 四 Job 全绿、commit-bound Tier 3 最终独立复审 Gate=`PASSED`，以及证据 Head `806bfa0d719259642dc152a0b96f80894b0cd637` 的 [CI #33469332157](https://github.com/lifei6671/xtunnel/actions/runs/33469332157) 四 Job 全绿共同构成 `DONE` 证据。
+- 状态影响：M7-04 从 `REVIEW` 转为 `DONE`，M7 从 `3/10` 更新为 `4/10 IN_PROGRESS`，全局从 `88/95` 更新为 `89/95`。M7-09 的 M0-09、M3-12、M7-04 依赖均已 `DONE`，因此从 `NOT_STARTED` 转为 `READY`；M7-05 至 M7-08 继续保持 `READY`，M7-10 继续等待 M7-05 至 M7-09。
+- 证据边界：用户阶段批准不扩大已验证范围；真实块设备 EIO/ENOSPC、物理断电、SQLite WAL/COMMIT fsync 中断与任意时刻崩溃耐久性仍未获得专用环境证据。本次未勾选 Alpha Release Gate Checklist，也未启动 M7-05 至 M7-09 的任何新任务。
+- 文档同步：只更新本开发计划与 `tests/chaos/m7-04-evidence.md` 的状态、批准证据和依赖解锁。总技术方案、根 README 与 `tests/chaos/README.md` 无需更新，因为没有改变产品行为、用户命令或验证入口；Proto/OpenAPI/生成物、Server Schema、Migration、依赖/Lockfile、部署资产、CI/CD、生产配置、权限模型、日志字段与 `AGENTS.md` 均未改变。

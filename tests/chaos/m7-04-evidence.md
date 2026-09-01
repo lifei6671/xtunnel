@@ -1,7 +1,7 @@
 # M7-04 Server Persistence/Filesystem Failpoints 交付证据
 
-> 状态：`REVIEW`（最终实现 Commit、commit-bound clean `full`、原生 Linux Race、
-> 精确 CI 与 Tier 3 commit-bound 最终独立复审已通过，等待用户阶段复审）
+> 状态：`DONE`（最终实现 Commit、commit-bound clean `full`、原生 Linux Race、
+> 精确 CI、Tier 3 commit-bound 最终独立复审与用户阶段复审均已通过）
 
 ## 证据边界
 
@@ -112,6 +112,20 @@ write/fsync/rename 边界返回 `EIO` 或 `ENOSPC`；默认入口仍调用原有
   14 个任务路径、14/14 Git Blob、Runner mode、远端 SHA、精确 CI 与独立 Linux
   Race 一致；该结论只支持进入 `REVIEW`，不替代用户阶段批准。
 
+## 用户阶段复审
+
+- 用户已明确回复“`M7-04 阶段复审通过`”。最终实现 Commit
+  `fdb7b3d02b72094564c417205b682b5fc9f71cf6`、WSL2 clean Runner `full`、Docker
+  Linux amd64/CGO=1 三包 Race、
+  [CI #33468280052](https://github.com/lifei6671/xtunnel/actions/runs/33468280052)、
+  commit-bound Tier 3 最终独立复审，以及证据 Head
+  `806bfa0d719259642dc152a0b96f80894b0cd637` 的
+  [CI #33469332157](https://github.com/lifei6671/xtunnel/actions/runs/33469332157)
+  共同构成 M7-04 `DONE` 证据。
+- 状态影响：M7-04 从 `REVIEW` 转为 `DONE`，M7 为 `4/10 IN_PROGRESS`，全局
+  `DONE` 更新为 `89/95`；M7-09 的任务级依赖已满足并转为 `READY`。本次未启动
+  M7-05 至 M7-09，也未勾选 Alpha Release Gate Checklist。
+
 ## 隐藏候选清理策略评估
 
 SIGKILL 可能留下本次进程创建的私有 `0600` 隐藏候选。当前文件名不绑定最终输出名、
@@ -124,7 +138,7 @@ M7-04 的安全结论是继续保留 fail-closed 行为：生产代码不自动�
 
 - 仍缺真实存储层的 `EIO/ENOSPC`、SQLite WAL/COMMIT fsync 中断、断电恢复与任意时刻
   崩溃证据；本轮未在专用可销毁块设备或断电仿真环境运行，不记录为通过。
-- 最终项目 Commit、commit-bound clean `full`、原生 Linux Race、精确 CI 与最终独立
-  复审均已通过；仍等待用户阶段复审。
-- M7-04 进入 `REVIEW`；全局 `DONE` 保持 `88/95`，M7 Alpha Gate Checklist 不勾选，
-  M7-09 继续等待 M7-04 `DONE`。
+- 最终项目 Commit、commit-bound clean `full`、原生 Linux Race、精确 CI、最终独立
+  复审与用户阶段复审均已通过。
+- M7-04 已 `DONE`；全局 `DONE` 为 `89/95`，M7 Alpha Gate Checklist 不勾选，
+  M7-09 已解锁为 `READY`。
