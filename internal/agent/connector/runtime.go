@@ -323,25 +323,40 @@ func (runtime *Runtime) handleSession(
 		return fmt.Errorf("start Agent WorkPool: %w", err)
 	}
 	defer func() {
-		// 普通 Control 断开只清理本代非 ACTIVE WorkConn；旧 ACTIVE 必须允许自然
-		// 结束，且 Wait 不能阻塞下一代重连。业务错误或进程退出仍强制取消整个 Pool。
-		preserveActive := resultErr == nil && ctx.Err() == nil
-		if !preserveActive {
-			cancelPool()
-		}
-		if waitErr := pool.Wait(); waitErr != nil && !errors.Is(waitErr, context.Canceled) {
-			resultErr = errors.Join(resultErr, fmt.Errorf("wait Agent WorkPool: %w", waitErr))
-		}
-		if preserveActive {
-			// 旧 ACTIVE 不阻塞下一代重连，但必须登记到 Runtime；进程关停时允许其
-			// 在同一固定排空窗口内结束，Deadline 后再统一取消并等待 Pool.Done。
-			runtime.retainPool(pool, cancelPool)
-		}
+		resultErr = runtime.finishSessionPool(ctx, pool, cancelPool, resultErr)
 	}()
 
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 	return runtime.runEstablished(ctx, session, configSession, pool, ticker)
+}
+
+func (runtime *Runtime) finishSessionPool(
+	ctx context.Context,
+	pool workPool,
+	cancelPool context.CancelFunc,
+	resultErr error,
+) error {
+	// 普通 Control 断开只清理本代非 ACTIVE WorkConn；旧 ACTIVE 必须允许自然
+	// 结束，且 Wait 不能阻塞下一代重连。业务错误或进程退出则先取消整个 Pool，
+	// 再等待 Done，防止 SessionDone 抢先把 ACTIVE 转为 detached 后 Agent 提前返回。
+	preserveActive := resultErr == nil && ctx.Err() == nil
+	if preserveActive {
+		if waitErr := pool.Wait(); waitErr != nil && !errors.Is(waitErr, context.Canceled) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("wait Agent WorkPool: %w", waitErr))
+		}
+		// 旧 ACTIVE 不阻塞下一代重连，但必须登记到 Runtime；进程关停时允许其
+		// 在同一固定排空窗口内结束，Deadline 后再统一取消并等待 Pool.Done。
+		runtime.retainPool(pool, cancelPool)
+		return resultErr
+	}
+
+	cancelPool()
+	<-pool.Done()
+	if waitErr := pool.Wait(); waitErr != nil && !errors.Is(waitErr, context.Canceled) {
+		resultErr = errors.Join(resultErr, fmt.Errorf("wait Agent WorkPool: %w", waitErr))
+	}
+	return resultErr
 }
 
 func (runtime *Runtime) runEstablished(
@@ -534,10 +549,41 @@ func (runtime *Runtime) drain(
 				}
 				continue
 			}
-			if err := pool.CompleteDrain(drainContext); err != nil {
-				return errors.Join(processContext.Err(), fmt.Errorf("complete Agent WorkPool drain: %w", err))
+			// CompleteDrain 会等待 ACTIVE 自然结束，不能同步阻塞 Control Owner；
+			// 否则等待期间没有 Heartbeat，Server 会先按 Heartbeat Timeout 关闭
+			// Session，绕过 Agent 自己的 Drain Deadline。该 goroutine 由本函数
+			// 持有：任何退出分支都会取消 drainContext 并等待它返回。
+			completeResult := make(chan error, 1)
+			safego.Go(
+				func(panicErr error) { completeResult <- panicErr },
+				nil,
+				func() { completeResult <- pool.CompleteDrain(drainContext) },
+			)
+			waitComplete := func(ownerErr error) error {
+				cancelDrain()
+				completeErr := <-completeResult
+				if completeErr != nil {
+					completeErr = fmt.Errorf("complete Agent WorkPool drain: %w", completeErr)
+				}
+				return errors.Join(processContext.Err(), ownerErr, completeErr)
 			}
-			return processContext.Err()
+			for {
+				select {
+				case completeErr := <-completeResult:
+					if completeErr != nil {
+						return errors.Join(processContext.Err(), fmt.Errorf("complete Agent WorkPool drain: %w", completeErr))
+					}
+					return processContext.Err()
+				case <-drainContext.Done():
+					return waitComplete(nil)
+				case <-session.Done():
+					return waitComplete(nil)
+				case now := <-ticker.C:
+					if err := session.Enqueue(heartbeatEnvelope(now, observedRevision(configSession))); err != nil {
+						return waitComplete(fmt.Errorf("enqueue draining heartbeat after ack: %w", err))
+					}
+				}
+			}
 		case <-reporter.changed():
 			if err := reporter.collectChanges(); err != nil {
 				return errors.Join(processContext.Err(), fmt.Errorf("enqueue draining health report: %w", err))

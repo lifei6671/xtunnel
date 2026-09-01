@@ -431,6 +431,7 @@ type gatewayBootstrapCloser struct {
 	httpHandler     *serverhttpingress.Handler
 	tcpIngress      *servertcpingress.Manager
 	sessions        *sessionruntime.Manager
+	limits          *serverlimits.Manager
 	routes          *serverroute.Manager
 	usage           *serverusage.Owner
 	cancelRoutes    context.CancelFunc
@@ -1035,7 +1036,7 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 			gateway: gatewayServer, management: managementServer, metrics: metricsServer,
 			metricsRegistry: metricsRegistry,
 			httpIngress:     httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
-			sessions: sessions, routes: routes, usage: usageOwner, cancelRoutes: cancelRoutes,
+			sessions: sessions, limits: limitManager, routes: routes, usage: usageOwner, cancelRoutes: cancelRoutes,
 			runtimeErrors: runtimeErrors,
 		}, nil
 	}
@@ -1047,7 +1048,7 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 		bootstrap: socket, gateway: gatewayServer, management: managementServer, metrics: metricsServer,
 		metricsRegistry: metricsRegistry,
 		httpIngress:     httpIngress, httpHandler: httpHandler, tcpIngress: tcpIngress,
-		sessions: sessions, routes: routes, usage: usageOwner, cancelRoutes: cancelRoutes,
+		sessions: sessions, limits: limitManager, routes: routes, usage: usageOwner, cancelRoutes: cancelRoutes,
 		runtimeErrors: runtimeErrors,
 	}, nil
 }

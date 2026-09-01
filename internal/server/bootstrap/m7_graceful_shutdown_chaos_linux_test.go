@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lifei6671/xtunnel/internal/agent/connector"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
 )
 
@@ -37,6 +38,7 @@ func TestM7GracefulShutdownChaos(t *testing.T) {
 	t.Run("WebSocket remains usable during Server graceful drain", testM7WebSocketNaturalDrain)
 	t.Run("hard deadline force closes all active transports", testM7HardDeadlineForceClose)
 	t.Run("Agent initiated drain preserves active TCP", testM7AgentInitiatedDrain)
+	t.Run("Agent hard deadline force closes active TCP", testM7AgentHardDeadlineForceClose)
 }
 
 type m7ShutdownFixture struct {
@@ -47,7 +49,7 @@ type m7ShutdownFixture struct {
 	tcpOrigin    *productGateTCPOrigin
 	publicTCP    string
 	publicHTTP   string
-	stopAgent    func()
+	agent        *m7ShutdownAgent
 
 	serverCloseOnce sync.Once
 	serverCloseErr  error
@@ -125,7 +127,7 @@ func newM7ShutdownFixture(t *testing.T, originHandler http.Handler) *m7ShutdownF
 		publicTCP:    publicAddress,
 		publicHTTP:   runtime.httpIngress.Addr().String(),
 	}
-	fixture.stopAgent = startProductGateAgent(t, issuedToken, runtime, 8)
+	fixture.agent = startM7ShutdownAgent(t, issuedToken, runtime, 8)
 	t.Cleanup(func() { fixture.cleanup(t) })
 	return fixture
 }
@@ -142,7 +144,7 @@ func (fixture *m7ShutdownFixture) closeStorage() error {
 
 func (fixture *m7ShutdownFixture) cleanup(t *testing.T) {
 	t.Helper()
-	fixture.stopAgent()
+	fixture.agent.stop(t)
 	if err := fixture.closeServer(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("close M7-03 Server runtime: %v", err)
 	}
@@ -195,10 +197,12 @@ func testM7TCPHalfCloseNaturalDrain(t *testing.T) {
 	if _, err := public.Write([]byte("public-head")); err != nil {
 		t.Fatalf("write M7-03 TCP request: %v", err)
 	}
-	// TCP Listener 的探测连接本身会进入生产 OPEN 路径，不能用重试 Dial 判断
-	// StopAccepting 是否完成，否则探针可能变成无人接管的第二条 Origin 连接。
-	m7StopTCPAccepting(t, fixture)
 	shutdownDone := m7StartServerClose(fixture)
+	// 先观察生产 StopAccepting 发布的空 Actual，证明 admission fence 已建立；
+	// 此后 Listener 关闭探针即使在内核队列中完成握手，也不会进入 Handler/OPEN。
+	m7WaitForTCPAdmissionFence(t, fixture)
+	m7WaitForListenerClosed(t, fixture.publicTCP)
+	fixture.tcpOrigin.assertNoNext(t, "Server shutdown listener probe")
 	m7AssertShutdownPending(t, shutdownDone)
 
 	if err := public.CloseWrite(); err != nil {
@@ -419,20 +423,19 @@ func testM7AgentInitiatedDrain(t *testing.T) {
 	originDone := startProductGateOriginEcho(origin)
 	assertProductGateRoundTrip(t, public, []byte("before-drain"), "Agent drain before request")
 
-	agentDone := make(chan error, 1)
-	go func() {
-		fixture.stopAgent()
-		agentDone <- nil
-	}()
+	fixture.agent.beginDrain()
 	m7WaitForAgentDraining(t, fixture)
-	m7AssertShutdownPending(t, agentDone)
+	m7AssertShutdownSignalPending(t, fixture.agent.done)
 	assertProductGateRoundTrip(t, public, []byte("during-drain"), "Agent drain active stream")
 	m7AssertNewOpenRejected(t, fixture)
 	finishProductGateTCP(t, public, originDone, "Agent drain")
 	if err := public.Close(); err != nil {
 		t.Fatalf("close M7-03 Agent drain public TCP: %v", err)
 	}
-	m7RequireResult(t, agentDone, "Agent graceful drain", false)
+	agentErr := fixture.agent.wait(5 * time.Second)
+	if !errors.Is(agentErr, context.Canceled) || errors.Is(agentErr, context.DeadlineExceeded) {
+		t.Fatalf("M7-03 Agent graceful-drain error = %v, want canceled without DeadlineExceeded", agentErr)
+	}
 
 	if err := fixture.closeServer(); err != nil {
 		t.Fatalf("close M7-03 Server after Agent drain: %v", err)
@@ -442,21 +445,173 @@ func testM7AgentInitiatedDrain(t *testing.T) {
 	t.Log("M7-03 Agent drain: active bytes preserved, new OPEN rejected, owners_done=true")
 }
 
+func testM7AgentHardDeadlineForceClose(t *testing.T) {
+	baseline := m7MustReadShutdownResources(t)
+	fixture := newM7ShutdownFixture(t, nil)
+	fixture.runtime.drainTimeout = m7ShutdownGracePeriod
+	waitForProductGateIdleWork(t, fixture.runtime, 1)
+
+	public := dialProductGateTCP(t, fixture.publicTCP, "127.0.0.1")
+	if err := public.SetDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear M7-03 Agent hard-deadline public TCP deadline: %v", err)
+	}
+	origin := fixture.tcpOrigin.next(t, "M7-03 Agent hard deadline")
+	originDone := startProductGateOriginEcho(origin)
+	assertProductGateRoundTrip(t, public, []byte("before-drain"), "Agent hard deadline before request")
+	trafficDone := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		buffer := make([]byte, 1)
+		for range ticker.C {
+			if _, err := public.Write([]byte("x")); err != nil {
+				trafficDone <- err
+				return
+			}
+			if _, err := io.ReadFull(public, buffer); err != nil {
+				trafficDone <- err
+				return
+			}
+		}
+	}()
+
+	started := time.Now()
+	fixture.agent.beginDrain()
+	m7WaitForAgentDraining(t, fixture)
+	m7AssertShutdownSignalPending(t, fixture.agent.done)
+	agentErr := fixture.agent.wait(35 * time.Second)
+	elapsed := time.Since(started)
+	if !errors.Is(agentErr, context.Canceled) || !errors.Is(agentErr, context.DeadlineExceeded) {
+		t.Fatalf("M7-03 Agent hard-deadline error = %v, want canceled + DeadlineExceeded", agentErr)
+	}
+	if elapsed < 29*time.Second || elapsed > 35*time.Second {
+		t.Fatalf("M7-03 Agent hard-deadline duration = %s", elapsed)
+	}
+	m7RequireResult(t, trafficDone, "Agent hard-deadline active traffic force close", true)
+	m7AssertConnectionClosed(t, public, "Agent hard-deadline public TCP")
+	m7RequireResult(t, originDone, "Agent hard-deadline Origin unblock", false)
+	_ = public.Close()
+
+	if err := fixture.closeServer(); err != nil {
+		t.Fatalf("close M7-03 Server after Agent hard deadline: %v", err)
+	}
+	fixture.cleanup(t)
+	m7AssertShutdownQuiescent(t, fixture, baseline)
+	t.Logf("M7-03 Agent hard deadline: deadline=30s force_close=%s", elapsed)
+}
+
+type m7ShutdownAgent struct {
+	cancel     context.CancelFunc
+	cancelOnce sync.Once
+	done       chan struct{}
+	mu         sync.Mutex
+	runErr     error
+}
+
+func startM7ShutdownAgent(
+	t *testing.T,
+	token string,
+	runtime *gatewayBootstrapCloser,
+	wantIdle uint32,
+) *m7ShutdownAgent {
+	t.Helper()
+	agentConfig, err := connector.HostConfig(token, "v0.1.0-m7-03-chaos")
+	if err != nil {
+		t.Fatalf("build M7-03 Agent config: %v", err)
+	}
+	agentConfig.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	agentRuntime, err := connector.New(agentConfig)
+	if err != nil {
+		t.Fatalf("construct M7-03 Agent runtime: %v", err)
+	}
+	agentContext, cancelAgent := context.WithCancel(context.Background())
+	agent := &m7ShutdownAgent{cancel: cancelAgent, done: make(chan struct{})}
+	go func() {
+		runErr := agentRuntime.Run(agentContext)
+		agent.mu.Lock()
+		agent.runErr = runErr
+		agent.mu.Unlock()
+		close(agent.done)
+	}()
+
+	deadline := time.NewTimer(8 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		for _, snapshot := range runtime.sessions.RuntimeStatusSnapshots() {
+			httpService, hasHTTP := snapshot.Config.Services[productGateHTTPServiceID]
+			tcpService, hasTCP := snapshot.Config.Services[productGateTCPServiceID]
+			if snapshot.TunnelID == productGateTunnelID && snapshot.CurrentControlSession &&
+				snapshot.Config.ConfigReady && snapshot.Config.HasObserved &&
+				snapshot.Config.ObservedRevision == 1 && hasHTTP && hasTCP &&
+				httpService.Enabled && httpService.RequiredRevision == 1 &&
+				tcpService.Enabled && tcpService.RequiredRevision == 1 && snapshot.WorkPool.Idle >= wantIdle {
+				return agent
+			}
+		}
+		select {
+		case <-agent.done:
+			t.Fatalf("M7-03 Agent exited before ready: %v", agent.err())
+		case <-deadline.C:
+			agent.stop(t)
+			t.Fatal("M7-03 Agent did not publish a ready two-Service Snapshot and IDLE Work")
+		case <-ticker.C:
+		}
+	}
+}
+
+func (agent *m7ShutdownAgent) beginDrain() {
+	agent.cancelOnce.Do(agent.cancel)
+}
+
+func (agent *m7ShutdownAgent) wait(timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-agent.done:
+		return agent.err()
+	case <-timer.C:
+		return fmt.Errorf("M7-03 Agent did not stop within %s", timeout)
+	}
+}
+
+func (agent *m7ShutdownAgent) err() error {
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	return agent.runErr
+}
+
+func (agent *m7ShutdownAgent) stop(t *testing.T) {
+	t.Helper()
+	agent.beginDrain()
+	err := agent.wait(35 * time.Second)
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("stop M7-03 Agent runtime: %v", err)
+	}
+}
+
 func m7StartServerClose(fixture *m7ShutdownFixture) <-chan error {
 	done := make(chan error, 1)
 	go func() { done <- fixture.closeServer() }()
 	return done
 }
 
-func m7StopTCPAccepting(t *testing.T, fixture *m7ShutdownFixture) {
+func m7WaitForTCPAdmissionFence(t *testing.T, fixture *m7ShutdownFixture) {
 	t.Helper()
-	if err := fixture.runtime.tcpIngress.StopAccepting(); err != nil {
-		t.Fatalf("stop M7-03 TCP listener: %v", err)
-	}
-	connection, err := net.DialTimeout("tcp", fixture.publicTCP, 50*time.Millisecond)
-	if err == nil {
-		_ = connection.Close()
-		t.Fatalf("M7-03 TCP listener %s still accepted a connection after StopAccepting", fixture.publicTCP)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if len(fixture.runtime.tcpIngress.Actual()) == 0 {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("M7-03 TCP admission fence was not published for %s", fixture.publicTCP)
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -485,6 +640,15 @@ func m7AssertShutdownPending(t *testing.T, done <-chan error) {
 	select {
 	case err := <-done:
 		t.Fatalf("M7-03 drain returned before active traffic completed: %v", err)
+	case <-time.After(75 * time.Millisecond):
+	}
+}
+
+func m7AssertShutdownSignalPending(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+		t.Fatal("M7-03 drain returned before active traffic reached its deadline")
 	case <-time.After(75 * time.Millisecond):
 	}
 }
@@ -689,9 +853,6 @@ func m7MustReadShutdownResources(t *testing.T) m7ResourceSample {
 
 func m7AssertShutdownQuiescent(t *testing.T, fixture *m7ShutdownFixture, baseline m7ResourceSample) {
 	t.Helper()
-	if snapshots := fixture.runtime.sessions.RuntimeStatusSnapshots(); len(snapshots) != 0 {
-		t.Fatalf("M7-03 final Session snapshots = %+v, want empty", snapshots)
-	}
 	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(25 * time.Millisecond)
@@ -703,14 +864,22 @@ func m7AssertShutdownQuiescent(t *testing.T, fixture *m7ShutdownFixture, baselin
 			t.Fatalf("read M7-03 final resources: %v", err)
 		}
 		final = current
-		if current.FDs <= baseline.FDs+10 && current.Goroutines <= baseline.Goroutines+20 {
+		snapshots := fixture.runtime.sessions.RuntimeStatusSnapshots()
+		limits := fixture.runtime.limits.Snapshot()
+		limitsZero := limits.Connectors == 0 && len(limits.ConnectorsByTunnel) == 0 &&
+			limits.WorkTotal == 0 && limits.WorkConnecting == 0 && limits.WorkIdle == 0 &&
+			limits.PendingOpens == 0 && limits.ActiveTotal == 0 && len(limits.ActiveByTunnel) == 0 &&
+			len(limits.ActiveByService) == 0 && len(limits.ActiveBySource) == 0
+		if len(snapshots) == 0 && limitsZero && current.FDs == baseline.FDs &&
+			current.Goroutines == baseline.Goroutines {
 			t.Logf("M7-03 resources: baseline_fd=%d final_fd=%d baseline_goroutines=%d final_goroutines=%d",
 				baseline.FDs, current.FDs, baseline.Goroutines, current.Goroutines)
 			return
 		}
 		select {
 		case <-deadline.C:
-			t.Fatalf("M7-03 resources did not return to budget: baseline=%+v final=%+v", baseline, final)
+			t.Fatalf("M7-03 resources did not return to zero: baseline=%+v final=%+v sessions=%+v limits=%+v",
+				baseline, final, snapshots, limits)
 		case <-ticker.C:
 		}
 	}

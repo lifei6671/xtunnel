@@ -117,7 +117,8 @@ M7-03 Runner 调度 `internal/server/bootstrap.TestM7GracefulShutdownChaos`。�
 - HTTP Streaming 与 WebSocket 在 Graceful Period 内自然完成；
 - TCP、HTTP Slow Origin、WebSocket 同时阻塞时的 Hard Deadline Force Close；
 - Agent 发起两阶段 Drain 后保留既有 ACTIVE、拒绝新 OPEN；
-- Session Snapshot 清空，以及 FD/goroutine 回到冻结预算。
+- Agent 在真实 30 秒默认 Drain 窗口内保持 DRAINING Heartbeat，并在超时后强制关闭 ACTIVE；
+- Session Snapshot 与全部运行时配额清零，以及 FD/goroutine 精确回到场景基线。
 
 阶段栅栏由 Channel 和 Socket 事件驱动，主断言不依赖随机延迟。组件级的 DrainRequest/Ack
 ID、旧 Ack、OPENING、Usage exactly-once、单边 EOF 和 SIGTERM 接线仍由各 owner 的定向

@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-08-31
+> **进度基线日期**：2026-09-01
 >
 > **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01、M7-02 · DONE；M7-03 · IN_PROGRESS）
 >
-> **当前结论**：M7-01、M7-02 均已于 2026-08-31 获用户明确阶段复审通过并转为 `DONE`。M7-03 已启动并完成真实 Linux Socket 下的 Server/Agent Graceful Shutdown Chaos Harness：TCP Half-Close、HTTP Streaming、WebSocket 自然排空，三类 Transport 的 Hard Deadline Force Close，以及 Agent 两阶段 Drain 均在 clean Commit `886c727271e11c8e87272fe1a19ef8ec14f465fa` 的 WSL2 Runner `full` 中通过；WSL2 Go 1.27 CGO-off 原生源码测试、相关 Windows Owner Test/Race/Vet 与全量 `go test ./...`、`go vet ./...` 也通过。由于 Linux Race 仍被 WSL2 缺少 C 编译器阻塞，且尚缺精确 CI、最终 commit-bound 复审与用户阶段复审，M7-03 保持 `IN_PROGRESS`，全局 `DONE` 仍为 `87/95`，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01、M7-02 均已获用户明确阶段复审通过并转为 `DONE`。M7-03 的五场景 clean Commit `886c727271e11c8e87272fe1a19ef8ec14f465fa` WSL2 Runner `full` 已通过；本轮又补齐由生产 Shutdown 自己建立 TCP Admission Fence、Agent 真实 30 秒 Hard Deadline、Session/Quota/FD/goroutine 精确归零，并修复 Agent 匹配 DrainAck 后等待 ACTIVE 时 Control Owner 停止 Heartbeat 的生产缺陷。更新后的六场景 WSL2 dirty 开发运行、Windows 定向 Test/Race/Vet、全量 `go test ./...` 与 `go vet ./...` 通过；Bootstrap Linux Race 因 WSL2 运行环境失去响应仍无结论。M7-03 继续保持 `IN_PROGRESS`，全局 `DONE` 仍为 `87/95`，尚缺新实现的 clean `full`、Bootstrap Linux Race、精确 CI、最终 commit-bound 复审与用户阶段复审，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -1776,3 +1776,14 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - clean 验证与探针修复：首次 clean `full` 暴露 TCP Listener 重试 Dial 探针会被生产 Accept 路径接收并制造第二条无人接管 Origin；Commit `886c727271e11c8e87272fe1a19ef8ec14f465fa` 改为同步 `StopAccepting` 后单次失败断言，仍严格覆盖 Shutdown pending 后 Public `CloseWrite`、Origin EOF 屏障及反向尾部字节。该 Commit 的 clean WSL2 Runner `full` 五场景全部 PASS，FD/goroutine 精确回到 `6/6`、`3/3`；TCP 契约路径 `20/20`、完整矩阵 `5/5` 通过，worktree Tier 3 独立复审为 `PASSED`、P0/P1/P2=`0/0/0`。
 - 证据边界：WSL2 Go `1.27.0` / `GOTOOLCHAIN=local` 检查与 CGO-off M7-03 原生源码测试通过；Linux Race 已尝试，但因当前 WSL2 没有 `gcc`/`cc`/`clang` 而在 `runtime/cgo` 快速失败。精确 CI、commit-bound 最终独立复审与用户阶段复审仍未形成，因此 M7-03 保持 `IN_PROGRESS`，全局 `DONE` 保持 `87/95`，不勾选 M7 Alpha Gate。
 - 文档同步：更新本开发计划、`tests/chaos/README.md` 与 `tests/chaos/m7-03-evidence.md`。总技术方案与根 README 无需更新，因为测试只验证已冻结的 Graceful Shutdown/Half-Close 契约，没有改变产品行为、用户命令、Proto/OpenAPI、Server Schema、Migration、依赖/Lockfile、CI/CD、部署、权限或日志契约。
+
+## 2026-09-01 · M7-03 独立复审 P1 修复 · IN_PROGRESS
+
+- 初始 Tier 3 checkpoint：对 Baseline `1babca3290447b33b02ae126c9d03c532c97ff8a` 至 Target `542653dc8040d47a661306e0a8589f66d7c0a2b6` 的独立复审为 `BLOCKED`，P0/P1/P2=`0/3/0`。三项 P1 分别为 TCP 场景直接调用 `StopAccepting` 绕过生产 Shutdown、缺少 Agent 30 秒 Hard Deadline，以及资源终态允许 FD/goroutine 宽松增量且未检查 Server Quota。
+- Harness 修复：TCP 自然排空改为先启动生产 `runtime.Close`，再观察 TCP `Actual` 为空的 Admission Fence 和 Listener 关闭；新增 Agent 真实 30 秒默认窗口场景，Drain 期间持续 ACTIVE 往返，Deadline 后验证 Public/Origin 两端 IO 被主动解除；每个场景均要求 Session Snapshot、Connector/Work/Pending Open/Active 配额计数与分组 Map 为零，FD 与 goroutine 精确回到基线。
+- 生产缺陷与修复：新场景暴露 Agent 收到匹配 DrainAck 后同步等待 `WorkPool.CompleteDrain` 会阻塞 Control Owner，Server 约 5 秒即按 Heartbeat Timeout 关闭 Session，绕过 Agent 30 秒 Drain Deadline。当前实现改由 owned goroutine 等待 ACTIVE，Control Owner 同期继续发送 DRAINING Heartbeat；所有返回路径取消 Drain Context 并等待 goroutine 收敛。该修复不改变公共 API/Protocol、Schema、默认 Drain 窗口、依赖、CI/CD、权限或日志契约。
+- 开发验证：Go `go1.27.0` / `GOTOOLCHAIN=local`；Windows Connector/Bootstrap 定向 Test、Race、Vet 与全量 `go test ./...`、`go vet ./...` 均通过；Linux amd64/CGO-off Test Binary 交叉编译通过。Repair round 1 后重新构建的 WSL2 dirty 六场景全部 PASS，Server `250ms` Hard Deadline 观测 `251.728152ms`，Agent 真实 30 秒窗口观测 `30.001029581s`，每场景 Session/Quota 归零且 FD/goroutine 精确回到 `7/7`、`3/3`。
+- Linux Race 边界：WSL2 GCC `11.4.0` 已可用，Connector 新回归测试的 Linux 原生 Race 通过；Bootstrap M7-03 Race 在 Linux-native `/tmp` checkout 中约 900 秒未产生测试结果，随后发行版连 `ps`/`find` 也无法完成并以 Exit `1` 收敛，已终止发行版回收残留。这是环境阻塞，不记录为代码失败，也不记录为通过。
+- Repair round 1：修复后复审发现 SessionDone 与进程取消竞态会先把 ACTIVE 转入 `detachedActive` 并让 `Wait` 返回，而当前 Session owner 未等待代表全部 worker/FD 退出的 `Done`。新增 `finishSessionPool`：普通 Control 断开仍 `Wait` 后登记 retired Pool，不阻塞重连；进程取消或业务错误分支则取消 Pool、等待 `Done`，再读取 `Wait` 结果。确定性回归在普通/Race 模式分别重复 `50/20` 次通过，Connector/Bootstrap 包级 Race、全仓 Test/Vet 与 `git diff --check` 通过。
+- Repair round 1 独立复审：`CHILD_AGENT / Standard Mode / Tier 3 / Go / FULL_SCOPE` 覆盖全部交付路径与必要相邻 owner，Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/0`；累计 Repair rounds=`1`。该结论绑定 dirty worktree checkpoint，不替代 commit-bound 最终复审。
+- 状态与下一步：当前产物仍是 dirty worktree 开发态，M7-03 保持 `IN_PROGRESS`、全局 `DONE` 保持 `87/95`，不勾选 M7 Alpha Gate。仍需新实现 clean `full`、Bootstrap Linux Race、精确 Commit/CI、commit-bound 最终独立复审及用户阶段复审。

@@ -80,6 +80,92 @@ func TestRunEstablishedSendsOneDrainAndWaitsForMatchingAck(t *testing.T) {
 	}
 }
 
+func TestRunEstablishedContinuesHeartbeatsWhileActiveDrainCompletes(t *testing.T) {
+	processContext, cancelProcess := context.WithCancel(context.Background())
+	session := newFakeEstablishedSession()
+	_, configSession := newTestConfigSession(t)
+	completeStarted := make(chan struct{})
+	releaseComplete := make(chan struct{})
+	pool := &fakeWorkPool{completeDrain: func(ctx context.Context) error {
+		close(completeStarted)
+		select {
+		case <-releaseComplete:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}}
+	runtime := &Runtime{
+		newDrainID:   func() (string, error) { return testDrainID, nil },
+		drainTimeout: time.Second,
+	}
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+
+	result := make(chan error, 1)
+	go func() { result <- runtime.runEstablished(processContext, session, configSession, pool, ticker) }()
+	cancelProcess()
+	_ = receiveEnqueued(t, session.enqueued)
+	session.inbound <- inbound(&protocolv1.ControlEnvelope_DrainAck{
+		DrainAck: &protocolv1.DrainAck{DrainId: testDrainID},
+	})
+	select {
+	case <-completeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Agent WorkPool CompleteDrain did not start after matching Ack")
+	}
+
+	ticker.Reset(time.Millisecond)
+	heartbeat := receiveEnqueued(t, session.enqueued)
+	if heartbeat.GetHeartbeat() == nil {
+		t.Fatalf("message while CompleteDrain blocked = %#v, want Heartbeat", heartbeat)
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("Agent drain returned before ACTIVE completion: %v", err)
+	default:
+	}
+	close(releaseComplete)
+	if err := receiveResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("runEstablished() error = %v, want context.Canceled", err)
+	}
+	if pool.completeDrainCalls.Load() != 1 {
+		t.Fatalf("CompleteDrain calls = %d, want 1", pool.completeDrainCalls.Load())
+	}
+}
+
+func TestFinishSessionPoolWaitsForDoneWhenProcessShutdownRacesSessionLoss(t *testing.T) {
+	processContext, cancelProcess := context.WithCancel(context.Background())
+	cancelProcess()
+	poolDone := make(chan struct{})
+	cancelCalled := make(chan struct{})
+	result := make(chan error, 1)
+
+	go func() {
+		result <- (&Runtime{}).finishSessionPool(
+			processContext,
+			&fakeWorkPool{done: poolDone},
+			func() { close(cancelCalled) },
+			context.Canceled,
+		)
+	}()
+	select {
+	case <-cancelCalled:
+	case <-time.After(time.Second):
+		t.Fatal("process shutdown did not cancel current Agent WorkPool")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("process shutdown returned before detached WorkPool workers exited: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(poolDone)
+	if err := receiveResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("finishSessionPool() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestRunEstablishedDrainTimeoutDoesNotAcceptOldAck(t *testing.T) {
 	processContext, cancelProcess := context.WithCancel(context.Background())
 	session := newFakeEstablishedSession()
@@ -734,6 +820,7 @@ func testSnapshot(revision uint64) *protocolv1.TunnelSnapshot {
 type fakeWorkPool struct {
 	demand             *protocolv1.WorkDemand
 	applyErr           error
+	completeDrain      func(context.Context) error
 	beginDrainCalls    atomic.Int32
 	completeDrainCalls atomic.Int32
 	done               chan struct{}
@@ -847,8 +934,11 @@ func (pool *fakeWorkPool) BeginDrain() error {
 	return nil
 }
 
-func (pool *fakeWorkPool) CompleteDrain(context.Context) error {
+func (pool *fakeWorkPool) CompleteDrain(ctx context.Context) error {
 	pool.completeDrainCalls.Add(1)
+	if pool.completeDrain != nil {
+		return pool.completeDrain(ctx)
+	}
 	return nil
 }
 
