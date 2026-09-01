@@ -3,8 +3,9 @@
 ## 当前状态
 
 - 任务：`M7-07`
-- 状态：`IN_PROGRESS`
+- 状态：`REVIEW`
 - Delivery 基线：`2bf793bf5a9a51326bbcef1a13dd417a4fa381e0`
+- 正式实现 Commit：`c527265fa165fd08b6c7f14644bd8138d83eea30`
 - `DONE` 计数：`91/95`（未变化）
 - M7：`6/10 IN_PROGRESS`（未变化）
 
@@ -53,7 +54,7 @@
     6/6 `OK`，结果目录 `/tmp/xtunnel-m7-07.hTy3Ag`，清单 SHA-256
     `e632c8a52e1e426370846b0c2f399ec3c07c84c4d9de275ac37a0263f4fe02ef`。
 
-以上是 WSL2/脏工作区开发反馈，不是原生 Linux Full、正式 Commit 或 CI 证据。
+以上是 WSL2/脏工作区开发反馈，不是原生 Linux Full 或 CI 证据。
 
 ## 审计与剩余 Gate
 
@@ -95,10 +96,9 @@
   `dash -n` 与 WSL ShellCheck 均 PASS。被复审判定过期的 R1/R2 Docker 候选已停止，不计
   产品失败或 PASS；上述 R3 clean `full` 是修复后的新鲜结果。
 - 修复后工作树 Tier 3 三分区独立复审均为 `COMPLETE/FRESH/PASSED`：Harness、
-  Runner/Builder、状态/证据的 P0/P1/P2 均为 `0/0/0`。该结论只绑定当前工作树，不替代
-  正式 Commit 上的最终 commit-bound 复审。
-- 尚未完成：独立原生 Linux arm64、正式 Commit、精确 CI 与最终 commit-bound Tier 3
-  复审。
+  Runner/Builder、状态/证据的 P0/P1/P2 均为 `0/0/0`。正式实现 Commit 的 Runner/CI 与
+  代码/集成 commit-bound 复审没有 P0/P1；唯一剩余项是提交后自然产生的文档时态 P2，
+  即提交内仍写“尚无正式 Commit/精确 CI”，当前 docs-only 收口正在修正。
 
 ## CI 接线
 
@@ -113,10 +113,25 @@
   PASS；CI Artifact 读回块对 R3 clean `full` 的 9/9 条目再次返回 `OK`，清单 SHA-256
   仍为 `be05b98b892331f281eb21308d30e68385afc2fab614760a71df75ca22d1dc66`。
   本机未安装 `actionlint`，因此该项为 `UNAVAILABLE`，未使用临时下载替代仓库工具链。
-- 精确 GitHub Actions 尚未运行，不能把本地 YAML 解析、Docker Linux amd64 或 Artifact
-  读回写成 CI PASS；原生 Linux arm64 仍需正式提交后的矩阵 Job 提供证据。
+- 用户明确回复“确认暂存、提交并推送 M7-07”。7 个 delivery-owned 路径以正式实现
+  Commit `c527265fa165fd08b6c7f14644bd8138d83eea30` 推送至 `origin/master`，Parent
+  `2bf793bf5a9a51326bbcef1a13dd417a4fa381e0`，Tree
+  `0e6ee53aaebb09c49a73ec2e1ddfc0adc285756e`，Runner mode=`100755`；提交信息为
+  `test(leak): add M7-07 resource leak gate`，提交后工作区干净且远端 SHA 精确一致。
+- 精确 GitHub Actions [#33502663587](https://github.com/lifei6671/xtunnel/actions/runs/33502663587)
+  的 Head SHA 精确匹配正式实现 Commit，结论为 `completed/success`。Linux amd64 Job
+  `99839352999`（15m20s）、Linux arm64 Job `99839353376`（12m51s）、Windows Agent
+  service Job `99839353136`（5m03s）与 Windows arm64 Agent runtime Job
+  `99839353139`（3m54s）均成功。
+- 两个原生 Linux Job 的 `Run native M7 resource leak full` 均 PASS：amd64 普通/Race
+  分别为 `155.71s`/`87.09s`，Artifact 清单 SHA-256 为
+  `fd062ac72251d22214488678d22a1523e39700e2cdd53134cd041127224522a8`；arm64
+  普通/Race 分别为 `155.59s`/`90.98s`，Artifact 清单 SHA-256 为
+  `76acfa9f82e30feb06145b735ccd075933d5bf96a0cc30978aed54ae76f6bd71`。两个 Job 的
+  9/9 Artifact 校验、其余既有 Gate 与最终 clean-tree 检查同样成功。
 - CI 接线后的工作树 Tier 3 复审由 CI/Runner 静态分区、状态/证据分区和跨分区集成复审
   组成，三路均为 `COMPLETE/FRESH/PASSED`、P0/P1/P2=`0/0/0`。该结果只说明当前工作树
   接线无已知阻断缺陷，不替代正式 Commit 上的 commit-bound 复审或精确 GitHub Actions。
-- 正式暂存、提交和推送尚未授权。M7-07 保持 `IN_PROGRESS`，不得转为 `REVIEW/DONE`；
-  M7-08 不启动，Alpha Release Gate Checklist 不变。
+- M7-07 从 `IN_PROGRESS` 转为 `REVIEW`，等待用户明确阶段复审批准；在批准前不得转为
+  `DONE`。全局 `DONE` 保持 `91/95`、M7 保持 `6/10 IN_PROGRESS`；M7-08 不启动，
+  Alpha Release Gate Checklist 不变。
