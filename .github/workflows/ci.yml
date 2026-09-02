@@ -156,6 +156,19 @@ jobs:
           go test -count=1 -timeout 180s ./internal/server/bootstrap \
             -run '^TestProductDataPlaneEndToEnd$'
 
+      - name: Run native M7 release backup restore reconnect matrix
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          release_test="$RUNNER_TEMP/m7-09-release-${{ matrix.arch }}.test"
+          go test -c -o "$release_test" ./internal/server/bootstrap
+          sudo -- "$release_test" \
+            -test.v \
+            -test.count=1 \
+            -test.timeout=180s \
+            -test.run '^TestM7ReleaseBackupMigrationRestoreAgentReconnect$'
+
       - name: Run native M6 Prometheus metrics blackbox
         shell: bash
         timeout-minutes: 3
