@@ -24,8 +24,10 @@ profile.cov
 go.work
 go.work.sum
 
-# env file
+# Local runtime configuration
 .env
+/server.yaml
+/configs/server.yaml
 
 # Editor/IDE
 .idea/

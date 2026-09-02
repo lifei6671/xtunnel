@@ -5805,6 +5805,10 @@ Server YAML 使用 Strict Decode，未知字段或重复 Key 直接启动失败�
 
 Server 配置 Schema 固定使用 JSON Schema Draft 2020-12。每个叶子字段必须显式声明 `x-secret` 和 `x-reloadable`；V0.1 Server 主配置的 `x-reloadable` 全部为 `false`。环境变量名由 Schema 点分路径转换：路径段大写后使用双下划线连接，例如 `management.public_url` 对应 `XTUNNEL_MANAGEMENT__PUBLIC_URL`。数组覆盖值使用 JSON Array，标量覆盖值按 Schema 类型解析。CLI 层同样使用 Schema 点分路径。Server 配置入口固定为可选的 `--config <path>` 和可重复的 `--set <schema.path>=<value>`；不接受位置参数，未知 Flag 或 Schema 路径直接失败，同一路径重复覆盖时以后出现的值为准。Agent 不使用此 Schema/Loader，Bootstrap 输入按下一节的单 Token 契约处理。
 
+可直接复制的完整注释示例见 `configs/server.example.yaml`；Agent 的 Token-only 输入说明见
+`configs/README.md` 与 `configs/agent-bootstrap.env.example`。下面只保留 Server 的核心部署
+片段，不作为第二份字段清单或默认值权威。
+
 推荐：
 
 ```yaml

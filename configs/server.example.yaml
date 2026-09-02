@@ -1,0 +1,181 @@
+# XTunnel Server 完整配置示例
+#
+# 字段、类型、范围和默认值的唯一机器权威是同目录的 server.schema.json。
+# 本文件显式列出当前 pinned TLS 模式下全部可同时生效的字段，方便部署者理解和修改；
+# 它不会覆盖 Schema，也不会被程序自动发现，启动时需要显式传入 --config。
+# V0.1 的 Server 主配置不支持热加载，修改后必须重启 Server。
+
+server:
+  # 持久化数据目录。必须是绝对路径；手工前台运行时需预先创建并限制访问权限。
+  # systemd 自安装会创建 /var/lib/xtunnel/data，数据库、Token 主密钥和 pinned PKI
+  # 都位于这个安全边界内。
+  data_dir: /var/lib/xtunnel/data
+
+management:
+  # Web 管理面内部监听地址。示例只监听 Loopback，由 Caddy/Nginx 终止公网 HTTPS。
+  listen: "127.0.0.1:8080"
+
+  # 浏览器实际访问的唯一外部 HTTPS Origin。只能包含 scheme、host 和可选端口；
+  # 不能包含用户名、密码、Query、Fragment 或非根路径。
+  public_url: "https://admin.example.com"
+
+  # public_url 派生的 Host 已自动允许；这里只添加额外可到达同一管理面的 Host，
+  # 它不会扩大登录 Origin，也不是 CORS 白名单。
+  allowed_hosts: []
+
+  # 只有直接连接到 Management Listener 的可信反向代理 CIDR 才能写在这里。
+  # 不要使用 0.0.0.0/0、::/0 或整个办公网段，否则会信任外部伪造的 Forwarded 信息。
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "::1/128"
+
+http_ingress:
+  # HTTP/WebSocket 数据面的内部监听地址。公网 HTTPS/WSS 通常由前置代理转发到这里。
+  listen: "127.0.0.1:8081"
+
+  # 决定客户端 IP、Scheme 与 Host 的可信边界；只填写真实直连的前置代理 CIDR。
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "::1/128"
+
+agent_gateway:
+  # Agent Control/Work TLS Gateway 的监听地址；7443 需要由公网防火墙放行。
+  listen: "0.0.0.0:7443"
+
+  # 写入 Connection Token 并用于证书校验的公网主机名；不要带 scheme、路径或端口。
+  public_hostname: "tunnel.example.com"
+
+  tls:
+    # pinned：Server 在 data_dir 中管理自签身份，首次签发 Token 时固化 SPKI Pin。
+    # public：使用公共 CA 或受 Agent 系统信任链签发的外部证书。
+    mode: pinned
+
+    # public 模式才允许启用下面两个字段；pinned 模式下保留它们会导致配置校验失败。
+    # cert_file: /etc/xtunnel/tls/tunnel.crt
+    # key_file: /etc/xtunnel/tls/tunnel.key
+    # key_file 路径不是 Secret，但私钥内容是 Secret；Linux 会精确要求文件权限为 0600。
+
+transport:
+  tcp:
+    # 等待可用 WorkConn 的最长时间。使用 Go Duration 格式，且必须大于 0。
+    work_acquire_timeout: 2s
+
+control:
+  # 心跳、ConfigAck 等高优先级 Control Frame 的有界队列容量。
+  high_priority_queue: 32
+
+  # Snapshot、Health 等普通 Control Frame 的有界队列容量。
+  normal_queue: 128
+
+  # 单个 Control Frame 的写出上限。超时会让 Session 快速失败并重连。
+  write_timeout: 5s
+
+tcp_ingress:
+  # Raw TCP/SSH 公网 Listener 的绑定 IP。必须是纯 IP，不能填写主机名。
+  bind: "0.0.0.0"
+
+  # 自动分配 TCP Route 时允许使用的最小端口，必须不大于 max_port。
+  min_port: 10000
+
+  # 允许使用的最大端口。扩大端口池会同步提高 Server 启动期的 FD 预算。
+  max_port: 60000
+
+connector_runtime:
+  # Server 下发并用于 Agent 心跳调度的周期，必须大于 0。
+  heartbeat_interval: 10s
+
+  # 判定 Connector 失联的窗口，必须至少为 heartbeat_interval 的 3 倍。
+  heartbeat_timeout: 30s
+
+metrics:
+  # Prometheus 监听地址。默认只对本机开放；暴露到其他网络时需由网络策略保护。
+  listen: "127.0.0.1:9090"
+
+  # Prometheus 抓取路径，必须以 / 开头。
+  path: /metrics
+
+logging:
+  # 结构化日志级别：debug、info、warn 或 error。生产环境通常使用 info。
+  level: info
+
+  # V0.1 固定为 JSON，方便 systemd Journal、日志平台和审计检索消费。
+  format: json
+
+limits:
+  # Tunnel 总数上限。
+  max_tunnels: 1000
+
+  # 当前在线 Connector 总数上限。
+  max_connectors: 5000
+
+  # 单 Tunnel Connector 上限，不能超过 max_connectors。
+  max_connectors_per_tunnel: 100
+
+  # 单 Tunnel Service 上限；Schema 的绝对最大值为 1000。
+  max_services_per_tunnel: 1000
+
+  # 单 Tunnel 启用 Health Check 后可占用的目标预算。
+  max_health_targets_per_tunnel: 2000
+
+  # 全局 Health Target 预算，不能小于单 Tunnel 预算。
+  max_health_targets_global: 50000
+
+  # 单 Tunnel 完整配置快照的最大字节数；Schema 的绝对最大值为 786432。
+  max_tunnel_snapshot_bytes: 786432
+
+  # Server 全局 ACTIVE 数据面连接上限。
+  max_active_connections: 20000
+
+  # 单 Tunnel ACTIVE 连接上限。
+  max_connections_per_tunnel: 5000
+
+  # 单 Service ACTIVE 连接上限。
+  max_connections_per_service: 5000
+
+  # 单来源 IP ACTIVE 连接上限。
+  max_connections_per_source_ip: 200
+
+  # 单来源 IP 每秒可触发的新 Tunnel OPEN 速率。
+  max_open_rate_per_source_ip: 50
+
+  # 单来源 IP OPEN Token Bucket 的突发容量。
+  max_open_burst_per_source_ip: 100
+
+  # 单来源 IP 每秒 HTTP 请求上限。
+  max_http_requests_per_source_ip_per_second: 100
+
+  # 全局 WorkConn 总量上限。
+  max_work_connections: 60000
+
+  # IDLE WorkConn 上限，不能超过 max_work_connections。
+  max_idle_work_connections: 20000
+
+  # CONNECTING WorkConn 上限，不能超过 max_work_connections。
+  max_connecting_work_connections: 1000
+
+  # 等待 WorkConn 的并发 OPEN 请求上限。
+  max_pending_opens: 1024
+
+  # 等待 Agent 身份认证的连接上限。
+  max_pending_auth: 512
+
+  # 同时进行 TLS Handshake 的连接上限。
+  max_pending_tls_handshakes: 512
+
+  # 单 Control Session 的重放防护条目上限。
+  max_replay_entries_per_session: 4096
+
+  # Control Envelope 最大字节数；Schema 的绝对最大值为 1 MiB。
+  max_control_frame_bytes: 1048576
+
+  # Agent Auth Frame 最大字节数；Schema 的绝对最大值为 64 KiB。
+  max_auth_frame_bytes: 65536
+
+  # Work Frame 最大字节数；Schema 的绝对最大值为 64 KiB。
+  max_work_frame_bytes: 65536
+
+  # HTTP Header 聚合上限，单位为 Byte；Schema 的绝对最大值为 1 MiB。
+  max_http_header_bytes: 65536
+
+  # HTTP Request Body 流式上限，单位为 Byte；示例为 2 GiB，绝对最大值为 1 TiB。
+  max_http_body_bytes: 2147483648
