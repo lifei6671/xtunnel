@@ -22,7 +22,7 @@ exactly-once 和真实 SIGTERM 接线继续由对应 owner 测试证明，不由
 | WebSocket 自然排空 | Shutdown 期间仍可完成真实帧双向传输，Hijacked Handler 自然退出 |
 | Hard Deadline | TCP、HTTP Slow Origin、WebSocket 同时阻塞；250ms 测试 Deadline 后主动解除两端 IO，错误链包含 `context.DeadlineExceeded` |
 | Agent 两阶段 Drain | Server 观察 WorkPool Draining；既有 ACTIVE 继续传输；新 OPEN 不到达 Origin；ACTIVE 完成后 Agent 有界退出 |
-| Agent Hard Deadline | 真实 30 秒默认窗口内持续 ACTIVE 流量；Control Owner 保持 DRAINING Heartbeat；Deadline 后 Agent 主动关闭 Public/Origin 两端 IO，错误链同时包含 `context.Canceled` 与 `context.DeadlineExceeded` |
+| Agent Hard Deadline | 真实 30 秒默认窗口内持续 ACTIVE 流量；Control Owner 保持 DRAINING Heartbeat；窗口到期后 Agent 主动关闭 Public/Origin 两端 IO，并等待 Session、WorkPool 与资源计数归零；Agent 本地 Deadline 与 Server 同窗关闭 Control Session 可并发收敛，因此不把 `context.DeadlineExceeded` 是否进入最终错误链作为行为证据 |
 | 资源终态 | Session Snapshot 为空；Connector/Work/Pending Open/Active 全部配额计数与分组 Map 为零；FD、goroutine 精确回到场景基线 |
 
 ## 当前开发证据

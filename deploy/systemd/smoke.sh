@@ -544,11 +544,47 @@ cmp -s "$previous_agent_binary" /usr/local/bin/xtunnel-agent
 
 # Agent creates /etc/xtunnel first. Server must make the shared parent traversable
 # as root:root 0755 while preserving the root-only Agent credential directory.
+previous_server_since=$(date +%s)
 "$previous_server_binary" service install --config "$temp_dir/server.yaml"
 previous_server_pid=$(systemctl show --property=MainPID --value xtunnel-server.service)
 cmp -s "$previous_server_binary" /usr/local/bin/xtunnel-server
-test -f /var/lib/xtunnel/data/xtunnel.db
-previous_database_identity=$(stat -c '%d:%i' /var/lib/xtunnel/data/xtunnel.db)
+database_path=/var/lib/xtunnel/data/xtunnel.db
+
+# sqlite.Open 会在 Ping 与 Migration 完成前创建文件，因此文件存在不代表 Server 已就绪。
+# 这里只接受本次进程 epoch 在资源和 Listener 完成初始化后发出的生命周期事件，
+# 并同时确认 systemd 始终持有同一个 PID，避免旧 Journal 或重启后的进程污染升级证据。
+previous_server_ready=0
+previous_server_deadline=$(( $(date +%s) + 30 ))
+while [ "$(date +%s)" -lt "$previous_server_deadline" ]; do
+	previous_server_state=$(systemctl show --property=ActiveState --value xtunnel-server.service)
+	observed_server_pid=$(systemctl show --property=MainPID --value xtunnel-server.service)
+	if [ "$previous_server_state" = active ] \
+		&& [ "$observed_server_pid" = "$previous_server_pid" ] \
+		&& journalctl -u xtunnel-server.service --since "@$previous_server_since" \
+			_PID="$previous_server_pid" --no-pager -o cat \
+			| grep -F '"event":"process_started"' >/dev/null; then
+		previous_server_ready=1
+		break
+	fi
+	sleep 1
+done
+if [ "$previous_server_ready" -eq 1 ]; then
+	# 生命周期事件后再观察一个周期，拒绝刚记录启动便退出或被 systemd 替换的进程。
+	sleep 1
+	previous_server_state=$(systemctl show --property=ActiveState --value xtunnel-server.service)
+	observed_server_pid=$(systemctl show --property=MainPID --value xtunnel-server.service)
+fi
+if [ "$previous_server_ready" -ne 1 ] \
+	|| [ "$previous_server_state" != active ] \
+	|| [ "$observed_server_pid" != "$previous_server_pid" ] \
+	|| [ ! -f "$database_path" ]; then
+	printf 'Server did not become ready before the deadline: unit=%s pid=%s database=%s\n' \
+		xtunnel-server.service "$previous_server_pid" "$database_path" >&2
+	systemctl show --property=ActiveState,SubState,Result,ExecMainStatus,NRestarts xtunnel-server.service >&2 || true
+	journalctl -u xtunnel-server.service --since "@$previous_server_since" --no-pager -n 50 >&2 || true
+	exit 1
+fi
+previous_database_identity=$(stat -c '%d:%i' "$database_path")
 previous_server_identity=$(id -u xtunnel-server):$(id -g xtunnel-server)
 previous_agent_identity=$(id -u xtunnel-agent):$(id -g xtunnel-agent)
 

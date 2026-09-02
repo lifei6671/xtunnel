@@ -492,8 +492,11 @@ func testM7AgentHardDeadlineForceClose(t *testing.T) {
 	m7AssertShutdownSignalPending(t, fixture.agent.done)
 	agentErr := fixture.agent.wait(35 * time.Second)
 	elapsed := time.Since(started)
-	if !errors.Is(agentErr, context.Canceled) || !errors.Is(agentErr, context.DeadlineExceeded) {
-		t.Fatalf("M7-03 Agent hard-deadline error = %v, want canceled + DeadlineExceeded", agentErr)
+	// Agent 与 Server 使用同一个排空窗口。本地 Drain Deadline 和 Server 关闭
+	// Control Session 可能同时完成，错误链因此不保证保留 DeadlineExceeded；
+	// 下面的耗时、双端 IO 解阻塞和资源归零才是强制关闭的权威行为证据。
+	if !errors.Is(agentErr, context.Canceled) {
+		t.Fatalf("M7-03 Agent hard-deadline error = %v, want canceled", agentErr)
 	}
 	if elapsed < 29*time.Second || elapsed > 35*time.Second {
 		t.Fatalf("M7-03 Agent hard-deadline duration = %s", elapsed)
