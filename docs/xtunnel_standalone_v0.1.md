@@ -18,7 +18,7 @@
 ## Go 工具链基线（冻结）
 
 - 项目 Go 语言版本固定为 **Go 1.27**，根 `go.mod` 必须声明 `go 1.27`。
-- M0-01 必须选择一个稳定的 `go1.27.x` 补丁版本，由 `go.mod` 的 `toolchain` 指令记录，并在 CI、OCI Builder 和版本检查入口中使用同一个精确版本。开发、测试、代码生成、发布构建必须设置 `GOTOOLCHAIN=local` 并使用该工具链，不允许自动下载、静默切换或回落到其他 Go 版本。
+- M0-01 必须选择一个稳定的 `go1.27.x` 补丁版本，由 `go.mod` 的 `toolchain` 指令记录，并在 CI、OCI Builder、Docker Desktop 本地 `go-runner` 和版本检查入口中使用同一个精确版本。开发、测试、代码生成、发布构建必须设置 `GOTOOLCHAIN=local` 并使用该工具链，不允许自动下载、静默切换或回落到其他 Go 版本。
 - 根 `go.mod` 是工具链版本权威；`tools/go.mod` 必须使用相同的 `go`/`toolchain` 版本，Proto 生成工具也必须由同一个 Go 1.27.x 工具链构建。补丁版本升级必须显式同步两个 Module、CI、OCI Builder、版本检查和构建证据。
 - 项目代码允许并应在适合的场景优先使用 Go 1.27 已稳定发布的语言、标准库和运行时特性；V0.1 不承诺兼容 Go 1.26 及更早版本，也不为旧工具链保留兼容垫片。
 - 使用 Go 1.27 特性必须服务于当前实现的正确性、可维护性、性能或简化目标，并由相关测试覆盖；不得为了“体现新版本”引入无关抽象。
@@ -8217,7 +8217,7 @@ OCI amd64 / arm64 Manifest + Agent `XTUNNEL_TOKEN` / Server Volume / SIGTERM Smo
 
 Linux Agent Binary Self-install / Managed Marker / LoadCredential / Restart / Uninstall Smoke = PASS，Unit ExecStart 仅为 `xtunnel-agent run` 且无 Secret
 
-Windows Agent Binary Self-install / SCM / LocalService / ProgramFiles / DPAPI Machine-scope Credential / Description Marker / Restart / Uninstall Smoke = PASS，SCM ImagePath 仅为安装 Binary + `run` 且无 Secret，运行中 EXE 延迟删除最终收敛
+Windows Agent Binary Self-install / SCM / LocalService / ProgramFiles / DPAPI Machine-scope Credential / Description Marker / Restart / Uninstall Smoke = PASS，SCM ImagePath 仅为安装 Binary + `run` 且无 Secret；运行中 EXE 的延迟删除登记必须 PASS，物理重启最终收敛按下方 Alpha 例外管理
 
 协议 Fuzz Corpus = PASS，零 Panic / OOM
 
@@ -8241,12 +8241,27 @@ Health Scheduler Rate/Concurrency/Batch 与两级 Target Budget = PASS
 
 测试结束并等待 30s 后：Goroutine 回到基线 + 20 以内
 
-日志扫描：Token / Password / Cookie / Private Key 命中数 = 0
+生产发布日志、Binary、OCI、示例配置、Unit、SCM/Registry 摘要和普通测试输出的真实或非测试 Token / Password / Cookie / Private Key 命中数 = 0；Backup 与公开 Golden 按下方分类规则验证
 
 Release Privileged Chaos / Crash / Restore Gate = PASS，并上传可复现 Artifact
 ```
 
 基线报告必须记录 CPU、内存、Go 版本、内核、`RLIMIT_NOFILE`、RTT、带宽和测试配置。若环境不满足延迟基线，可以单独标记性能 Gate 未验证，但功能、安全和资源泄漏 Gate 不得跳过。
+
+Secret Gate 使用分类后仍然默认拒绝。Backup Archive 必须继续由 Durable Operations 的
+固定成员、权限、大小、Hash 和一致性校验作为唯一权威；其中允许的 Token Master Key 与
+Pinned Gateway Private Key 按长期私钥材料保护，原始 Archive 不得作为普通 CI Artifact
+上传。Protocol Golden 只允许路径与 SHA-256 同时固定的确定性公开测试 Token/Session
+Secret；相同字节若出现在生产 Binary、OCI、日志或普通测试输出中仍属于泄漏。
+
+首个 Alpha 采用例外 `ALPHA-LIMIT-WIN-REBOOT-001`：GitHub-hosted Windows Runner 只能
+验证 SCM Service、受管 Event Source 删除、DPAPI Machine-scope Credential 保留，以及
+`MoveFileEx(DELAY_UNTIL_REBOOT)` 对运行中安装 EXE 的精确登记，不能在同一 Runner 生命周期
+完成物理重启。该例外不把登记证据表述为重启收敛 PASS；使用者收到 pending-reboot 提示后
+必须先重启并确认旧 EXE 消失，之后才能在相同路径重新安装。关闭条件是在隔离、可恢复快照、
+无并发工作负载的专用 Windows Self-hosted VM 上完成 Schedule→外部重启→Verify 两阶段证据，
+验证 Boot Time 前进、EXE 消失、登记被消费且 Credential Hash/ACL 不变。责任人为发布负责人，
+有效期止于首个 Beta Gate；进入 Beta 前该例外必须关闭或重新取得发布签核。
 
 ## Server
 

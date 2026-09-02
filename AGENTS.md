@@ -24,6 +24,7 @@
 
 - 项目必须使用 Go 1.27。根 `go.mod` 必须声明 `go 1.27`。
 - 根 `go.mod` 的 `toolchain` 指令记录稳定的精确 `go1.27.x` 补丁版本；`tools/go.mod`、 CI、OCI Builder 和版本检查入口必须使用同一版本，禁止写入 `latest`、`stable` 或占位值。
+- `compose.codex.yml` 的 Docker Desktop 本地验证 Runner 固定为 `golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466`，并强制 `GOTOOLCHAIN=local`、`GOFLAGS=-mod=readonly`；本地结果仅作为开发反馈，不替代 CI、OCI 或 Release 证据。
 - 本地开发、测试、代码生成、CI 和发布构建必须设置 `GOTOOLCHAIN=local`。执行 Go 命令前先检查 `go env GOVERSION` 和 `go env GOTOOLCHAIN`；版本或模式不匹配时快速失败，不得自动下载或切换工具链，也不得把结果作为验收证据。
 - 项目允许并应在适合的实现中优先采用稳定 Go 1.27 能力，不兼容 Go 1.26 及更早工具链，但不得为了展示新语法增加无关复杂度。
 - 不得新增旧 Go 版本兼容垫片。`GOEXPERIMENT`、tip-only API、开发分支能力和未进入稳定 Go 1.27 的特性默认禁止；确需使用时必须先获得明确授权并同步技术方案和验收规则。
@@ -127,3 +128,26 @@ PR 和交付说明，只描述最终采用的状态，假设读者没看过本�
 - 保留真实的基线变化、已经执行的外部操作，以及必要的技术名称、诊断、测试和快照。任务开始前已有的用户改动不算被否内容。
 - 不要把与本任务无关的改动写进本次 commit、PR 或交付说明。对比、引用、审计和迁移说明，只在用户要求或当前交付面确实需要时保留。
 - 写完后通读全部用户可见内容及其包装，包括文件名、元数据和 hook 改写。内容发生变化后重新检查，不要另加「已清理」或「无残留」类声明。
+
+## Validation Environment
+
+Docker Desktop's Linux VM is the canonical Linux validation environment for this project.
+
+During development, use:
+
+`.\scripts\test.ps1 [package]`
+
+Before completing a task that changes Go code, use:
+
+`.\scripts\verify.ps1`
+
+Do not use WSL for build, test, vet, lint, or Linux validation.
+
+Do not create ad-hoc Docker runners.
+
+Do not mount host Go module or build caches into containers.
+
+The runner uses the repository-pinned `golang:1.27.0-bookworm` image digest and rejects any Go version other than `go1.27.0`.
+
+If Docker validation cannot run because of an environment problem, report the failure.
+Do not fall back to WSL or another Linux environment.

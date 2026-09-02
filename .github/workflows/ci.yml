@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_gate:
+        description: Run the Alpha release-only OCI and artifact gate
+        required: true
+        default: false
+        type: boolean
   schedule:
     - cron: '30 18 * * *'
 
@@ -426,7 +432,11 @@ jobs:
             sh ./tests/chaos/run-m7-08.sh \
               -m full \
               -o "$result_dir" \
-            2>&1 | tee "$artifact_root/runner.log"
+            >"$artifact_root/runner.log" 2>&1
+
+          # 原始日志只有在秘密扫描通过后才允许进入 Actions Artifact；扫描失败时
+          # scanner 仅报告规则与路径，不把可能含凭据的原文回显到 CI 控制台。
+          go run ./tests/release/secretscan -path "$artifact_root" >/dev/null
 
           test -s "$result_dir/artifact-sha256.txt"
           (
@@ -436,7 +446,7 @@ jobs:
           )
 
       - name: Upload M7 privileged network chaos artifacts
-        if: always()
+        if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: m7-08-network-${{ matrix.arch }}-${{ github.sha }}-attempt-${{ github.run_attempt }}
@@ -694,3 +704,249 @@ jobs:
           $status = git status --porcelain --untracked-files=all
           if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
           if ($status) { throw "working tree is dirty after Windows arm64 verification`n$status" }
+
+  alpha-release-chaos:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_gate
+    name: Alpha release reconnect and durable chaos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Go 1.27.0
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.0'
+          check-latest: false
+          cache: false
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the embedded web assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(npm --version)" = '11.17.0'
+          npm --prefix web ci
+          npm --prefix web run check
+          npm --prefix web run build
+
+      - name: Run full reconnect and durable-operation chaos
+        shell: bash
+        timeout-minutes: 70
+        run: |
+          set -euo pipefail
+          ./tools/check-go-version.sh
+          sudo prlimit --pid "$$" --nofile=1048576:1048576
+          result_dir="$RUNNER_TEMP/m7-10-release-chaos"
+          ./tests/release/run-hardening.sh -s chaos -o "$result_dir"
+
+      - name: Upload verified reconnect and durable chaos candidate evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: m7-10-candidate-chaos-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m7-10-release-chaos
+          if-no-files-found: error
+          retention-days: 14
+
+  alpha-release-analysis:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_gate
+    name: Alpha release profile fuzz and leak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Go 1.27.0
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.0'
+          check-latest: false
+          cache: false
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install profile tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends strace
+
+      - name: Run full concurrency profile, fuzz, and leak gates
+        shell: bash
+        timeout-minutes: 145
+        run: |
+          set -euo pipefail
+          ./tools/check-go-version.sh
+          result_dir="$RUNNER_TEMP/m7-10-release-analysis"
+          ./tests/release/run-hardening.sh -s analysis -o "$result_dir"
+
+      - name: Upload verified profile, fuzz, and leak candidate evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: m7-10-candidate-analysis-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m7-10-release-analysis
+          if-no-files-found: error
+          retention-days: 14
+
+  alpha-release-scale:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_gate
+    name: Alpha release public scale
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Go 1.27.0
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.0'
+          check-latest: false
+          cache: false
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the embedded web assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(npm --version)" = '11.17.0'
+          npm --prefix web ci
+          npm --prefix web run check
+          npm --prefix web run build
+
+      - name: Run 1000 and 5000 public connection gates
+        shell: bash
+        timeout-minutes: 65
+        run: |
+          set -euo pipefail
+          ./tools/check-go-version.sh
+          sudo prlimit --pid "$$" --nofile=1048576:1048576
+          result_dir="$RUNNER_TEMP/m7-10-release-scale"
+          ./tests/release/run-scale.sh -m full -o "$result_dir"
+
+      - name: Upload verified public scale candidate evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: m7-10-candidate-scale-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m7-10-release-scale
+          if-no-files-found: error
+          retention-days: 14
+
+  alpha-release-oci:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_gate
+    name: Alpha release OCI manifest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Go 1.27.0
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.0'
+          check-latest: false
+          cache: false
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the embedded web assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(npm --version)" = '11.17.0'
+          npm --prefix web ci
+          npm --prefix web run check
+          npm --prefix web run build
+
+      - name: Build and verify multi-architecture OCI layouts
+        shell: bash
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          ./tools/check-go-version.sh
+          result_dir="$RUNNER_TEMP/m7-10-release-oci"
+          GITHUB_SHA="$GITHUB_SHA" ./tests/release/run-m7-10.sh -o "$result_dir"
+          (
+            cd "$result_dir"
+            sha256sum -c artifact-sha256.txt
+          )
+
+      - name: Upload verified Alpha OCI candidate evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: m7-10-candidate-oci-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m7-10-release-oci
+          if-no-files-found: error
+          retention-days: 14
+
+  alpha-release-gate:
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.release_gate
+    name: Alpha release gate
+    runs-on: ubuntu-24.04
+    needs:
+      - verify
+      - privileged-network-chaos
+      - windows-agent
+      - windows-arm64-agent
+      - alpha-release-chaos
+      - alpha-release-analysis
+      - alpha-release-scale
+      - alpha-release-oci
+
+    steps:
+      - name: Require every Alpha producer to pass
+        shell: bash
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          NETWORK_RESULT: ${{ needs.privileged-network-chaos.result }}
+          WINDOWS_RESULT: ${{ needs.windows-agent.result }}
+          WINDOWS_ARM64_RESULT: ${{ needs.windows-arm64-agent.result }}
+          CHAOS_RESULT: ${{ needs.alpha-release-chaos.result }}
+          ANALYSIS_RESULT: ${{ needs.alpha-release-analysis.result }}
+          SCALE_RESULT: ${{ needs.alpha-release-scale.result }}
+          OCI_RESULT: ${{ needs.alpha-release-oci.result }}
+        run: |
+          set -euo pipefail
+          for result in "$VERIFY_RESULT" "$NETWORK_RESULT" "$WINDOWS_RESULT" \
+            "$WINDOWS_ARM64_RESULT" "$CHAOS_RESULT" "$ANALYSIS_RESULT" "$SCALE_RESULT" \
+            "$OCI_RESULT"; do
+            test "$result" = success
+          done
