@@ -731,20 +731,27 @@ func testProductGatePendingOpen(t *testing.T) {
 
 func waitForProductGateIdleWork(t *testing.T, runtime *gatewayBootstrapCloser, want uint32) {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
+	// WorkConn 补充与上一条公网连接的 ACTIVE/Pending 配额释放由不同 owner
+	// 收敛。只有 IDLE 已补充且公网配额归零后才能开始下一子场景，否则会把旧连接
+	// 的短暂尾部状态误判为新请求的容量失败。HTTP Keep-Alive 对应的 WorkConn 可以
+	// 合法保持 ACTIVE，因此这里不要求 WorkPool.Active 清零。
+	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		limitSnapshot := runtime.limits.Snapshot()
 		for _, snapshot := range runtime.sessions.RuntimeStatusSnapshots() {
 			if snapshot.TunnelID == productGateTunnelID && snapshot.CurrentControlSession &&
-				snapshot.WorkPool.Idle >= want {
+				snapshot.WorkPool.Idle >= want &&
+				limitSnapshot.ActiveTotal == 0 && limitSnapshot.PendingOpens == 0 {
 				return
 			}
 		}
 		select {
 		case <-deadline.C:
-			t.Fatalf("Product Gate Agent did not replenish %d IDLE Work connections", want)
+			t.Fatalf("Product Gate did not settle before replenishing %d IDLE Work connections: limits=%+v sessions=%+v",
+				want, runtime.limits.Snapshot(), runtime.sessions.RuntimeStatusSnapshots())
 		case <-ticker.C:
 		}
 	}
