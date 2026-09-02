@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-02
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-07 · DONE；M7-08 · REVIEW；M7-09 · READY）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-08 · DONE；M7-09 · READY）
 >
-> **当前结论**：M7-01 至 M7-07 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `92/95`，M7 为 `7/10 IN_PROGRESS`。M7-08 正式实现 Commit `0f629f926ed3bdbbf9c698dab82130a1282e4731` 已完成生产 Server→Gateway→Agent→Origin 链路的 Large Transfer/Half-Close/Reset Harness、Linux namespace Runner、Windows 交叉构建入口，以及原生 Linux amd64/arm64 特权 `full` CI 与 Artifact 上传；[CI #33583345819 Attempt 2](https://github.com/lifei6671/xtunnel/actions/runs/33583345819/attempts/2) 最终为 `completed/success`，双架构 Artifact 已逐项回读，commit-bound Tier 3 独立复审为 `PASSED`、P0/P1/P2=`0/0/1`，唯一 P2 即本次证据文档同步。M7-08 进入 `REVIEW`，等待证据提交的精确 CI 与用户阶段复审；M7-09 保持 `READY`，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01 至 M7-08 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `93/95`，M7 为 `8/10 IN_PROGRESS`。M7-08 正式实现 Commit `0f629f926ed3bdbbf9c698dab82130a1282e4731`、双架构 Artifact 回读、[实现 CI #33583345819 Attempt 2](https://github.com/lifei6671/xtunnel/actions/runs/33583345819/attempts/2)、commit-bound Tier 3 独立复审、证据 Commit `584f699c04e247f44b8ac80a4aad373200f82ea9` 与 [证据 CI #33586979302 Attempt 2](https://github.com/lifei6671/xtunnel/actions/runs/33586979302/attempts/2) 均已闭环；用户已明确回复“`M7-08 阶段复审通过`”。M7-09 保持 `READY`，M7-10 继续等待 M7-09，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -404,7 +404,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `DONE` |
 | M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `DONE` |
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `DONE` |
-| M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `REVIEW` |
+| M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `DONE` |
 | M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；Server/Agent Binary `service install/uninstall` 安装、升级、卸载覆盖 Managed Marker、三文件原子发布/回滚、Server 旧官方 Unit 接管、配置/凭据权限、Secret 不落 argv 和非托管 Unit/Service 拒绝边界；Agent 前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `READY` |
 | M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `NOT_STARTED` |
 
@@ -433,11 +433,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 5. `M7-05` — `DONE`。实现与 arm64 测试超时修复均已提交并推送；Windows 全仓 Race/Vet、隔离 Linux clean `full`、Linux amd64/arm64 全仓 Race、修复与证据 Head 精确 CI、commit-bound Tier 3 最终独立复审及用户阶段复审均已闭环。
 6. `M7-06` — `DONE`。正式 Commit `5b88b46f29be882525038ea3f2c749fd24a53646`、隔离 Linux amd64 clean `full`、实现与证据 Head 的精确 CI `#33492076511`、`#33493628266`、Linux amd64/arm64 Short Fuzz、commit-bound Tier 3 独立复审及用户阶段复审均已闭环。
 7. `M7-07` — `DONE`。Linux-only 产品 Leak Harness、Runner、Builder 与 CI full 接线、两轮 CI 回归修复、原生 Linux amd64/arm64 完整三分区普通与 Race、Artifact 校验、精确 CI `#33510562933`、docs-only CI `#33512711172` 与最终独立复审均已通过；用户已明确阶段复审通过。
-8. `M7-08` — `REVIEW`。正式实现 Commit `0f629f926ed3bdbbf9c698dab82130a1282e4731`、原生 Linux amd64/arm64 特权 `full`、双架构 Artifact 回读、精确 CI `#33583345819` 与 commit-bound Tier 3 独立复审均已完成；等待本次证据提交的精确 CI 与用户阶段复审。
+8. `M7-08` — `DONE`。正式实现 Commit `0f629f926ed3bdbbf9c698dab82130a1282e4731`、原生 Linux amd64/arm64 特权 `full`、双架构 Artifact 回读、实现 CI `#33583345819`、commit-bound Tier 3 独立复审、证据 Commit `584f699c04e247f44b8ac80a4aad373200f82ea9`、证据 CI `#33586979302` 与用户阶段复审均已闭环。
 9. `M7-09` — `READY`，本轮不启动。
-10. `M7-10` — 继续等待 M7-08、M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
+10. `M7-10` — 继续等待 M7-09 `DONE`，Alpha Release Gate Checklist 保持未勾选。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `92/95`。M7 当前为 `7/10 IN_PROGRESS`，M7-01 至 M7-07 已 `DONE`，M7-08 为 `REVIEW`，M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `93/95`。M7 当前为 `8/10 IN_PROGRESS`，M7-01 至 M7-08 已 `DONE`，M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -2030,3 +2030,11 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - Artifact 回读：amd64 Artifact `9829213126`（`m7-08-network-amd64-0f629f926ed3bdbbf9c698dab82130a1282e4731-attempt-1`）与 arm64 Artifact `9829209726`（`m7-08-network-arm64-0f629f926ed3bdbbf9c698dab82130a1282e4731-attempt-1`）均为 `mode=full`、seed=`20260902`、clean worktree、`go1.27.0/local`、精确 Commit；各自 8 项 Manifest 均经 SHA-256 回读，clean 1 GiB、四个受损传输档和 Reset/恢复结果齐备。Reset nft dport/sport counter 分别为 amd64 `7/7 packets`、arm64 `5/5 packets`，两端均记录活动连接被非 Timeout 主动解阻并在故障撤销后恢复。
 - 独立复审：正式 Commit 的 7 路径经 `CHILD_AGENT`、`FULL_SCOPE / Tier 3` commit-bound 复审，Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/1`。唯一 P2 是开发计划与本证据文件仍保留 `IN_PROGRESS/NOT RUN` 旧状态，本次同步即修复该证据缺口；实现本身无 P0/P1/P2 问题。
 - 状态与剩余 Gate：M7-08 从 `IN_PROGRESS` 进入 `REVIEW`，但在本次证据提交的精确 CI 和用户明确阶段复审完成前不得转为 `DONE`。全局 `DONE` 保持 `92/95`，M7 保持 `7/10 IN_PROGRESS`，M7-09 保持 `READY`，本次未勾选任何产品任务或 Alpha Release Gate；Attempt 1 的历史失败事实不因 Attempt 2 成功而改写。
+
+## 2026-09-02 · M7-08 阶段复审批准 · DONE
+
+- 阶段批准：用户明确回复“`M7-08 阶段复审通过`”，批准对象包括正式实现 Commit `0f629f926ed3bdbbf9c698dab82130a1282e4731`、双架构 Artifact 回读、实现 CI `#33583345819`、commit-bound Tier 3 独立复审，以及证据 Commit `584f699c04e247f44b8ac80a4aad373200f82ea9`。证据提交与用户文档 Commit `776e7c42562ffc3a762ad444e27375c7b3ec8207` 在同一次 fast-forward Push 中到达 `origin/master`，未改变 M7-08 正式实现 Target。
+- 证据 CI 首轮：[CI #33586979302 Attempt 1](https://github.com/lifei6671/xtunnel/actions/runs/33586979302/attempts/1) 的 Head SHA 精确匹配证据 Commit。原生特权 amd64 Job `100113067796`、arm64 Job `100113067627`、Windows arm64 Agent Runtime、Windows Agent Service 与 Linux verify arm64 均成功；Linux verify amd64 Job `100113067865` 在前置全量 Go 步骤的既有 `TestProcessExitsOnSIGTERM` 中以 `process exit error = signal: terminated` 失败，未进入后续 Gate，因此 Attempt 1 整体保持 `failure`。
+- 证据 CI 重跑：用户明确确认仅重跑失败的 amd64 verify Job。同一 Commit、同一 Workflow 的 [CI #33586979302 Attempt 2](https://github.com/lifei6671/xtunnel/actions/runs/33586979302/attempts/2) 只重新执行 Job `100115793630`；此前失败未复现，Go Test/Vet/Build、Short Fuzz、Leak Full、Data Plane、M6 Observability、1 GiB Streaming、Ingress/Browser、OCI、Compose、systemd Diagnostics 与 clean-tree 检查全部成功，Run 最终为 `completed/success`。
+- 状态影响：M7-08 从 `REVIEW` 转为 `DONE`，全局从 `92/95` 更新为 `93/95`，M7 从 `7/10` 更新为 `8/10 IN_PROGRESS`。M7-09 保持 `READY` 且本轮不启动；M7-10 继续等待 M7-09 `DONE`，Alpha Release Gate Checklist 保持未勾选。
+- 证据边界：阶段批准不改写两条 CI Attempt 1 的历史失败事实，也不把 WSL2 缺少 `SOCK_DESTROY` 的开发环境结果冒充原生 Reset PASS；正式 Reset/恢复证据来自原生 Linux amd64/arm64 特权 Runner。M7-08 完成不代表 M7-09 Release/Upgrade/Backup-Restore Matrix 或 M7-10 Alpha Gate 已通过。

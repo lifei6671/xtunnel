@@ -1,7 +1,7 @@
 # M7-08 Large Transfer/Privileged Network Chaos 交付证据
 
-> 状态：`REVIEW`（正式实现、原生 Linux amd64/arm64 特权 `full`、Artifact 回读、
-> 精确 CI 与 commit-bound Tier 3 独立复审已完成；等待证据提交 CI 和用户阶段复审）
+> 状态：`DONE`（正式实现、原生 Linux amd64/arm64 特权 `full`、Artifact 回读、
+> 精确 CI、commit-bound Tier 3 独立复审、证据 CI 与用户阶段复审均已完成）
 
 ## 当前范围
 
@@ -78,13 +78,22 @@
   10 Mbit/s、Reset 与恢复结果齐备。
 - Reset nft dport/sport counter 分别为 amd64 `7/7 packets`、arm64 `5/5 packets`；
   两端均记录活动连接被非 Timeout 主动解阻，并在撤销故障后恢复新连接。
+- 证据 Commit `584f699c04e247f44b8ac80a4aad373200f82ea9` 的
+  [CI #33586979302 Attempt 1](https://github.com/lifei6671/xtunnel/actions/runs/33586979302/attempts/1)
+  中，双架构 M7-08 特权 Job、Windows Jobs 与 arm64 verify 均成功；amd64 verify Job
+  `100113067865` 在既有 `TestProcessExitsOnSIGTERM` 中偶发 `signal: terminated`，因此
+  Attempt 1 保持 `failure`。
+- 用户明确确认只重跑失败的 amd64 verify Job。[Attempt 2](https://github.com/lifei6671/xtunnel/actions/runs/33586979302/attempts/2)
+  仅执行 Job `100115793630`；原失败未复现，全部后续 Gate 均成功，Run 最终为
+  `completed/success`。
 
 ## 独立复审
 
 - 正式 Commit 的 7 路径经 `CHILD_AGENT`、`FULL_SCOPE / Tier 3` commit-bound 复审。
 - Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/1`。
 - 唯一 P2 是本文件与开发计划仍保留旧的 `IN_PROGRESS/NOT RUN` 状态；本次证据同步
-  修复该缺口，实现本身无 P0/P1/P2 问题。
+  已由证据 Commit `584f699c04e247f44b8ac80a4aad373200f82ea9` 修复并通过精确 CI；
+  实现本身无 P0/P1/P2 问题。
 
 ## 修复记录
 
@@ -97,12 +106,12 @@
 - `smoke` 移除随机 Loss，只保留有界 Delay/Jitter/Rate，避免 1 秒 TCP Dial Deadline
   因 SYN 随机丢失产生开发态抖动；Loss 1%/5% 仍是 `full` 的必跑档，不能跳过。
 
-## 未完成项
+## 阶段结论
 
-- 本次证据同步尚未提交，其精确 GitHub Actions 为 `NOT RUN`。
-- 用户阶段复审尚未完成；M7-08 只能进入 `REVIEW`，不得标记为 `DONE`。
-
-因此本文件不能单独作为 M7-08、M7-10 或 Alpha Release Gate 的通过证据。
+- 用户已明确回复“`M7-08 阶段复审通过`”，M7-08 转为 `DONE`。
+- M7-08 已无未完成验收项；两条 CI Attempt 1 的偶发失败事实继续保留，不因 failed-only
+  重跑成功而改写。
+- 本文件只证明 M7-08，不代表 M7-09、M7-10 或 Alpha Release Gate 已通过。
 
 ## CI 接线
 
