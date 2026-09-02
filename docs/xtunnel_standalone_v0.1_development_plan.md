@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-09-01
+> **进度基线日期**：2026-09-02
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-07 · DONE；M7-08 至 M7-09 · READY）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-07 · DONE；M7-08 · IN_PROGRESS；M7-09 · READY）
 >
-> **当前结论**：M7-01 至 M7-07 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `92/95`，M7 为 `7/10 IN_PROGRESS`。M7-07 Linux-only Leak Test Harness、Runner、Linux amd64/arm64 CI `full` 接线、两轮 CI 回归修复与最终独立复审已经闭环；精确 GitHub Actions `#33510562933` 和 docs-only `#33512711172` 均为 `completed/success`。M7-08 至 M7-09 保持 `READY`，M7-10 继续等待二者 `DONE`，M7 Alpha Gate 尚未通过。
+> **当前结论**：M7-01 至 M7-07 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `92/95`，M7 为 `7/10 IN_PROGRESS`。M7-08 已启动并落地生产 Server→Gateway→Agent→Origin 链路的 Large Transfer/Half-Close/Reset 测试、Linux namespace Runner、Windows 交叉构建入口，以及非 PR Push/手动/Nightly 的原生 Linux amd64/arm64 特权 `full` CI 接线与 Artifact 上传；WSL2 开发态的 1 GiB clean 与 8 MiB 双向 netem 传输已通过，但 WSL2 内核不支持 `SOCK_DESTROY`，TCP Reset 档按设计快速失败。CI Workflow 仍处于未提交工作树，原生特权 `full`、精确 CI 和独立复审尚未完成，M7-08 保持 `IN_PROGRESS`；M7-09 保持 `READY`，M7 Alpha Gate 尚未通过。
 
 ---
 
@@ -404,7 +404,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-05 | Race/Concurrency Suite | M2-08、M3-13、M4-10 | Race CI Job | `go test -race ./...`；Session Replacement、Config Write、Usage Flush、Listener Reconcile、共享 TLS Config/证书热加载；记录 TunnelRuntime Mutex/Block Profile 与 Connector Selection 热路径 Profile | `DONE` |
 | M7-06 | Protocol/Parser Fuzz | M05-10、M4-10 | `tests/fuzz` | Canonical/non-canonical UVarint、Frame/Envelope/WorkHello/Host、RawPath/RequestURI/encoded separator/dot-segment、Forwarded Header；Crash/OOM/无界分配为零 | `DONE` |
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `DONE` |
-| M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `READY` |
+| M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `IN_PROGRESS` |
 | M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；Server/Agent Binary `service install/uninstall` 安装、升级、卸载覆盖 Managed Marker、三文件原子发布/回滚、Server 旧官方 Unit 接管、配置/凭据权限、Secret 不落 argv 和非托管 Unit/Service 拒绝边界；Agent 前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 收敛；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `READY` |
 | M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `NOT_STARTED` |
 
@@ -433,10 +433,11 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 5. `M7-05` — `DONE`。实现与 arm64 测试超时修复均已提交并推送；Windows 全仓 Race/Vet、隔离 Linux clean `full`、Linux amd64/arm64 全仓 Race、修复与证据 Head 精确 CI、commit-bound Tier 3 最终独立复审及用户阶段复审均已闭环。
 6. `M7-06` — `DONE`。正式 Commit `5b88b46f29be882525038ea3f2c749fd24a53646`、隔离 Linux amd64 clean `full`、实现与证据 Head 的精确 CI `#33492076511`、`#33493628266`、Linux amd64/arm64 Short Fuzz、commit-bound Tier 3 独立复审及用户阶段复审均已闭环。
 7. `M7-07` — `DONE`。Linux-only 产品 Leak Harness、Runner、Builder 与 CI full 接线、两轮 CI 回归修复、原生 Linux amd64/arm64 完整三分区普通与 Race、Artifact 校验、精确 CI `#33510562933`、docs-only CI `#33512711172` 与最终独立复审均已通过；用户已明确阶段复审通过。
-8. `M7-08` 至 `M7-09` — `READY`，本轮不启动。
-9. `M7-10` — 继续等待 M7-08、M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
+8. `M7-08` — `IN_PROGRESS`。生产数据面测试、Builder、特权 Runner 与双架构 CI 接线已落地；WSL2 的 1 GiB clean 与 netem 双向 Smoke 通过，Reset 因内核缺少 `SOCK_DESTROY` 明确失败。等待原生 Linux CI 完整矩阵、Artifact 读回与独立复审。
+9. `M7-09` — `READY`，本轮不启动。
+10. `M7-10` — 继续等待 M7-08、M7-09 全部 `DONE`，Alpha Release Gate Checklist 保持未勾选。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `92/95`。M7 当前为 `7/10 IN_PROGRESS`，M7-01 至 M7-07 已 `DONE`，M7-08 至 M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `92/95`。M7 当前为 `7/10 IN_PROGRESS`，M7-01 至 M7-07 已 `DONE`，M7-08 为 `IN_PROGRESS`，M7-09 为 `READY`；尚未勾选 Alpha Release Gate Checklist。
 
 推进规则：
 
@@ -2017,3 +2018,12 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 用户明确回复“`systemd 二进制安装阶段复审通过`”，批准对象是冻结实现 Commit `36bcce33f97af7e8083196d9204b46918c743f65`、独立 Tier 3 `P0/P1/P2=0/0/0` 复审、[CI #33520632888 Attempt 2](https://github.com/lifei6671/xtunnel/actions/runs/33520632888/attempts/2) 的双架构 Binary systemd Smoke，以及证据 Commit `3316268813955a6b8320eec0c1b911fba19f9487` 的 [docs-only CI #33523948492](https://github.com/lifei6671/xtunnel/actions/runs/33523948492)；两条 CI 均为 `completed/success`，本地与 `origin/master` Head 精确一致。
 - 状态影响：Server/Agent Binary systemd Self-install 追补从 `REVIEW` 转为 `DONE`。该追补不是独立产品 Task，不增加仪表盘计数；M7-07 继续 `DONE`，M7-08/M7-09 继续 `READY`，全局保持 `92/95`，M7 保持 `7/10 IN_PROGRESS`，M7-10 与 Alpha Release Gate Checklist 不变。本轮不启动 M7-08 或 M7-09，不勾选任何产品任务。
 - 证据边界：阶段批准只冻结 Linux amd64/arm64 Server/Agent Binary systemd 自安装子范围，不把它扩大为完整 M7-09 Release/Upgrade/Backup-Restore Matrix，也不改写 CI Attempt 1 的 Raw TCP reset 历史失败事实。
+
+## 2026-09-02 · M7-08 Large Transfer/Privileged Network Chaos · IN_PROGRESS
+
+- 授权与范围：用户在 systemd Binary Self-install 阶段复审通过后明确要求继续推进。本轮只启动 M7-08；不修改生产行为、Proto、OpenAPI、Server Schema、依赖、权限、日志契约或 CI/CD，也未暂存、提交或推送。
+- 已落地产物：新增 Linux-only `TestM7PrivilegedNetworkChaos`，复用真实 Public TCP Listener→Server/Gateway→Token-only Agent→Origin 产品链路，按精确字节数和双向 SHA-256 验证 1 GiB clean 与受损链路传输，并断言 TCP Half-Close、FD/goroutine/运行时计数收敛。Reset 场景使用 marker 与外部 Runner 握手，只接受非 Timeout 的主动解阻，并验证故障撤销后新连接恢复。
+- Runner 边界：新增 POSIX `tests/chaos/run-m7-08.sh` 与 Windows `build-m7-08-linux.ps1`。Runner 只在独立 Linux network namespace 的 loopback 上配置 `tc netem` 与独立 nft table；`full` 固定执行 clean 1 GiB、Loss 1%/5%、100 ms+50 ms Jitter、10 Mbit/s、TCP Reset，要求 root、clean worktree 和可验证 Manifest/Binary SHA-256。Reset 先记录 nft 命中计数，移除会截获销毁 RST 的 reject table 后，再通过 `ss -K` 精确销毁目标活动 socket；内核缺少 `SOCK_DESTROY` 时必须失败，不允许用读超时冒充 Reset。
+- 当前开发证据：Windows `go1.27.0/local` 版本检查、Go 格式化、Linux amd64/`GOAMD64=v1` 与 Linux arm64、`CGO_ENABLED=0` Test Binary 交叉构建、PowerShell Parser、WSL2 `sh -n`/`dash -n`/ShellCheck 与 `git diff --check` 已通过。WSL2 独立 namespace 的 clean 1 GiB 双向档通过，上传 SHA-256=`29fddf94839f22d967c01da8fdfcb2219c2bc7d206388970162b58114e077e42`、下载 SHA-256=`5462afe8e48f15efe43acdcf26224b2462feaeea74210fa13da5d923701f42f4`；Smoke 的 8 MiB 双向 `delay 20ms 5ms rate 100mbit` 档也通过，上传 SHA-256=`5351604d9baa8549dc27dc086c58a3010aff4e6c018e9d22ed6213a8f5aa42ef`、下载 SHA-256=`98de66313c2ca653a73ea4b33dba0c43df9b35eb0e9c52df504e286b7c81d4a0`。两档均为 `lost=0 duplicate=0 half_close=true`，资源回到基线。
+- CI 接线：用户明确回复“确认修改 M7-08 CI”。`.github/workflows/ci.yml` 新增与现有 verify 并行的原生 Linux amd64/arm64 `privileged-network-chaos` Job；PR 明确不运行，非 PR Push、`workflow_dispatch` 与每日 `18:30 UTC` Nightly 执行 root namespace `full`。Job 固定 Go `1.27.0`、Node `24.19.0`，构建 Embed Web 后安装 `iproute2/nftables`，以最小 root PATH 和当前 Checkout `safe.directory` 运行 Runner；成功时复核内部 SHA-256，失败时也通过固定 Commit 的 `actions/upload-artifact@v4.6.2` 上传预检、Runner 日志和已有结果，保留 14 天。PyYAML 结构读回、三个 Bash Block 的 `bash -n`、`actionlint v1.7.12` 与 Action Tag/SHA 读回均通过。
+- 阻塞与状态：WSL2 `6.18.33.2-microsoft-standard-WSL2` 的 `ss -K` 返回 `RTNETLINK answers: Invalid argument`，目标 socket 仍存在；最终 Runner 已在约 12 秒内以 `SOCK_DESTROY support is required` 失败并完成 namespace/qdisc/nft/temp 清理。该事实是环境能力阻塞，不是 Reset PASS。clean `full`、原生 Linux amd64/arm64 特权矩阵、Race、精确 CI、Artifact 读回与独立复审均为 `NOT RUN`；M7-08 保持 `IN_PROGRESS`，全局 `DONE` 仍为 `92/95`，本次未勾选任何产品任务或 Alpha Gate。

@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 18 * * *'
 
 permissions:
   contents: read
@@ -289,6 +292,118 @@ jobs:
           set -euo pipefail
           git diff --check
           test -z "$(git status --porcelain --untracked-files=all)"
+
+  privileged-network-chaos:
+    if: github.event_name != 'pull_request'
+    name: privileged network chaos (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            uname_arch: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            uname_arch: aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Go 1.27.0
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.27.0'
+          check-latest: false
+          cache: false
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the embedded web assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = 'v24.19.0'
+          test "$(npm --version)" = '11.17.0'
+          npm --prefix web ci
+          npm --prefix web run check
+          npm --prefix web run build
+
+      - name: Install privileged network tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends iproute2 nftables
+
+      - name: Run native M7 privileged network chaos full
+        shell: bash
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = '${{ matrix.uname_arch }}'
+          test "$(go env GOVERSION)" = 'go1.27.0'
+          test "$(go env GOTOOLCHAIN)" = 'local'
+          ./tools/check-go-version.sh
+
+          artifact_root="$RUNNER_TEMP/m7-08-network-${{ matrix.arch }}"
+          result_dir="$artifact_root/result"
+          mkdir -p "$artifact_root"
+          {
+            printf 'commit=%s\n' "$GITHUB_SHA"
+            printf 'arch=%s\n' '${{ matrix.arch }}'
+            printf 'uname=%s\n' "$(uname -a)"
+            printf 'go_version=%s\n' "$(go env GOVERSION)"
+            printf 'go_toolchain=%s\n' "$(go env GOTOOLCHAIN)"
+            printf 'ip_version=%s\n' "$(ip -Version 2>&1)"
+            printf 'tc_version=%s\n' "$(tc -Version 2>&1)"
+            printf 'nft_version=%s\n' "$(nft --version 2>&1)"
+            printf 'ss_version=%s\n' "$(ss -V 2>&1)"
+          } >"$artifact_root/runner-preflight.txt"
+
+          cleanup_artifact_ownership() {
+            if sudo test -d "$result_dir"; then
+              sudo chown -R "$(id -u):$(id -g)" "$result_dir"
+            fi
+          }
+          trap cleanup_artifact_ownership EXIT
+
+          go_bin_dir=$(dirname "$(command -v go)")
+          sudo env \
+            PATH="$go_bin_dir:/usr/sbin:/usr/bin:/sbin:/bin" \
+            GOTOOLCHAIN=local \
+            GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=safe.directory \
+            GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE" \
+            sh ./tests/chaos/run-m7-08.sh \
+              -m full \
+              -o "$result_dir" \
+            2>&1 | tee "$artifact_root/runner.log"
+
+          test -s "$result_dir/artifact-sha256.txt"
+          (
+            cd "$result_dir"
+            sha256sum -c artifact-sha256.txt
+            sha256sum artifact-sha256.txt
+          )
+
+      - name: Upload M7 privileged network chaos artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: m7-08-network-${{ matrix.arch }}-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m7-08-network-${{ matrix.arch }}
+          if-no-files-found: warn
+          retention-days: 14
 
   windows-agent:
     name: Windows Agent service

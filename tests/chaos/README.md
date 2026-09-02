@@ -209,3 +209,69 @@ SHA-256，并把 Binary 和输出复制到 Linux-native `/tmp/xtunnel-m7-04.XXXX
   存储控制器写乱序。Windows 交叉编译也不构成 Linux Runtime 证据。
 - `smoke` 只用于开发反馈；`full` 仍需结合 Linux Race、全仓 Test/Vet、精确 CI 与独立
   交付复审，不能单独作为 M7-04 或 Alpha Gate 通过证据。
+
+---
+
+# M7-08 Large Transfer/Privileged Network Chaos
+
+M7-08 Runner 把完整 Go Test Binary 放入独立 Linux network namespace，只在该
+namespace 的 loopback 上配置 `tc netem` 和独立 nft table。测试流量从真实 Public TCP
+Listener 进入生产 Server/Gateway，经 Token-only Agent 到 Origin，不使用 `net.Pipe` 或
+测试专用 Proxy。
+
+## 构建与运行
+
+直接运行要求 Linux root、项目固定 Go `go1.27.0`、`GOTOOLCHAIN=local`，并安装
+`ip`、`tc`、`nft`、`ss`、`timeout` 和 `sha256sum`：
+
+```sh
+./tests/chaos/run-m7-08.sh -m smoke -o /var/tmp/xtunnel-m7-08-smoke
+./tests/chaos/run-m7-08.sh -m full -o /var/tmp/xtunnel-m7-08-full
+```
+
+Linux 没有 Go 时，可在 Windows 交叉构建 `linux/amd64`、`GOAMD64=v1`、
+`CGO_ENABLED=0` 的 Test Binary 与 Manifest：
+
+```powershell
+./tests/chaos/build-m7-08-linux.ps1 -OutputDirectory C:\Temp\xtunnel-m7-08-bin
+```
+
+```sh
+./tests/chaos/run-m7-08.sh -m smoke \
+  -b /mnt/c/Temp/xtunnel-m7-08-bin \
+  -o /var/tmp/xtunnel-m7-08-smoke
+```
+
+`-AllowDirty` 只允许 Builder 生成开发 Smoke 产物。Runner 的 `full` 同时要求当前
+checkout 与 Manifest 为 clean，并校验 Commit、Go/目标平台字段和 Binary SHA-256。
+输出目录必须尚不存在，成功后保留环境、逐档日志、Reset 网络计数和 Artifact SHA-256；
+临时 Test Binary 始终位于 Linux-native `/tmp`，Trap 精确清理 nft table、qdisc 与
+namespace。
+
+## 固定矩阵与证据边界
+
+- `smoke`：每方向 8 MiB，`delay 20ms 5ms rate 100mbit`，随后执行 TCP Reset/恢复。
+- `full`：clean 1 GiB 双向；Loss 1%/5%、`delay 100ms 50ms`、10 Mbit/s 各 8 MiB
+  双向；最后执行 TCP Reset/恢复。
+- 每个完整传输档同时断言发送/接收字节数、双向 SHA-256、Half-Close、零丢失/重复和
+  资源收敛。Reset 档先用 nftables 规则及 counter 证明目标活动流量已命中；随后移除
+  reject table，避免拦截内核将要发送的 RST，再用 `ss -K` 销毁精确公网 socket，让
+  对端收到 TCP Reset；故障撤销后必须建立新连接。
+- 内核必须支持 `SOCK_DESTROY`。如果 `ss -K` 后活动 socket 仍存在，Runner 明确失败；
+  读 Deadline 超时不能冒充 TCP Reset。当前 WSL2 内核返回
+  `RTNETLINK answers: Invalid argument`，因此 WSL2 只能提供 netem 传输开发反馈，不能
+  作为 Reset 或正式 `full` 证据。
+- Windows 交叉编译、WSL2 Smoke、单个网络档或当前工作树运行都不等于专用原生 Linux
+  特权 Runner、精确 CI、Race、完整 Artifact 与发布 Gate 通过。
+
+## CI 分级
+
+普通 Pull Request 只运行既有无特权 Unit/Integration/Race/Short Fuzz，不运行 M7-08
+特权矩阵。非 PR Push、手动 `workflow_dispatch` 和每日 `18:30 UTC` Nightly 在原生
+Linux amd64/arm64 Runner 上执行 `full`。CI 先构建 Embed Web，再以 root 和最小 PATH
+进入独立 namespace；任一架构缺少命令、权限、`SOCK_DESTROY`、完整矩阵或 Artifact
+校验都会让 Job 失败。
+
+每个架构上传独立 Artifact，包含 Runner 预检、完整控制台日志、环境、逐档日志、Reset
+网络计数与 SHA-256 清单。即使 Runner 失败，已经生成的诊断仍会上传并保留 14 天；成功
+结果必须先在 Job 内执行 `sha256sum -c artifact-sha256.txt`。
