@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
+    [string]$PreviousAgentPath,
+
+    [Parameter(Mandatory = $true)]
     [string]$AgentPath,
 
     [Parameter(Mandatory = $true)]
@@ -23,6 +26,7 @@ $installedBinary = Join-Path $installDirectory 'xtunnel-agent.exe'
 $productDataDirectory = Join-Path $env:ProgramData 'XTunnel'
 $credentialDirectory = Join-Path $productDataDirectory 'credentials'
 $credentialPath = Join-Path $credentialDirectory 'agent.token.dpapi'
+$previousAgentFullPath = [IO.Path]::GetFullPath($PreviousAgentPath)
 $agentFullPath = [IO.Path]::GetFullPath($AgentPath)
 $gateHelperFullPath = [IO.Path]::GetFullPath($GateHelperPath)
 $installedGateHelper = Join-Path $installDirectory 'xtunnel-scm-gate-helper.exe'
@@ -159,10 +163,12 @@ function Assert-AgentServiceStable {
 function Invoke-Agent {
     param(
         [Parameter(Mandatory = $true)]
-        [string[]]$ArgumentList
+        [string[]]$ArgumentList,
+
+        [string]$ExecutablePath = $agentFullPath
     )
 
-    $output = & $agentFullPath @ArgumentList 2>&1
+    $output = & $ExecutablePath @ArgumentList 2>&1
     if ($LASTEXITCODE -ne 0) {
         $message = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
         throw "Agent command failed with exit code $LASTEXITCODE`: $message"
@@ -1099,6 +1105,9 @@ function Remove-EmptyDirectory {
 if (-not [Environment]::Is64BitOperatingSystem) {
     throw 'Windows Service smoke requires 64-bit Windows'
 }
+if (-not (Test-Path -LiteralPath $previousAgentFullPath -PathType Leaf)) {
+    throw "Previous Agent executable not found: $previousAgentFullPath"
+}
 if (-not (Test-Path -LiteralPath $agentFullPath -PathType Leaf)) {
     throw "Agent executable not found: $agentFullPath"
 }
@@ -1121,13 +1130,19 @@ if (Test-Path -LiteralPath $eventSourceRegistryPath) {
 if ((Test-Path -LiteralPath $installDirectory) -or (Test-Path -LiteralPath $productDataDirectory)) {
     throw 'refusing to overwrite an existing XTunnel install or data path'
 }
+$previousSourceBinaryHash = (Get-FileHash -LiteralPath $previousAgentFullPath -Algorithm SHA256).Hash
+$sourceBinaryHash = (Get-FileHash -LiteralPath $agentFullPath -Algorithm SHA256).Hash
+if ($previousSourceBinaryHash -eq $sourceBinaryHash) {
+    throw 'previous and current Agent executables must have different SHA256 hashes'
+}
 
 try {
     $firstToken = New-SmokeToken
     Test-UnmanagedServiceBoundary -Token $firstToken
     Test-UnmanagedEventSourceBoundary -Token $firstToken
     $installAttempted = $true
-    Invoke-Agent -ArgumentList @('service', 'install', '--token', $firstToken)
+    Invoke-Agent -ExecutablePath $previousAgentFullPath `
+        -ArgumentList @('service', 'install', '--token', $firstToken)
     Wait-AgentServiceStatus -Status 'Running'
     Assert-AgentServiceStable
     Assert-ServiceContract
@@ -1138,24 +1153,40 @@ try {
     if (-not (Test-Path -LiteralPath $installedBinary -PathType Leaf)) {
         throw 'installed Agent binary is missing'
     }
-    $sourceBinaryHash = (Get-FileHash -LiteralPath $agentFullPath -Algorithm SHA256).Hash
     $installedBinaryHash = (Get-FileHash -LiteralPath $installedBinary -Algorithm SHA256).Hash
-    if ($sourceBinaryHash -ne $installedBinaryHash) {
-        throw 'installed Agent binary does not match the source executable'
+    if ($previousSourceBinaryHash -ne $installedBinaryHash) {
+        throw 'initial installed Agent binary does not match the previous candidate executable'
     }
 
+    $previousProcessId = (Get-AgentService).ProcessId
+    if ($previousProcessId -eq 0) {
+        throw 'previous candidate Agent service has an invalid process ID'
+    }
     $firstCredentialHash = (Get-FileHash -LiteralPath $credentialPath -Algorithm SHA256).Hash
     $secondToken = New-SmokeToken
+    # Invoke the current binary while the candidate process is still running. This
+    # proves the SCM stop, atomic EXE replacement, DPAPI update, and restart sequence.
     Invoke-Agent -ArgumentList @('service', 'install', '--token', $secondToken)
     Wait-AgentServiceStatus -Status 'Running'
     Assert-AgentServiceStable
+    $currentProcessId = (Get-AgentService).ProcessId
+    if (($currentProcessId -eq 0) -or ($currentProcessId -eq $previousProcessId)) {
+        throw "Agent upgrade did not replace the candidate process: before=$previousProcessId after=$currentProcessId"
+    }
     Assert-ServiceContract
     Assert-CredentialProtected -PlaintextToken $secondToken
     Assert-RestrictedAcl -LiteralPath $credentialDirectory
     Assert-RestrictedAcl -LiteralPath $credentialPath
     $secondCredentialHash = (Get-FileHash -LiteralPath $credentialPath -Algorithm SHA256).Hash
     if ($firstCredentialHash -eq $secondCredentialHash) {
-        throw 'reinstall did not replace the protected Agent credential'
+        throw 'upgrade did not replace the protected Agent credential'
+    }
+    $installedBinaryHash = (Get-FileHash -LiteralPath $installedBinary -Algorithm SHA256).Hash
+    if ($sourceBinaryHash -ne $installedBinaryHash) {
+        throw 'upgraded Agent binary does not match the current executable'
+    }
+    if ($previousSourceBinaryHash -eq $installedBinaryHash) {
+        throw 'upgrade left the previous candidate Agent binary installed'
     }
     Assert-EventSourceContract
     Assert-EventLogContract -ForbiddenValues @($firstToken, $secondToken)

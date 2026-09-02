@@ -12,6 +12,8 @@ permissions:
 
 env:
   GOTOOLCHAIN: local
+  # Fixed pre-release candidate baseline. The repository has no official release tag yet.
+  M7_PREVIOUS_CANDIDATE_COMMIT: 36bcce33f97af7e8083196d9204b46918c743f65
 
 jobs:
   verify:
@@ -285,17 +287,41 @@ jobs:
           set -euo pipefail
           ./deploy/docker/dualstack-smoke.sh --platform '${{ matrix.platform }}'
 
-      - name: Run native M6 Operations systemd fault diagnostics smoke
+      - name: Run native M6 Operations and M7 release systemd smoke
         shell: bash
-        timeout-minutes: 7
+        timeout-minutes: 12
         run: |
           set -euo pipefail
+          candidate_commit="$M7_PREVIOUS_CANDIDATE_COMMIT"
+          candidate_source="$RUNNER_TEMP/m7-09-candidate-source"
+          previous_server_binary="$RUNNER_TEMP/xtunnel-server-previous"
+          previous_agent_binary="$RUNNER_TEMP/xtunnel-agent-previous"
           server_binary="$RUNNER_TEMP/xtunnel-server"
           agent_binary="$RUNNER_TEMP/xtunnel-agent"
-          build_version="v0.1.0-ci.${GITHUB_SHA}"
-          go build -trimpath -ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$build_version" -o "$server_binary" ./cmd/server
-          go build -trimpath -ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$build_version" -o "$agent_binary" ./cmd/agent
+
+          git fetch --no-tags --depth=1 origin "$candidate_commit"
+          test "$(git rev-parse "$candidate_commit^{commit}")" = "$candidate_commit"
+          mkdir "$candidate_source"
+          git archive "$candidate_commit" | tar -x -C "$candidate_source"
+          npm --prefix "$candidate_source/web" ci
+          npm --prefix "$candidate_source/web" run build
+          (
+            cd "$candidate_source"
+            ./tools/check-go-version.sh
+            go mod verify
+            candidate_version="v0.1.0-candidate.$candidate_commit"
+            candidate_ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$candidate_version"
+            go build -trimpath -ldflags="$candidate_ldflags" -o "$previous_server_binary" ./cmd/server
+            go build -trimpath -ldflags="$candidate_ldflags" -o "$previous_agent_binary" ./cmd/agent
+          )
+
+          current_version="v0.1.0-ci.${GITHUB_SHA}"
+          current_ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$current_version"
+          go build -trimpath -ldflags="$current_ldflags" -o "$server_binary" ./cmd/server
+          go build -trimpath -ldflags="$current_ldflags" -o "$agent_binary" ./cmd/agent
           sudo ./deploy/systemd/smoke.sh \
+            --previous-server-binary "$previous_server_binary" \
+            --previous-agent-binary "$previous_agent_binary" \
             --server-binary "$server_binary" \
             --agent-binary "$agent_binary"
 
@@ -499,14 +525,42 @@ jobs:
           go test ./internal/agent/service -run '^TestWindowsServiceHandlerFailsWhenRuntimeDoesNotStop$' -count=1
           if ($LASTEXITCODE -ne 0) { throw 'Windows Stop timeout diagnostic unit gate failed' }
 
-      - name: Run Windows M6 SCM persistent Event Log gate
+      - name: Run Windows M6 SCM and M7 candidate upgrade gate
         shell: powershell
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
+          $candidateCommit = $env:M7_PREVIOUS_CANDIDATE_COMMIT
+          $candidateArchive = Join-Path $env:RUNNER_TEMP 'm7-09-candidate.zip'
+          $candidateSource = Join-Path $env:RUNNER_TEMP 'm7-09-candidate-source'
+          $previousAgentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent-previous.exe'
           $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent.exe'
           $gateHelperPath = Join-Path $env:RUNNER_TEMP 'xtunnel-scm-gate-helper.exe'
-          ./deploy/windows/smoke.ps1 -AgentPath $agentPath -GateHelperPath $gateHelperPath
+
+          git fetch --no-tags --depth=1 origin $candidateCommit
+          if ($LASTEXITCODE -ne 0) { throw 'candidate commit fetch failed' }
+          $resolvedCandidate = git rev-parse "$candidateCommit^{commit}"
+          if (($LASTEXITCODE -ne 0) -or ($resolvedCandidate -ne $candidateCommit)) {
+            throw 'candidate commit identity verification failed'
+          }
+          git archive --format=zip -o $candidateArchive $candidateCommit
+          if ($LASTEXITCODE -ne 0) { throw 'candidate source archive failed' }
+          Expand-Archive -LiteralPath $candidateArchive -DestinationPath $candidateSource
+          Push-Location $candidateSource
+          try {
+            go mod verify
+            if ($LASTEXITCODE -ne 0) { throw 'candidate go mod verify failed' }
+            $candidateVersion = "v0.1.0-candidate.$candidateCommit"
+            $candidateLdflags = "-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$candidateVersion"
+            go build -trimpath -ldflags $candidateLdflags -o $previousAgentPath ./cmd/agent
+            if ($LASTEXITCODE -ne 0) { throw 'candidate Agent build failed' }
+          }
+          finally {
+            Pop-Location
+          }
+
+          ./deploy/windows/smoke.ps1 -PreviousAgentPath $previousAgentPath `
+            -AgentPath $agentPath -GateHelperPath $gateHelperPath
 
       - name: Verify working tree remains clean
         shell: powershell
@@ -522,7 +576,7 @@ jobs:
   windows-arm64-agent:
     name: Windows arm64 Agent runtime
     runs-on: windows-11-arm
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       CGO_ENABLED: '0'
 
@@ -591,6 +645,10 @@ jobs:
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
+          $candidateCommit = $env:M7_PREVIOUS_CANDIDATE_COMMIT
+          $candidateArchive = Join-Path $env:RUNNER_TEMP 'm7-09-candidate-arm64.zip'
+          $candidateSource = Join-Path $env:RUNNER_TEMP 'm7-09-candidate-arm64-source'
+          $previousAgentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent-previous-arm64.exe'
           $agentPath = Join-Path $env:RUNNER_TEMP 'xtunnel-agent-arm64.exe'
           $gateHelperPath = Join-Path $env:RUNNER_TEMP 'xtunnel-scm-gate-helper-arm64.exe'
           $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"
@@ -601,7 +659,30 @@ jobs:
           go build -trimpath -o $gateHelperPath ./tests/windows-scm-gate
           if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 SCM Gate Helper build failed' }
 
-          ./deploy/windows/smoke.ps1 -AgentPath $agentPath -GateHelperPath $gateHelperPath
+          git fetch --no-tags --depth=1 origin $candidateCommit
+          if ($LASTEXITCODE -ne 0) { throw 'candidate commit fetch failed' }
+          $resolvedCandidate = git rev-parse "$candidateCommit^{commit}"
+          if (($LASTEXITCODE -ne 0) -or ($resolvedCandidate -ne $candidateCommit)) {
+            throw 'candidate commit identity verification failed'
+          }
+          git archive --format=zip -o $candidateArchive $candidateCommit
+          if ($LASTEXITCODE -ne 0) { throw 'candidate source archive failed' }
+          Expand-Archive -LiteralPath $candidateArchive -DestinationPath $candidateSource
+          Push-Location $candidateSource
+          try {
+            go mod verify
+            if ($LASTEXITCODE -ne 0) { throw 'candidate go mod verify failed' }
+            $candidateVersion = "v0.1.0-candidate.$candidateCommit"
+            $candidateLdflags = "-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$candidateVersion"
+            go build -trimpath -ldflags $candidateLdflags -o $previousAgentPath ./cmd/agent
+            if ($LASTEXITCODE -ne 0) { throw 'candidate Windows arm64 Agent build failed' }
+          }
+          finally {
+            Pop-Location
+          }
+
+          ./deploy/windows/smoke.ps1 -PreviousAgentPath $previousAgentPath `
+            -AgentPath $agentPath -GateHelperPath $gateHelperPath
 
       - name: Verify working tree remains clean
         shell: powershell

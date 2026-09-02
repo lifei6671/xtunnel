@@ -3,20 +3,33 @@ set -eu
 
 usage() {
 	cat <<'EOF'
-Usage: smoke.sh --server-binary PATH --agent-binary PATH
+Usage: smoke.sh [--previous-server-binary PATH --previous-agent-binary PATH] \
+                --server-binary PATH --agent-binary PATH
 
-Runs install, start, restart, stop, start, and uninstall checks for both
-systemd services. It also injects a bounded Server startup failure, recovery
-restart, and runtime-only stop timeout. This destructive test is only for an
-isolated Linux host. It refuses to run when any XTunnel path, service user,
-service group, or runtime drop-in exists.
+Installs both services, optionally from a fixed previous candidate before
+upgrading them to the current binaries, then runs restart, stop, start, fault,
+and uninstall checks. This destructive test is only for an isolated Linux host.
+It refuses to run when any XTunnel path, service user, service group, or runtime
+drop-in exists.
 EOF
 }
 
+previous_server_binary=
+previous_agent_binary=
 server_binary=
 agent_binary=
 while [ "$#" -gt 0 ]; do
 	case "$1" in
+		--previous-server-binary)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+			previous_server_binary=${2-}
+			shift 2
+			;;
+		--previous-agent-binary)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+			previous_agent_binary=${2-}
+			shift 2
+			;;
 		--server-binary)
 			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
 			server_binary=${2-}
@@ -43,9 +56,27 @@ if [ "$(id -u)" -ne 0 ]; then
 	exit 1
 fi
 
-if [ -z "$server_binary" ] || [ -z "$agent_binary" ] || [ ! -x "$server_binary" ] || [ ! -x "$agent_binary" ]; then
+if [ -z "$server_binary" ] || [ -z "$agent_binary" ] \
+	|| [ ! -x "$server_binary" ] || [ ! -x "$agent_binary" ]; then
 	printf '%s\n' "both --server-binary and --agent-binary must name executable files" >&2
 	exit 2
+fi
+upgrade_matrix=0
+if [ -n "$previous_server_binary" ] || [ -n "$previous_agent_binary" ]; then
+	if [ -z "$previous_server_binary" ] || [ -z "$previous_agent_binary" ] \
+		|| [ ! -x "$previous_server_binary" ] || [ ! -x "$previous_agent_binary" ]; then
+		printf '%s\n' "both previous binary arguments must name executable files" >&2
+		exit 2
+	fi
+	if cmp -s "$previous_server_binary" "$server_binary" \
+		|| cmp -s "$previous_agent_binary" "$agent_binary"; then
+		printf '%s\n' "previous and current Server/Agent binaries must be byte-distinct" >&2
+		exit 2
+	fi
+	upgrade_matrix=1
+else
+	previous_server_binary=$server_binary
+	previous_agent_binary=$agent_binary
 fi
 
 if ! command -v systemctl >/dev/null 2>&1 || ! systemctl show --property=Version --value >/dev/null; then
@@ -503,25 +534,59 @@ if "$agent_binary" service install --token invalid-smoke-token >/dev/null 2>&1; 
 	printf '%s\n' "agent install unexpectedly accepted an invalid --token" >&2
 	exit 1
 fi
-"$agent_binary" service install --token "$smoke_agent_token"
-first_agent_pid=$(systemctl show --property=MainPID --value xtunnel-agent.service)
+
+# Install the initial binaries first. When the optional candidate pair is present,
+# the current binaries must replace running candidate processes without replacing
+# Server data or leaking Agent credentials.
+"$previous_agent_binary" service install --token "$smoke_agent_token"
+previous_agent_pid=$(systemctl show --property=MainPID --value xtunnel-agent.service)
+cmp -s "$previous_agent_binary" /usr/local/bin/xtunnel-agent
+
+# Agent creates /etc/xtunnel first. Server must make the shared parent traversable
+# as root:root 0755 while preserving the root-only Agent credential directory.
+"$previous_server_binary" service install --config "$temp_dir/server.yaml"
+previous_server_pid=$(systemctl show --property=MainPID --value xtunnel-server.service)
+cmp -s "$previous_server_binary" /usr/local/bin/xtunnel-server
+test -f /var/lib/xtunnel/data/xtunnel.db
+previous_database_identity=$(stat -c '%d:%i' /var/lib/xtunnel/data/xtunnel.db)
+previous_server_identity=$(id -u xtunnel-server):$(id -g xtunnel-server)
+previous_agent_identity=$(id -u xtunnel-agent):$(id -g xtunnel-agent)
+
 smoke_agent_token=$reinstall_agent_token
 "$agent_binary" service install --token "$smoke_agent_token"
-second_agent_pid=$(systemctl show --property=MainPID --value xtunnel-agent.service)
-case "$first_agent_pid:$second_agent_pid" in
+current_agent_pid=$(systemctl show --property=MainPID --value xtunnel-agent.service)
+case "$previous_agent_pid:$current_agent_pid" in
 	*[!0-9:]*|0:*|*:0|:*|*:)
-		printf 'Agent reinstall returned invalid MainPIDs: before=%s after=%s\n' "$first_agent_pid" "$second_agent_pid" >&2
+		printf 'Agent upgrade returned invalid MainPIDs: before=%s after=%s\n' "$previous_agent_pid" "$current_agent_pid" >&2
 		exit 1
 		;;
 esac
-if [ "$first_agent_pid" -eq "$second_agent_pid" ]; then
-	printf 'Agent reinstall did not restart the service: MainPID=%s\n' "$first_agent_pid" >&2
+if [ "$previous_agent_pid" -eq "$current_agent_pid" ]; then
+	printf 'Agent upgrade did not replace the candidate process: MainPID=%s\n' "$previous_agent_pid" >&2
 	exit 1
 fi
+cmp -s "$agent_binary" /usr/local/bin/xtunnel-agent
 
-# Agent 先安装会先创建 /etc/xtunnel；Server 安装必须把共享父目录修正为可穿透的
-# root:root 0755，同时保持 Agent Credential 子目录 root-only 0700。
 "$server_binary" service install --config "$temp_dir/server.yaml"
+current_server_pid=$(systemctl show --property=MainPID --value xtunnel-server.service)
+case "$previous_server_pid:$current_server_pid" in
+	*[!0-9:]*|0:*|*:0|:*|*:)
+		printf 'Server upgrade returned invalid MainPIDs: before=%s after=%s\n' "$previous_server_pid" "$current_server_pid" >&2
+		exit 1
+		;;
+esac
+if [ "$previous_server_pid" -eq "$current_server_pid" ]; then
+	printf 'Server upgrade did not replace the candidate process: MainPID=%s\n' "$previous_server_pid" >&2
+	exit 1
+fi
+cmp -s "$server_binary" /usr/local/bin/xtunnel-server
+cmp -s "$temp_dir/server.yaml" /etc/xtunnel/server.yaml
+test "$(stat -c '%d:%i' /var/lib/xtunnel/data/xtunnel.db)" = "$previous_database_identity"
+test "$(id -u xtunnel-server):$(id -g xtunnel-server)" = "$previous_server_identity"
+test "$(id -u xtunnel-agent):$(id -g xtunnel-agent)" = "$previous_agent_identity"
+if [ "$upgrade_matrix" -eq 1 ]; then
+	printf '%s\n' "systemd candidate-to-current binary upgrade passed"
+fi
 
 for unit in xtunnel-server.service xtunnel-agent.service; do
 	systemctl is-enabled --quiet "$unit"
@@ -544,6 +609,7 @@ test "$(stat -c '%a:%U:%G' /var/lib/xtunnel/data)" = '700:xtunnel-server:xtunnel
 test ! -e /var/lib/xtunnel-agent
 test "$(stat -c '%a:%U:%G' /usr/local/bin/xtunnel-server)" = '755:root:root'
 test "$(stat -c '%a:%U:%G' /usr/local/bin/xtunnel-agent)" = '755:root:root'
+cmp -s "$server_binary" /usr/local/bin/xtunnel-server
 cmp -s "$agent_binary" /usr/local/bin/xtunnel-agent
 test "$(stat -c '%a:%U:%G' /etc/systemd/system/xtunnel-server.service)" = '644:root:root'
 test "$(stat -c '%a:%U:%G' /etc/systemd/system/xtunnel-agent.service)" = '644:root:root'
