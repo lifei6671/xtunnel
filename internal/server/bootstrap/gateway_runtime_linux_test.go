@@ -343,7 +343,9 @@ func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
 	}()
 
 	socketPath := filepath.Join(runtimeDir, adminBootstrapSocketName)
-	waitForFile(t, socketPath, 2*time.Second)
+	// Race Runner 会同时承受全仓编译与测试调度；这里验证生命周期顺序，
+	// 不是 2 秒启动 SLO，因此为真实进程启动保留与其他集成测试一致的预算。
+	waitForFile(t, socketPath, 10*time.Second)
 	handled, requestErr := requestAdminBootstrap(
 		runContext,
 		socketPath,
@@ -359,7 +361,7 @@ func TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun(t *testing.T) {
 		if runErr == nil || !strings.Contains(runErr.Error(), "start agent gateway after HTTP ingress") {
 			t.Fatalf("runWithStorageAndBootstrap() error = %v, want gateway startup failure", runErr)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("runWithStorageAndBootstrap() did not exit after Gateway startup failure")
 	}
 	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
