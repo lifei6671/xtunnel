@@ -121,12 +121,17 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		t.Fatalf("create Work authenticator: %v", err)
 	}
 
+	gatewayPortReservation := reserveReconnectableGatewayPort(t)
+	gatewayListenAddress := gatewayPortReservation.Addr().String()
 	gatewayServer, err := gateway.NewServer(gateway.ServerOptions{
-		Listen: "127.0.0.1:0", Identity: gatewayIdentity, MaxPendingTLSHandshakes: 32,
+		Listen: gatewayListenAddress, Identity: gatewayIdentity, MaxPendingTLSHandshakes: 32,
 		Handle: gatewayHandler(controlHandler, workHandler, sessions),
 	})
 	if err != nil {
 		t.Fatalf("create Gateway server: %v", err)
+	}
+	if err := gatewayPortReservation.Close(); err != nil {
+		t.Fatalf("release Gateway endpoint reservation: %v", err)
 	}
 	if err := gatewayServer.Start(ctx); err != nil {
 		t.Fatalf("start Gateway server: %v", err)
@@ -323,6 +328,46 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	}
 	_ = store.Close()
 	waitForResourceBaseline(t, baselineGoroutines, baselineFDs, baselineFDTargets)
+}
+
+// reserveReconnectableGatewayPort 在 Linux 上避开出站连接使用的临时端口范围。
+// 本用例必须关闭并重开同一个 Gateway 地址；否则 Agent 的重连拨号或并行测试包
+// 可能短暂复用刚释放的 :0 端口，使第二次监听出现与重连语义无关的 bind 冲突。
+func reserveReconnectableGatewayPort(t *testing.T) net.Listener {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve Gateway endpoint: %v", err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+		return listener
+	}
+
+	rangeBytes, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	if err != nil {
+		t.Fatalf("read Linux ephemeral port range: %v", err)
+	}
+	fields := bytes.Fields(rangeBytes)
+	if len(fields) != 2 {
+		t.Fatalf("Linux ephemeral port range = %q, want two bounds", bytes.TrimSpace(rangeBytes))
+	}
+	lowerBound, err := strconv.Atoi(string(fields[0]))
+	if err != nil || lowerBound <= 1024 {
+		t.Fatalf("Linux ephemeral port lower bound = %q, want integer above 1024", fields[0])
+	}
+	span := lowerBound - 1024
+	start := 1024 + os.Getpid()%span
+	for offset := 0; offset < span; offset++ {
+		port := 1024 + (start-1024+offset)%span
+		listener, listenErr := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if listenErr == nil {
+			t.Cleanup(func() { _ = listener.Close() })
+			return listener
+		}
+	}
+	t.Fatal("no loopback TCP port available below the Linux ephemeral range")
+	return nil
 }
 
 // blockingSnapshotProvider 只在测试显式 arm 时阻塞下一次完整 Snapshot 读取。

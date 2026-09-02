@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -170,15 +171,9 @@ func TestTCPIngressWaitsForFirstAdminAndRestoresAfterRestart(t *testing.T) {
 	runtimeDir := newRuntimeDirectory(t)
 	dataDir := t.TempDir()
 
-	portProbe, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve TCP Route port error = %v", err)
-	}
+	portProbe := reserveNonEphemeralLoopbackTCP4(t)
 	publicPort := uint16(portProbe.Addr().(*net.TCPAddr).Port)
 	publicAddress := portProbe.Addr().String()
-	if err := portProbe.Close(); err != nil {
-		t.Fatalf("release TCP Route port error = %v", err)
-	}
 
 	config := gatewayLifecycleTestConfig(dataDir, "127.0.0.1:0")
 	config.TCPIngress.MinPort = int(publicPort)
@@ -235,11 +230,9 @@ func TestTCPIngressWaitsForFirstAdminAndRestoresAfterRestart(t *testing.T) {
 	if actual := firstRuntime.tcpIngress.Actual(); len(actual) != 0 {
 		t.Fatalf("TCP listeners before first Admin = %+v, want none", actual)
 	}
-	available, err := net.Listen("tcp4", publicAddress)
-	if err != nil {
-		t.Fatalf("TCP Route port was occupied during SETUP_REQUIRED: %v", err)
-	}
-	if err := available.Close(); err != nil {
+	// 预留 Listener 一直持有到首个管理员提交前：SETUP_REQUIRED 阶段若错误启动
+	// TCP Ingress，真实 bind 会立即失败；随后只留下一个极短的释放到生产 bind 窗口。
+	if err := portProbe.Close(); err != nil {
 		t.Fatalf("close SETUP_REQUIRED port probe error = %v", err)
 	}
 	if handled, err := requestAdminBootstrap(ctx, filepath.Join(runtimeDir, adminBootstrapSocketName), serverResources.targetHash, "admin", "tcp bootstrap password"); !handled || err != nil {
@@ -288,6 +281,37 @@ func TestTCPIngressWaitsForFirstAdminAndRestoresAfterRestart(t *testing.T) {
 	if err := restartedResources.Close(); err != nil {
 		t.Fatalf("close restarted Server storage error = %v", err)
 	}
+}
+
+// reserveNonEphemeralLoopbackTCP4 从 Linux 本机临时端口范围之外预留测试端口。
+// 全仓 Race 会并行启动多个 package；若先释放由 :0 分配的临时端口，其他测试的
+// 出站连接可能在生产 Listener 启动前复用它，制造与业务行为无关的 bind 冲突。
+func reserveNonEphemeralLoopbackTCP4(t *testing.T) net.Listener {
+	t.Helper()
+	rangeBytes, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	if err != nil {
+		t.Fatalf("read Linux ephemeral port range: %v", err)
+	}
+	fields := strings.Fields(string(rangeBytes))
+	if len(fields) != 2 {
+		t.Fatalf("Linux ephemeral port range = %q, want two bounds", strings.TrimSpace(string(rangeBytes)))
+	}
+	lowerBound, err := strconv.Atoi(fields[0])
+	if err != nil || lowerBound <= 1024 {
+		t.Fatalf("Linux ephemeral port lower bound = %q, want integer above 1024", fields[0])
+	}
+	span := lowerBound - 1024
+	start := 1024 + os.Getpid()%span
+	for offset := 0; offset < span; offset++ {
+		port := 1024 + (start-1024+offset)%span
+		listener, listenErr := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if listenErr == nil {
+			t.Cleanup(func() { _ = listener.Close() })
+			return listener
+		}
+	}
+	t.Fatal("no loopback TCP port available below the Linux ephemeral range")
+	return nil
 }
 
 // TestFirstAdminGatewayStartFailureStopsBootstrapAndExitsRun 锁定“Admin 事务已提交，
