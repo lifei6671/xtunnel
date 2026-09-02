@@ -1,11 +1,11 @@
 # M7-08 Large Transfer/Privileged Network Chaos 交付证据
 
-> 状态：`IN_PROGRESS`（生产链路 Harness、Builder 与 Runner 已落地；WSL2 netem
-> 开发 Smoke 部分通过，TCP Reset 因内核缺少 `SOCK_DESTROY` 明确失败）
+> 状态：`REVIEW`（正式实现、原生 Linux amd64/arm64 特权 `full`、Artifact 回读、
+> 精确 CI 与 commit-bound Tier 3 独立复审已完成；等待证据提交 CI 和用户阶段复审）
 
 ## 当前范围
 
-- 起始 Head：`3316268813955a6b8320eec0c1b911fba19f9487`。
+- 正式实现 Commit：`0f629f926ed3bdbbf9c698dab82130a1282e4731`。
 - 测试路径：Public TCP Listener→Server/Gateway→Token-only Agent→Origin。
 - clean 档：每方向 1 GiB，发送端和接收端分别计算 SHA-256，字节数必须精确一致。
 - 受损档：Loss 1%/5%、100 ms Delay+50 ms Jitter、10 Mbit/s；每方向 8 MiB。
@@ -62,6 +62,30 @@
   Runner 随后清理 namespace、qdisc、nft table 和 Linux-native 临时目录。该档结论为
   `BLOCKED_BY_WSL2_KERNEL`，不是产品失败，也不是 Reset PASS。
 
+## 精确 CI 与 Artifact 回读
+
+- [CI #33583345819 Attempt 1](https://github.com/lifei6671/xtunnel/actions/runs/33583345819/attempts/1)
+  精确绑定正式实现 Commit。M7-08 原生特权 amd64 Job `100102157629`、arm64 Job
+  `100102157615` 均成功；Linux verify arm64 Job `100102157501` 在前置全量 Go 步骤的
+  既有 `TestProcessExitsOnSIGTERM` 中以 `process exit error = signal: terminated` 失败，
+  因而 Attempt 1 整体保持 `failure`。
+- 用户明确确认仅重跑失败的 arm64 verify Job。[Attempt 2](https://github.com/lifei6671/xtunnel/actions/runs/33583345819/attempts/2)
+  只重新执行 Job `100105330507`，此前失败未复现，后续全部 Gate 均成功，Run 最终为
+  `completed/success`。
+- amd64 Artifact `9829213126` 与 arm64 Artifact `9829209726` 均已下载并逐项回读：
+  `mode=full`、seed=`20260902`、clean worktree、`go1.27.0/local`、精确 Commit；每端
+  8 项 Manifest 均通过 SHA-256 校验，clean 1 GiB、Loss 1%/5%、Jitter 50 ms、
+  10 Mbit/s、Reset 与恢复结果齐备。
+- Reset nft dport/sport counter 分别为 amd64 `7/7 packets`、arm64 `5/5 packets`；
+  两端均记录活动连接被非 Timeout 主动解阻，并在撤销故障后恢复新连接。
+
+## 独立复审
+
+- 正式 Commit 的 7 路径经 `CHILD_AGENT`、`FULL_SCOPE / Tier 3` commit-bound 复审。
+- Coverage=`COMPLETE`、Freshness=`FRESH`、Gate=`PASSED`、P0/P1/P2=`0/0/1`。
+- 唯一 P2 是本文件与开发计划仍保留旧的 `IN_PROGRESS/NOT RUN` 状态；本次证据同步
+  修复该缺口，实现本身无 P0/P1/P2 问题。
+
 ## 修复记录
 
 - 首轮 Reset Harness 曾把活动流量的 20 秒读 Timeout 当成“已解阻”，并在等待 Origin
@@ -75,16 +99,10 @@
 
 ## 未完成项
 
-- clean checkout 的 Runner `full`：`NOT RUN`。
-- 1 GiB 双向生产链路 Runtime：WSL2 dirty-development 定向档已通过；clean Runner
-  `full` 仍为 `NOT RUN`。
-- Loss 1%/5%、Jitter 50 ms、10 Mbit/s 完整矩阵：`NOT RUN`。
-- 支持 `SOCK_DESTROY` 的原生 Linux TCP Reset/恢复：`NOT RUN`。
-- Linux amd64/arm64 特权 Runner、精确 CI、Artifact 读回：`NOT RUN`。
-- 当前 Target 的独立 Tier 3 复审、正式 Commit、推送和用户阶段复审：`NOT RUN`。
+- 本次证据同步尚未提交，其精确 GitHub Actions 为 `NOT RUN`。
+- 用户阶段复审尚未完成；M7-08 只能进入 `REVIEW`，不得标记为 `DONE`。
 
-因此 M7-08 只能保持 `IN_PROGRESS`；本文件不能作为 M7-08、M7-10 或 Alpha Release
-Gate 的通过证据。
+因此本文件不能单独作为 M7-08、M7-10 或 Alpha Release Gate 的通过证据。
 
 ## CI 接线
 
@@ -100,6 +118,7 @@ Gate 的通过证据。
   已生成结果；成功时必须先校验 Runner 内部 `artifact-sha256.txt`。上传使用固定 Commit
   `actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`（v4.6.2），保留
   14 天。
-- 当前已完成 PyYAML 结构读回、三个 Bash `run` Block 的 `bash -n`、
-  `actionlint v1.7.12`、Action Tag/SHA 读回和 `git diff --check`；Workflow 尚未提交，
-  精确 GitHub Actions 为 `NOT RUN`，因此任务状态仍为 `IN_PROGRESS`。
+- PyYAML 结构读回、三个 Bash `run` Block 的 `bash -n`、`actionlint v1.7.12`、
+  Action Tag/SHA 读回和 `git diff --check` 均已通过；正式 Workflow 已随 Commit
+  `0f629f926ed3bdbbf9c698dab82130a1282e4731` 提交，并由 CI `#33583345819` 完成原生
+  Linux amd64/arm64 特权执行。
