@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-02
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-09 · DONE；M7-10 · IN_PROGRESS）
+> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-09 · DONE；M7-10 · REVIEW）
 >
-> **当前结论**：M7-01 至 M7-09 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `94/95`，M7 为 `9/10 IN_PROGRESS`。M7-09 的实现 Head `8f11f2a5d0118859ee7e0398b96517dd0be2a96d`、精确 [CI #33612503805](https://github.com/lifei6671/xtunnel/actions/runs/33612503805)、状态同步 Head `cb3209d0bbb3debfa263c2bad226150a090318f5` 的精确 [CI #33615267877](https://github.com/lifei6671/xtunnel/actions/runs/33615267877)、commit-bound Tier 3 独立复审与用户阶段批准均已闭环。M7-10 已启动，正在逐项核验 Alpha Release Gate Checklist；在核验、最终复审和用户发布签核完成前不得转为 `DONE`。
+> **当前结论**：M7-01 至 M7-09 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `94/95`，M7 为 `9/10 IN_PROGRESS`。M7-10 候选 Head `7e24cc4a11a231e4ef63f1505ed0ad92064b273a` 的 [Push CI #33647215011](https://github.com/lifei6671/xtunnel/actions/runs/33647215011) 与 [Alpha Release Gate #33647228286](https://github.com/lifei6671/xtunnel/actions/runs/33647228286) 均成功，Checklist 九项已取得精确 Commit/CI 证据，任务进入 `REVIEW`；在最终 commit-bound 复审和用户阶段签核前不得转为 `DONE`。
 
 ---
 
@@ -406,19 +406,19 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `DONE` |
 | M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `DONE` |
 | M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；Server/Agent Binary `service install/uninstall` 安装、升级、卸载覆盖 Managed Marker、三文件原子发布/回滚、Server 旧官方 Unit 接管、配置/凭据权限、Secret 不落 argv 和非托管 Unit/Service 拒绝边界；Agent 前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 延迟删除登记/调度；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `DONE` |
-| M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `IN_PROGRESS` |
+| M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `REVIEW` |
 
 ## 13.2 Alpha Release Gate Checklist
 
-- [ ] 干净 checkout 完整 CI 通过。
-- [ ] Unit、Integration、E2E、Contract、Golden、Race、Fuzz 全部通过。
-- [ ] Privileged Network Chaos 与所有 Server Durable Operation Crash/Filesystem Failpoint 通过。
-- [ ] Linux amd64/arm64 Binary/OCI/Server 与 Agent systemd Binary Self-install、升级、卸载及 Windows Agent amd64/arm64 SCM Self-install/升级/卸载通过，Server 上一版官方 Unit 完成精确接管，且非托管 Unit/Service 不被覆盖或删除；Windows 运行中 EXE 的延迟删除登记必须通过，物理重启最终收敛由已批准的 `ALPHA-LIMIT-WIN-REBOOT-001` 管理并在 Beta 前关闭。
-- [ ] SQLite Backup→Migration→Restore→Agent Reconnect 并重新获取完整配置通过。
-- [ ] 满负载和重连风暴下无负计数、超额资源、FD/goroutine 泄漏。
-- [ ] 生产发布日志、Binary、OCI、Server 示例配置、systemd Unit/ExecStart、Windows SCM ImagePath/Registry 摘要和普通测试输出中无真实或非测试 Connection Token/Secret；Backup 只包含 Durable Operations 权威白名单 Secret、按长期私钥材料保护且不上传原始 Archive，公开 Golden 只允许路径与 SHA-256 固定的确定性测试向量；ProgramData 只保留 ACL 受限的 DPAPI Machine-scope 密文。
-- [ ] 已记录 Server Restart Recovery、HTTP/1.1 WorkConn Capacity、16/32/64 KiB Buffer、TunnelRuntime Mutex/Block Profile 的环境、结果、推荐默认值和容量边界。
-- [ ] 发布文档明确 Alpha 限制与 V0.1 不支持能力。
+- [x] 干净 checkout 完整 CI 通过。
+- [x] Unit、Integration、E2E、Contract、Golden、Race、Fuzz 全部通过。
+- [x] Privileged Network Chaos 与所有 Server Durable Operation Crash/Filesystem Failpoint 通过。
+- [x] Linux amd64/arm64 Binary/OCI/Server 与 Agent systemd Binary Self-install、升级、卸载及 Windows Agent amd64/arm64 SCM Self-install/升级/卸载通过，Server 上一版官方 Unit 完成精确接管，且非托管 Unit/Service 不被覆盖或删除；Windows 运行中 EXE 的延迟删除登记必须通过，物理重启最终收敛由已批准的 `ALPHA-LIMIT-WIN-REBOOT-001` 管理并在 Beta 前关闭。
+- [x] SQLite Backup→Migration→Restore→Agent Reconnect 并重新获取完整配置通过。
+- [x] 满负载和重连风暴下无负计数、超额资源、FD/goroutine 泄漏。
+- [x] 生产发布日志、Binary、OCI、Server 示例配置、systemd Unit/ExecStart、Windows SCM ImagePath/Registry 摘要和普通测试输出中无真实或非测试 Connection Token/Secret；Backup 只包含 Durable Operations 权威白名单 Secret、按长期私钥材料保护且不上传原始 Archive，公开 Golden 只允许路径与 SHA-256 固定的确定性测试向量；ProgramData 只保留 ACL 受限的 DPAPI Machine-scope 密文。
+- [x] 已记录 Server Restart Recovery、HTTP/1.1 WorkConn Capacity、16/32/64 KiB Buffer、TunnelRuntime Mutex/Block Profile 的环境、结果、推荐默认值和容量边界。
+- [x] 发布文档明确 Alpha 限制与 V0.1 不支持能力。
 
 ---
 
@@ -435,9 +435,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 7. `M7-07` — `DONE`。Linux-only 产品 Leak Harness、Runner、Builder 与 CI full 接线、两轮 CI 回归修复、原生 Linux amd64/arm64 完整三分区普通与 Race、Artifact 校验、精确 CI `#33510562933`、docs-only CI `#33512711172` 与最终独立复审均已通过；用户已明确阶段复审通过。
 8. `M7-08` — `DONE`。正式实现 Commit `0f629f926ed3bdbbf9c698dab82130a1282e4731`、原生 Linux amd64/arm64 特权 `full`、双架构 Artifact 回读、实现 CI `#33583345819`、commit-bound Tier 3 独立复审、证据 Commit `584f699c04e247f44b8ac80a4aad373200f82ea9`、证据 CI `#33586979302` 与用户阶段复审均已闭环。
 9. `M7-09` — `DONE`。Head `8f11f2a5d0118859ee7e0398b96517dd0be2a96d`、精确 CI `#33612503805`、状态同步 Head `cb3209d0bbb3debfa263c2bad226150a090318f5` 的精确 CI `#33615267877`、commit-bound Tier 3 复审与用户阶段批准已闭环 Linux amd64/arm64 Binary/OCI/systemd、Windows Agent amd64/arm64 Binary/SCM、Backup→Migration→Restore→Token-only Reconnect 及安全失败边界矩阵。
-10. `M7-10` — `IN_PROGRESS`。全部任务级依赖已 `DONE`，正在逐项核对 Alpha Release Gate Checklist、未决 P0/P1 与发布文档边界；Checklist 在证据核验完成前保持未勾选。
+10. `M7-10` — `REVIEW`。候选 Head `7e24cc4a11a231e4ef63f1505ed0ad92064b273a` 的普通 CI 与 Alpha Release Gate 均成功，Checklist 九项已勾选；等待最终 commit-bound 独立复审与用户明确阶段签核。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `94/95`。M7 当前为 `9/10 IN_PROGRESS`，M7-01 至 M7-09 已 `DONE`，M7-10 为 `IN_PROGRESS`；Alpha Release Gate Checklist 正在核验，尚未勾选。
+M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `94/95`。M7 当前为 `9/10 IN_PROGRESS`，M7-01 至 M7-09 已 `DONE`，M7-10 为 `REVIEW`；Alpha Release Gate Checklist 九项已勾选，等待最终阶段签核。
 
 推进规则：
 
@@ -2128,3 +2128,18 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 候选与执行：生命周期 Race 稳定性修复 Commit 为 `88558b5329622b4b69310e96839b93fc8a1a7c1b`；精确 [CI #33637353239](https://github.com/lifei6671/xtunnel/actions/runs/33637353239) 为 `workflow_dispatch release_gate=true / attempt 1 / completed / failure`，Head SHA 与候选精确匹配。除 arm64 Verify 与最终聚合外，其余九个正式 Job 全部通过。相同候选的 [Push CI #33637341094](https://github.com/lifei6671/xtunnel/actions/runs/33637341094) 中，arm64 Verify、Windows 与双架构特权网络 Job 通过，amd64 Verify 未通过。
 - 失败归因：正式 arm64 Verify 的真实 Caddy E2E 在测试释放预留端口与 host-network 容器绑定之间发生端口竞争，容器明确返回 `bind: address already in use`；Push CI 的 amd64 全仓 Race 中，`TestProductDataPlaneEndToEnd` 的首个公网 HTTP 请求在既有 10 秒测试预算内未到达 Origin，测试只等待 Origin 通知而未观察请求 goroutine 的提前返回，后续 WebSocket 场景级联返回 `503`。两项均为测试 Harness 的墙钟或宿主资源竞争，不改变已通过的正式 Scale、OCI、Profile/Fuzz/Leak 和 Chaos 结果。
 - 收敛方向：Front Proxy E2E 仅对明确的 `address already in use` 最多三次重新选择端口，每次失败容器均有界停止并确认删除，其他启动或 TLS 错误仍立即失败；Product Data Plane E2E 同时观察 Origin 通知与请求提前返回，把普通/Race 集成测试预算调整为 30 秒，并继续保留路由、限额、HTTP、WebSocket、断连传播与资源收敛断言。两项均不修改生产超时、配置、协议或运行时行为；修复在形成新 Commit、精确 Release Gate CI 和最终独立复审前仍属于开发态，M7-10 保持 `IN_PROGRESS`，Alpha 发布保持 `NO-GO`。
+
+## 2026-09-02 · M7-10 Alpha Gate 第五至七轮收敛 · FAILED
+
+- 第五轮：候选 `4ec6cdddf5f28e9d46b1f4d6eeac604e79df76f5` 的 [Release Gate #33640720447](https://github.com/lifei6671/xtunnel/actions/runs/33640720447) 失败，同 SHA 的 [Push CI #33640706204](https://github.com/lifei6671/xtunnel/actions/runs/33640706204) 成功。完整 Analysis Race 同时暴露 Bootstrap TCP Route 与 Token-only Gateway 重启使用先释放的 Linux `:0` 临时端口，其他并行 package/出站连接可在生产 bind 前复用该端口。候选 `dfda07c50591d97a3acdc458a954926f3204b7e9` 改为从 `/proc/sys/net/ipv4/ip_local_port_range` 之外预留端口，并在 Bootstrap 场景保持占用到真实启动前。
+- 第六轮：`dfda07c...` 的 [Release Gate #33642609371](https://github.com/lifei6671/xtunnel/actions/runs/33642609371) 在 amd64 Verify 的 `TestProcessExitsOnSIGTERM` 失败；固定 100 ms 等待不能证明子进程已经注册 Signal Handler。同 SHA 的 [Push CI #33642577420](https://github.com/lifei6671/xtunnel/actions/runs/33642577420) 另在 amd64 `TestM7ResourceLeak/drain/epoch_02/hard_deadline_force_closes_all_active_transports` 与 Windows `TestPoolObservesOpenPhasesRefillsActiveAndTrimsOnlyIdle` 失败。候选 `9e7ec47937728c111fda1bb5dc01a83ca6d27b5e` 使用继承 fd 3 的匿名管道，在子进程完成 Signal Handler 注册并进入存储启动阶段后通知父进程，再发送 SIGTERM；Start 后立即建立唯一 Wait 与 Kill+Wait Cleanup，失败路径不会遗留孤儿进程或并发读取输出缓冲。后续同候选 [Push CI #33644448257](https://github.com/lifei6671/xtunnel/actions/runs/33644448257) 成功，关闭上述 Push CI 偶发失败。
+- 第七轮：`9e7ec47...` 的 [Push CI #33644448257](https://github.com/lifei6671/xtunnel/actions/runs/33644448257) 成功，[Release Gate #33644462148](https://github.com/lifei6671/xtunnel/actions/runs/33644462148) 的 amd64 Verify 在 Product Data Plane TCP 子场景后首个 HTTP 请求返回 `503`。旧等待只确认 IDLE Work 已补充，未等待上一公网连接的 ACTIVE/Pending 配额归零；候选 `7e24cc4a11a231e4ef63f1505ed0ad92064b273a` 同时要求 IDLE Work 可用及 `ActiveTotal=0`、`PendingOpens=0`，并保留 HTTP Keep-Alive 可合法占用 WorkConn 的语义。
+- 验证与复审：固定 `golang:1.27.0-bookworm` 的 Linux amd64 原生容器中，端口两用例 Race 连续 10 轮、SIGTERM Race 100 轮和最终 50 轮、Product Data Plane Race 20 轮和最终 5 轮均通过；包含最终谓词的全仓 `go test -race -count=1 -timeout=10m ./...` 与 `go vet ./...` 通过。端口生命周期/跨平台、SIGTERM 生命周期/可移植性、数据面收敛/回归两路复审最终均为 `APPROVED`，P0/P1/P2/P3 为 `0/0/0/0`。本机 Go 已漂移为 `1.27.1`，本轮本机版本检查按设计失败，未把该环境结果计为验收。
+
+## 2026-09-02 · M7-10 Alpha Release Gate · REVIEW
+
+- 候选与 CI：最终候选 Head 为 `7e24cc4a11a231e4ef63f1505ed0ad92064b273a`；[Push CI #33647215011](https://github.com/lifei6671/xtunnel/actions/runs/33647215011) 为 `push / attempt 1 / completed / success`，[Alpha Release Gate #33647228286](https://github.com/lifei6671/xtunnel/actions/runs/33647228286) 为 `workflow_dispatch release_gate=true / attempt 1 / completed / success`，两者 Head SHA 均精确匹配候选。
+- 正式 Gate：Linux amd64/arm64 Verify、Windows Agent Service、Windows arm64 Agent Runtime、amd64/arm64 Privileged Network Chaos、Alpha Reconnect and Durable Chaos、Alpha Public Scale、Alpha OCI Manifest、Alpha Profile/Fuzz/Leak 十个执行 Job 全部成功；最终 `Alpha release gate` 聚合 Job 成功。双架构 Verify 均通过完整 Test/Race、Short Fuzz、Full Leak、Product Data Plane、Backup/Restore、Metrics/Trace/Usage/Diagnostics、1 GiB、真实 Caddy/Nginx、OCI/Compose 与 systemd 发布矩阵。
+- 发布产物：正式运行上传 Analysis、OCI、Scale、Reconnect/Durable Chaos 与双架构 Network Chaos 六组候选证据 Artifact，名称均包含精确 Head 与 attempt；各 Runner 在上传前执行发布级 Secret 扫描和 SHA-256 清单校验。OCI Artifact 验证恰好包含 Linux amd64/arm64 的 Server/Agent Layout 与 Manifest 关系，不把内部候选证据描述为已发布 Release。
+- Checklist 与边界：九项 Alpha Release Gate Checklist 均已由精确候选、成功 CI、既有 M0/M7 证据和已批准的 `ALPHA-LIMIT-WIN-REBOOT-001` 覆盖。Windows 运行中 EXE 已验证延迟删除登记，物理重启后的最终删除继续作为 Beta 前必须关闭的已知限制；固定历史候选仍不是正式签名 Release。README 与 `docs/static` 图片不属于本轮变更。
+- 状态影响：M7-10 从 `IN_PROGRESS` 进入 `REVIEW`，等待最终 commit-bound 独立复审和用户明确阶段签核；在签核前不转为 `DONE`。全局 `DONE` 保持 `94/95`，M7 保持 `9/10 IN_PROGRESS`，Alpha Release Gate 自动化结论为 `PASS`。
