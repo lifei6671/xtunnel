@@ -18,9 +18,11 @@ func TestVerifyArchive(t *testing.T) {
 		platforms []string
 		secret    string
 		unused    bool
+		nested    bool
 		wantErr   bool
 	}{
 		{name: "valid", platforms: []string{"amd64", "arm64"}},
+		{name: "valid buildx nested index", platforms: []string{"amd64", "arm64"}, nested: true},
 		{name: "missing arm64", platforms: []string{"amd64"}, wantErr: true},
 		{name: "secret in layer", platforms: []string{"amd64", "arm64"}, secret: "xta_0123456789abcdefghijklmnop", wantErr: true},
 		{name: "unreferenced blob", platforms: []string{"amd64", "arm64"}, unused: true, wantErr: true},
@@ -28,7 +30,7 @@ func TestVerifyArchive(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "layout.tar")
-			writeOCIArchive(t, path, test.platforms, test.secret, test.unused)
+			writeOCIArchive(t, path, test.platforms, test.secret, test.unused, test.nested)
 			err := verifyArchive(path, "agent")
 			if (err != nil) != test.wantErr {
 				t.Fatalf("verifyArchive() error = %v, want error %t", err, test.wantErr)
@@ -37,7 +39,7 @@ func TestVerifyArchive(t *testing.T) {
 	}
 }
 
-func writeOCIArchive(t *testing.T, path string, platforms []string, secret string, unused bool) {
+func writeOCIArchive(t *testing.T, path string, platforms []string, secret string, unused, nested bool) {
 	t.Helper()
 	blobs := make(map[string][]byte)
 	root := index{SchemaVersion: 2}
@@ -56,6 +58,10 @@ func writeOCIArchive(t *testing.T, path string, platforms []string, secret strin
 	}
 	if unused {
 		addBlob(blobs, "application/vnd.oci.image.config.v1+json", []byte(`{"unused":true}`))
+	}
+	if nested {
+		nestedDescriptor := addBlob(blobs, "application/vnd.oci.image.index.v1+json", mustJSON(t, root))
+		root.Manifests = []descriptor{nestedDescriptor}
 	}
 
 	file, err := os.Create(path)

@@ -124,6 +124,31 @@ connector_runtime:
   heartbeat_timeout: 30s
 metrics:
   listen: %q
+limits:
+  max_tunnels: 16
+  max_connectors: 8
+  max_connectors_per_tunnel: 4
+  max_services_per_tunnel: 1000
+  max_health_targets_per_tunnel: 2000
+  max_health_targets_global: 50000
+  max_tunnel_snapshot_bytes: 786432
+  max_active_connections: 32
+  max_connections_per_tunnel: 16
+  max_connections_per_service: 16
+  max_connections_per_source_ip: 8
+  max_open_rate_per_source_ip: 50
+  max_open_burst_per_source_ip: 100
+  max_http_requests_per_source_ip_per_second: 100
+  max_pending_tls_handshakes: 64
+  max_pending_auth: 64
+  max_replay_entries_per_session: 32
+  max_work_connections: 64
+  max_idle_work_connections: 32
+  max_connecting_work_connections: 16
+  max_pending_opens: 16
+  max_control_frame_bytes: 1048576
+  max_http_header_bytes: 65536
+  max_http_body_bytes: 2147483648
 `, managementAddress, httpAddress, gatewayAddress.String(), ports[0], ports[0], metricsAddress))
 	serverArgs := []string{"--config", configPath, "--set", "server.data_dir=" + dataDir}
 	agentArgs := []string{"run", "--token", token}

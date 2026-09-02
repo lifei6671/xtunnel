@@ -2104,3 +2104,9 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 新增入口：仓库新增固定 `go1.27.0/local` 的 Docker Desktop 验证入口、发布级 Secret Scanner、双架构 OCI Layout/Manifest 校验、Hardening 聚合 Runner、1000/5000 公网 TCP 数据面 Gate，以及真实 Server/Agent 子进程的 `SIGKILL` 恢复测试。候选 Artifact 在 Alpha 总 Gate 前只作为内部证据，不构成正式发布物。
 - 本地开发反馈：固定 `golang:1.27.0-bookworm` Digest 的 Docker Desktop 环境中，发布工具包测试通过；真实子进程恢复测试通过。公网数据面 Gate 的 1000 档为 `1000/1000`、Open P95 `0 ms`、数据面 RTT P95 `12 ms`，5000 档为 `5000/5000`、Open P95 `0 ms`、数据面 RTT P95 `31 ms`；两档均在释放连接后回落到资源阈值内。上述结果来自未提交工作树，只作为开发反馈。
 - 当前边界：实现尚未形成 commit-bound 候选，也没有对应的 `workflow_dispatch release_gate=true` 精确 CI、最终独立复审和发布签核。M7-10 继续 `IN_PROGRESS`，Alpha 发布保持 `NO-GO`，Checklist 暂不勾选，全局仍为 `94/95`。
+
+## 2026-09-02 · M7-10 Alpha Gate 首轮正式执行 · FAILED
+
+- 候选与执行：入口实现 Commit 为 `8532a72921eb732a8048615d30f4df39f1781a30`；精确 [CI #33628184938](https://github.com/lifei6671/xtunnel/actions/runs/33628184938) 为 `workflow_dispatch release_gate=true / attempt 1 / completed / failure`，Head SHA 与候选精确匹配。双架构特权网络、Windows amd64 Agent Service、Windows arm64 Agent Runtime，以及 Alpha 重连与 Durable Chaos Job 通过；Verify、Alpha Scale、Alpha Analysis、Alpha OCI 和最终聚合未通过。
+- 失败归因：进程恢复测试误用生产容量默认值，在 Runner 的 `RLIMIT_NOFILE=65536` 下按设计快速失败；公网数据面测试在 Agent 尚有 Opening/Connecting 工作时开始采样，并把 Race/普通回归误当作正式性能环境；5000 连接释放后仍保持 Agent 运行，WorkPool 会继续补充下一波所需的 Idle Work，导致资源 Oracle 把预期常驻连接计为未回落；OCI 校验器只接受平台 Manifest 直接挂根索引，未接受 Buildx 输出的单层命名子索引，且原脚本未在 Secret 扫描后回显安全失败日志。
+- 收敛方向：恢复测试使用显式小容量有效配置；公网数据面先等待足够 Idle 且 Opening/Connecting 归零，只有正式 Release Scale 才执行延迟阈值；业务流量释放后停止高需求 Agent、确认旧 Session 退出，再启动与负载前相同数量和低水位 WorkPool 的新 Agent，以相同 Owner 集合比较资源，连接收敛、Agent 切换与资源采样共同消费冻结的单一 30 秒截止时间；OCI 校验器接受 Buildx 单层子索引并继续限制恰好两个 Linux 平台、拒绝额外证明对象与未引用 Blob；发布脚本只在失败日志通过 Secret 扫描后输出有界诊断。上述修复在形成新 Commit、完整验证、精确 Release Gate CI 和最终独立复审前仍属于开发态，M7-10 保持 `IN_PROGRESS`，Alpha 发布保持 `NO-GO`。

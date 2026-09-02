@@ -107,11 +107,12 @@ func verifyArchive(path, target string) error {
 	if err := json.Unmarshal(files.content["index.json"], &root); err != nil {
 		return fmt.Errorf("decode index.json: %w", err)
 	}
-	if root.SchemaVersion != 2 || len(root.Manifests) != 2 {
-		return fmt.Errorf("root index must contain schemaVersion 2 and exactly two manifests")
+	platformManifests, err := resolvePlatformManifests(files, root)
+	if err != nil {
+		return err
 	}
 	want := map[string]bool{"amd64": false, "arm64": false}
-	for _, item := range root.Manifests {
+	for _, item := range platformManifests {
 		if item.MediaType != "application/vnd.oci.image.manifest.v1+json" {
 			return fmt.Errorf("unexpected root descriptor media type %q", item.MediaType)
 		}
@@ -176,6 +177,36 @@ func verifyArchive(path, target string) error {
 		}
 	}
 	return nil
+}
+
+// resolvePlatformManifests 接受 OCI Layout 的两种等价结构：平台 Manifest
+// 直接挂在根索引下，或由 Buildx 先生成一个带名称注解的单层子索引。只允许这一层
+// 间接结构，避免递归索引掩盖额外平台、证明清单或未受验证的对象。
+func resolvePlatformManifests(files *layoutFiles, root index) ([]descriptor, error) {
+	if root.SchemaVersion != 2 {
+		return nil, fmt.Errorf("root index must use schemaVersion 2")
+	}
+	if len(root.Manifests) == 2 {
+		return root.Manifests, nil
+	}
+	if len(root.Manifests) != 1 || root.Manifests[0].MediaType != "application/vnd.oci.image.index.v1+json" {
+		return nil, fmt.Errorf("root index must contain two platform manifests or one nested image index")
+	}
+	nestedBytes, err := descriptorBytes(files, root.Manifests[0])
+	if err != nil {
+		return nil, fmt.Errorf("read nested image index: %w", err)
+	}
+	if err := scanSecrets("nested image index", nestedBytes); err != nil {
+		return nil, err
+	}
+	var nested index
+	if err := json.Unmarshal(nestedBytes, &nested); err != nil {
+		return nil, fmt.Errorf("decode nested image index: %w", err)
+	}
+	if nested.SchemaVersion != 2 || len(nested.Manifests) != 2 {
+		return nil, fmt.Errorf("nested image index must contain schemaVersion 2 and exactly two manifests")
+	}
+	return nested.Manifests, nil
 }
 
 func readTarMetadata(file *os.File) (*layoutFiles, error) {

@@ -53,6 +53,21 @@ version="v0.1.0-alpha.${GITHUB_SHA:-$(git -C "$repo_dir" rev-parse HEAD)}"
 binary_dir="$output_dir/binaries"
 mkdir "$binary_dir"
 
+run_scanned() {
+	log_file=$1
+	shift
+	command_status=0
+	"$@" >"$log_file" 2>&1 || command_status=$?
+	if ! go run "$script_dir/secretscan" -path "$log_file" >/dev/null; then
+		printf 'secret scan rejected %s; raw log suppressed\n' "$log_file" >&2
+		return 1
+	fi
+	if [ "$command_status" -ne 0 ]; then
+		sed -n '1,240p' "$log_file" >&2
+		return "$command_status"
+	fi
+}
+
 {
 	printf 'commit=%s\n' "$(git -C "$repo_dir" rev-parse HEAD)"
 	printf 'worktree_clean=%s\n' "$(test -z "$(git -C "$repo_dir" status --porcelain --untracked-files=all)" && printf true || printf false)"
@@ -89,7 +104,7 @@ go run "$script_dir/secretscan" -path "$repo_dir/deploy" >"$output_dir/deploy-se
 for target in agent server; do
 	archive="$output_dir/xtunnel-$target.oci.tar"
 	log="$output_dir/$target-build.txt"
-	docker buildx build \
+	run_scanned "$log" docker buildx build \
 		--progress plain \
 		--platform linux/amd64,linux/arm64 \
 		--provenance=false \
@@ -98,9 +113,9 @@ for target in agent server; do
 		--build-arg "XTUNNEL_VERSION=$version" \
 		--output "type=oci,dest=$archive" \
 		--file "$repo_dir/deploy/docker/Dockerfile" \
-		"$repo_dir" >"$log" 2>&1
-	go run "$script_dir/ociverify" -archive "$archive" -target "$target" \
-		>"$output_dir/$target-verify.txt" 2>&1
+		"$repo_dir"
+	run_scanned "$output_dir/$target-verify.txt" go run "$script_dir/ociverify" \
+		-archive "$archive" -target "$target"
 done
 
 # 先扫描全部可上传文本；OCI Layer 已由 ociverify 解包扫描。公开 Golden 和含
