@@ -393,7 +393,9 @@ func testProductGateHTTP(
 	waitForProductGateIdleWork(t, runtime, 1)
 	transport := &http.Transport{}
 	t.Cleanup(transport.CloseIdleConnections)
-	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	// 全仓 Race 会放大调度成本；这里验证路由、限额和数据面语义，不把
+	// Runner 上的 10 秒墙钟作为产品性能 SLO。
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	do := func(method, path, source, body string) *http.Response {
 		t.Helper()
 		request, err := http.NewRequestWithContext(t.Context(), method, "http://"+address+path, strings.NewReader(body))
@@ -428,18 +430,24 @@ func testProductGateHTTP(
 	}()
 
 	var originRequest productGateHTTPRequest
+	var first httpResult
 	select {
 	case originRequest = <-observed:
-	case <-time.After(10 * time.Second):
+	case first = <-firstResult:
+		if first.response != nil {
+			_ = first.response.Body.Close()
+			t.Fatalf("first Product Gate HTTP request returned status %d before reaching Origin: %v", first.response.StatusCode, first.err)
+		}
+		t.Fatalf("first Product Gate HTTP request failed before reaching Origin: %v", first.err)
+	case <-time.After(30 * time.Second):
 		t.Fatal("Product Gate HTTP Origin did not receive routed request")
 	}
 
 	rateLimited := do(http.MethodGet, "/gate/rate", "198.51.100.10", "")
 	releaseOrigin()
-	var first httpResult
 	select {
 	case first = <-firstResult:
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("first Product Gate HTTP request did not finish after Origin release")
 	}
 	if first.err != nil {

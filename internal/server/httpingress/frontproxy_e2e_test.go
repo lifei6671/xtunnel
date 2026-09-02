@@ -135,21 +135,35 @@ func runFrontProxyRuntimeE2E(t *testing.T, docker string, proxyRuntime frontProx
 	}
 
 	server, tunnelDialer := startFrontProxyIngress(t)
-	publicPort := reserveFrontProxyPort(t)
 	certificateFile, keyFile, roots := writeFrontProxyCertificate(t, frontProxyPublicHost)
-	container := startFrontProxyContainer(t, docker, proxyRuntime, frontProxyContainerOptions{
-		publicPort:      publicPort,
-		upstream:        server.Addr().String(),
-		certificateFile: certificateFile,
-		keyFile:         keyFile,
-	})
-	proxyAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(publicPort))
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		RootCAs:    roots,
 		ServerName: frontProxyPublicHost,
 	}
-	waitForFrontProxyTLS(t, container, proxyAddress, tlsConfig)
+	var publicPort int
+	var proxyAddress string
+	for attempt := 1; attempt <= 3; attempt++ {
+		// host-network 容器无法继承测试 Listener。端口预留与 Docker bind 之间
+		// 存在不可消除的窗口，只对明确的地址占用换端口重试。
+		publicPort = reserveFrontProxyPort(t)
+		container := startFrontProxyContainer(t, docker, proxyRuntime, frontProxyContainerOptions{
+			publicPort:      publicPort,
+			upstream:        server.Addr().String(),
+			certificateFile: certificateFile,
+			keyFile:         keyFile,
+		})
+		proxyAddress = net.JoinHostPort("127.0.0.1", strconv.Itoa(publicPort))
+		if err := waitForFrontProxyTLS(container, proxyAddress, tlsConfig); err == nil {
+			break
+		} else {
+			output := container.output.String()
+			container.stopAndWait(t)
+			if attempt == 3 || !strings.Contains(strings.ToLower(output), "address already in use") {
+				t.Fatalf("%v\n%s", err, output)
+			}
+		}
+	}
 
 	authority := net.JoinHostPort(frontProxyPublicHost, strconv.Itoa(publicPort))
 	assertFrontProxyHTTPS(t, proxyAddress, authority, tlsConfig, tunnelDialer)
@@ -630,8 +644,7 @@ func (container *frontProxyContainer) result() error {
 	return container.waitErr
 }
 
-func waitForFrontProxyTLS(t *testing.T, container *frontProxyContainer, address string, config *tls.Config) {
-	t.Helper()
+func waitForFrontProxyTLS(container *frontProxyContainer, address string, config *tls.Config) error {
 	deadline := time.NewTimer(20 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -640,14 +653,13 @@ func waitForFrontProxyTLS(t *testing.T, container *frontProxyContainer, address 
 		connection, err := tls.DialWithDialer(&net.Dialer{Timeout: time.Second}, "tcp", address, config.Clone())
 		if err == nil {
 			_ = connection.Close()
-			return
+			return nil
 		}
 		select {
 		case <-container.done:
-			t.Fatalf("front proxy container exited before TLS readiness: %v\n%s",
-				container.result(), container.output.String())
+			return fmt.Errorf("front proxy container exited before TLS readiness: %v", container.result())
 		case <-deadline.C:
-			t.Fatalf("front proxy TLS readiness timed out\n%s", container.output.String())
+			return errors.New("front proxy TLS readiness timed out")
 		case <-ticker.C:
 		}
 	}
