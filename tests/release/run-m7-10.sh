@@ -68,6 +68,40 @@ run_scanned() {
 	fi
 }
 
+# Hosted Runner 的默认 docker driver 不提供 OCI exporter。每次发布验证使用独立的
+# docker-container builder，并通过显式 --builder 隔离，不改变调用方的默认构建器。
+builder_name="xtunnel-m7-10-$$"
+builder_owned=false
+cleanup_builder() {
+	if [ "$builder_owned" != true ]; then
+		return 0
+	fi
+	if ! docker buildx rm "$builder_name" >/dev/null 2>&1; then
+		printf '%s\n' 'M7-10 cleanup failed for the isolated Buildx builder' >&2
+		return 1
+	fi
+}
+trap 'exit 129' 1
+trap 'exit 130' 2
+trap 'exit 143' 15
+trap 'status=$?; trap - 0; cleanup_builder || { [ "$status" -ne 0 ] || status=1; }; exit "$status"' 0
+builder_create_log="$output_dir/buildx-create.txt"
+builder_create_status=0
+docker buildx create --driver docker-container --name "$builder_name" >"$builder_create_log" 2>&1 || builder_create_status=$?
+if [ "$builder_create_status" -eq 0 ]; then
+	builder_owned=true
+fi
+if ! go run "$script_dir/secretscan" -path "$builder_create_log" >/dev/null; then
+	printf 'secret scan rejected %s; raw log suppressed\n' "$builder_create_log" >&2
+	exit 1
+fi
+if [ "$builder_create_status" -ne 0 ]; then
+	sed -n '1,240p' "$builder_create_log" >&2
+	exit "$builder_create_status"
+fi
+run_scanned "$output_dir/buildx-bootstrap.txt" docker buildx inspect \
+	--builder "$builder_name" --bootstrap
+
 {
 	printf 'commit=%s\n' "$(git -C "$repo_dir" rev-parse HEAD)"
 	printf 'worktree_clean=%s\n' "$(test -z "$(git -C "$repo_dir" status --porcelain --untracked-files=all)" && printf true || printf false)"
@@ -75,6 +109,7 @@ run_scanned() {
 	printf 'go_toolchain=%s\n' "$(go env GOTOOLCHAIN)"
 	printf 'docker_version=%s\n' "$(docker version --format '{{.Server.Version}}')"
 	printf 'buildx_version=%s\n' "$(docker buildx version)"
+	printf 'buildx_driver=docker-container\n'
 	printf 'platforms=linux/amd64,linux/arm64\n'
 } >"$output_dir/environment.txt"
 
@@ -105,6 +140,7 @@ for target in agent server; do
 	archive="$output_dir/xtunnel-$target.oci.tar"
 	log="$output_dir/$target-build.txt"
 	run_scanned "$log" docker buildx build \
+		--builder "$builder_name" \
 		--progress plain \
 		--platform linux/amd64,linux/arm64 \
 		--provenance=false \

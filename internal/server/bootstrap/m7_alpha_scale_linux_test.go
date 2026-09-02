@@ -65,9 +65,12 @@ func TestM7AlphaPublicConnectionGate(t *testing.T) {
 	formalGate := strings.TrimSpace(os.Getenv(m7AlphaConnectionsEnvironment)) != ""
 	shardCount := (connections + 49) / 50
 	origin := startM7AlphaEchoOrigin(t)
-	directRTT := m7AlphaMeasureDirectRTT(t, origin.listener.Addr().String())
-	if p95 := m7AlphaPercentile(directRTT, 95); formalGate && p95 > time.Millisecond {
-		t.Fatalf("M7-10 direct loopback RTT P95 = %v, want <= 1ms", p95)
+	directP95 := time.Duration(0)
+	if formalGate {
+		directP95 = m7AlphaPercentile(m7AlphaMeasureDirectRTT(t, origin.listener.Addr().String()), 95)
+		if directP95 > time.Millisecond {
+			t.Fatalf("M7-10 direct loopback RTT P95 = %v, want <= 1ms", directP95)
+		}
 	}
 	reserved, ports := reserveM7AlphaPorts(t, shardCount)
 	serverContext, cancelServer := context.WithCancel(context.Background())
@@ -154,10 +157,16 @@ func TestM7AlphaPublicConnectionGate(t *testing.T) {
 			agent.stop(t, 30*time.Second)
 		}
 	}()
-	openDurations := m7AlphaMeasureTunnelOpen(t, shards)
-	openP95 := m7AlphaPercentile(openDurations, 95)
-	if formalGate && openP95 > 200*time.Millisecond {
-		t.Fatalf("M7-10 public Dial-to-Origin-echo P95 = %v, want <= 200ms", openP95)
+	openP95 := time.Duration(0)
+	if formalGate {
+		openP95 = m7AlphaPercentile(m7AlphaMeasureTunnelOpen(t, shards, 100), 95)
+		if openP95 > 200*time.Millisecond {
+			t.Fatalf("M7-10 public Dial-to-Origin-echo P95 = %v, want <= 200ms", openP95)
+		}
+	} else {
+		// 普通与 Race 回归只做一次功能预热，使数据面首次使用的固定资源进入
+		// 基线；延迟分布及阈值仍只属于显式连接规模的正式 Gate。
+		_ = m7AlphaMeasureTunnelOpen(t, shards, 1)
 	}
 	m7AlphaWaitSettled(t, serverRuntime, shards, 30*time.Second)
 	m7AlphaWaitHeartbeatWarmup(t, serverRuntime, shardCount, 30*time.Second)
@@ -272,7 +281,7 @@ func TestM7AlphaPublicConnectionGate(t *testing.T) {
 	m7AlphaWaitHeartbeatWarmup(t, serverRuntime, shardCount, m7AlphaRemaining(t, resourceDeadline, "baseline heartbeat warmup"))
 	// 新 Agent 恢复到与负载前相同的低水位 WorkPool 后再比较，防止停止全部
 	// Agent 形成的负偏移掩盖 Server 泄漏，同时排除首次运行库初始化的固定成本。
-	settled := m7AlphaWaitResources(t, baseline, baselineFDTargets, m7AlphaRemaining(t, resourceDeadline, "resource settlement"))
+	settled := m7AlphaWaitResources(t, baseline, baselineFDTargets, formalGate, m7AlphaRemaining(t, resourceDeadline, "resource settlement"))
 	for _, agent := range agents {
 		agent.stop(t, 30*time.Second)
 	}
@@ -292,7 +301,7 @@ func TestM7AlphaPublicConnectionGate(t *testing.T) {
 		Connections: connections, Shards: shardCount, Succeeded: succeeded,
 		SuccessRate: float64(succeeded) / float64(connections), OpenP95MS: openP95.Milliseconds(),
 		ScaleRoundTripP95MS: scaleP95.Milliseconds(),
-		DirectRTTP95Micros:  m7AlphaPercentile(directRTT, 95).Microseconds(),
+		DirectRTTP95Micros:  directP95.Microseconds(),
 		Baseline:            baseline, Peak: peak, Settled: settled,
 	}
 	encoded, err := json.Marshal(result)
@@ -583,10 +592,10 @@ func m7AlphaMeasureDirectRTT(t *testing.T, address string) []time.Duration {
 	return values
 }
 
-func m7AlphaMeasureTunnelOpen(t *testing.T, shards []m7AlphaShard) []time.Duration {
+func m7AlphaMeasureTunnelOpen(t *testing.T, shards []m7AlphaShard, samples int) []time.Duration {
 	t.Helper()
-	values := make([]time.Duration, 0, 100)
-	for index := range 100 {
+	values := make([]time.Duration, 0, samples)
+	for index := range samples {
 		shard := shards[index%len(shards)]
 		startedAt := time.Now()
 		connection, err := net.DialTimeout("tcp4", shard.address, 5*time.Second)
@@ -665,7 +674,7 @@ func m7AlphaWaitSessionsClosed(t *testing.T, runtime *gatewayBootstrapCloser, ti
 	t.Fatal("M7-10 old Control Sessions did not close")
 }
 
-func m7AlphaWaitResources(t *testing.T, baseline m7ResourceSample, baselineFDTargets map[string]string, timeout time.Duration) m7ResourceSample {
+func m7AlphaWaitResources(t *testing.T, baseline m7ResourceSample, baselineFDTargets map[string]string, formalGate bool, timeout time.Duration) m7ResourceSample {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var current m7ResourceSample
@@ -675,11 +684,27 @@ func m7AlphaWaitResources(t *testing.T, baseline m7ResourceSample, baselineFDTar
 		if err != nil {
 			t.Fatalf("read settled M7-10 resources: %v", err)
 		}
-		if current.FDs <= baseline.FDs+10 && current.Goroutines <= baseline.Goroutines+20 {
+		fdSettled := current.FDs <= baseline.FDs+10
+		if !formalGate {
+			// go test 在普通与 Race 回归中可能为并发包调度保留匿名管道；产品
+			// 不拥有这类 FD，因此非正式回归只比较 Socket、数据库等相关 FD。
+			fdSettled = m7AlphaRelevantFDCount(m7LeakFDTargets()) <= m7AlphaRelevantFDCount(baselineFDTargets)+10
+		}
+		if fdSettled && current.Goroutines <= baseline.Goroutines+20 {
 			return current
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("M7-10 resources did not settle: baseline=%+v current=%+v baseline_fds=%+v current_fds=%+v", baseline, current, baselineFDTargets, m7LeakFDTargets())
 	return current
+}
+
+func m7AlphaRelevantFDCount(targets map[string]string) int {
+	count := 0
+	for _, target := range targets {
+		if !strings.HasPrefix(target, "pipe:[") {
+			count++
+		}
+	}
+	return count
 }
