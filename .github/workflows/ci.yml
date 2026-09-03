@@ -554,7 +554,15 @@ jobs:
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-          $serverPackages = @(
+          $serverTestPackages = @(
+            './configs'
+            './internal/server/config'
+            './internal/server/durableops'
+            './internal/server/limits'
+            './internal/server/service'
+            './internal/server/bootstrap'
+          )
+          $serverVetPackages = @(
             './configs'
             './internal/server/config'
             './internal/server/datadir'
@@ -564,9 +572,12 @@ jobs:
             './internal/server/bootstrap'
             './cmd/server'
           )
-          go test -count=1 -timeout 180s @serverPackages
+          go test -count=1 -timeout 180s @serverTestPackages
           if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server baseline tests failed' }
-          go vet @serverPackages
+          $dataDirTestPath = Join-Path $env:RUNNER_TEMP 'server-datadir-amd64.test.exe'
+          go test -c -o $dataDirTestPath ./internal/server/datadir
+          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server data directory test compile failed' }
+          go vet @serverVetPackages
           if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server baseline vet failed' }
 
           $serverPath = Join-Path $env:RUNNER_TEMP 'xtunnel-server.exe'
@@ -575,8 +586,11 @@ jobs:
           go build -trimpath -ldflags $ldflags -o $serverPath ./cmd/server
           if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server build failed' }
 
+          $ErrorActionPreference = 'Continue'
           $serverHelp = & $serverPath --help 2>&1
-          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server help failed' }
+          $serverHelpExitCode = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($serverHelpExitCode -ne 0) { throw 'Windows amd64 Server help failed' }
           if (($serverHelp -join "`n") -notmatch 'run and maintain XTunnel Server') {
             throw 'Windows amd64 Server help output is incomplete'
           }
@@ -793,8 +807,11 @@ jobs:
           go build -trimpath -ldflags $ldflags -o $serverPath ./cmd/server
           if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 Server build failed' }
 
+          $ErrorActionPreference = 'Continue'
           $serverHelp = & $serverPath --help 2>&1
-          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 Server help failed' }
+          $serverHelpExitCode = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($serverHelpExitCode -ne 0) { throw 'native Windows arm64 Server help failed' }
           if (($serverHelp -join "`n") -notmatch 'run and maintain XTunnel Server') {
             throw 'native Windows arm64 Server help output is incomplete'
           }
