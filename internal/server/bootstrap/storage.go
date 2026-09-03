@@ -25,6 +25,7 @@ type storage interface {
 type serverStorage struct {
 	database        *sqlite.Store
 	lock            *externallock.Lock
+	parentGuard     *datadir.ParentGuard
 	dataDir         string
 	targetHash      string
 	databaseExisted bool
@@ -45,24 +46,31 @@ func openServerStorage(ctx context.Context, dataDir, runtimeDir string) (*server
 	failAfterLock := func(cause error) (*serverStorage, error) {
 		return nil, errors.Join(cause, lock.Close())
 	}
+	parentGuard, err := datadir.PinParent(target)
+	if err != nil {
+		return failAfterLock(fmt.Errorf("pin stable server data parent: %w", err))
+	}
+	failAfterGuard := func(cause error) (*serverStorage, error) {
+		return nil, errors.Join(cause, parentGuard.Close(), lock.Close())
+	}
 
 	if _, err := durableops.RecoverPendingRestore(ctx, target); err != nil {
-		return failAfterLock(fmt.Errorf("recover pending Restore Journal: %w", err))
+		return failAfterGuard(fmt.Errorf("recover pending Restore Journal: %w", err))
 	}
-	if err := datadir.ValidateCanonical(target); err != nil {
-		return failAfterLock(fmt.Errorf("validate canonical server data directory: %w", err))
+	if err := parentGuard.ValidateCanonical(); err != nil {
+		return failAfterGuard(fmt.Errorf("validate canonical server data directory: %w", err))
 	}
 	_, databaseStatErr := os.Stat(filepath.Join(target.Path, "xtunnel.db"))
 	databaseExisted := databaseStatErr == nil
 	if databaseStatErr != nil && !errors.Is(databaseStatErr, os.ErrNotExist) {
-		return failAfterLock(fmt.Errorf("inspect Server database before opening SQLite: %w", databaseStatErr))
+		return failAfterGuard(fmt.Errorf("inspect Server database before opening SQLite: %w", databaseStatErr))
 	}
 	database, err := sqlite.Open(ctx, target.Path)
 	if err != nil {
-		return failAfterLock(fmt.Errorf("initialize SQLite: %w", err))
+		return failAfterGuard(fmt.Errorf("initialize SQLite: %w", err))
 	}
 	failAfterDatabase := func(cause error) (*serverStorage, error) {
-		return nil, errors.Join(cause, database.Close(), lock.Close())
+		return nil, errors.Join(cause, database.Close(), parentGuard.Close(), lock.Close())
 	}
 	hasTunnelTokens, err := database.HasTunnelTokens(ctx)
 	if err != nil {
@@ -76,14 +84,16 @@ func openServerStorage(ctx context.Context, dataDir, runtimeDir string) (*server
 		return failAfterDatabase(fmt.Errorf("load Tunnel Token master key: %w", err))
 	}
 	return &serverStorage{
-		database: database, lock: lock, dataDir: target.Path, targetHash: target.Hash, databaseExisted: databaseExisted,
+		database: database, lock: lock, parentGuard: parentGuard, dataDir: target.Path, targetHash: target.Hash, databaseExisted: databaseExisted,
 		tokenMasterKey: tokenMasterKey,
 	}, nil
 }
 
-// Close 先关闭 SQLite，再释放覆盖整个数据目录的 External Lock。
+// Close 先关闭 SQLite，再释放父目录身份 Guard，最后释放覆盖整个数据目录的
+// External Lock；该逆序保证持久化路径不会在锁仍被依赖时失去身份固定。
 func (storage *serverStorage) Close() error {
 	databaseErr := storage.database.Close()
+	guardErr := storage.parentGuard.Close()
 	lockErr := storage.lock.Close()
-	return errors.Join(databaseErr, lockErr)
+	return errors.Join(databaseErr, guardErr, lockErr)
 }

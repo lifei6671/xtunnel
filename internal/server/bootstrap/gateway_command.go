@@ -79,10 +79,19 @@ func runGatewayRotateKeyWithOptions(
 			resultErr = errors.Join(resultErr, fmt.Errorf("close gateway rotation external lock: %w", err))
 		}
 	}()
+	parentGuard, err := datadir.PinParent(target)
+	if err != nil {
+		return fmt.Errorf("pin stable data parent for gateway rotation: %w", err)
+	}
+	defer func() {
+		if err := parentGuard.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close gateway rotation data parent guard: %w", err))
+		}
+	}()
 	if _, err := durableops.RecoverPendingRestore(ctx, target); err != nil {
 		return fmt.Errorf("recover pending Restore Journal before gateway rotation: %w", err)
 	}
-	if err := datadir.ValidateCanonical(target); err != nil {
+	if err := parentGuard.ValidateCanonical(); err != nil {
 		return fmt.Errorf("validate canonical server data directory before gateway rotation: %w", err)
 	}
 	if _, err := os.Stat(target.Path + "/xtunnel.db"); err != nil {

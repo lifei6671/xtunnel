@@ -610,7 +610,11 @@ func openGatewayAndBootstrapAtTracing(
 	startedAt time.Time,
 	traceRuntime *tracing.Runtime,
 ) (io.Closer, error) {
-	lifecycle, err := openGatewayAndBootstrapWithStartedAtTracing(ctx, config, resources, logger, startedAt, externallock.RuntimeDirectory, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
+	runtimeDir, err := externallock.RuntimeDirectory()
+	if err != nil {
+		return nil, err
+	}
+	lifecycle, err := openGatewayAndBootstrapWithStartedAtTracing(ctx, config, resources, logger, startedAt, runtimeDir, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
 		return openAdminBootstrapSocketAfter(ctx, runtimeDir, targetHash, store, afterCreate, reportRuntimeError)
 	}, traceRuntime)
 	if err != nil {
@@ -632,7 +636,7 @@ func openGatewayAndBootstrapAtTracing(
 	}
 	barrier, err := openBackupBarrierSocket(
 		ctx,
-		externallock.RuntimeDirectory,
+		runtimeDir,
 		serverResources.targetHash,
 		serverResources.database,
 		reportRuntimeError,

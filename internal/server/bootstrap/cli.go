@@ -162,7 +162,11 @@ func newServerCommandWithServices(
 		},
 	}
 	admin.Commands = []*cli.Command{newAdminCreateCommand(program, environ, stderr, func(ctx context.Context, options adminCreateOptions) error {
-		return runAdminCreateWithOptions(ctx, options, stderr, externallock.RuntimeDirectory)
+		runtimeDir, err := externallock.RuntimeDirectory()
+		if err != nil {
+			return err
+		}
+		return runAdminCreateWithOptions(ctx, options, stderr, runtimeDir)
 	})}
 
 	gateway := &cli.Command{
@@ -176,7 +180,11 @@ func newServerCommandWithServices(
 		},
 	}
 	gateway.Commands = []*cli.Command{newGatewayRotateKeyCommand(program, environ, stderr, func(ctx context.Context, options baseconfig.Options) error {
-		return runGatewayRotateKeyWithOptions(ctx, options, stderr, externallock.RuntimeDirectory, time.Now())
+		runtimeDir, err := externallock.RuntimeDirectory()
+		if err != nil {
+			return err
+		}
+		return runGatewayRotateKeyWithOptions(ctx, options, stderr, runtimeDir, time.Now())
 	})}
 
 	backup := &cli.Command{
@@ -194,10 +202,18 @@ func newServerCommandWithServices(
 	}
 	backup.Commands = []*cli.Command{
 		newBackupOperationCommand(program, "create", environ, stderr, func(ctx context.Context, options backupCommandOptions) error {
-			return runBackupCreateWithOptions(ctx, options, stderr, externallock.RuntimeDirectory)
+			runtimeDir, err := externallock.RuntimeDirectory()
+			if err != nil {
+				return err
+			}
+			return runBackupCreateWithOptions(ctx, options, stderr, runtimeDir)
 		}),
 		newBackupOperationCommand(program, "restore", environ, stderr, func(ctx context.Context, options backupCommandOptions) error {
-			return runBackupRestoreWithOptions(ctx, options, stderr, externallock.RuntimeDirectory)
+			runtimeDir, err := externallock.RuntimeDirectory()
+			if err != nil {
+				return err
+			}
+			return runBackupRestoreWithOptions(ctx, options, stderr, runtimeDir)
 		}),
 	}
 

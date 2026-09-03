@@ -6,13 +6,14 @@ import (
 	"fmt"
 )
 
-const (
-	// RuntimeDirectory 是 systemd/OCI 预先创建的 Server 运行时目录。
-	RuntimeDirectory = "/run/xtunnel"
-)
-
 // ErrAlreadyLocked 表示另一个 Server 已经持有同一 Stable Data Target 的锁。
 var ErrAlreadyLocked = errors.New("server data target is already locked")
+
+// RuntimeDirectory 返回平台固定的 Server 运行时目录。调用方必须传播解析错误，
+// Windows 不得回退到环境变量或假定系统盘符。
+func RuntimeDirectory() (string, error) {
+	return runtimeDirectory()
+}
 
 // Lock 持有进程全生命周期的非阻塞 OS 文件锁。
 type Lock struct {

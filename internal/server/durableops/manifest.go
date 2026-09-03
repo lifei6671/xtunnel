@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -169,42 +168,14 @@ type restorePaths struct {
 	journal string
 }
 
-// pathsForTarget 从已解析的 Stable Target 派生恢复路径，并再次校验父目录、
-// leaf 与 hash 的绑定关系，防止调用方把 Journal 或清理操作导向其他目录。
+// pathsForTarget 从已解析的 Stable Target 派生恢复路径。Target 的平台身份、
+// leaf 与 Hash 绑定只由 datadir 校验，避免 Windows 与 Linux 在这里形成第二套
+// Stable Target 算法。
 func pathsForTarget(target datadir.Target) (restorePaths, error) {
-	if target.Parent == "" || target.Leaf == "" || target.Path == "" || target.Hash == "" {
-		return restorePaths{}, errors.New("stable data target is incomplete")
+	if err := datadir.ValidateTarget(target); err != nil {
+		return restorePaths{}, fmt.Errorf("validate stable data target: %w", err)
 	}
-	canonicalParent, err := filepath.EvalSymlinks(target.Parent)
-	if err != nil {
-		return restorePaths{}, fmt.Errorf("resolve stable data parent: %w", err)
-	}
-	canonicalParent, err = filepath.Abs(canonicalParent)
-	if err != nil {
-		return restorePaths{}, fmt.Errorf("make stable data parent absolute: %w", err)
-	}
-	if filepath.Clean(canonicalParent) != filepath.Clean(target.Parent) {
-		return restorePaths{}, errors.New("stable data parent is not canonical")
-	}
-	parentInfo, err := os.Lstat(canonicalParent)
-	if err != nil {
-		return restorePaths{}, fmt.Errorf("inspect stable data parent: %w", err)
-	}
-	if parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() {
-		return restorePaths{}, errors.New("stable data parent must be a non-symbolic-link directory")
-	}
-	if filepath.Base(target.Leaf) != target.Leaf || target.Leaf == "." || target.Leaf == ".." {
-		return restorePaths{}, errors.New("stable data target leaf is invalid")
-	}
-	wantTarget := filepath.Join(canonicalParent, target.Leaf)
-	if filepath.Clean(target.Path) != wantTarget {
-		return restorePaths{}, errors.New("stable data target is not a direct child of its parent")
-	}
-	digest := sha256.Sum256([]byte(target.Path))
-	wantHash := fmt.Sprintf("%x", digest)
-	if target.Hash != wantHash {
-		return restorePaths{}, errors.New("stable data target hash is invalid")
-	}
+	canonicalParent := target.Parent
 	prefix := ".xtunnel-restore-" + target.Hash
 	paths := restorePaths{
 		target:   target.Path,

@@ -557,7 +557,9 @@ jobs:
           $serverTestPackages = @(
             './configs'
             './internal/server/config'
+            './internal/server/datadir'
             './internal/server/durableops'
+            './internal/server/externallock'
             './internal/server/limits'
             './internal/server/service'
             './internal/server/bootstrap'
@@ -567,6 +569,7 @@ jobs:
             './internal/server/config'
             './internal/server/datadir'
             './internal/server/durableops'
+            './internal/server/externallock'
             './internal/server/limits'
             './internal/server/service'
             './internal/server/bootstrap'
@@ -574,9 +577,8 @@ jobs:
           )
           go test -count=1 -timeout 180s @serverTestPackages
           if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server baseline tests failed' }
-          $dataDirTestPath = Join-Path $env:RUNNER_TEMP 'server-datadir-amd64.test.exe'
-          go test -c -o $dataDirTestPath ./internal/server/datadir
-          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server data directory test compile failed' }
+          go test -race -count=1 -timeout 180s ./internal/server/datadir ./internal/server/externallock
+          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 M8-02 race tests failed' }
           go vet @serverVetPackages
           if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server baseline vet failed' }
 
@@ -631,6 +633,7 @@ jobs:
             @{ Package = './internal/server/config'; Output = 'server-config-arm64.test.exe' }
             @{ Package = './internal/server/datadir'; Output = 'server-datadir-arm64.test.exe' }
             @{ Package = './internal/server/durableops'; Output = 'server-durableops-arm64.test.exe' }
+            @{ Package = './internal/server/externallock'; Output = 'server-externallock-arm64.test.exe' }
             @{ Package = './internal/server/limits'; Output = 'server-limits-arm64.test.exe' }
             @{ Package = './internal/server/service'; Output = 'server-service-arm64.test.exe' }
             @{ Package = './internal/server/bootstrap'; Output = 'server-bootstrap-arm64.test.exe' }
@@ -800,6 +803,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           go test -count=1 -timeout 180s ./configs
           if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 Server config example tests failed' }
+          go test -count=1 -timeout 180s ./internal/server/datadir ./internal/server/externallock
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 M8-02 target and external lock tests failed' }
+          go test -count=1 -timeout 180s ./internal/server/bootstrap `
+            -run '^TestWindowsOpenServerStorageLocksBeforeDurableState$'
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 M8-02 bootstrap ordering test failed' }
 
           $serverPath = Join-Path $env:RUNNER_TEMP 'xtunnel-server-arm64.exe'
           $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"

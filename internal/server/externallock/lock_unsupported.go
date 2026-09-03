@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package externallock
 
@@ -7,5 +7,5 @@ import (
 )
 
 func acquire(string, string) (func() error, error) {
-	return nil, errors.New("server external lock is only supported on Linux in XTunnel V0.1")
+	return nil, errors.New("server external lock is only supported on Linux and Windows")
 }

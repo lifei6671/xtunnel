@@ -76,8 +76,8 @@ func runBackupCreateWithOptions(
 	// create 固定一次 SQLite 源 inode，再把 SQLite Backup API 与 durableops 的
 	// 文件快照装配在同一生命周期内。在线路径传入 beforePublish=lease.Close，
 	// 因而 Release ACK 是归档对调用方可见为成功之前的最后一道承诺条件。
-	create := func(createContext context.Context, beforePublish func() error) (result durableops.Manifest, resultErr error) {
-		if err := datadir.ValidateCanonical(target); err != nil {
+	create := func(createContext context.Context, beforePublish func() error, validateCanonical func() error) (result durableops.Manifest, resultErr error) {
+		if err := validateCanonical(); err != nil {
 			return durableops.Manifest{}, fmt.Errorf("validate canonical server data directory for backup: %w", err)
 		}
 		databasePath := filepath.Join(target.Path, "xtunnel.db")
@@ -120,7 +120,9 @@ func runBackupCreateWithOptions(
 		// Socket Reader 会在 Server Shutdown、EOF 或异常提前响应时取消
 		// leaseContext，使仍在进行的 SQLite/文件捕获尽快失败收敛。
 		leaseContext, cancelLeaseContext := lease.BindContext(ctx)
-		manifest, createErr := create(leaseContext, lease.Close)
+		manifest, createErr := create(leaseContext, lease.Close, func() error {
+			return datadir.ValidateCanonical(target)
+		})
 		cancelLeaseContext()
 		releaseErr := lease.Close()
 		if createErr != nil || releaseErr != nil {
@@ -141,10 +143,19 @@ func runBackupCreateWithOptions(
 			resultErr = errors.Join(resultErr, fmt.Errorf("close offline backup external lock: %w", err))
 		}
 	}()
+	parentGuard, err := datadir.PinParent(target)
+	if err != nil {
+		return fmt.Errorf("pin stable data parent for offline backup: %w", err)
+	}
+	defer func() {
+		if err := parentGuard.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close offline backup data parent guard: %w", err))
+		}
+	}()
 	if _, err := durableops.RecoverPendingRestore(ctx, target); err != nil {
 		return fmt.Errorf("recover pending Restore before offline backup: %w", err)
 	}
-	manifest, err := create(ctx, nil)
+	manifest, err := create(ctx, nil, parentGuard.ValidateCanonical)
 	if err != nil {
 		return err
 	}
@@ -195,6 +206,15 @@ func runBackupRestoreWithOptions(
 			resultErr = errors.Join(resultErr, fmt.Errorf("close Restore external lock: %w", err))
 		}
 	}()
+	parentGuard, err := datadir.PinParent(target)
+	if err != nil {
+		return fmt.Errorf("pin stable data parent for Restore: %w", err)
+	}
+	defer func() {
+		if err := parentGuard.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close Restore data parent guard: %w", err))
+		}
+	}()
 	if _, err := durableops.RecoverPendingRestore(ctx, target); err != nil {
 		return fmt.Errorf("recover previous pending Restore: %w", err)
 	}
@@ -202,7 +222,7 @@ func runBackupRestoreWithOptions(
 	if err != nil {
 		return err
 	}
-	if err := datadir.ValidateCanonical(target); err != nil {
+	if err := parentGuard.ValidateCanonical(); err != nil {
 		return fmt.Errorf("validate restored canonical server data directory: %w", err)
 	}
 	logBackupCompletion(ctx, logger, "backup_restore_completed", target.Hash, manifest, "offline")

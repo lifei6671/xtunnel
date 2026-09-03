@@ -26,7 +26,11 @@ func Execute(program string, args, environ []string, stderr io.Writer) int {
 	startedAt := time.Now()
 	return executeWithRun(program, args, environ, stderr, func(ctx context.Context, options baseconfig.Options, stderr io.Writer) error {
 		return runWithStorageAndBootstrapOptions(ctx, options, stderr, func(ctx context.Context, dataDir string) (storage, error) {
-			return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
+			runtimeDir, err := externallock.RuntimeDirectory()
+			if err != nil {
+				return nil, err
+			}
+			return openServerStorage(ctx, dataDir, runtimeDir)
 		}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger, traceRuntime *tracing.Runtime) (io.Closer, error) {
 			return openGatewayAndBootstrapAtTracing(ctx, config, resources, logger, startedAt, traceRuntime)
 		})
@@ -62,7 +66,11 @@ func executeWithRun(
 func run(ctx context.Context, program string, args, environ []string, stderr io.Writer) error {
 	startedAt := time.Now()
 	return runWithStorageAndBootstrap(ctx, program, args, environ, stderr, func(ctx context.Context, dataDir string) (storage, error) {
-		return openServerStorage(ctx, dataDir, externallock.RuntimeDirectory)
+		runtimeDir, err := externallock.RuntimeDirectory()
+		if err != nil {
+			return nil, err
+		}
+		return openServerStorage(ctx, dataDir, runtimeDir)
 	}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger, traceRuntime *tracing.Runtime) (io.Closer, error) {
 		return openGatewayAndBootstrapAtTracing(ctx, config, resources, logger, startedAt, traceRuntime)
 	})
