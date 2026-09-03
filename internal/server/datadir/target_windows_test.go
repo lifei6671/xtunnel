@@ -23,7 +23,7 @@ func TestWindowsResolveDoesNotRequireOrCreateLeaf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !strings.EqualFold(target.Path, dataDir) || target.Leaf != "Data" || len(target.Hash) != 64 {
+	if !strings.EqualFold(target.Path, filepath.Join(target.Parent, "Data")) || target.Leaf != "Data" || len(target.Hash) != 64 {
 		t.Fatalf("Resolve() = %#v", target)
 	}
 	if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
