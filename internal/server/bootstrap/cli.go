@@ -13,7 +13,9 @@ import (
 	"github.com/urfave/cli/v3"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
-	"github.com/lifei6671/xtunnel/internal/server/externallock"
+	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
+	"github.com/lifei6671/xtunnel/internal/server/pathprofile"
+	"github.com/lifei6671/xtunnel/internal/server/provision"
 	serverservice "github.com/lifei6671/xtunnel/internal/server/service"
 )
 
@@ -32,6 +34,29 @@ func (platformServerServiceOperations) Install(ctx context.Context, configSource
 
 func (platformServerServiceOperations) Uninstall(ctx context.Context) error {
 	return serverservice.Uninstall(ctx)
+}
+
+func initializeServerDirectories(_ context.Context, options baseconfig.Options) error {
+	config, err := serverconfig.Load(options)
+	if err != nil {
+		return fmt.Errorf("load server config: %w", err)
+	}
+	if err := provision.Initialize(config.Server.DataDir); err != nil {
+		return fmt.Errorf("initialize Server directories: %w", err)
+	}
+	return nil
+}
+
+func runtimeDirectoryForOptions(options baseconfig.Options) (string, error) {
+	config, err := serverconfig.Load(options)
+	if err != nil {
+		return "", fmt.Errorf("load server config: %w", err)
+	}
+	profile, err := pathprofile.Resolve(config.Server.DataDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve server path profile: %w", err)
+	}
+	return profile.RuntimeDir, nil
 }
 
 type configFlagValues struct {
@@ -114,7 +139,7 @@ func newServerCommand(
 	stderr io.Writer,
 	runner func(context.Context, baseconfig.Options, io.Writer) error,
 ) *cli.Command {
-	return newServerCommandWithServices(program, args, environ, stderr, runner, platformServerServiceOperations{})
+	return newServerCommandWithServicesAndInitializer(program, args, environ, stderr, runner, platformServerServiceOperations{}, initializeServerDirectories)
 }
 
 func newServerCommandWithServices(
@@ -124,6 +149,18 @@ func newServerCommandWithServices(
 	stderr io.Writer,
 	runner func(context.Context, baseconfig.Options, io.Writer) error,
 	services serverServiceOperations,
+) *cli.Command {
+	return newServerCommandWithServicesAndInitializer(program, args, environ, stderr, runner, services, initializeServerDirectories)
+}
+
+func newServerCommandWithServicesAndInitializer(
+	program string,
+	args []string,
+	environ []string,
+	stderr io.Writer,
+	runner func(context.Context, baseconfig.Options, io.Writer) error,
+	services serverServiceOperations,
+	initializer func(context.Context, baseconfig.Options) error,
 ) *cli.Command {
 	rootConfig := &configFlagValues{}
 	command := &cli.Command{
@@ -162,7 +199,7 @@ func newServerCommandWithServices(
 		},
 	}
 	admin.Commands = []*cli.Command{newAdminCreateCommand(program, environ, stderr, func(ctx context.Context, options adminCreateOptions) error {
-		runtimeDir, err := externallock.RuntimeDirectory()
+		runtimeDir, err := runtimeDirectoryForOptions(options.config)
 		if err != nil {
 			return err
 		}
@@ -180,7 +217,7 @@ func newServerCommandWithServices(
 		},
 	}
 	gateway.Commands = []*cli.Command{newGatewayRotateKeyCommand(program, environ, stderr, func(ctx context.Context, options baseconfig.Options) error {
-		runtimeDir, err := externallock.RuntimeDirectory()
+		runtimeDir, err := runtimeDirectoryForOptions(options)
 		if err != nil {
 			return err
 		}
@@ -202,14 +239,14 @@ func newServerCommandWithServices(
 	}
 	backup.Commands = []*cli.Command{
 		newBackupOperationCommand(program, "create", environ, stderr, func(ctx context.Context, options backupCommandOptions) error {
-			runtimeDir, err := externallock.RuntimeDirectory()
+			runtimeDir, err := runtimeDirectoryForOptions(options.config)
 			if err != nil {
 				return err
 			}
 			return runBackupCreateWithOptions(ctx, options, stderr, runtimeDir)
 		}),
 		newBackupOperationCommand(program, "restore", environ, stderr, func(ctx context.Context, options backupCommandOptions) error {
-			runtimeDir, err := externallock.RuntimeDirectory()
+			runtimeDir, err := runtimeDirectoryForOptions(options.config)
 			if err != nil {
 				return err
 			}
@@ -218,11 +255,48 @@ func newServerCommandWithServices(
 	}
 
 	service := newServerServiceCommand(program, stderr, services)
+	init := newServerInitCommand(program, environ, stderr, initializer)
 
-	if len(args) == 0 || args[0] == "admin" || args[0] == "gateway" || args[0] == "backup" || args[0] == "service" || args[0] == "-h" || args[0] == "--help" {
-		command.Commands = []*cli.Command{admin, gateway, backup, service}
+	if len(args) == 0 || args[0] == "admin" || args[0] == "gateway" || args[0] == "backup" || args[0] == "service" || args[0] == "init" || args[0] == "-h" || args[0] == "--help" {
+		command.Commands = []*cli.Command{admin, gateway, backup, service, init}
 	}
 	return command
+}
+
+func newServerInitCommand(
+	program string,
+	environ []string,
+	stderr io.Writer,
+	initializer func(context.Context, baseconfig.Options) error,
+) *cli.Command {
+	configValues := &configFlagValues{}
+	return &cli.Command{
+		Name:                      "init",
+		Usage:                     "initialize Windows Server data and runtime directories",
+		UsageText:                 program + " init --config path [--set path=value]...",
+		DisableSliceFlagSeparator: true,
+		StopOnNthArg:              stopOnFirstArgument(),
+		Before:                    serverHelpBefore,
+		OnUsageError:              passthroughUsageError,
+		Flags:                     configValues.flags(),
+		Action: func(ctx context.Context, current *cli.Command) error {
+			if current.NArg() != 0 {
+				return fmt.Errorf("server init does not accept positional arguments: %s", strings.Join(current.Args().Slice(), " "))
+			}
+			if !current.IsSet("config") || strings.TrimSpace(configValues.path) == "" {
+				return errors.New("server init requires --config")
+			}
+			options, err := configValues.options(environ)
+			if err != nil {
+				return err
+			}
+			if err := initializer(ctx, options); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(stderr, "initialized Server data and runtime directories")
+			return err
+		},
+	}
 }
 
 func newServerServiceCommand(program string, stderr io.Writer, services serverServiceOperations) *cli.Command {

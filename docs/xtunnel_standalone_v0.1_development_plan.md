@@ -2230,8 +2230,88 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - M8-03 实施边界：串行完成 Protected DACL、Windows Durable File Publisher 与 Restore/Recovery 平台实现，覆盖受管密钥/SQLite/Journal/Backup 的 no-follow 与耐久发布、operator-owned Public TLS 文件身份和权限验证，以及三阶段 Restore Journal、崩溃矩阵、回滚优先和跨卷/未知状态拒绝。
 - Gate 与文档边界：M8 Windows Server Release Gate 八项保持未勾选。根 README、总技术方案、配置示例、Schema、Proto、OpenAPI、Migration、依赖、CI/CD、部署资产、日志契约和 `docs/static` 图片保持不变；M8-06 完整原生运行、发布候选、聚合 Gate 与用户阶段签核闭环前，Windows Server 支持矩阵保持不变。
 
+## 2026-09-03 · M8-03 前台路径 Profile 与目录初始化 · IN_PROGRESS
+
+- 产物与边界：新增 `xtunnel-server init --config PATH [--set path=value]...`，只面向 Windows 前台启动准备配置指定的 Data 父链、Data leaf 与 Known Folder 派生的 Runtime 目录。`server.data_dir: auto` 是 Schema 声明的前台默认值，由 Known Folder API 解析为当前登录用户的 LocalAppData Data/Runtime Profile；未来 SCM 入口将把同一值解析为独立的 ProgramData Service Profile。两种 Profile 不共用 SQLite、密钥、Journal 或 External Lock。命令先执行现有 Strict Decode、跨字段和 Windows Stable Target 校验，再创建目录并通过同一 no-follow External Lock 路径复核；不启动 SQLite、密钥、Listener 或常驻 Server，也不接管或放宽既有 ACL/owner。日常启动继续只验证既有目录。
+- 验证：仓库固定 Docker Runner 的 `go1.27.0` / `GOTOOLCHAIN=local` 已完成修改文件 `gofmt`；Linux 定向 `go test -count=1 -timeout 60s ./internal/server/bootstrap -run '^(TestServerCLIInit|TestServerCLIInitRejectsInvalidInput)$'` 通过。由同一 Runner 交叉编译的 Windows amd64 原生测试二进制在宿主执行后，目录创建/幂等、文件目标拒绝及 CLI 参数验证全部通过；Windows arm64 的编译检查通过。宿主 `go env GOVERSION` 为 `go1.27.1`，不符合仓库固定 `go1.27.0`，未使用其工具链产生验证证据。
+- 完整验证边界：`./scripts/verify.ps1` 先后两次未完成。一次在 Web Check 前置依赖中报告 `tsc: not found`；另一次在拉取固定 Go Runner 镜像时被 Docker Registry `401 Unauthorized` 阻断，均未进入可归因于本次代码的完整 Test/Vet/Build 阶段，因此完整验证为 `UNABLE_TO_VERIFY`。
+- Profile 验证：固定 `go1.27.0` Docker Runner 下 `./internal/server/config` 与 `./configs` 定向测试通过；Windows amd64 交叉编译后的原生测试二进制已验证 `auto` 前台 Profile、前台 Runtime 解析与 `server init` CLI 参数契约。Windows arm64 的 Path Profile/Bootstrap 编译检查通过。宿主 `go1.27.1` 未用于产生验证证据。
+- 前台目录保护：`init` 对新建的 `%LocalAppData%\XTunnel`、`Server`、Data 与 Runtime 目录在 `CreateDirectory` 时直接写入受保护的 `SYSTEM + 当前登录用户` 精确 DACL；既有受管目录只经 `OPEN_REPARSE_POINT` 句柄复核 owner、Protected DACL、ACE 与目录类型，不匹配即拒绝且不接管。Windows amd64 原生测试已覆盖安全描述符正向校验、继承 ACL 拒绝、目录创建/复用及既有不受保护受管根拒绝；Windows arm64 已完成对应 Package 编译检查。持久化文件、Runtime Lock、Durable Publisher 与 Restore Recovery 仍在 M8-03 后续分区，未把普通启动改为绕过恢复检查。
+- 状态与 Gate：此项只解决前台首次启动的目录准备，不实现 Windows SCM Server 安装器；M8-03 仍为 `IN_PROGRESS`，M8-04 至 M8-06 仍为 `NOT_STARTED`，M8 Windows Server Release Gate 八项保持未勾选。本次未勾选任何产品任务。
+
 ## 2026-09-03 · M8-03 Windows SQLite Driver 边界 · IN_PROGRESS
 
 - 产物与边界：Windows 和其他平台统一继续使用既有 `github.com/libtnb/sqlite` Driver；不引入或维护自定义 SQLite VFS。XTunnel 在打开前完成前台 Data Directory 的 Protected DACL、owner、对象类型、Reparse Point 与 External Lock 验证；SQLite Driver 独立负责主库、WAL、SHM、journal 与临时文件的 Windows 文件 I/O、锁、共享内存、同步和恢复语义。受保护目录 DACL 适用于其创建的子对象，但 XTunnel 不再持有或拦截 SQLite 文件 Handle。
 - 维护边界：审计摘要保持既有 `[]byte` 到 SQL NULL 的编码，不为平台 Driver 分叉引入记录类型差异。Windows `BackupSQLite` 与在线 Backup Barrier 继续明确返回未支持；对应 3 个测试用例仅因 M8-04 尚未实施而跳过，未计为通过。Restore 仍保持平台未支持，未接入 Windows Server 启动路径。
 - 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 的 SQLite 定向测试与 `./scripts/verify.ps1` 均通过；Windows amd64/arm64 编译检查通过，`git diff --check` 通过。独立 `CHILD_AGENT` 全范围复审为 `APPROVED`，P0/P1/P2/P3=`0/0/0/0`。
+- 状态与 Gate：本增量只收敛 SQLite 职责边界，不包含 Windows Restore Recovery、M8-04 Named Pipe/Backup、SCM 或完整 Windows Gate。M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · M8-03 Windows Restore 干净状态恢复预检 · IN_PROGRESS
+
+- 产物与边界：Windows 在已由 `init` 创建并经 Protected DACL 验证的 Data Parent/Data Target 上，Restore Recovery 现在允许无 Journal、无 staging、无 rollback 的正常启动继续进入 SQLite；Journal 读取经 no-follow Handle、精确文件 DACL 和 64 KiB 上限复核。任一畸形或结构合法的 Journal、staging 或 rollback 残留均保留现场并 fail-closed，绝不猜测删除、回滚或提升目录。`Restore` 本身仍明确返回未支持，完整 staging 提取、目录原子切换、崩溃收敛、可证明的持久化屏障和安全树删除仍未实现。
+- 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下 Linux `go test -count=1 -timeout 60s ./internal/server/durableops` 与 `go vet ./internal/server/durableops` 通过；Windows amd64 的 durableops/bootstrap/winsecurity 编译与 `go vet` 通过，Windows arm64 durableops/bootstrap 编译检查通过。同一固定工具链编译的 Windows amd64 测试二进制在宿主原生执行，4 个 Recovery 分支及 Bootstrap clean-state Storage 测试均通过。独立 `CHILD_AGENT` 受影响分区复审通过，P0/P1/P2=`0/0/0`；此前合法 Journal + rollback 残留分支的测试缺口已在复审前补齐。
+- 完整验证边界：Linux Bootstrap 定向回归曾在临时 Docker Runner 的父执行进程被工具窗口中断前未返回结果，记为 `NOT_RUN`，不以局部 durableops 结果替代；`scripts/verify.ps1`、完整 CI、commit 和发布均未执行。
+- 状态与 Gate：本增量仅解除 Windows 正常启动被非 Linux Restore 占位阻断的问题，不构成完整 Restore Recovery。M8-03 继续 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · M8-03 Windows Restore 受保护目录提升原语 · IN_PROGRESS
+
+- 产物与边界：Windows 新增只在已验证受保护父目录下使用的 sibling 目录原语：staging/rollback 只能创建为全新 strict leaf，并在创建后经 no-follow Handle、精确 Protected DACL 与完整 128-bit `FILE_ID_INFO` 复核；目录提升仅允许同父目录的 `MoveFileEx(MOVEFILE_WRITE_THROUGH)`，不允许覆盖既有目标或 copy fallback，提升后重新核对 DACL、目录类型、Reparse 状态与完整身份。任何既有目标、junction 或异常均保留现场失败。调用方仍必须持有 Stable Target 的 ParentGuard 与 External Lock；原语尚未接入 Restore 状态机。
+- 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下 Windows amd64 winsecurity 编译与 `go vet`、Windows arm64 编译检查通过；同一固定工具链生成的 Windows amd64 测试二进制在宿主原生执行，覆盖 target→rollback、staging→target、目标已存在拒绝和 source junction 拒绝且外部 marker 不变。独立 `CHILD_AGENT` 修复后复审通过，P0/P1/P2=`0/0/0`；复审发现的“仅校验 DACL 会接受 junction”P1 已改为统一 no-follow 类型校验并复验。
+- 耐久性边界：`MOVEFILE_WRITE_THROUGH` 仅作为目录移动的运行时 Write Through 语义使用；本地单测不能证明物理断电后的目录/删除持久化，因此不把它记为 Journal 清理、自动收敛或完整 Restore 的通过证据。安全递归删除、Journal 后续阶段、崩溃矩阵和生产 Restore 接线仍待实现。
+- 状态与 Gate：M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · M8-03 Windows Restore Journal 受保护发布 · IN_PROGRESS
+
+- 产物与边界：Windows Restore Journal 现有专用写入入口只接受能够与当前 Stable Target 路径、Manifest 摘要和 phase 相互验证的记录；它复用受管文件发布原语，在受保护 Parent 中创建不可预测同目录候选、写入并 Flush、以 `MoveFileEx(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` 提升，并以完整 128-bit `FILE_ID_INFO` 确认最终对象仍为该候选。已有最终文件必须先经 no-follow Handle、精确 Protected DACL 和稳定文件身份验证；不受保护或 Reparse 对象不会被接管。候选失败清理与 Gateway Rotation Journal 清理均仅在已持有或完整身份复验的 no-follow Handle 上标记删除，禁止验证后路径式删除。
+- 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下 Windows amd64 的 winsecurity、gateway、durableops 编译与 `go vet` 通过，Windows arm64 durableops 编译检查通过；同一固定工具链生成的 Windows amd64 测试二进制在宿主原生执行，三包均 PASS。覆盖受保护 Journal phase 替换、无效 Journal 保留旧值、既有不受保护最终对象拒绝且身份不变、候选路径替换拒绝删除、Gateway Rotation Journal 清理以及既有 Restore fail-closed 分支。独立 `CHILD_AGENT` 最终复审通过，P0/P1/P2=`0/0/0`；`git diff --check` 退出码为 0（仅报告既有 CRLF 工作区告警）。
+- 耐久性边界：Windows 原生单测不能证明突然断电时 `MOVEFILE_WRITE_THROUGH` 或删除目录项在实际存储介质上的持久化效果，也未实现完整 `prepared → rollback_ready → installed` 的目录切换与崩溃收敛；这些仍是 M8-03 后续工作，不把本增量记作完整 Restore 通过。
+- 状态与 Gate：M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · M8-03 Windows prepared Journal 尾项收敛 · IN_PROGRESS
+
+- 产物与边界：Windows 现在只开启一个无目录移动的可证明恢复尾项：受保护 Journal 的 phase 为 `prepared`，正式 target 存在且 staging/rollback 均不存在时，恢复在同一 no-follow、带 `DELETE` 权限的文件 Handle 内完成 DACL 校验、内容读取、Journal/目录组合验证并标记删除。该 Handle 在解析和删除之间持续持有，因此不接受同名替换对象。旧 target 从未被移动；Journal 缺失时维持正常启动，任何格式、DACL、对象类型、取消或目录组合异常均保留现场 fail-closed。
+- 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下 Windows amd64 的 durableops/winsecurity 编译与 `go vet` 通过，Windows arm64 durableops 编译检查通过；同一固定工具链生成的 Windows amd64 原生测试二进制在宿主执行，winsecurity 与 durableops 全包均 PASS。覆盖 prepared 尾项 Journal 删除且 target marker 保持、staging 残留拒绝且 Journal 不变、不受保护 Journal 拒绝且 target 不变、无 Journal 正常启动和既有 fail-closed 分支。独立 `CHILD_AGENT` 复审通过，P0/P1/P2=`0/0/0`。
+- 恢复边界：`rollback_ready`/`installed` 的 rollback 恢复组合仍未开启。现有 V1 phase 在“rollback 已改名回 target、Journal 尚未删除”的崩溃窗口缺少可持久判定的状态，直接实现会造成恢复死锁；安全递归删除、完整目录切换、V1/V2 Journal 方案裁定和断电持久化证明仍为 M8-03 后续工作。
+- 状态与 Gate：M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · M8-03 Windows Restore 受保护目录树只读预检 · IN_PROGRESS
+
+- 产物与边界：Windows 新增 `ValidateForegroundDirectoryTree`，仅为后续 staging/rollback 清理提供删除前的只读输入。它在受保护 ParentGuard 持有期间，以 no-follow、无 `FILE_SHARE_DELETE` 的目录 Handle 枚举每一层，并对目录和常规文件逐项复核精确 Protected DACL、对象类型、Reparse/Device 禁止、完整 `FILE_ID_INFO` 与父目录卷一致性；取消、异常目录项或任一身份/权限不符均 fail-closed。此预检不执行任何删除，亦不授权调用方在检查之后使用路径式删除。
+- 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下完成修改文件 `gofmt`、Windows amd64 winsecurity 测试二进制编译及 `go vet`，Windows arm64 winsecurity 测试二进制编译检查通过；同一固定工具链生成的 Windows amd64 原生测试二进制在宿主执行，winsecurity 全包 PASS。新增用例覆盖受管嵌套目录树正向且 marker 保持、嵌套 junction 拒绝且外部 marker 保持，以及取消 Context 拒绝且 marker 保持。独立 `CHILD_AGENT` 最终复审通过，P0/P1/P2=`0/0/0`；`git diff --check` 退出码为 0（仅报告既有 CRLF 工作区告警）。
+- 恢复边界：安全递归删除仍未实现；实际删除必须在删除期间重新以同一 Handle/身份约束验证，不能以本预检替代 TOCTOU 防护。`rollback_ready`/`installed` 的 V1 Journal 状态歧义、完整目录切换、V1/V2 Journal 方案裁定与断电持久化证明仍为 M8-03 后续工作。
+- 状态与 Gate：M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · M8-03 Restore Journal V2 回滚意图 · IN_PROGRESS
+
+- 契约与产物：经用户明确授权，Restore Journal 从“新写入 V1”演进为“新写入 V2”。V2 增加 `rollback_restoring` phase，任何 `rollback → target` 目录改名前都必须先将该 phase 耐久发布；因此改名后只剩 target 与 Journal 的尾项可唯一解释为旧 target 已恢复。Linux 新 Restore 写 V2；旧 V1 的可判定回滚组合在 `rollback → target` 前升级为 V2。V1 `rollback_ready`/`installed` 的 target-only 歧义组合保留现场 fail-closed，不根据 Manifest 猜测前进或清理。Windows 仍只安全开启 prepared 的 target-only Journal 清理，未因 V2 提前启用目录切换、递归删除或完整 Restore。
+- 验证与复审：已完成受影响 Go 文件 `gofmt` 与 `git diff --check`（退出码为 0，仅有既有 CRLF 工作区告警）。Docker Desktop Linux Engine 恢复后，固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下 Linux `go test -count=1 -timeout 60s ./internal/server/durableops` 和 `go vet ./internal/server/durableops` 通过；Windows amd64 编译/vet、Windows arm64 测试二进制编译检查通过，同一固定工具链生成的 Windows amd64 durableops 原生测试二进制在宿主执行 PASS。随后 `./scripts/verify.ps1` 以退出码 0 完成 Web Check/Build 及全仓 Go Test/Vet。独立 `CHILD_AGENT` 对 V2 契约、解析、Linux 状态机/崩溃组合、V1 兼容、测试证明力和 Windows 未开启边界完成最终复审，P0/P1/P2=`0/0/0`、Coverage=`COMPLETE`、Freshness=`FRESH`。宿主 `go1.27.1` 未作为替代证据。
+- 恢复边界：V2 只消除 Journal 阶段语义歧义；Windows 受保护树删除仍必须以删除时同一 no-follow Handle 重新验证对象身份，不能以既有只读预检替代 TOCTOU 防护。Windows staging 提取、目录切换、Manifest 状态重验、完整崩溃矩阵和物理断电持久化证明仍为 M8-03 后续工作。
+- 状态与 Gate：M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · M8-03 Windows 受保护目录树删除原语 · IN_PROGRESS
+
+- 契约与产物：Windows 新增 `RemoveForegroundDirectoryTree`，仅接受已验证 Protected DACL parent 下的 strict direct-leaf 目录。它在同一 no-follow、禁止共享删除的 parent Handle 持有期间先收集完整后序计划，计划阶段不删除对象；删除时每个计划节点均以 no-follow `DELETE` Handle 重开，并复核精确 DACL、目录/普通文件类型、非 Reparse/Device、同卷与完整 128-bit `FILE_ID_INFO`，随后才在同一 Handle 上标记删除。路径替换、权限/类型漂移、取消或异常均停止，绝不按路径式补偿。该原语尚未接入 Windows Restore 状态机。
+- 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下完成受影响 Go 文件 `gofmt`、Windows amd64 `go vet` 与测试二进制编译、Windows arm64 测试二进制编译检查；同一固定工具链生成的 Windows amd64 测试二进制在宿主原生执行 PASS。随后 `./scripts/verify.ps1` 退出码为 0，完成 Web Check/Build 与全仓 Go Test/Vet。新增用例覆盖受管嵌套树后序删除且同级文件保留、嵌套 junction 与未受保护子项在预检失败后全量保留、计划后替换为另一受保护对象的完整身份拒绝，以及删除中取消后停止于后续节点。独立 `CHILD_AGENT` 最终复审 P0/P1/P2=`0/0/0`；`git diff --check` 退出码为 0（仅报告既有 CRLF 工作区告警）。
+- 恢复边界：删除阶段报错或取消时，先前已标记的受管节点可能已删除；未来 Restore 只能在已持久化的可重试清理状态、ParentGuard 与恢复串行边界内接入，不能把错误解释为原树未变。本原语不证明突然断电后的目录项持久化，亦未开启 Windows staging 提取、目录切换、Manifest 状态重验或完整崩溃收敛。
+- 状态与 Gate：M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · M8-03 Windows V2 回滚完成尾项 · IN_PROGRESS
+
+- 契约与产物：Windows `RecoverPendingRestore` 现在仅开启 V2 `rollback_restoring + target 存在 + staging/rollback 不存在` 的 Journal-only 尾项。该 V2 phase 已在 `rollback → target` 改名前持久化，所以此唯一组合可确定为旧 target 已恢复、仅遗留受保护 Journal；恢复通过验证内容后的同一 no-follow `DELETE` Handle 清理 Journal，旧 target 不移动、不重验 Manifest，也不删除任何目录。`rollback_ready`、`installed`、V1 `rollback_restoring` 及所有其他目录组合继续保留现场 fail-closed。
+- 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下完成受影响 Go 文件 `gofmt`、Windows amd64 durableops/winsecurity `go vet` 与 durableops 测试二进制编译、Windows arm64 durableops 测试二进制编译检查；同一固定工具链生成的 Windows amd64 durableops 测试二进制在宿主原生执行 PASS。随后 `./scripts/verify.ps1` 退出码为 0，完成 Web Check/Build 与全仓 Go Test/Vet。新增回归覆盖 V2 target-only Journal 清理且旧 target marker 保留，staging/rollback 残留或 target 缺失的拒绝，V1/取消保留 Journal，以及 target-only `rollback_ready`/`installed` 仍拒绝且 marker/Journal 不变。独立 `CHILD_AGENT` 最终复审 P0/P1/P2=`0/0/0`、Coverage=`COMPLETE`、Freshness=`FRESH`。
+- 恢复边界：本增量不接入目录提升、安全树删除、staging 提取或 Windows `Restore`，不将 `rollback_ready`/`installed` 解释为可清理状态，也不证明突然断电后的目录项持久化。M8-03 后续恢复分支仍须在 ParentGuard 与 External Lock 的持有范围内逐项获得状态机、对象身份和崩溃矩阵证据。
+- 状态与 Gate：M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · M8-03 Windows 受保护目录运行时同步原语 · IN_PROGRESS
+
+- 契约与产物：Windows 新增 `SyncForegroundDirectory`。它只接受绝对受保护目录，并在同一 no-follow、带 `GENERIC_WRITE` 且拒绝共享写/删除的 Handle 上复核精确 DACL、目录类型和非 Reparse 后调用 `FlushFileBuffers`。任何打开、验证、flush 或关闭错误都会返回，不能降级为无屏障清理；相对路径、普通文件、junction 和未受保护目录均拒绝。该成功结果仅表示当前 Windows/文件系统已成功响应本次运行时 flush 请求，不宣称任意介质、文件系统或突然断电下的物理持久化。
+- 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下完成受影响 Go 文件 `gofmt`、Windows amd64 winsecurity `go vet` 与测试二进制编译、Windows arm64 测试二进制编译检查；同一固定工具链生成的 Windows amd64 winsecurity 测试二进制在宿主原生执行 PASS。新增回归覆盖受保护目录 flush 成功、未受保护目录、相对路径、普通文件和 junction 拒绝。随后 `./scripts/verify.ps1` 在固定 Docker Runner 中 exit 0（Web check/build 与 Linux 全量 `go test ./...`）。独立 `CHILD_AGENT` 最终复审 P0/P1/P2=`0/0/0`、Coverage=`COMPLETE`、Freshness=`FRESH`。
+- 恢复边界：本原语尚未接入 `prepared` staging 清理链，也未把树删除、目录同步、Journal 删除或 ParentGuard 编排合并为一个完整恢复事务。后续接线必须保持“删除 staging → 运行时同步成功 → 同一受控恢复边界内消费 Journal”的顺序，任何失败保留 Journal；物理断电持久化证明仍未取得。
+- 状态与 Gate：M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · M8-03 Windows prepared staging 安全收敛 · IN_PROGRESS
+
+- 契约与产物：Windows `RecoverPendingRestore` 现在仅额外开启 `prepared + target + staging + no rollback`。在已验证、同一 no-follow `DELETE` Journal Handle 持有期间，它使用完整身份复验的受保护树原语删除 staging，随后同步 parent；Journal 标记删除并关闭后，仍在已验证 parent Handle 持有期间再次同步。`prepared` target-only 与 V2 `rollback_restoring` target-only 同样先后同步 parent 再消费 Journal。前置删除、同步、身份/DACL/Reparse 校验或取消失败均保留 Journal；第二次同步失败返回不确定清理错误，Journal 可能已删除，不能报告恢复成功。
+- 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下完成受影响 Go 文件 `gofmt`、Windows amd64 durableops/winsecurity `go vet`、amd64 测试二进制编译及 arm64 两包编译检查；同一固定工具链生成的 Windows amd64 durableops 与 winsecurity 全包测试二进制在宿主原生执行 PASS。新增回归覆盖嵌套受保护 staging 清理与重复启动、junction/未受保护子对象/未受保护 Journal/取消/rollback 残留均保留现场，以及 Journal 删除 Handle 关闭后才执行后置动作、后置动作失败的未确定清理传播。随后 `./scripts/verify.ps1` 在固定 Docker Runner 中 exit 0（Web check/build 与 Linux 全量 `go test ./...`）。
+- 恢复边界：未开启 `rollback_ready`、`installed`、V1 `rollback_restoring` 或任何其他目录组合；未接入 Windows Restore staging 提取、目录提升、Manifest 状态重验或完整崩溃矩阵。`FlushFileBuffers` 成功仍仅是当前运行时请求成功，不是物理断电持久化证明。
+- 状态与 Gate：M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。

@@ -68,9 +68,8 @@ func TestLoadOrCreateRejectsCorruptExistingKey(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := absoluteTempDir(t)
-			directory := filepath.Join(dataDir, credentialDirectoryName)
-			if err := os.Mkdir(directory, 0o700); err != nil {
-				t.Fatalf("os.Mkdir(credentials) error = %v", err)
+			if _, err := loadOrCreate(dataDir, false, bytes.NewReader(make([]byte, Size))); err != nil {
+				t.Fatalf("loadOrCreate(initial) error = %v", err)
 			}
 			if err := os.WriteFile(keyPath(dataDir), test.content, 0o600); err != nil {
 				t.Fatalf("os.WriteFile(key) error = %v", err)
@@ -125,10 +124,11 @@ func TestLoadOrCreatePropagatesRandomFailureWithoutPublishingKey(t *testing.T) {
 
 func absoluteTempDir(t *testing.T) string {
 	t.Helper()
-	path, err := filepath.Abs(t.TempDir())
+	path, err := filepath.Abs(filepath.Join(t.TempDir(), "managed-data"))
 	if err != nil {
 		t.Fatalf("filepath.Abs() error = %v", err)
 	}
+	prepareTestDataDir(t, path)
 	return path
 }
 

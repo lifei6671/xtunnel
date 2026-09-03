@@ -28,12 +28,12 @@ func TestServerExampleCoversSchemaAndLoads(t *testing.T) {
 func TestWindowsServerExampleCoversSchemaAndLoads(t *testing.T) {
 	data, example := loadServerExample(t, "server.windows.example.yaml")
 	serverSection := serverExampleSection(t, example)
-	const dataDir = `C:\ProgramData\XTunnel\Server\data`
+	const dataDir = "auto"
 	if serverSection["data_dir"] != dataDir {
 		t.Fatalf("Windows Server example server.data_dir = %v, want %q", serverSection["data_dir"], dataDir)
 	}
 	for _, requiredText := range []string{
-		"data_dir: 'C:\\ProgramData\\XTunnel\\Server\\data'",
+		"data_dir: auto",
 		"# cert_file: 'C:\\ProgramData\\XTunnel\\Server\\tls\\tunnel.crt'",
 		"# key_file: 'C:\\ProgramData\\XTunnel\\Server\\tls\\tunnel.key'",
 		"不会被程序自动发现",

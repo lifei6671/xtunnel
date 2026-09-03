@@ -184,6 +184,68 @@ func TestServerCLIServiceRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestServerCLIInit(t *testing.T) {
+	configPath := writeConfig(t, "management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: gateway.example.test\n")
+	var initialized baseconfig.Options
+	called := false
+	args := []string{"init", "--config", configPath, "--set", "logging.level=debug"}
+	var output bytes.Buffer
+	command := newServerCommandWithServicesAndInitializer(
+		"xtunnel-server", args, nil, &output,
+		func(context.Context, baseconfig.Options, io.Writer) error {
+			t.Fatal("server init invoked the Server runner")
+			return nil
+		},
+		&fakeServerServiceOperations{},
+		func(_ context.Context, options baseconfig.Options) error {
+			called = true
+			initialized = options
+			return nil
+		},
+	)
+	if err := command.Run(context.Background(), append([]string{"xtunnel-server"}, args...)); err != nil {
+		t.Fatalf("command.Run() error = %v", err)
+	}
+	if !called || string(initialized.YAML) == "" || initialized.CLI["logging.level"] != "debug" {
+		t.Fatalf("initializer options = %#v, called = %t", initialized, called)
+	}
+	if !strings.Contains(output.String(), "initialized Server data and runtime directories") {
+		t.Fatalf("output = %q", output.String())
+	}
+}
+
+func TestServerCLIInitRejectsInvalidInput(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		args  []string
+		match string
+	}{
+		{name: "missing config", args: []string{"init"}, match: "requires --config"},
+		{name: "positional", args: []string{"init", "extra"}, match: "does not accept positional"},
+		{name: "invalid set", args: []string{"init", "--config", filepath.Join(t.TempDir(), "server.yaml"), "--set", "logging.level"}, match: "expected path=value"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			command := newServerCommandWithServicesAndInitializer(
+				"xtunnel-server", test.args, nil, &bytes.Buffer{},
+				func(context.Context, baseconfig.Options, io.Writer) error { return nil },
+				&fakeServerServiceOperations{},
+				func(context.Context, baseconfig.Options) error {
+					called = true
+					return nil
+				},
+			)
+			err := command.Run(context.Background(), append([]string{"xtunnel-server"}, test.args...))
+			if err == nil || !strings.Contains(err.Error(), test.match) {
+				t.Fatalf("command.Run() error = %v, want substring %q", err, test.match)
+			}
+			if called {
+				t.Fatal("invalid server init invoked initializer")
+			}
+		})
+	}
+}
+
 func TestParseConfigOptionsRejectsInvalidCommandLine(t *testing.T) {
 	tests := []struct {
 		name  string

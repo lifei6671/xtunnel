@@ -293,7 +293,7 @@ func TestServerRecoversProtocolHandlerPanicAndStops(t *testing.T) {
 
 func TestServerRecoversRenewalLoopPanicAndStops(t *testing.T) {
 	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
-	identity, err := LoadOrCreatePinnedIdentity(t.TempDir(), "gateway.example.test", true, createdAt)
+	identity, err := LoadOrCreatePinnedIdentity(newGatewayTestDataDir(t), "gateway.example.test", true, createdAt)
 	if err != nil {
 		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
 	}
@@ -332,7 +332,7 @@ func TestServerRecoversRenewalLoopPanicAndStops(t *testing.T) {
 }
 
 func TestServerRenewsRunningPinnedIdentityAndHotLoadsNewHandshakes(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := newGatewayTestDataDir(t)
 	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
 	identity, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
 	if err != nil {
@@ -413,7 +413,7 @@ func TestServerPinnedRenewalPublishesCompleteIdentityToConcurrentHandshakes(t *t
 		readerCount = 32
 		readRounds  = 4
 	)
-	dataDir := t.TempDir()
+	dataDir := newGatewayTestDataDir(t)
 	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
 	identity, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
 	if err != nil {
@@ -777,7 +777,7 @@ func TestServerMetricsSnapshotReadsPublicIdentityExpiry(t *testing.T) {
 }
 
 func TestServerPinnedRenewalWaitsForMaintenanceBarrier(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := newGatewayTestDataDir(t)
 	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
 	identity, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
 	if err != nil {
@@ -829,7 +829,7 @@ func TestServerPinnedRenewalWaitsForMaintenanceBarrier(t *testing.T) {
 }
 
 func TestServerRenewalLoopStopsWithClose(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := newGatewayTestDataDir(t)
 	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
 	identity, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
 	if err != nil {
@@ -858,7 +858,7 @@ func TestServerRenewalLoopStopsWithClose(t *testing.T) {
 }
 
 func TestServerCloseCancelsRenewalWaitingForMaintenanceBarrier(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := newGatewayTestDataDir(t)
 	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
 	identity, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
 	if err != nil {
@@ -902,7 +902,7 @@ func TestServerCloseCancelsRenewalWaitingForMaintenanceBarrier(t *testing.T) {
 }
 
 func TestServerRenewalFailureRetainsOldIdentityAndExposesError(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := newGatewayTestDataDir(t)
 	createdAt := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
 	identity, err := LoadOrCreatePinnedIdentity(dataDir, "gateway.example.test", true, createdAt)
 	if err != nil {
@@ -964,7 +964,7 @@ func waitForGatewayCondition(t *testing.T, condition func() bool) {
 
 func testIdentity(t *testing.T) Identity {
 	t.Helper()
-	identity, err := LoadOrCreatePinnedIdentity(t.TempDir(), "gateway.example.test", true, time.Now())
+	identity, err := LoadOrCreatePinnedIdentity(newGatewayTestDataDir(t), "gateway.example.test", true, time.Now())
 	if err != nil {
 		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
 	}
@@ -977,17 +977,10 @@ func testPublicIdentity(t *testing.T, issuedAt time.Time) Identity {
 	if err != nil {
 		t.Fatalf("newSelfSignedCertificate() error = %v", err)
 	}
-	directory := t.TempDir()
-	keyPath := filepath.Join(directory, "public.key")
-	certPath := filepath.Join(directory, "public.crt")
-	if err := writeKeyPair(keyPath, certPath, certificate); err != nil {
-		t.Fatalf("writeKeyPair() error = %v", err)
-	}
-	identity, err := LoadPublicIdentity(certPath, keyPath)
-	if err != nil {
-		t.Fatalf("LoadPublicIdentity() error = %v", err)
-	}
-	return identity
+	// Gateway listener tests exercise an already validated identity. They must
+	// not manufacture operator-owned Windows files with an ordinary t.TempDir
+	// DACL; LoadPublicIdentity itself has platform-specific boundary tests.
+	return Identity{Certificate: certificate}
 }
 
 func validateCompleteTLSIdentity(certificate *tls.Certificate) error {

@@ -316,6 +316,9 @@ func TestRestoreDirectorySwitchSIGKILLRecovers(t *testing.T) {
 			if journal.Phase != test.wantJournalPhase {
 				t.Fatalf("Restore SIGKILL journal phase = %q, want %q", journal.Phase, test.wantJournalPhase)
 			}
+			if journal.Version != restoreJournalVersionV2 {
+				t.Fatalf("Restore SIGKILL journal version = %d, want %d", journal.Version, restoreJournalVersionV2)
+			}
 
 			recovered, err := RecoverPendingRestore(context.Background(), target)
 			if err != nil {
@@ -390,12 +393,14 @@ func runRestoreSwitchSIGKILLHelper(t *testing.T) {
 }
 
 func TestRecoverPendingRestoreConvergesInterruptedRenameStates(t *testing.T) {
+	rollbackTargetAdmin := false
 	tests := []struct {
 		name           string
 		phase          restorePhase
 		targetExists   bool
 		stagingExists  bool
 		rollbackExists bool
+		targetAdmin    *bool
 		wantAdmin      bool
 	}{
 		{name: "prepared before first rename rolls back staging", phase: phasePrepared, targetExists: true, stagingExists: true, wantAdmin: true},
@@ -404,7 +409,8 @@ func TestRecoverPendingRestoreConvergesInterruptedRenameStates(t *testing.T) {
 		{name: "rollback ready before second rename restores rollback", phase: phaseRollbackReady, stagingExists: true, rollbackExists: true, wantAdmin: true},
 		{name: "rollback ready after second rename finishes install", phase: phaseRollbackReady, targetExists: true, rollbackExists: true},
 		{name: "rollback ready after invalid target removal restores rollback", phase: phaseRollbackReady, rollbackExists: true, wantAdmin: true},
-		{name: "rollback ready after rollback cleanup removes journal", phase: phaseRollbackReady, targetExists: true},
+		{name: "rollback restoring before invalid target removal restores rollback", phase: phaseRollbackRestoring, targetExists: true, rollbackExists: true, targetAdmin: &rollbackTargetAdmin, wantAdmin: true},
+		{name: "rollback restoring after cleanup removes journal", phase: phaseRollbackRestoring, targetExists: true, wantAdmin: true},
 		{name: "installed cleans rollback", phase: phaseInstalled, targetExists: true, rollbackExists: true},
 		{name: "installed after invalid target removal restores rollback", phase: phaseInstalled, rollbackExists: true, wantAdmin: true},
 		{name: "installed after rollback cleanup removes journal", phase: phaseInstalled, targetExists: true},
@@ -422,7 +428,11 @@ func TestRecoverPendingRestoreConvergesInterruptedRenameStates(t *testing.T) {
 			}
 			var manifest Manifest
 			if test.targetExists {
-				manifest = writeValidStateDirectory(t, paths.target, test.wantAdmin)
+				targetAdmin := test.wantAdmin
+				if test.targetAdmin != nil {
+					targetAdmin = *test.targetAdmin
+				}
+				manifest = writeValidStateDirectory(t, paths.target, targetAdmin)
 			}
 			if test.stagingExists {
 				manifest = writeValidStateDirectory(t, paths.staging, false)
@@ -441,7 +451,7 @@ func TestRecoverPendingRestoreConvergesInterruptedRenameStates(t *testing.T) {
 			}
 			manifestDigest := sha256.Sum256(manifestData)
 			journal := restoreJournal{
-				Version: 1, ManifestSHA256: hex.EncodeToString(manifestDigest[:]), Manifest: manifest, StableTarget: paths.target,
+				Version: restoreJournalVersion, ManifestSHA256: hex.EncodeToString(manifestDigest[:]), Manifest: manifest, StableTarget: paths.target,
 				Staging: paths.staging, Rollback: paths.rollback, Phase: test.phase,
 			}
 			if err := writeJournal(paths, journal, os.Getuid(), os.Getgid()); err != nil {
@@ -461,6 +471,58 @@ func TestRecoverPendingRestoreConvergesInterruptedRenameStates(t *testing.T) {
 					t.Fatalf("recovery artifact %q remained: %v", path, err)
 				}
 			}
+		})
+	}
+}
+
+func TestRecoverPendingRestoreRejectsUnprovableTargetOnlyJournal(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		version int
+		phase   restorePhase
+	}{
+		{name: "version 1 rollback ready", version: restoreJournalVersionV1, phase: phaseRollbackReady},
+		{name: "version 1 installed", version: restoreJournalVersionV1, phase: phaseInstalled},
+		{name: "version 2 rollback ready", version: restoreJournalVersionV2, phase: phaseRollbackReady},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := newRestoreTarget(t)
+			paths, err := pathsForTarget(target)
+			if err != nil {
+				t.Fatalf("pathsForTarget() error = %v", err)
+			}
+			if err := os.Remove(paths.target); err != nil {
+				t.Fatalf("os.Remove(empty target) error = %v", err)
+			}
+			manifest := writeValidStateDirectory(t, paths.target, false)
+			manifestData, err := json.Marshal(manifest)
+			if err != nil {
+				t.Fatalf("json.Marshal(manifest) error = %v", err)
+			}
+			digest := sha256.Sum256(manifestData)
+			journal := restoreJournal{
+				Version: test.version, ManifestSHA256: hex.EncodeToString(digest[:]), Manifest: manifest,
+				StableTarget: paths.target, Staging: paths.staging, Rollback: paths.rollback, Phase: test.phase,
+			}
+			if err := writeJournal(paths, journal, os.Getuid(), os.Getgid()); err != nil {
+				t.Fatalf("writeJournal() error = %v", err)
+			}
+			before, err := os.ReadFile(paths.journal)
+			if err != nil {
+				t.Fatalf("ReadFile(Journal before recovery) error = %v", err)
+			}
+
+			if recovered, err := RecoverPendingRestore(context.Background(), target); err == nil || recovered {
+				t.Fatalf("RecoverPendingRestore() = (%t, %v), want target-only rejection", recovered, err)
+			}
+			after, err := os.ReadFile(paths.journal)
+			if err != nil {
+				t.Fatalf("ReadFile(Journal after recovery) error = %v", err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("target-only Journal changed after rejected recovery")
+			}
+			assertStateHasAdmin(t, paths.target, false)
 		})
 	}
 }
@@ -525,7 +587,7 @@ func TestWriteJournalFilesystemFailpointsPreserveRecoverablePhase(t *testing.T) 
 			}
 			digest := sha256.Sum256(manifestData)
 			journal := restoreJournal{
-				Version: 1, ManifestSHA256: hex.EncodeToString(digest[:]), Manifest: manifest,
+				Version: restoreJournalVersion, ManifestSHA256: hex.EncodeToString(digest[:]), Manifest: manifest,
 				StableTarget: paths.target, Staging: paths.staging, Rollback: paths.rollback,
 				Phase: phaseRollbackReady,
 			}
@@ -984,7 +1046,7 @@ func writeRestoreJournalForTest(t *testing.T, paths restorePaths, manifest Manif
 	}
 	digest := sha256.Sum256(manifestData)
 	journal := restoreJournal{
-		Version: 1, ManifestSHA256: hex.EncodeToString(digest[:]), Manifest: manifest,
+		Version: restoreJournalVersion, ManifestSHA256: hex.EncodeToString(digest[:]), Manifest: manifest,
 		StableTarget: paths.target, Staging: paths.staging, Rollback: paths.rollback, Phase: phase,
 	}
 	if err := writeJournal(paths, journal, os.Getuid(), os.Getgid()); err != nil {

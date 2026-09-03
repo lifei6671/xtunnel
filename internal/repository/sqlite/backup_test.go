@@ -205,6 +205,9 @@ func TestReadViewsRejectWritesOutsideWriteGate(t *testing.T) {
 }
 
 func TestBackupSQLiteIncludesUncheckpointedWALAndCreatesPrivateFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows SQLite backup remains unavailable pending M8-04")
+	}
 	dataDir := t.TempDir()
 	store, err := Open(context.Background(), dataDir)
 	if err != nil {
@@ -276,6 +279,9 @@ func TestBackupSQLiteIncludesUncheckpointedWALAndCreatesPrivateFile(t *testing.T
 }
 
 func TestBackupSQLiteCancellationCleansDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows SQLite backup remains unavailable pending M8-04")
+	}
 	store, err := Open(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -328,6 +334,9 @@ func TestBackupSQLiteRefusesExistingDestination(t *testing.T) {
 }
 
 func TestOfflineBackupSQLiteUsesReadOnlySource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows SQLite backup remains unavailable pending M8-04")
+	}
 	dataDir := t.TempDir()
 	store, err := Open(context.Background(), dataDir)
 	if err != nil {

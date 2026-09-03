@@ -17,12 +17,21 @@ import (
 // phase 只描述最后一次已 fsync 的承诺；恢复时还必须与三个目录的真实状态交叉判断。
 type restorePhase string
 
+const (
+	restoreJournalVersionV1 = 1
+	restoreJournalVersionV2 = 2
+	restoreJournalVersion   = restoreJournalVersionV2
+)
+
 // restorePhase 的合法值按目录发布顺序单向推进。
 const (
 	// phasePrepared 表示 staging 已完整验证且 Journal 已落盘，旧 target 尚未承诺移走。
 	phasePrepared restorePhase = "prepared"
 	// phaseRollbackReady 表示旧 target 已作为 rollback 持久化，可开始发布 staging。
 	phaseRollbackReady restorePhase = "rollback_ready"
+	// phaseRollbackRestoring 表示回滚意图已先于 rollback -> target 改名持久化。
+	// V2 以它区分“旧 target 已恢复但 Journal 尚未清理”的 target-only 尾项。
+	phaseRollbackRestoring restorePhase = "rollback_restoring"
 	// phaseInstalled 表示新 target 已验证，剩余工作仅是删除 rollback 和 Journal。
 	phaseInstalled restorePhase = "installed"
 )
@@ -92,7 +101,8 @@ func parseJournal(data []byte, paths restorePaths) (restoreJournal, error) {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return restoreJournal{}, fmt.Errorf("parse restore journal: %w", err)
 	}
-	if journal.Version != 1 || journal.StableTarget != paths.target || journal.Staging != paths.staging || journal.Rollback != paths.rollback {
+	if (journal.Version != restoreJournalVersionV1 && journal.Version != restoreJournalVersionV2) ||
+		journal.StableTarget != paths.target || journal.Staging != paths.staging || journal.Rollback != paths.rollback {
 		return restoreJournal{}, errors.New("restore journal paths or version do not match the stable target")
 	}
 	if !validSHA256(journal.ManifestSHA256) {
@@ -109,8 +119,12 @@ func parseJournal(data []byte, paths restorePaths) (restoreJournal, error) {
 	if hex.EncodeToString(digest[:]) != journal.ManifestSHA256 {
 		return restoreJournal{}, errors.New("restore journal manifest does not match its SHA-256")
 	}
-	if journal.Phase != phasePrepared && journal.Phase != phaseRollbackReady && journal.Phase != phaseInstalled {
+	if journal.Phase != phasePrepared && journal.Phase != phaseRollbackReady &&
+		journal.Phase != phaseRollbackRestoring && journal.Phase != phaseInstalled {
 		return restoreJournal{}, fmt.Errorf("restore journal phase %q is invalid", journal.Phase)
+	}
+	if journal.Phase == phaseRollbackRestoring && journal.Version != restoreJournalVersionV2 {
+		return restoreJournal{}, errors.New("restore journal rollback_restoring phase requires version 2")
 	}
 	return journal, nil
 }

@@ -6,7 +6,16 @@ import (
 	"testing"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
+	"github.com/lifei6671/xtunnel/internal/server/pathprofile"
 )
+
+func testDataDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return pathprofile.AutomaticDataDir
+	}
+	return t.TempDir()
+}
 
 func TestLoadUsesStableParentDataLeafByDefault(t *testing.T) {
 	if runtime.GOOS != "linux" {
@@ -38,7 +47,7 @@ logging:
 `),
 		Environment: []string{"XTUNNEL_LOGGING__LEVEL=error"},
 		CLI: map[string]string{
-			"server.data_dir": t.TempDir(),
+			"server.data_dir": testDataDir(t),
 			"logging.level":   "debug",
 		},
 	})
@@ -71,7 +80,7 @@ func TestLoadMaxHTTPBodyBytesBounds(t *testing.T) {
 
 	result, err := Load(baseconfig.Options{
 		YAML: []byte(baseYAML + "limits:\n  max_http_body_bytes: 1099511627776\n"),
-		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+		CLI:  map[string]string{"server.data_dir": testDataDir(t)},
 	})
 	if err != nil {
 		t.Fatalf("Load() at maximum error = %v", err)
@@ -82,7 +91,7 @@ func TestLoadMaxHTTPBodyBytesBounds(t *testing.T) {
 
 	_, err = Load(baseconfig.Options{
 		YAML: []byte(baseYAML + "limits:\n  max_http_body_bytes: 1099511627777\n"),
-		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+		CLI:  map[string]string{"server.data_dir": testDataDir(t)},
 	})
 	if err == nil || !strings.Contains(err.Error(), "max_http_body_bytes") {
 		t.Fatalf("Load() above maximum error = %v, want max_http_body_bytes", err)
@@ -94,7 +103,7 @@ func TestLoadMaxServicesPerTunnelAbsoluteLimit(t *testing.T) {
 
 	result, err := Load(baseconfig.Options{
 		YAML: []byte(baseYAML + "limits:\n  max_services_per_tunnel: 1000\n"),
-		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+		CLI:  map[string]string{"server.data_dir": testDataDir(t)},
 	})
 	if err != nil {
 		t.Fatalf("Load() at absolute limit error = %v", err)
@@ -105,7 +114,7 @@ func TestLoadMaxServicesPerTunnelAbsoluteLimit(t *testing.T) {
 
 	_, err = Load(baseconfig.Options{
 		YAML: []byte(baseYAML + "limits:\n  max_services_per_tunnel: 1001\n"),
-		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+		CLI:  map[string]string{"server.data_dir": testDataDir(t)},
 	})
 	if err == nil || !strings.Contains(err.Error(), "max_services_per_tunnel") {
 		t.Fatalf("Load() above absolute limit error = %v, want max_services_per_tunnel", err)
@@ -124,7 +133,7 @@ agent_gateway:
 
 	_, err := Load(baseconfig.Options{
 		YAML: []byte(baseYAML),
-		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+		CLI:  map[string]string{"server.data_dir": testDataDir(t)},
 	})
 	if err == nil || !strings.Contains(err.Error(), "cert_file") {
 		t.Fatalf("Load() error = %v, want missing cert_file", err)
@@ -132,7 +141,7 @@ agent_gateway:
 
 	result, err := Load(baseconfig.Options{
 		YAML: []byte(baseYAML + "    cert_file: /run/xtunnel/server.crt\n    key_file: /run/xtunnel/server.key\n"),
-		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+		CLI:  map[string]string{"server.data_dir": testDataDir(t)},
 	})
 	if err != nil {
 		t.Fatalf("Load() public TLS error = %v", err)
@@ -175,7 +184,7 @@ func TestLoadRejectsCrossFieldViolations(t *testing.T) {
 			yaml := "management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: tunnel.example.com\n" + test.yaml
 			_, err := Load(baseconfig.Options{
 				YAML: []byte(yaml),
-				CLI:  map[string]string{"server.data_dir": t.TempDir()},
+				CLI:  map[string]string{"server.data_dir": testDataDir(t)},
 			})
 			if err == nil || !strings.Contains(err.Error(), test.match) {
 				t.Fatalf("Load() error = %v, want substring %q", err, test.match)
@@ -188,7 +197,7 @@ func TestLoadRejectsInvalidTrustedProxy(t *testing.T) {
 	_, err := Load(baseconfig.Options{
 		YAML: []byte("management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: tunnel.example.com\n"),
 		CLI: map[string]string{
-			"server.data_dir":            t.TempDir(),
+			"server.data_dir":            testDataDir(t),
 			"management.trusted_proxies": `["not-a-cidr"]`,
 		},
 	})
@@ -201,7 +210,7 @@ func TestLoadAcceptsDualStackAndIPv6ListenAddresses(t *testing.T) {
 	result, err := Load(baseconfig.Options{
 		YAML: []byte("management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: tunnel.example.com\n"),
 		CLI: map[string]string{
-			"server.data_dir":      t.TempDir(),
+			"server.data_dir":      testDataDir(t),
 			"management.listen":    ":8080",
 			"http_ingress.listen":  "[::]:8081",
 			"agent_gateway.listen": ":7443",
@@ -221,7 +230,7 @@ func TestLoadRejectsUnbracketedIPv6ListenAddress(t *testing.T) {
 	_, err := Load(baseconfig.Options{
 		YAML: []byte("management:\n  public_url: https://admin.example.com\nagent_gateway:\n  public_hostname: tunnel.example.com\n"),
 		CLI: map[string]string{
-			"server.data_dir":      t.TempDir(),
+			"server.data_dir":      testDataDir(t),
 			"agent_gateway.listen": ":::7443",
 		},
 	})

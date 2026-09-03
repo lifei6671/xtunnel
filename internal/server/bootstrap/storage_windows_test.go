@@ -11,7 +11,35 @@ import (
 
 	"github.com/lifei6671/xtunnel/internal/server/datadir"
 	"github.com/lifei6671/xtunnel/internal/server/externallock"
+	"github.com/lifei6671/xtunnel/internal/server/winsecurity"
 )
+
+func TestWindowsOpenServerStorageAllowsCleanManagedTarget(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "server")
+	directorySecurity, err := winsecurity.NewForegroundDirectorySecurity()
+	if err != nil {
+		t.Fatalf("NewForegroundDirectorySecurity() error = %v", err)
+	}
+	if err := winsecurity.CreateForegroundDirectory(parent, directorySecurity); err != nil {
+		t.Fatalf("CreateForegroundDirectory(parent) error = %v", err)
+	}
+	dataDir := filepath.Join(parent, "data")
+	if err := winsecurity.CreateForegroundDirectory(dataDir, directorySecurity); err != nil {
+		t.Fatalf("CreateForegroundDirectory(data) error = %v", err)
+	}
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
+		t.Fatalf("os.Mkdir(runtime) error = %v", err)
+	}
+
+	storage, err := openServerStorage(context.Background(), dataDir, runtimeDir)
+	if err != nil {
+		t.Fatalf("openServerStorage() error = %v", err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatalf("serverStorage.Close() error = %v", err)
+	}
+}
 
 func TestWindowsOpenServerStorageLocksBeforeDurableState(t *testing.T) {
 	parent := t.TempDir()

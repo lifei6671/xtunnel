@@ -22,13 +22,13 @@ import (
 	"github.com/lifei6671/xtunnel/internal/safego"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	servercontrolauth "github.com/lifei6671/xtunnel/internal/server/controlauth"
-	"github.com/lifei6671/xtunnel/internal/server/externallock"
 	"github.com/lifei6671/xtunnel/internal/server/gateway"
 	serverhttpingress "github.com/lifei6671/xtunnel/internal/server/httpingress"
 	serverlimits "github.com/lifei6671/xtunnel/internal/server/limits"
 	servermanagementapi "github.com/lifei6671/xtunnel/internal/server/managementapi"
 	servermetrics "github.com/lifei6671/xtunnel/internal/server/metrics"
 	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
+	"github.com/lifei6671/xtunnel/internal/server/pathprofile"
 	serverrecenterror "github.com/lifei6671/xtunnel/internal/server/recenterror"
 	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
@@ -73,7 +73,7 @@ func loadGatewayIdentity(config serverconfig.Config, resources *serverStorage) (
 	switch config.AgentGateway.TLS.Mode {
 	case gateway.PinnedMode:
 		identity, err = gateway.LoadOrCreatePinnedIdentity(
-			config.Server.DataDir,
+			resources.dataDir,
 			config.AgentGateway.PublicHostname,
 			!resources.databaseExisted,
 			time.Now(),
@@ -610,10 +610,11 @@ func openGatewayAndBootstrapAtTracing(
 	startedAt time.Time,
 	traceRuntime *tracing.Runtime,
 ) (io.Closer, error) {
-	runtimeDir, err := externallock.RuntimeDirectory()
+	profile, err := pathprofile.Resolve(config.Server.DataDir)
 	if err != nil {
 		return nil, err
 	}
+	runtimeDir := profile.RuntimeDir
 	lifecycle, err := openGatewayAndBootstrapWithStartedAtTracing(ctx, config, resources, logger, startedAt, runtimeDir, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
 		return openAdminBootstrapSocketAfter(ctx, runtimeDir, targetHash, store, afterCreate, reportRuntimeError)
 	}, traceRuntime)

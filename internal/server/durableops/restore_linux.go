@@ -135,7 +135,7 @@ func restorePlatformWithSwitchOps(
 	}
 
 	journal := restoreJournal{
-		Version: 1, ManifestSHA256: manifestHash, StableTarget: paths.target,
+		Version: restoreJournalVersion, ManifestSHA256: manifestHash, StableTarget: paths.target,
 		Manifest: manifest, Staging: paths.staging, Rollback: paths.rollback, Phase: phasePrepared,
 	}
 	if err := writeJournal(paths, journal, int(owner.Uid), int(owner.Gid)); err != nil {
@@ -162,7 +162,7 @@ func restorePlatformWithSwitchOps(
 		return restoreResult{}, fmt.Errorf("sync stable data parent after target install: %w", err)
 	}
 	if err := validateRestoredState(ctx, paths.target, manifest); err != nil {
-		rollbackErr := rollbackInstalledTarget(paths)
+		rollbackErr := rollbackInstalledTarget(paths, &journal)
 		return restoreResult{}, errors.Join(fmt.Errorf("validate installed restore target: %w", err), rollbackErr)
 	}
 	journal.Phase = phaseInstalled
@@ -248,43 +248,78 @@ func recoverPlatform(ctx context.Context, paths restorePaths) (bool, error) {
 		if !targetExists && stagingExists && rollbackExists {
 			// target -> rollback 可能已落盘，但 phase 更新未落盘。
 			// 优先回滚到旧 target，不将未标记可提交的 staging 猜测为新状态。
-			if err := os.Rename(paths.rollback, paths.target); err != nil {
-				return false, fmt.Errorf("roll back interrupted target rename: %w", err)
-			}
-			if err := syncDirectory(filepath.Dir(paths.target)); err != nil {
+			if err := restoreRollbackOnly(paths, &journal); err != nil {
 				return false, err
 			}
-			return true, rollbackPrepared(paths)
+			return true, finishRollbackRestoration(paths, true)
 		}
 	case phaseRollbackReady:
 		if !targetExists && stagingExists && rollbackExists {
 			// 两次 rename 之间尚未有新 target，固定优先恢复旧目录；
 			// 只有已观测到 target 的状态才可视为新数据已发布。
-			if err := os.Rename(paths.rollback, paths.target); err != nil {
-				return false, fmt.Errorf("roll back interrupted restore switch: %w", err)
-			}
-			if err := syncDirectory(filepath.Dir(paths.target)); err != nil {
+			if err := restoreRollbackOnly(paths, &journal); err != nil {
 				return false, err
 			}
-			return true, rollbackPrepared(paths)
+			return true, finishRollbackRestoration(paths, true)
 		}
 		if targetExists && !stagingExists && rollbackExists {
 			if err := validateRestoredState(ctx, paths.target, journal.Manifest); err != nil {
-				if rollbackErr := rollbackInstalledTarget(paths); rollbackErr != nil {
+				if rollbackErr := rollbackInstalledTarget(paths, &journal); rollbackErr != nil {
 					return false, errors.Join(fmt.Errorf("validate interrupted restore target: %w", err), rollbackErr)
 				}
 				return true, nil
 			}
+			journal.Version = restoreJournalVersion
+			journal.Phase = phaseInstalled
+			if err := writeJournal(paths, journal, os.Getuid(), os.Getgid()); err != nil {
+				return false, err
+			}
 			return true, finishInstalled(paths)
 		}
 		if !targetExists && !stagingExists && rollbackExists {
-			return true, restoreRollbackOnly(paths)
+			if err := restoreRollbackOnly(paths, &journal); err != nil {
+				return false, err
+			}
+			return true, finishRollbackRestoration(paths, false)
 		}
 		if targetExists && !stagingExists && !rollbackExists {
-			if err := validateRestoredState(ctx, paths.target, journal.Manifest); err != nil {
-				return false, fmt.Errorf("validate completed restore target: %w", err)
+			if journal.Version == restoreJournalVersionV1 {
+				return false, errors.New("legacy version 1 rollback_ready Journal has ambiguous target-only state")
 			}
-			return true, removeCompletedJournal(paths)
+			return false, errors.New("version 2 rollback_ready Journal cannot have a target-only state")
+		}
+	case phaseRollbackRestoring:
+		if targetExists && !stagingExists && rollbackExists {
+			// rollback_restoring 已在删除新 target 前持久化。此组合表示崩溃发生在
+			// 回滚承诺之后、删除之前；不得重新验证或前向提交该 target。
+			if err := removeDirectoryTree(paths.target); err != nil {
+				return false, fmt.Errorf("remove rollback-restoring target: %w", err)
+			}
+			if err := syncDirectory(filepath.Dir(paths.target)); err != nil {
+				return false, fmt.Errorf("sync restore parent after removing rollback-restoring target: %w", err)
+			}
+			if err := moveRollbackToTarget(paths); err != nil {
+				return false, err
+			}
+			return true, finishRollbackRestoration(paths, false)
+		}
+		if !targetExists && stagingExists && rollbackExists {
+			if err := restoreRollbackOnly(paths, &journal); err != nil {
+				return false, err
+			}
+			return true, finishRollbackRestoration(paths, true)
+		}
+		if !targetExists && !stagingExists && rollbackExists {
+			if err := restoreRollbackOnly(paths, &journal); err != nil {
+				return false, err
+			}
+			return true, finishRollbackRestoration(paths, false)
+		}
+		if targetExists && stagingExists && !rollbackExists {
+			return true, finishRollbackRestoration(paths, true)
+		}
+		if targetExists && !stagingExists && !rollbackExists {
+			return true, finishRollbackRestoration(paths, false)
 		}
 	case phaseInstalled:
 		if targetExists && !stagingExists && rollbackExists {
@@ -295,7 +330,7 @@ func recoverPlatform(ctx context.Context, paths restorePaths) (bool, error) {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return false, fmt.Errorf("validate installed restore target: %w", err)
 				}
-				if rollbackErr := rollbackInstalledTarget(paths); rollbackErr != nil {
+				if rollbackErr := rollbackInstalledTarget(paths, &journal); rollbackErr != nil {
 					return false, errors.Join(fmt.Errorf("validate installed restore target: %w", err), rollbackErr)
 				}
 				return true, nil
@@ -303,9 +338,15 @@ func recoverPlatform(ctx context.Context, paths restorePaths) (bool, error) {
 			return true, finishInstalled(paths)
 		}
 		if !targetExists && !stagingExists && rollbackExists {
-			return true, restoreRollbackOnly(paths)
+			if err := restoreRollbackOnly(paths, &journal); err != nil {
+				return false, err
+			}
+			return true, finishRollbackRestoration(paths, false)
 		}
 		if targetExists && !stagingExists && !rollbackExists {
+			if journal.Version == restoreJournalVersionV1 {
+				return false, errors.New("legacy version 1 installed Journal has ambiguous target-only state")
+			}
 			if err := validateRestoredState(ctx, paths.target, journal.Manifest); err != nil {
 				return false, fmt.Errorf("validate completed restore target: %w", err)
 			}
@@ -535,32 +576,73 @@ func finishInstalledWithSync(paths restorePaths, syncParent func(string) error) 
 	return syncParent(parent)
 }
 
-// rollbackInstalledTarget 删除未通过重验的新 target，并恢复旧 rollback。
-// 先 fsync “新 target 已消失”这一事实，再执行 rollback rename，避免两个名称的
-// 崩溃观察顺序含糊。
-func rollbackInstalledTarget(paths restorePaths) error {
+// rollbackInstalledTarget 先持久化 V2 回滚意图，再删除未通过重验的新 target 并恢复旧
+// rollback。这样在 rollback -> target 后、Journal 清理前崩溃时，target-only 状态仍可
+// 被 rollback_restoring 唯一解释为旧状态。
+func rollbackInstalledTarget(paths restorePaths, journal *restoreJournal) error {
+	if err := markRollbackRestoring(paths, journal); err != nil {
+		return err
+	}
 	if err := removeDirectoryTree(paths.target); err != nil {
 		return fmt.Errorf("remove invalid installed restore target: %w", err)
 	}
 	if err := syncDirectory(filepath.Dir(paths.target)); err != nil {
 		return fmt.Errorf("sync restore parent after removing invalid target: %w", err)
 	}
-	return restoreRollbackOnly(paths)
+	if err := moveRollbackToTarget(paths); err != nil {
+		return err
+	}
+	return finishRollbackRestoration(paths, false)
 }
 
-// restoreRollbackOnly 在 target 缺失时把唯一可信的 rollback 原子改名回来，
-// 持久化 rename 后才移除 Journal。
-func restoreRollbackOnly(paths restorePaths) error {
+// restoreRollbackOnly 在 target 缺失时，先把回滚意图持久化为 V2，再把唯一可信的
+// rollback 原子改名回来。Journal 留到 caller 处理 staging 后删除，确保崩溃时
+// target-only 组合仍由 rollback_restoring 解释为旧状态。
+func restoreRollbackOnly(paths restorePaths, journal *restoreJournal) error {
+	if err := markRollbackRestoring(paths, journal); err != nil {
+		return err
+	}
+	return moveRollbackToTarget(paths)
+}
+
+func markRollbackRestoring(paths restorePaths, journal *restoreJournal) error {
+	if journal == nil {
+		return errors.New("restore Journal is nil")
+	}
+	journal.Version = restoreJournalVersion
+	journal.Phase = phaseRollbackRestoring
+	if err := writeJournal(paths, *journal, os.Getuid(), os.Getgid()); err != nil {
+		return fmt.Errorf("persist rollback restoration intent: %w", err)
+	}
+	return nil
+}
+
+func moveRollbackToTarget(paths restorePaths) error {
 	if err := os.Rename(paths.rollback, paths.target); err != nil {
 		return fmt.Errorf("restore rollback directory as stable target: %w", err)
 	}
 	if err := syncDirectory(filepath.Dir(paths.target)); err != nil {
 		return fmt.Errorf("sync restore parent after rollback: %w", err)
 	}
+	return nil
+}
+
+// finishRollbackRestoration 在旧 target 已恢复后先删除未提交 staging，再删除 Journal。
+// 每次目录项变化后同步父目录，保证 Journal 消失时旧状态已完整恢复且 staging 已清理。
+func finishRollbackRestoration(paths restorePaths, stagingExists bool) error {
+	parent := filepath.Dir(paths.target)
+	if stagingExists {
+		if err := removeDirectoryTree(paths.staging); err != nil {
+			return fmt.Errorf("remove rolled-back restore staging: %w", err)
+		}
+		if err := syncDirectory(parent); err != nil {
+			return fmt.Errorf("sync restore parent after removing rolled-back staging: %w", err)
+		}
+	}
 	if err := os.Remove(paths.journal); err != nil {
 		return fmt.Errorf("remove rolled-back restore journal: %w", err)
 	}
-	return syncDirectory(filepath.Dir(paths.target))
+	return syncDirectory(parent)
 }
 
 // removeCompletedJournal 处理新 target 已提交且 rollback 已清理、只剩 Journal 的尾声。

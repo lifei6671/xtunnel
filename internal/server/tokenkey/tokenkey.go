@@ -78,6 +78,10 @@ func loadOrCreate(dataDir string, encryptedTokensExist bool, random io.Reader) (
 }
 
 func loadExisting(directoryPath, keyPath string) (Key, bool, error) {
+	return loadExistingPlatform(directoryPath, keyPath)
+}
+
+func loadExistingPOSIX(directoryPath, keyPath string) (Key, bool, error) {
 	directoryInfo, err := os.Lstat(directoryPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return Key{}, false, nil
@@ -123,6 +127,10 @@ func loadExisting(directoryPath, keyPath string) (Key, bool, error) {
 }
 
 func createCredentialDirectory(dataDir, directoryPath string) error {
+	return createCredentialDirectoryPlatform(dataDir, directoryPath)
+}
+
+func createCredentialDirectoryPOSIX(dataDir, directoryPath string) error {
 	if err := os.Mkdir(directoryPath, 0o700); err != nil {
 		if !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("create tunnel token credential directory: %w", err)
@@ -145,6 +153,13 @@ func createCredentialDirectory(dataDir, directoryPath string) error {
 }
 
 func writeKeyAtomically(directoryPath, keyPath string, key []byte) (resultErr error) {
+	return writeKeyAtomicallyPlatform(directoryPath, keyPath, key)
+}
+
+// writeKeyAtomicallyPOSIX preserves the Linux publication path. Windows uses
+// a separately compiled implementation because os.Rename and Unix mode bits
+// cannot prove the required DACL, no-follow, and Write Through semantics.
+func writeKeyAtomicallyPOSIX(directoryPath, keyPath string, key []byte) (resultErr error) {
 	temporary, err := os.CreateTemp(directoryPath, masterKeyFilename+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("create temporary tunnel token master key: %w", err)

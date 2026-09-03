@@ -26,8 +26,8 @@
         "data_dir": {
           "type": "string",
           "minLength": 1,
-          "default": "/var/lib/xtunnel/data",
-          "description": "Server 持久化数据目录，必须为绝对路径。",
+          "default": "auto",
+          "description": "Server 持久化数据目录。auto 在 Linux 解析为 /var/lib/xtunnel/data，在 Windows 解析为当前用户 LocalAppData 下的前台目录；Windows 服务仅允许固定 ProgramData 路径。",
           "x-secret": false,
           "x-reloadable": false
         }

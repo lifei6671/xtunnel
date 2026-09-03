@@ -11,6 +11,7 @@ import (
 
 	configschemas "github.com/lifei6671/xtunnel/configs"
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
+	"github.com/lifei6671/xtunnel/internal/server/pathprofile"
 )
 
 // Config 是完成四层合并和校验后的 Server 配置。
@@ -139,6 +140,11 @@ func Load(options baseconfig.Options) (Config, error) {
 }
 
 func validate(value *Config) error {
+	profile, err := pathprofile.Resolve(value.Server.DataDir)
+	if err != nil {
+		return fmt.Errorf("resolve server.data_dir: %w", err)
+	}
+	value.Server.DataDir = profile.DataDir
 	if !filepath.IsAbs(value.Server.DataDir) {
 		return fmt.Errorf("server.data_dir must be absolute")
 	}

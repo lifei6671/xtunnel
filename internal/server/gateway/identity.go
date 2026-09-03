@@ -118,7 +118,7 @@ func (identity Identity) SPKIHash() [sha256.Size]byte {
 // LoadPinnedIdentity 读取已经存在的 pinned 身份；不会静默补建缺失文件。
 func LoadPinnedIdentity(dataDir string) (Identity, error) {
 	paths := identityPaths(dataDir)
-	if err := requirePrivateKeyMode(paths.key); err != nil {
+	if err := validatePinnedIdentityFiles(paths.key, paths.cert); err != nil {
 		return Identity{}, err
 	}
 	certificate, err := loadKeyPair(paths.key, paths.cert)
@@ -128,16 +128,14 @@ func LoadPinnedIdentity(dataDir string) (Identity, error) {
 	return Identity{Certificate: certificate}, nil
 }
 
-// LoadPublicIdentity 读取外部证书管理系统提供的 public TLS 身份，私钥同样必须是 0600。
+// LoadPublicIdentity 读取外部证书管理系统提供的 public TLS 身份。平台实现负责
+// 在解析 PEM 前验证外部文件边界；它绝不接管、复制或修复 operator-owned 对象。
 func LoadPublicIdentity(certPath, keyPath string) (Identity, error) {
-	info, err := os.Stat(keyPath)
+	certPEM, keyPEM, err := readPublicIdentityFiles(certPath, keyPath)
 	if err != nil {
-		return Identity{}, fmt.Errorf("inspect public gateway private key: %w", err)
+		return Identity{}, err
 	}
-	if !privateKeyPermissionsValid(info.Mode()) {
-		return Identity{}, fmt.Errorf("public gateway private key permissions are %04o, want 0600", info.Mode().Perm())
-	}
-	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return Identity{}, fmt.Errorf("load public gateway certificate: %w", err)
 	}
@@ -174,14 +172,14 @@ func LoadOrCreatePinnedIdentity(dataDir, hostname string, mayCreate bool, now ti
 	if hostname == "" {
 		return Identity{}, errors.New("gateway public hostname must not be empty")
 	}
-	if err := os.MkdirAll(paths.directory, 0o700); err != nil {
+	if err := createPinnedIdentityDirectory(dataDir, paths.directory); err != nil {
 		return Identity{}, fmt.Errorf("create gateway PKI directory: %w", err)
 	}
 	certificate, err := newSelfSignedCertificate(hostname, now)
 	if err != nil {
 		return Identity{}, err
 	}
-	if err := writeIdentity(paths.key, paths.cert, certificate); err != nil {
+	if err := writePinnedIdentity(paths.key, paths.cert, certificate); err != nil {
 		return Identity{}, err
 	}
 	return withPinnedRenewalSource(Identity{Certificate: certificate}, paths, hostname), nil
@@ -242,7 +240,14 @@ func rotatePinnedIdentity(
 	if err := completeRotationWith(paths, journal, false, fileOps); err != nil {
 		return Identity{}, err
 	}
-	return LoadPinnedIdentity(dataDir)
+	identity, err := LoadPinnedIdentity(dataDir)
+	if err != nil {
+		return Identity{}, err
+	}
+	if identity.SPKIHash() != journal.Audit.AfterStateDigest {
+		return Identity{}, errors.New("rotated gateway identity does not match the journal after-state")
+	}
+	return identity, nil
 }
 
 // RecoverRotation 完成已经落盘的轮换 Journal；没有 Journal 时绝不修改身份文件。
@@ -266,7 +271,17 @@ func recoverRotation(dataDir string, fileOps rotationFileOps) error {
 		if err := validateRotationAuditJournal(journal.Audit); err != nil {
 			return err
 		}
-		return completeRotationWith(paths, journal, false, fileOps)
+		if err := completeRotationWith(paths, journal, false, fileOps); err != nil {
+			return err
+		}
+		identity, err := LoadPinnedIdentity(dataDir)
+		if err != nil {
+			return err
+		}
+		if identity.SPKIHash() != journal.Audit.AfterStateDigest {
+			return errors.New("recovered gateway identity does not match the journal after-state")
+		}
+		return nil
 	default:
 		return errors.New("gateway rotation journal is invalid")
 	}
@@ -296,7 +311,7 @@ func PendingRotationAuditEvent(dataDir string) (PendingRotationAudit, bool, erro
 
 // CompleteRotationAudit 删除已经幂等落库的换钥 Journal。调用方必须持有 External Lock。
 func CompleteRotationAudit(dataDir, eventID, operationID string) error {
-	return completeRotationAudit(dataDir, eventID, operationID, syncDirectory)
+	return completeRotationAudit(dataDir, eventID, operationID, defaultRotationFileOps().syncDirectory)
 }
 
 func completeRotationAudit(
@@ -312,7 +327,7 @@ func completeRotationAudit(
 		journal.Audit.EventID != eventID || journal.Audit.OperationID != operationID {
 		return errors.New("gateway rotation audit journal does not match the committed event")
 	}
-	if err := os.Remove(paths.journal); err != nil {
+	if err := removePinnedIdentityFile(paths.journal); err != nil {
 		return fmt.Errorf("remove gateway rotation audit journal: %w", err)
 	}
 	if err := syncPKIDirectory(paths.directory); err != nil {
@@ -343,25 +358,6 @@ func identityPaths(dataDir string) identityFilePaths {
 		keyTemp:   filepath.Join(directory, keyTempFileName),
 		certTemp:  filepath.Join(directory, certTempFileName),
 	}
-}
-
-func requirePrivateKeyMode(path string) error {
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return ErrIdentityMissing
-	}
-	if err != nil {
-		return fmt.Errorf("inspect gateway private key: %w", err)
-	}
-	if !privateKeyPermissionsValid(info.Mode()) {
-		return fmt.Errorf("gateway private key permissions are %04o, want 0600", info.Mode().Perm())
-	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(path), certFileName)); errors.Is(err, os.ErrNotExist) {
-		return ErrIdentityMissing
-	} else if err != nil {
-		return fmt.Errorf("inspect gateway certificate: %w", err)
-	}
-	return nil
 }
 
 func newSelfSignedCertificate(hostname string, now time.Time) (tlsCertificate, error) {
@@ -430,7 +426,7 @@ func renewPinnedIdentity(paths identityFilePaths, hostname string, identity Iden
 	if err != nil {
 		return Identity{}, fmt.Errorf("renew gateway pinned certificate: %w", err)
 	}
-	if err := replaceCertificateAtomically(paths.directory, paths.cert, certificate); err != nil {
+	if err := replacePinnedCertificate(paths.directory, paths.cert, certificate); err != nil {
 		return Identity{}, fmt.Errorf("atomically renew gateway pinned certificate: %w", err)
 	}
 	return withPinnedRenewalSource(Identity{Certificate: certificate}, paths, hostname), nil
@@ -505,11 +501,11 @@ func pkixName(hostname string) pkix.Name {
 }
 
 func loadKeyPair(keyPath, certPath string) (tlsCertificate, error) {
-	keyPEM, err := os.ReadFile(keyPath)
+	keyPEM, err := readPinnedIdentityFile(keyPath)
 	if err != nil {
 		return tlsCertificate{}, fmt.Errorf("read gateway private key: %w", err)
 	}
-	certPEM, err := os.ReadFile(certPath)
+	certPEM, err := readPinnedIdentityFile(certPath)
 	if err != nil {
 		return tlsCertificate{}, fmt.Errorf("read gateway certificate: %w", err)
 	}
@@ -555,16 +551,10 @@ func writeKeyPairWith(
 	certificate tlsCertificate,
 	writeSyncedFile func(string, []byte, os.FileMode) error,
 ) error {
-	privateKey, ok := certificate.privateKey.(*ecdsa.PrivateKey)
-	if !ok {
-		return errors.New("gateway private key is not ECDSA P-256")
-	}
-	keyBytes, err := x509.MarshalECPrivateKey(privateKey)
+	keyPEM, certPEM, err := pinnedIdentityPEM(certificate)
 	if err != nil {
-		return fmt.Errorf("marshal gateway private key: %w", err)
+		return err
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.certificate[0]})
 	if err := writeSyncedFile(keyPath, keyPEM, 0o600); err != nil {
 		return fmt.Errorf("write gateway private key: %w", err)
 	}
@@ -572,6 +562,20 @@ func writeKeyPairWith(
 		return fmt.Errorf("write gateway certificate: %w", err)
 	}
 	return nil
+}
+
+func pinnedIdentityPEM(certificate tlsCertificate) ([]byte, []byte, error) {
+	privateKey, ok := certificate.privateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, nil, errors.New("gateway private key is not ECDSA P-256")
+	}
+	keyBytes, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal gateway private key: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.certificate[0]})
+	return keyPEM, certPEM, nil
 }
 
 type rotationJournal struct {
@@ -597,15 +601,6 @@ type rotationFileOps struct {
 	rename        func(string, string) error
 	remove        func(string) error
 	syncDirectory func(string) error
-}
-
-func defaultRotationFileOps() rotationFileOps {
-	return rotationFileOps{
-		writeFileSync: writeFileSync,
-		rename:        os.Rename,
-		remove:        os.Remove,
-		syncDirectory: syncDirectory,
-	}
 }
 
 // rollbackRotationPreparation 只在 Journal 发布返回错误、身份 rename 尚未开始时调用。
@@ -666,7 +661,7 @@ func writeJournalWith(path string, journal rotationJournal, fileOps rotationFile
 }
 
 func readJournal(path string) (rotationJournal, bool, error) {
-	data, err := os.ReadFile(path)
+	data, err := readPinnedIdentityFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return rotationJournal{}, false, nil
 	}
@@ -694,14 +689,14 @@ func completeRotationWith(
 		{journal.KeyTemporary, paths.key},
 		{journal.CertificateTemporary, paths.cert},
 	} {
-		if _, err := os.Stat(replacement.temporary); err == nil {
+		if exists, err := rotationTemporaryExists(replacement.temporary); err == nil && exists {
 			if err := fileOps.rename(replacement.temporary, replacement.destination); err != nil {
 				return fmt.Errorf("atomically replace gateway identity file: %w", err)
 			}
 			if err := fileOps.syncDirectory(paths.directory); err != nil {
 				return fmt.Errorf("sync gateway identity replacement: %w", err)
 			}
-		} else if !errors.Is(err, os.ErrNotExist) {
+		} else if err != nil {
 			return fmt.Errorf("inspect gateway identity replacement: %w", err)
 		}
 	}
@@ -709,7 +704,7 @@ func completeRotationWith(
 		return fmt.Errorf("validate recovered gateway identity: %w", err)
 	}
 	if removeJournal {
-		if err := os.Remove(paths.journal); err != nil {
+		if err := fileOps.remove(paths.journal); err != nil {
 			return fmt.Errorf("remove gateway rotation journal: %w", err)
 		}
 		if err := fileOps.syncDirectory(paths.directory); err != nil {

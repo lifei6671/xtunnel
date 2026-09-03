@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	libsqlite "github.com/libtnb/sqlite"
@@ -51,6 +52,9 @@ func (store *Store) AcquireBackupBarrier(ctx context.Context) (*BackupBarrier, e
 // 主文件及可能产生的 journal/WAL sidecar，避免半成品被后续归档误认成有效快照。
 // 本方法不会隐式 Release，Barrier 生命周期仍由取得它的调用方负责。
 func (barrier *BackupBarrier) BackupSQLite(ctx context.Context, destinationPath string) error {
+	if runtime.GOOS == "windows" {
+		return errors.New("SQLite backup is unsupported on Windows pending M8-04")
+	}
 	barrier.mu.Lock()
 	defer barrier.mu.Unlock()
 	if barrier.released {
@@ -77,6 +81,9 @@ func (barrier *BackupBarrier) Release() {
 // 调用方必须先持有目标 data-dir 的 External Lock，证明没有运行中的 Server 写入；
 // 该锁是离线模式的唯一并发边界，不能仅凭“当前看不到 socket”推断源库静止。
 func BackupSQLite(ctx context.Context, sourcePath, destinationPath string) (resultErr error) {
+	if runtime.GOOS == "windows" {
+		return errors.New("SQLite backup is unsupported on Windows pending M8-04")
+	}
 	pool, err := sql.Open(libsqlite.DriverName, readOnlyDatabaseDSN(sourcePath))
 	if err != nil {
 		return fmt.Errorf("open source SQLite database for backup: %w", err)

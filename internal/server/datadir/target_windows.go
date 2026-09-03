@@ -120,6 +120,14 @@ func validateWindowsDataPath(dataDir string) (cleanPath, leaf, parent string, er
 	return cleanPath, leaf, parent, nil
 }
 
+// ValidateWindowsDataPath 只校验 Windows Data 目录输入形状，不访问文件系统。
+// 显式初始化需要在创建任何父目录前复用这条边界，避免把 UNC、设备路径或 ADS
+// 交给通用目录创建逻辑。
+func ValidateWindowsDataPath(dataDir string) error {
+	_, _, _, err := validateWindowsDataPath(dataDir)
+	return err
+}
+
 func validateWindowsLeaf(leaf string) error {
 	if leaf == "" || leaf == "." || leaf == ".." {
 		return errors.New("leaf must name a directory")

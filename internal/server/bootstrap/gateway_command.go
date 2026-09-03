@@ -18,6 +18,7 @@ import (
 	"github.com/lifei6671/xtunnel/internal/server/durableops"
 	"github.com/lifei6671/xtunnel/internal/server/externallock"
 	"github.com/lifei6671/xtunnel/internal/server/gateway"
+	"github.com/lifei6671/xtunnel/internal/server/pathprofile"
 )
 
 var errGatewayRotationAuditAfterCommit = errors.New("gateway identity was rotated but its security audit event was not persisted")
@@ -66,7 +67,11 @@ func runGatewayRotateKeyWithOptions(
 	if now.UTC().Unix() <= 0 {
 		return errors.New("gateway rotation time must be after the Unix epoch")
 	}
-	target, err := datadir.Resolve(config.Server.DataDir)
+	dataDir, err := gatewayRotationDataDirectory(config.Server.DataDir)
+	if err != nil {
+		return err
+	}
+	target, err := datadir.Resolve(dataDir)
 	if err != nil {
 		return fmt.Errorf("resolve stable server data target: %w", err)
 	}
@@ -146,6 +151,17 @@ func runGatewayRotateKeyWithOptions(
 		return errors.Join(errGatewayRotationAuditAfterCommit, errors.New("gateway rotation audit journal disappeared before reconciliation"))
 	}
 	return nil
+}
+
+// gatewayRotationDataDirectory makes the maintenance command use the same
+// foreground profile as normal startup. In particular, Windows "auto" is a
+// configuration sentinel and must be expanded before Stable Target validation.
+func gatewayRotationDataDirectory(configuredDataDir string) (string, error) {
+	profile, err := pathprofile.Resolve(configuredDataDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve server foreground path profile for gateway rotation: %w", err)
+	}
+	return profile.DataDir, nil
 }
 
 func parseGatewayRotateKeyOptions(program string, args, environ []string, stderr io.Writer) (baseconfig.Options, error) {

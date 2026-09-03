@@ -4251,7 +4251,7 @@ Backup Archive 固定为 canonical POSIX USTAR，`manifest.json` 使用格式版
 
 `backup restore` 只允许 Server 停止后执行，必须先由 `realpath(parent) + basename` 计算 Stable Data Target、获取同一外部锁，再校验 Manifest/Hash/Schema 兼容性。只接受大于零且不高于当前 Binary 支持上限的 Schema 版本；较旧版本原样 Restore，由下一次正常启动执行 forward-only Migration，离线 Backup/Restore 校验路径不得先运行 Migration。staging 必须在第一次 rename 前通过完整白名单/Hash/权限、immutable SQLite `quick_check`、精确 `schema_migrations`、Token Master Key 与 Pinned key/certificate 配对校验；其中全部 `tunnel_tokens` 都必须用归档 Master Key 和行身份 AAD 解密，严格解析规范 Token，并核对 Tunnel ID、Token ID、Version 与 `secret_hash`，合法长度但属于另一数据库的 Key 必须拒绝。任何失败都只删除 staging，旧 target 保持不动。恢复内容写到同盘 sibling staging 目录，然后按“旧目录 rename 为 rollback → staging rename 为正式目录 → fsync 父目录”的顺序切换。切换前在父目录写入权限 `0600` 的 `.xtunnel-restore-<hash>.journal`，文件名中的 `<hash>` 固定为 Stable Data Target 的 SHA-256；Journal 同时保存 canonical Manifest 与 Manifest Hash，二者必须相互匹配。staging 与 rollback 也必须由同一 Hash 固定派生。三条路径都必须校验为同一 `realpath(parent)` 的直接子项，且不得是 symlink 或独立挂载点。
 
-Restore Journal 版本 `1` 的 phase 固定为 `prepared`、`rollback_ready`、`installed`。每次 phase 更新都必须以同父目录 `O_CREATE | O_EXCL | O_NOFOLLOW` 临时文件写入，完成文件 `fsync`、原子 rename 和父目录 `fsync`，禁止原地 truncate。恢复决策必须同时验证 phase 与正式 target/staging/rollback 的实际存在组合：两次目录 rename 之间优先把 rollback 恢复为正式目录；第二次 rename 已完成但 phase 尚未更新时，只有新 target 按 Journal Manifest 完整重验通过才允许前向完成，否则恢复旧 rollback；路径越界、对象类型异常或不可判定组合一律 fail closed。无 Journal 时只允许清理由 `target + staging + no rollback` 唯一判定的 pre-Journal 孤儿 staging；任何孤儿 rollback 都阻止启动。成功安装并验证后才能删除 rollback；删除前必须用 FD-relative 两阶段遍历证明整棵树无 symlink、特殊文件或不同 `statx mount ID`，禁止 `RemoveAll` 穿过 nested bind mount，之后才逐层 unlink。最后删除 Journal，并在每次目录项变化后 `fsync` 父目录。root 离线 Restore 必须沿用原 target 或 rollback 的 Runtime UID/GID，不能信任 Archive UID/GID；staging 根在完成内容校验前保持 root `0700`，只在交付前最后变更 owner。Journal 位于替换边界外且跨重启保留，崩溃后下次 Server/Restore 命令先按 Stable Target 取得同一把锁，再完成或回滚，不能要求 leaf 预先存在。禁止与现有数据库合并。集成测试必须覆盖“备份 → Migration → 恢复 → Agent 通过原 Pin 重连”以及两个 rename 之间崩溃后的回滚。
+Restore Journal 当前写入版本为 `2`，phase 固定为 `prepared`、`rollback_ready`、`rollback_restoring`、`installed`。每次 phase 更新都必须以同父目录 `O_CREATE | O_EXCL | O_NOFOLLOW` 临时文件写入，完成文件 `fsync`、原子 rename 和父目录 `fsync`，禁止原地 truncate。`rollback_restoring` 必须在任何 `rollback → target` 改名之前持久化，表示此后 target-only 尾项只能解释为旧 target 已恢复而 Journal 尚未清理；改名后才可删除未提交 staging 与 Journal。恢复决策必须同时验证 phase 与正式 target/staging/rollback 的实际存在组合：两次目录 rename 之间优先把 rollback 恢复为正式目录；第二次 rename 已完成但 phase 尚未更新时，只有新 target 按 Journal Manifest 完整重验通过才允许前向完成，否则先持久化 `rollback_restoring` 再恢复旧 rollback；路径越界、对象类型异常或不可判定组合一律 fail closed。恢复端有限接受遗留 V1：新的 Restore 一律写 V2；V1 的可判定回滚组合在 `rollback → target` 前升级为 V2，而 V1 的 `rollback_ready` 或 `installed` 加 target-only 组合必须保留现场拒绝，不得根据 Manifest 重验结果猜测前进或清理。无 Journal 时只允许清理由 `target + staging + no rollback` 唯一判定的 pre-Journal 孤儿 staging；任何孤儿 rollback 都阻止启动。成功安装并验证后才能删除 rollback；删除前必须用 FD-relative 两阶段遍历证明整棵树无 symlink、特殊文件或不同 `statx mount ID`，禁止 `RemoveAll` 穿过 nested bind mount，之后才逐层 unlink。最后删除 Journal，并在每次目录项变化后 `fsync` 父目录。root 离线 Restore 必须沿用原 target 或 rollback 的 Runtime UID/GID，不能信任 Archive UID/GID；staging 根在完成内容校验前保持 root `0700`，只在交付前最后变更 owner。Journal 位于替换边界外且跨重启保留，崩溃后下次 Server/Restore 命令先按 Stable Target 取得同一把锁，再完成或回滚，不能要求 leaf 预先存在。禁止与现有数据库合并。集成测试必须覆盖“备份 → Migration → 恢复 → Agent 通过原 Pin 重连”以及两个 rename 之间崩溃后的回滚。
 
 维护命令仅记录稳定事件 `backup_create_completed` 与 `backup_restore_completed`，字段固定为 `target_hash`、`manifest_sha256`、`schema_version`、`mode=online|offline`；不得记录 Archive 路径、Data Directory 路径、Token、Key、证书内容或其他 Secret。
 
@@ -8617,6 +8617,23 @@ Data:    %ProgramData%\XTunnel\Server\data
 Runtime: %ProgramData%\XTunnel\Server\runtime
 ```
 
+Windows 有两套永不共享持久化状态的路径 Profile。前台 Profile 的
+`server.data_dir: auto` 只经 Known Folder API 解析为当前登录用户的
+`%LocalAppData%\XTunnel\Server\data`，Runtime 固定为同级的
+`%LocalAppData%\XTunnel\Server\runtime`；它们只允许 SYSTEM 与该当前用户访问。
+Service Profile 的同一 `auto` 只在 `XTunnelServer` SCM 入口解析为上面的 ProgramData
+Data/Runtime，并应用 Service SID 的精确 DACL。两个 Profile 不得共用 SQLite、Token Master
+Key、Pinned Gateway Identity、Restore Journal、Backup 临时候选、Archive 或 External Lock；
+前台进程不得把 ProgramData Service Profile 当作可访问的后备路径，Service 同样不得复用用户
+Profile。`server.data_dir` 也可以写入与当前 Profile 精确相同的已展开路径；不得使用环境变量
+展开、UNC、设备路径或任意自定义目录绕过 Profile 选择。
+
+Windows 前台部署必须先显式执行 `xtunnel-server init --config PATH`。该命令要求
+`--config`，先完成 Strict Decode、跨字段和平台路径校验；只会创建或复核配置指定的
+Data 父链、Data leaf 及同一 Profile 的 Runtime 目录，随后以既有的 no-follow External Lock
+路径复核目录对象。它不启动 SQLite、密钥、Listener 或常驻 Server，也不接管、修复或放宽既有对象的 ACL/owner；
+日常前台启动同样不得隐式创建目录。该前台初始化命令不表示 Windows SCM Server 安装器已支持。
+
 `service install --config PATH` 的 `PATH` 只是一次性安装源。安装器必须在任何持久化
 变更前完成配置 Strict Decode、跨字段校验与 Windows 平台路径校验，再把配置原子发布到
 固定 Config 路径。受管配置中的 `server.data_dir` 必须精确解析到固定 Data 路径；SCM
@@ -8632,15 +8649,27 @@ Administrators 授予 Full Control，向 Service SID 授予 Modify。这里的 M
 替代该矩阵。安装器必须拒绝 ACL、owner、对象类型或 Reparse Point 不满足契约的既有目标，
 不得通过追加一个 ACE 接管未知对象。
 
+LocalAppData 前台 Profile 的 Data、Runtime 及其受管子对象同样关闭继承，且只向 SYSTEM 与
+当前登录用户授予 Full Control；不得把 Users、Authenticated Users、LocalService 或未来的
+Service SID 加入这套 DACL。前台初始化只创建新对象，已有对象若 owner、DACL、对象类型或
+Reparse Point 不满足当前用户 Profile，必须拒绝而非接管。前台 Profile 与 Service Profile
+之间的迁移只能通过显式 Backup/Restore 操作完成。
+
 `public` TLS 的 `cert_file` 与 `key_file` 是 operator-owned 外部对象，不复制到受管 Data，
 也不由安装器改写其 owner 或 DACL。两者必须是本机固定卷上的绝对普通文件，路径分量与
 最终对象均不得是 Reparse Point、设备路径或 Alternate Data Stream；Server 在启动时通过
 禁止跟随 Reparse Point 的 Handle 复核 Volume/File Identity。Service SID 必须具备读取
 证书与私钥的权限；证书可以向普通用户开放读取，但普通用户与其他非授权服务身份不得
 具备写入、删除或更改 DACL/owner 的有效权限，私钥还不得向这些主体开放读取。上述限制
-必须同时考虑文件与父目录授予的有效权限。证书管理器自身的受限维护身份可以保留必要权限。
-安装、升级与每次启动只验证这些条件，不得为通过
+必须同时考虑文件与父目录授予的有效权限。安装、升级与每次启动只验证这些条件，不得为通过
 检查而放宽或接管外部证书管理器维护的 ACL；任一条件无法证明时必须快速失败。
+
+M8 Windows 初版采用固定、可审计的严格策略，不引入维护 SID 的配置白名单：`cert_file`、
+`key_file` 与其直接父目录的 owner 只能是 SYSTEM 或 Builtin Administrators，DACL 必须关闭
+继承；父目录与私钥的 ACE 精确为 SYSTEM/Administrators Full Control 加
+`NT SERVICE\XTunnelServer` Read，证书额外允许 Builtin Users Read。未知、拒绝或继承 ACE
+一律拒绝；因此外部证书管理器只能以 SYSTEM 或 Administrators 身份维护该对文件。未来若
+支持独立维护身份，必须先新增明确的契约与授权输入，不能根据未知 ACL 猜测其权限。
 
 ## 191.2 Stable Target、External Lock 与 Windows 文件身份
 
@@ -8682,12 +8711,32 @@ Driver-owned 文件的 Handle、锁或生命周期。受管密钥与 Journal 的
 operator-owned 验证边界。Server 不得替外部证书管理器原子替换、修复权限或删除文件，
 但必须在每次打开时验证 DACL、owner、对象类型、Reparse 状态及 Volume/File Identity。
 
-Windows Restore 继续使用与 Linux 相同的 versioned Manifest、`prepared → rollback_ready →
-installed` Journal 状态机和“未证明新 target 有效时优先回滚”原则。staging、target 与 rollback
+Windows Restore 继续使用与 Linux 相同的 versioned Manifest、V2 `prepared → rollback_ready →
+rollback_restoring | installed` Journal 状态机和“未证明新 target 有效时优先回滚”原则；任何
+`rollback → target` 必须先持久化 `rollback_restoring`。staging、target 与 rollback
 必须位于同一支持原子目录改名和持久化屏障的本地卷；目录切换、Journal 更新及清理均须在
 External Lock 内完成。恢复过程逐层拒绝 Reparse Point、特殊对象、跨卷对象和身份漂移，
 崩溃后下次 Server 或 Restore 命令必须在打开 SQLite 前完成确定性前向收敛或回滚。无法证明
 状态组合时保留现场并快速失败，不允许使用递归跟随链接的通用删除或复制覆盖作为回退。
+Windows 只可开启三种 Journal 收敛：`prepared + target + staging + no rollback`、
+`prepared + target + no staging + no rollback`，以及 V2 `rollback_restoring + target + no staging +
+no rollback`。第一种表明旧 target 从未移动，必须在已验证 Journal 的同一 no-follow `DELETE`
+Handle 持有期间，先以受保护树删除原语清理 staging、同步 parent，再删除 Journal；后两种仅在
+同步 parent 后删除 Journal。三种情形都必须在 Journal 删除 Handle 关闭、目录项实际消失且已验证
+parent Handle 仍持有时再次同步 parent。删除前的树删除、任一前置同步或取消失败均保留 Journal；
+删除后第二次同步失败必须返回不确定清理错误，不得报告恢复成功，此时 Journal 可能已经删除。
+V1 `rollback_restoring`、`rollback_ready`、`installed` 或任何其他目录组合一律保留现场拒绝，不能
+据此推断目录切换已完成。
+Windows 目录项变更的运行时持久化屏障必须在受保护、no-follow、带写权限的目录 Handle 上
+重验 DACL、对象类型和非 Reparse 后调用 `FlushFileBuffers`；调用失败必须阻止后续 Journal
+清理或使当前恢复调用返回不确定清理错误。该 API 成功只证明当前 Windows/文件系统对本次 flush
+请求成功响应，不构成任意介质、文件系统或突然断电场景的物理持久化证明。
+受保护 staging/rollback 树的删除必须先在已验证、无跟随且禁止共享删除的 parent Handle
+持续持有期间完成整树计划；计划收集阶段不得删除任何对象。删除阶段只可后序重开计划内
+节点的 no-follow `DELETE` Handle，并在同一 Handle 上再次验证精确 DACL、对象类型、
+非 Reparse/Device、同卷与完整 `FILE_ID_INFO` 后标记删除。任一预检或重验失败均停止，
+不得按路径补偿；删除中失败或取消可以留下已删除的受管前序节点，必须由已持久化、可重试的
+恢复状态收敛，不得把错误解释为原树未变。此原语本身不构成目录项突然断电后的持久化证明。
 
 Backup/Restore 的内容白名单、Manifest Hash、Schema/TLS 模式校验、Backup Barrier、ACK 前
 最终路径不可见、Token Master Key 的 Secret 保护和安全审计语义与既有 Server 契约相同；

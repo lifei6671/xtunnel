@@ -17,7 +17,7 @@ Copy-Item .\configs\server.windows.example.yaml .\server.windows.yaml
 ```
 
 - `server.example.yaml`：Linux systemd、OCI 或前台运行示例。
-- `server.windows.example.yaml`：Windows 原生路径与安全边界示例。
+- `server.windows.example.yaml`：Windows 前台用户路径与安全边界示例。
 
 Windows 示例不会改变 `server.schema.json` 中面向现有 Linux 部署的默认值，也不会被
 Server 自动发现。Windows 的配置加载及后续原生运行必须显式传入配置文件：
@@ -26,9 +26,14 @@ Server 自动发现。Windows 的配置加载及后续原生运行必须显式�
 .\xtunnel-server.exe --config .\server.windows.yaml
 ```
 
-受管 Windows 部署中，`XTunnelServer` Service SID 对配置文件只有读取权限；SYSTEM 与
-Administrators 保留完全控制。Data/Runtime 目录对 Service SID 授予 Modify，但不允许其
-更改 DACL 或 owner。不要用 LocalService 组权限或 Config 可写权限替代这组精确边界。
+Windows 前台配置默认使用 `server.data_dir: auto`。它只经 Windows Known Folder API 解析为
+当前登录用户的 `%LOCALAPPDATA%\XTunnel\Server\data`，同级 Runtime 目录用于该用户的锁和
+本机运行资源。前台与服务不共用 SQLite、密钥、Journal 或锁。未来 M8-05 的受管 Windows
+服务安装器完成后，
+`auto` 只在服务入口解析为 `%ProgramData%\XTunnel\Server\data`；`XTunnelServer` Service SID
+对配置文件只有读取权限，SYSTEM 与 Administrators 保留完全控制，Data/Runtime 则仅授予
+Service SID Modify（不含更改 DACL 或 owner）。不要用 LocalService 组权限、用户目录 ACL 或
+Config 可写权限替代这组精确边界。
 
 在 M8-06 的 Windows 原生运行与发布验证完成前，该文件只代表构建和配置契约基线，
 不代表 Windows Server 已进入正式支持矩阵。
@@ -37,11 +42,18 @@ Administrators 保留完全控制。Data/Runtime 目录对 Service SID 授予 Mo
 
 - `management.public_url`：浏览器实际访问的 HTTPS Origin。
 - `agent_gateway.public_hostname`：Agent 可从公网连接的 Gateway 主机名。
-- Windows 部署还应确认 `server.data_dir` 使用带盘符的绝对路径，并为运行 Server 的
-  身份配置受限 ACL。
+- Windows 前台部署应保留 `server.data_dir: auto`，并为当前用户 Profile 配置受限 ACL；不要将
+  `%LOCALAPPDATA%` 作为普通环境变量字符串手工展开或把用户目录传给服务安装器。
 
-若手工前台运行，还需要预先创建 `server.data_dir`。Linux systemd 自安装会创建
-默认的 `/var/lib/xtunnel/data`：
+Windows 手工前台运行前，先使用已校验的配置显式准备 Data 和 Runtime 目录：
+
+```powershell
+.\xtunnel-server.exe init --config .\server.windows.yaml
+```
+
+`init` 只创建或复核目录，不启动 Server、SQLite 或 Listener，也不会接管或放宽既有目录
+的 ACL/owner；日常启动不会隐式创建目录。
+Linux systemd 自安装会创建默认的 `/var/lib/xtunnel/data`：
 
 ```sh
 sudo xtunnel-server service install --config "$PWD/server.yaml"
