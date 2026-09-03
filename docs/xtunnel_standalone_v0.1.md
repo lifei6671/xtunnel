@@ -8660,14 +8660,19 @@ Private Key、创建 Named Pipe 或绑定任何 Listener。锁持有到 Listener
 SQLite 与持久化资源全部逆序关闭之后；不得使用仅限当前进程的内存锁或名称不绑定 Stable
 Target 的全局 Mutex 降级。
 
-所有安全文件在路径检查后都必须通过禁止跟随 Reparse Point 的 Handle 重新打开，并比较
-Volume/File Identity，避免检查与使用之间被替换。不存在等价 Windows 安全语义时必须快速
-失败，不得沿用非 Linux 占位实现中“权限总是有效”或目录同步空操作的行为。
+XTunnel 直接管理的安全文件在路径检查后都必须通过禁止跟随 Reparse Point 的 Handle 重新打开，
+并比较 Volume/File Identity，避免检查与使用之间被替换。SQLite 主库、WAL、SHM、journal 与
+临时文件的打开、锁定、共享内存和恢复语义由单一 SQLite Driver 的 Windows VFS 负责；XTunnel
+只在打开前验证其受保护 Data Directory、运行身份与 External Lock，不得自定义或替换 SQLite
+VFS。不存在等价 Windows 安全语义时必须快速失败，不得沿用非 Linux 占位实现中“权限总是有效”
+或目录同步空操作的行为。
 
 ## 191.3 DACL、密钥耐久发布与 Restore Recovery
 
-受管 Pinned Gateway Private Key、Tunnel Token Master Key、SQLite、Restore Journal、Backup
-临时文件和最终 Archive 必须继承或显式取得上述 Protected DACL。受管密钥与 Journal 的发布顺序固定
+受管 Pinned Gateway Private Key、Tunnel Token Master Key、SQLite Data Directory、Restore Journal、Backup
+临时文件和最终 Archive 必须继承或显式取得上述 Protected DACL。SQLite Data Directory 的受保护
+DACL 适用于 SQLite Driver 创建的主库、WAL、SHM、journal 与临时文件；XTunnel 不逐一接管这些
+Driver-owned 文件的 Handle、锁或生命周期。受管密钥与 Journal 的发布顺序固定
 为：在同目录创建不可预测临时普通文件、写入完整内容、`FlushFileBuffers`、验证 DACL 与文件
 身份、使用带 Replace Existing 与 Write Through 语义的同卷原子替换、重新打开并复核最终
 对象。任一阶段失败都删除仍由本进程拥有的临时候选并保留旧正式文件；不得先截断正式文件，
