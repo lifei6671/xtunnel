@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-09-02
+> **进度基线日期**：2026-09-03
 >
-> **当前阶段**：M7 Hardening · IN_PROGRESS（M7-01 至 M7-09 · DONE；M7-10 · REVIEW）
+> **当前阶段**：M7 Hardening/Alpha · DONE（M7-01 至 M7-10 · DONE）
 >
-> **当前结论**：M7-01 至 M7-09 均已获用户明确阶段复审通过并转为 `DONE`，全局 `DONE` 为 `94/95`，M7 为 `9/10 IN_PROGRESS`。M7-10 候选 Head `7e24cc4a11a231e4ef63f1505ed0ad92064b273a` 的 [Push CI #33647215011](https://github.com/lifei6671/xtunnel/actions/runs/33647215011) 与 [Alpha Release Gate #33647228286](https://github.com/lifei6671/xtunnel/actions/runs/33647228286) 均成功，Checklist 九项已取得精确 Commit/CI 证据，任务进入 `REVIEW`；在最终 commit-bound 复审和用户阶段签核前不得转为 `DONE`。
+> **当前结论**：M0 至 M7 的 95 项任务已全部 `DONE`。M7-10 候选 Head `7e24cc4a11a231e4ef63f1505ed0ad92064b273a` 的 [Push CI #33647215011](https://github.com/lifei6671/xtunnel/actions/runs/33647215011) 与 [Alpha Release Gate #33647228286](https://github.com/lifei6671/xtunnel/actions/runs/33647228286) 均成功；证据提交 `a140560aaef827098c1a1de9a6c1b0be622edbb8` 的 [Push CI #33651186233](https://github.com/lifei6671/xtunnel/actions/runs/33651186233)、两路 commit-bound 独立复审与用户阶段签核均已闭环。Alpha Release Gate 自动化结论为 `PASS`，已批准的 Alpha 限制继续按发布文档管理。
 
 ---
 
@@ -111,8 +111,8 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M4 Product Data Plane | 10 | 10 | `DONE` | M2-08 + M3-13 | M4-10 |
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 7 | `DONE` | M5-11 | M6-07 |
-| M7 Hardening/Alpha | 10 | 9 | `IN_PROGRESS` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| **合计** | **95** | **94** |  |  |  |
+| M7 Hardening/Alpha | 10 | 10 | `DONE` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
+| **合计** | **95** | **95** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -406,7 +406,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M7-07 | Goroutine/FD/Memory Leak | M1-14、M4-10 | Leak Test Harness | 连接 churn、Cancel、Reconnect、Drain 后回基线 | `DONE` |
 | M7-08 | Large Transfer/Privileged Network Chaos | M4-10 | Linux namespace + netem/nftables Suite | 1GB 上下行、Loss/Jitter/Reset/Half-Close；字节无丢失/重复 | `DONE` |
 | M7-09 | Release/Upgrade/Backup-Restore Matrix | M0-09、M3-12、M7-04 | Release Candidate Evidence | Linux amd64/arm64 Binary/OCI/systemd 与 Windows Agent amd64/arm64 Binary/SCM；Server/Agent Binary `service install/uninstall` 安装、升级、卸载覆盖 Managed Marker、三文件原子发布/回滚、Server 旧官方 Unit 接管、配置/凭据权限、Secret 不落 argv 和非托管 Unit/Service 拒绝边界；Agent 前台 `run --token`、OCI `XTUNNEL_TOKEN` + 默认 `run`、Linux systemd LoadCredential、Windows ProgramData DPAPI Machine-scope Credential；Windows 覆盖运行中 EXE 的 Replace Existing/Write Through 与 Self-uninstall `DELAY_UNTIL_REBOOT` 延迟删除登记/调度；Upgrade/Migration/Backup/Restore 后 Agent 仅凭 Token 重连并重新获取完整配置；仅验证 M3 已实现的维护命令 | `DONE` |
-| M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `REVIEW` |
+| M7-10 | XTunnel Standalone Alpha Gate | M0-12、M7-01至 M7-09 | Alpha 发布签核 | 下方所有发布 Gate 通过，无 P0/P1 未决项 | `DONE` |
 
 ## 13.2 Alpha Release Gate Checklist
 
@@ -422,9 +422,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 ---
 
-# 14. 当前可立即执行的任务队列
+# 14. 当前任务状态
 
-当前 `M0-01` 至 `M0-12`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07` 已完成。当前待办为：
+当前 `M0-01` 至 `M0-12`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07`、`M7-01` 至 `M7-10` 已全部完成，当前无待办。以下保留 M7 完成记录：
 
 1. `M7-01` — `DONE`。生产 32 KiB Buffer、关键测试、fresh Proxy 正式复验、精确 CI、commit-bound 最终独立复审与用户阶段复审均已闭环。
 2. `M7-02` — `DONE`。Chaos Harness、确定性 Backoff 单测、AUTH Reset 分类修复、WSL2 `/tmp` clean `full`、实现与证据提交的精确 CI、Tier 3 commit-bound 最终独立复审及用户阶段复审均已闭环。
@@ -435,9 +435,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 7. `M7-07` — `DONE`。Linux-only 产品 Leak Harness、Runner、Builder 与 CI full 接线、两轮 CI 回归修复、原生 Linux amd64/arm64 完整三分区普通与 Race、Artifact 校验、精确 CI `#33510562933`、docs-only CI `#33512711172` 与最终独立复审均已通过；用户已明确阶段复审通过。
 8. `M7-08` — `DONE`。正式实现 Commit `0f629f926ed3bdbbf9c698dab82130a1282e4731`、原生 Linux amd64/arm64 特权 `full`、双架构 Artifact 回读、实现 CI `#33583345819`、commit-bound Tier 3 独立复审、证据 Commit `584f699c04e247f44b8ac80a4aad373200f82ea9`、证据 CI `#33586979302` 与用户阶段复审均已闭环。
 9. `M7-09` — `DONE`。Head `8f11f2a5d0118859ee7e0398b96517dd0be2a96d`、精确 CI `#33612503805`、状态同步 Head `cb3209d0bbb3debfa263c2bad226150a090318f5` 的精确 CI `#33615267877`、commit-bound Tier 3 复审与用户阶段批准已闭环 Linux amd64/arm64 Binary/OCI/systemd、Windows Agent amd64/arm64 Binary/SCM、Backup→Migration→Restore→Token-only Reconnect 及安全失败边界矩阵。
-10. `M7-10` — `REVIEW`。候选 Head `7e24cc4a11a231e4ef63f1505ed0ad92064b273a` 的普通 CI 与 Alpha Release Gate 均成功，Checklist 九项已勾选；等待最终 commit-bound 独立复审与用户明确阶段签核。
+10. `M7-10` — `DONE`。候选 Head `7e24cc4a11a231e4ef63f1505ed0ad92064b273a` 的普通 CI 与 Alpha Release Gate、证据提交 `a140560aaef827098c1a1de9a6c1b0be622edbb8` 的精确 CI、Checklist 九项、两路 commit-bound 独立复审与用户阶段签核均已闭环。
 
-M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `94/95`。M7 当前为 `9/10 IN_PROGRESS`，M7-01 至 M7-09 已 `DONE`，M7-10 为 `REVIEW`；Alpha Release Gate Checklist 九项已勾选，等待最终阶段签核。
+M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；全局完成数为 `95/95`。Alpha Release Gate Checklist 九项、精确 CI、commit-bound 独立复审和用户阶段签核均已闭环。
 
 推进规则：
 
@@ -2143,3 +2143,9 @@ M0、M0.5、M1、M2、M3、M4、M5 与 M6 已全部完成；全局完成数为 `
 - 发布产物：正式运行上传 Analysis、OCI、Scale、Reconnect/Durable Chaos 与双架构 Network Chaos 六组候选证据 Artifact，名称均包含精确 Head 与 attempt；各 Runner 在上传前执行发布级 Secret 扫描和 SHA-256 清单校验。OCI Artifact 验证恰好包含 Linux amd64/arm64 的 Server/Agent Layout 与 Manifest 关系，不把内部候选证据描述为已发布 Release。
 - Checklist 与边界：九项 Alpha Release Gate Checklist 均已由精确候选、成功 CI、既有 M0/M7 证据和已批准的 `ALPHA-LIMIT-WIN-REBOOT-001` 覆盖。Windows 运行中 EXE 已验证延迟删除登记，物理重启后的最终删除继续作为 Beta 前必须关闭的已知限制；固定历史候选仍不是正式签名 Release。README 与 `docs/static` 图片不属于本轮变更。
 - 状态影响：M7-10 从 `IN_PROGRESS` 进入 `REVIEW`，等待最终 commit-bound 独立复审和用户明确阶段签核；在签核前不转为 `DONE`。全局 `DONE` 保持 `94/95`，M7 保持 `9/10 IN_PROGRESS`，Alpha Release Gate 自动化结论为 `PASS`。
+
+## 2026-09-03 · M7-10 用户阶段复审 · DONE
+
+- 阶段批准：用户明确回复“`M7-10 阶段复审通过`”，批准对象为候选 Head `7e24cc4a11a231e4ef63f1505ed0ad92064b273a`、[Push CI #33647215011](https://github.com/lifei6671/xtunnel/actions/runs/33647215011)、[Alpha Release Gate #33647228286](https://github.com/lifei6671/xtunnel/actions/runs/33647228286)、证据提交 `a140560aaef827098c1a1de9a6c1b0be622edbb8` 的 [Push CI #33651186233](https://github.com/lifei6671/xtunnel/actions/runs/33651186233)，以及两路 commit-bound 独立复审。三次 CI 均为 `completed / success`，最终两路复审均为 `APPROVED`，P0/P1/P2/P3 为 `0/0/0/0`。
+- 状态影响：M7-10 从 `REVIEW` 转为 `DONE`，M7 从 `9/10 IN_PROGRESS` 更新为 `10/10 DONE`，全局从 `94/95` 更新为 `95/95 DONE`。M0 至 M7 的任务与 Gate 全部闭环，Alpha Release Gate 自动化结论保持 `PASS`。
+- 发布边界：本次批准闭环 Alpha 阶段 Gate，不把固定历史候选描述为正式签名 Release，也不改变 `ALPHA-LIMIT-WIN-REBOOT-001`；Windows 运行中 EXE 物理重启后的最终删除仍需在 Beta 前关闭。README、总技术方案、Proto、OpenAPI、Server Schema、Migration、依赖、CI/CD、部署资产、权限模型和日志契约均无需更新，因为本轮只记录既有证据的用户阶段批准，不改变产品行为或支持矩阵。
