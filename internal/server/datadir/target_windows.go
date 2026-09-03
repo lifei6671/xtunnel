@@ -51,7 +51,7 @@ func (directory *verifiedWindowsDirectory) Close() error {
 // Lock 后由 PinParent 重新打开并核对同一身份；本阶段全部 Handle 在最终父目录
 // canonical path 与身份读取完成后释放。
 func resolve(dataDir string) (Target, error) {
-	cleanPath, leaf, parent, err := validateWindowsDataPath(dataDir)
+	_, leaf, parent, err := validateWindowsDataPath(dataDir)
 	if err != nil {
 		return Target{}, err
 	}
@@ -65,9 +65,6 @@ func resolve(dataDir string) (Target, error) {
 	}
 
 	stablePath := filepath.Join(directory.path, leaf)
-	if !strings.EqualFold(filepath.Clean(cleanPath), filepath.Clean(stablePath)) {
-		return Target{}, fmt.Errorf("server data directory resolved to %q, want input %q", stablePath, dataDir)
-	}
 	hash := stableTargetHash(directory.identity, leaf)
 	return Target{
 		Path:         stablePath,
