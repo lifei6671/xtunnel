@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,28 +16,69 @@ import (
 )
 
 func TestServerExampleCoversSchemaAndLoads(t *testing.T) {
-	data, err := os.ReadFile("server.example.yaml")
-	if err != nil {
-		t.Fatalf("read Server example: %v", err)
-	}
-
-	var example map[string]any
-	if err := yaml.Unmarshal(data, &example); err != nil {
-		t.Fatalf("decode Server example: %v", err)
-	}
-	serverSection, ok := example["server"].(map[string]any)
-	if !ok {
-		t.Fatal("Server example has no server object")
-	}
+	data, example := loadServerExample(t, "server.example.yaml")
+	serverSection := serverExampleSection(t, example)
 	dataDir, ok := serverSection["data_dir"].(string)
 	if !ok || !path.IsAbs(dataDir) {
 		t.Fatalf("Server example server.data_dir = %v, want an absolute Linux path", serverSection["data_dir"])
 	}
+	assertServerExampleCoversSchemaAndLoads(t, data, example, "linux")
+}
 
-	// 示例面向 Linux；Windows 测试宿主使用临时绝对路径覆盖，但先独立验证原始 POSIX 路径。
+func TestWindowsServerExampleCoversSchemaAndLoads(t *testing.T) {
+	data, example := loadServerExample(t, "server.windows.example.yaml")
+	serverSection := serverExampleSection(t, example)
+	const dataDir = `C:\ProgramData\XTunnel\Server\data`
+	if serverSection["data_dir"] != dataDir {
+		t.Fatalf("Windows Server example server.data_dir = %v, want %q", serverSection["data_dir"], dataDir)
+	}
+	for _, requiredText := range []string{
+		"data_dir: 'C:\\ProgramData\\XTunnel\\Server\\data'",
+		"# cert_file: 'C:\\ProgramData\\XTunnel\\Server\\tls\\tunnel.crt'",
+		"# key_file: 'C:\\ProgramData\\XTunnel\\Server\\tls\\tunnel.key'",
+		"不会被程序自动发现",
+		"--config",
+	} {
+		if !strings.Contains(string(data), requiredText) {
+			t.Fatalf("Windows Server example does not contain required guidance %q", requiredText)
+		}
+	}
+	assertServerExampleCoversSchemaAndLoads(t, data, example, "windows")
+}
+
+func loadServerExample(t *testing.T, filename string) ([]byte, map[string]any) {
+	t.Helper()
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatalf("read Server example %q: %v", filename, err)
+	}
+	var example map[string]any
+	if err := yaml.Unmarshal(data, &example); err != nil {
+		t.Fatalf("decode Server example %q: %v", filename, err)
+	}
+	return data, example
+}
+
+func serverExampleSection(t *testing.T, example map[string]any) map[string]any {
+	t.Helper()
+	serverSection, ok := example["server"].(map[string]any)
+	if !ok {
+		t.Fatal("Server example has no server object")
+	}
+	return serverSection
+}
+
+func assertServerExampleCoversSchemaAndLoads(t *testing.T, data []byte, example map[string]any, nativeOS string) {
+	t.Helper()
+	// 两份示例在各自原生平台直接验证路径语义；其他测试宿主以临时绝对路径覆盖。
+	// 两条路径都只验证同一 Schema，不把示例值维护成第二套默认值。
+	var overrides map[string]string
+	if runtime.GOOS != nativeOS {
+		overrides = map[string]string{"server.data_dir": t.TempDir()}
+	}
 	if _, err := serverconfig.Load(baseconfig.Options{
 		YAML: data,
-		CLI:  map[string]string{"server.data_dir": t.TempDir()},
+		CLI:  overrides,
 	}); err != nil {
 		t.Fatalf("load Server example: %v", err)
 	}

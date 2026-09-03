@@ -8584,3 +8584,180 @@ WebSocket
 ```
 
 它不再是一个简单内网穿透 POC，而是一个可以长期运行、能够作为后续 XTunnel Cluster 和 Platform 基础的 **Standalone Reverse Tunnel Platform**。
+
+---
+
+# 191. Post-Alpha M8：Windows Server 支持冻结契约
+
+本章是 Alpha Gate 完成后的新增范围，不追溯修改第 145 节冻结的 V0.1 Alpha
+支持矩阵，也不把 M0-09、M7-09 或 M7-10 的既有 Linux Server / Windows Agent
+证据扩大为 Windows Server 证据。M8 的目标平台是 Windows amd64 与 Windows arm64；
+在 M8-06 完整 Gate、commit-bound 独立复审和用户阶段签核完成前，Windows Server
+始终属于实施中能力，不得在发布物或用户文档中宣称为受支持平台。
+
+M8 不引入 Windows Container。Server/Agent OCI Layout 与 Manifest 继续只包含
+`linux/amd64`、`linux/arm64`，Windows 交付面只包含原生 PE Binary、SCM 服务与对应
+验证证据。
+
+## 191.1 服务身份与固定路径
+
+Windows Server 服务名与 Application Event Log Source 固定为 `XTunnelServer`，
+Display Name 固定为 `XTunnel Server`，受管 Description Marker 固定为
+`Managed by xtunnel-server service install`。服务登录账户固定为
+`NT AUTHORITY\LocalService`，安装器必须启用并使用 `NT SERVICE\XTunnelServer`
+Service SID 作为文件授权主体；不得把宽泛的 LocalService、Users 或
+Authenticated Users 权限当作 Service SID 隔离的替代。
+
+SCM 自安装固定使用以下已展开绝对路径：
+
+```text
+Binary:  %ProgramFiles%\XTunnel\xtunnel-server.exe
+Config:  %ProgramData%\XTunnel\server.yaml
+Data:    %ProgramData%\XTunnel\Server\data
+Runtime: %ProgramData%\XTunnel\Server\runtime
+```
+
+`service install --config PATH` 的 `PATH` 只是一次性安装源。安装器必须在任何持久化
+变更前完成配置 Strict Decode、跨字段校验与 Windows 平台路径校验，再把配置原子发布到
+固定 Config 路径。受管配置中的 `server.data_dir` 必须精确解析到固定 Data 路径；SCM
+ImagePath 只包含已展开并正确引用的 Binary 与 Config 路径，不得包含密码、Token、Private
+Key 或其他 Secret。Server 继续不增加 `run` 子命令。
+
+ProgramFiles 下的受管 Binary 使用关闭继承的 Protected DACL：SYSTEM 与 Administrators
+获得 Full Control，Service SID 只获得 Read & Execute。ProgramData 下的对象也必须关闭
+继承并使用以下精确矩阵：Config 只向 SYSTEM 与 Administrators 授予 Full Control，向
+`NT SERVICE\XTunnelServer` 授予 Read；Data、Runtime 及其受管子对象向 SYSTEM 与
+Administrators 授予 Full Control，向 Service SID 授予 Modify。这里的 Modify 不包含
+更改 DACL 或 owner；不得用 Full Control、宽泛 LocalService 权限或模糊的“运行所需权限”
+替代该矩阵。安装器必须拒绝 ACL、owner、对象类型或 Reparse Point 不满足契约的既有目标，
+不得通过追加一个 ACE 接管未知对象。
+
+`public` TLS 的 `cert_file` 与 `key_file` 是 operator-owned 外部对象，不复制到受管 Data，
+也不由安装器改写其 owner 或 DACL。两者必须是本机固定卷上的绝对普通文件，路径分量与
+最终对象均不得是 Reparse Point、设备路径或 Alternate Data Stream；Server 在启动时通过
+禁止跟随 Reparse Point 的 Handle 复核 Volume/File Identity。Service SID 必须具备读取
+证书与私钥的权限；证书可以向普通用户开放读取，但普通用户与其他非授权服务身份不得
+具备写入、删除或更改 DACL/owner 的有效权限，私钥还不得向这些主体开放读取。上述限制
+必须同时考虑文件与父目录授予的有效权限。证书管理器自身的受限维护身份可以保留必要权限。
+安装、升级与每次启动只验证这些条件，不得为通过
+检查而放宽或接管外部证书管理器维护的 ACL；任一条件无法证明时必须快速失败。
+
+## 191.2 Stable Target、External Lock 与 Windows 文件身份
+
+Windows `server.data_dir` 必须是本机固定卷上的绝对路径。UNC、设备命名空间、Alternate
+Data Stream、跨卷 Restore，以及路径任一分量为 Symlink、Junction、Mount Point 或其他
+Reparse Point 的输入全部拒绝。路径比较使用 Windows 大小写不敏感语义；只比较路径字符串
+不能证明对象身份。
+
+Stable Target 在不打开正式 leaf 的前提下，由已打开 Canonical Parent 的 Volume Identity、
+File Identity 与规范化 leaf name 派生。External Lock 继续位于 Data Target 之外的固定
+Runtime 目录，以 Stable Target Hash 命名；实现必须使用 crash-safe 的独占 Windows Handle，
+第二进程无等待快速失败，进程退出或崩溃后由内核释放 Handle，锁对象本身可以保留复用。
+
+Server、`admin create`、Gateway Rotation、Backup 与 Restore 必须先取得同一 Stable Target
+External Lock，再读取 Restore Journal、打开 SQLite、加载或生成 Token Master Key / Gateway
+Private Key、创建 Named Pipe 或绑定任何 Listener。锁持有到 Listener、Session、Named Pipe、
+SQLite 与持久化资源全部逆序关闭之后；不得使用仅限当前进程的内存锁或名称不绑定 Stable
+Target 的全局 Mutex 降级。
+
+所有安全文件在路径检查后都必须通过禁止跟随 Reparse Point 的 Handle 重新打开，并比较
+Volume/File Identity，避免检查与使用之间被替换。不存在等价 Windows 安全语义时必须快速
+失败，不得沿用非 Linux 占位实现中“权限总是有效”或目录同步空操作的行为。
+
+## 191.3 DACL、密钥耐久发布与 Restore Recovery
+
+受管 Pinned Gateway Private Key、Tunnel Token Master Key、SQLite、Restore Journal、Backup
+临时文件和最终 Archive 必须继承或显式取得上述 Protected DACL。受管密钥与 Journal 的发布顺序固定
+为：在同目录创建不可预测临时普通文件、写入完整内容、`FlushFileBuffers`、验证 DACL 与文件
+身份、使用带 Replace Existing 与 Write Through 语义的同卷原子替换、重新打开并复核最终
+对象。任一阶段失败都删除仍由本进程拥有的临时候选并保留旧正式文件；不得先截断正式文件，
+也不得静默回退为无持久化屏障的普通写入。
+
+`public` TLS 外部证书与私钥不进入上述受管发布流程；它们始终遵循第 191.1 节的
+operator-owned 验证边界。Server 不得替外部证书管理器原子替换、修复权限或删除文件，
+但必须在每次打开时验证 DACL、owner、对象类型、Reparse 状态及 Volume/File Identity。
+
+Windows Restore 继续使用与 Linux 相同的 versioned Manifest、`prepared → rollback_ready →
+installed` Journal 状态机和“未证明新 target 有效时优先回滚”原则。staging、target 与 rollback
+必须位于同一支持原子目录改名和持久化屏障的本地卷；目录切换、Journal 更新及清理均须在
+External Lock 内完成。恢复过程逐层拒绝 Reparse Point、特殊对象、跨卷对象和身份漂移，
+崩溃后下次 Server 或 Restore 命令必须在打开 SQLite 前完成确定性前向收敛或回滚。无法证明
+状态组合时保留现场并快速失败，不允许使用递归跟随链接的通用删除或复制覆盖作为回退。
+
+Backup/Restore 的内容白名单、Manifest Hash、Schema/TLS 模式校验、Backup Barrier、ACK 前
+最终路径不可见、Token Master Key 的 Secret 保护和安全审计语义与既有 Server 契约相同；
+Windows 支持不得删减维护命令形成第二套“仅可运行、不可恢复”的 Server 产品面。
+
+## 191.4 Admin Bootstrap 与 Backup Barrier Named Pipe
+
+Windows 以两个按 Stable Target Hash 隔离的本机 Named Pipe 替代 Unix Domain Socket：
+
+```text
+\\.\pipe\XTunnelServer-admin-<stable-target-hash>
+\\.\pipe\XTunnelServer-backup-<stable-target-hash>
+```
+
+Pipe 必须使用关闭继承的 Protected Security Descriptor，只允许 SYSTEM、Administrators 与
+`NT SERVICE\XTunnelServer`。Server 端通过客户端 Token Impersonation 验证调用方属于提升的
+Administrators；客户端必须把 Pipe Server PID/Token 绑定到当前受管 `XTunnelServer` 服务或
+明确的前台 Server 进程。身份无法取得、对象被替换、Hash/版本不匹配或消息超限时拒绝请求，
+不得回退到 Loopback TCP、匿名 Pipe 或仅依赖路径保密。
+
+Admin Pipe 继续只允许事务创建首个管理员，并在成功创建或运行时失败后关闭。Backup Pipe
+继续使用有版本、有界、绑定 Stable Target Hash 的 Acquire/Release 协议；每个 Lease 归单一
+连接所有，连接断开、Server Shutdown、Context 取消或协议错误必须 exactly-once 释放 Barrier，
+最终 Archive 只有在 Release ACK 成功后才能发布。两个 Pipe owner 都必须有明确停止条件、
+主动解阻塞方式和等待退出路径。
+
+## 191.5 `XTunnelServer` SCM 安装、升级、回滚与卸载
+
+安装前置检查必须在写文件、创建 Event Source 或修改 SCM 前验证 Administrator、Windows
+amd64/arm64、SCM、受支持本地卷、固定路径对象类型、Protected DACL 和同名 Service/Event
+Source 的受管 Marker。任一同名对象缺少精确 Marker、关键配置被人工修改或身份不匹配时，
+拒绝覆盖与删除。
+
+SCM ImagePath 使用已展开路径，语义等价于：
+
+```text
+"%ProgramFiles%\XTunnel\xtunnel-server.exe" --config "%ProgramData%\XTunnel\server.yaml"
+```
+
+Binary 在 SCM 上下文必须先进入 Windows Service Dispatcher，再以 SCM Stop/Shutdown 派生的
+Context 运行既有 Server 生命周期。Application Event Log 使用唯一 `XTunnelServer` Source，
+共享 JSON Handler 的稳定字段与 Secret 脱敏规则不变；Source 缺失、被修改或写入失败必须让
+服务失败，不得回退为 SCM 中不可检索的 stderr。运行回调异常返回非零 Service Exit，并配置
+有界 non-crash recovery；Stop/Shutdown 先停止新入口并排空，30 秒上界后主动 Force Close
+残留 Socket/Named Pipe，再等待 owner 收敛。
+
+安装和升级必须把旧 Binary、Config、Service/Event Source 配置与原运行状态作为单一回滚
+单元。新 Binary、Config 与 DACL 全部发布并验证后才能更新 SCM；启动与 Running 验证失败时
+恢复原文件、SCM 配置和先前启停状态。重复安装必须重启服务使新 Binary/Config 生效，且不能
+留下部分升级。运行中 EXE 的替换与自卸载继续使用 Windows Replace Existing、Write Through
+和必要的 `DELAY_UNTIL_REBOOT` 语义，并以精确注册表记录验证调度结果。
+
+`service uninstall` 只删除确认受管的 SCM Service、Event Source 与 Binary，保留 Config、
+Data 及其 Protected DACL；Runtime 只清理本次受管服务确认拥有且已经停止使用的瞬态对象。
+重新安装同名 `XTunnelServer` 后必须恢复同一 Service SID 的访问能力；卸载不得为了清理未知
+对象而放宽 ACL、递归跟随 Reparse Point 或删除用户数据。
+
+## 191.6 原生运行、发布产物与完成 Gate
+
+Windows Server 完成证据必须绑定同一候选 Commit，并至少包含：
+
+1. Windows amd64 与 Windows arm64 原生 Runner 上的固定 Go 1.27 工具链检查、Server 全包
+   Test/Vet、Binary 构建与真实进程执行；交叉编译只能作为补充。
+2. 两个架构的前台启动、首个 Admin、Management/HTTP/WebSocket/TCP/Agent Gateway 数据面、
+   第二进程抢锁、重启恢复、Graceful Shutdown、FD/Handle/goroutine 收敛。
+3. DACL、Reparse Point、文件身份竞态、密钥发布、Restore Journal 每个持久化边界的失败注入，
+   以及 Backup→Migration→Restore→Agent Token-only Reconnect。
+4. 提升权限的真实 SCM 安装、候选到当前版本升级、失败回滚、恢复重启、Stop/Shutdown、
+   Event Log、非受管对象拒绝、自卸载和延迟删除收敛。
+5. 候选 Artifact 中存在 `xtunnel-server-windows-amd64.exe` 与
+   `xtunnel-server-windows-arm64.exe`，版本、PE 架构、SHA-256 与 Secret 扫描全部通过；
+   Linux OCI 仍精确限制为两个 Linux 平台。
+6. 干净 checkout 的完整 CI 和 Windows Server Release 聚合 Job 成功，commit-bound 独立复审
+   无 P0/P1，发布/配置/运维文档同步，并取得用户明确阶段签核。
+
+M8-01 至 M8-05 的局部实现、编译、单元测试、交叉构建或单架构 Smoke 均不能单独改变支持
+矩阵。只有 M8-06 全部完成后，后续用户可见发布材料才可把 Server 当前平台扩展为 Windows
+amd64/arm64。

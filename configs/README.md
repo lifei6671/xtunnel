@@ -6,16 +6,39 @@
 
 ## Server
 
-从完整示例开始：
+Linux 与 Windows 示例都完整覆盖当前 pinned TLS 模式可同时生效的全部 Schema 字段：
 
 ```sh
 cp configs/server.example.yaml server.yaml
 ```
 
+```powershell
+Copy-Item .\configs\server.windows.example.yaml .\server.windows.yaml
+```
+
+- `server.example.yaml`：Linux systemd、OCI 或前台运行示例。
+- `server.windows.example.yaml`：Windows 原生路径与安全边界示例。
+
+Windows 示例不会改变 `server.schema.json` 中面向现有 Linux 部署的默认值，也不会被
+Server 自动发现。Windows 的配置加载及后续原生运行必须显式传入配置文件：
+
+```powershell
+.\xtunnel-server.exe --config .\server.windows.yaml
+```
+
+受管 Windows 部署中，`XTunnelServer` Service SID 对配置文件只有读取权限；SYSTEM 与
+Administrators 保留完全控制。Data/Runtime 目录对 Service SID 授予 Modify，但不允许其
+更改 DACL 或 owner。不要用 LocalService 组权限或 Config 可写权限替代这组精确边界。
+
+在 M8-06 的 Windows 原生运行与发布验证完成前，该文件只代表构建和配置契约基线，
+不代表 Windows Server 已进入正式支持矩阵。
+
 至少需要替换：
 
 - `management.public_url`：浏览器实际访问的 HTTPS Origin。
 - `agent_gateway.public_hostname`：Agent 可从公网连接的 Gateway 主机名。
+- Windows 部署还应确认 `server.data_dir` 使用带盘符的绝对路径，并为运行 Server 的
+  身份配置受限 ACL。
 
 若手工前台运行，还需要预先创建 `server.data_dir`。Linux systemd 自安装会创建
 默认的 `/var/lib/xtunnel/data`：
@@ -72,9 +95,23 @@ agent_gateway:
     key_file: /etc/xtunnel/tls/tunnel.key
 ```
 
+Windows 路径应使用单引号保留反斜杠；下面仍然只是路径，不包含证书或私钥内容：
+
+```yaml
+agent_gateway:
+  tls:
+    mode: public
+    cert_file: 'C:\ProgramData\XTunnel\Server\tls\tunnel.crt'
+    key_file: 'C:\ProgramData\XTunnel\Server\tls\tunnel.key'
+```
+
 `pinned` 模式禁止出现 `cert_file` 和 `key_file`。路径本身不是 Secret，但私钥内容是
-Secret；不要把证书私钥写进 YAML、Git、日志或备份说明。Linux 会精确要求
-`key_file` 的权限为 `0600`，其他权限（包括 `0400`、`0640`）都会让 Server 启动失败：
+Secret；不要把证书私钥写进 YAML、Git、日志或备份说明。Windows 外部私钥必须位于
+本机固定卷的普通文件中，拒绝 Reparse Point，并允许 `NT SERVICE\XTunnelServer` 读取；
+证书可以向普通用户开放读取，但文件和父目录不得向普通用户或其他非授权服务开放写入、
+删除或更改 DACL/owner，私钥还不得向这些主体开放读取。Server 只验证 operator-owned 文件的 owner、
+DACL 与文件身份，不会改写证书管理器维护的 ACL。Linux 会精确要求 `key_file` 的权限为
+`0600`，其他权限（包括 `0400`、`0640`）都会让 Server 启动失败：
 
 ```sh
 chmod 600 /etc/xtunnel/tls/tunnel.key

@@ -470,17 +470,62 @@ jobs:
           check-latest: false
           cache: false
 
-      - name: Verify fixed Go toolchain
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Verify fixed toolchains
         shell: powershell
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
+          $runnerArchitecture = '${{ runner.arch }}'
+          $runtimeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          if ($runnerArchitecture -ne 'X64') {
+            throw "GitHub runner architecture must be X64, got $runnerArchitecture"
+          }
+          if ($runtimeArchitecture -ne 'X64') {
+            throw "Windows runner architecture must be X64, got $runtimeArchitecture"
+          }
+          if ((go env GOOS) -ne 'windows') {
+            throw 'Go target OS must be windows'
+          }
+          if ((go env GOHOSTARCH) -ne 'amd64') {
+            throw 'Go host architecture must be amd64'
+          }
+          if ((go env GOARCH) -ne 'amd64') {
+            throw 'Go target architecture must be amd64'
+          }
           if ((go env GOVERSION) -ne 'go1.27.0') {
             throw 'Go version must be go1.27.0'
           }
           if ((go env GOTOOLCHAIN) -ne 'local') {
             throw 'GOTOOLCHAIN must be local'
           }
+          if ((node --version) -ne 'v24.19.0') {
+            throw 'Node version must be v24.19.0'
+          }
+          if ((npm --version) -ne '11.17.0') {
+            throw 'npm version must be 11.17.0'
+          }
+          ./tools/check-go-version.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Go version check failed' }
+
+      - name: Build the embedded web assets
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          npm --prefix web ci
+          if ($LASTEXITCODE -ne 0) { throw 'web npm ci failed' }
+          npm --prefix web run check
+          if ($LASTEXITCODE -ne 0) { throw 'web check failed' }
+          npm --prefix web run build
+          if ($LASTEXITCODE -ne 0) { throw 'web build failed' }
 
       - name: Test Go modules and build Agent
         shell: powershell
@@ -504,7 +549,44 @@ jobs:
           go build -trimpath -o $gateHelperPath ./tests/windows-scm-gate
           if ($LASTEXITCODE -ne 0) { throw 'Windows SCM Gate Helper build failed' }
 
-      - name: Cross-build Windows arm64 Agent
+      - name: Test vet and build Windows amd64 Server baseline
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $serverPackages = @(
+            './configs'
+            './internal/server/config'
+            './internal/server/datadir'
+            './internal/server/durableops'
+            './internal/server/limits'
+            './internal/server/service'
+            './internal/server/bootstrap'
+            './cmd/server'
+          )
+          go test -count=1 -timeout 180s @serverPackages
+          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server baseline tests failed' }
+          go vet @serverPackages
+          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server baseline vet failed' }
+
+          $serverPath = Join-Path $env:RUNNER_TEMP 'xtunnel-server.exe'
+          $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"
+          $ldflags = "-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$buildVersion"
+          go build -trimpath -ldflags $ldflags -o $serverPath ./cmd/server
+          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server build failed' }
+
+          $serverHelp = & $serverPath --help 2>&1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server help failed' }
+          if (($serverHelp -join "`n") -notmatch 'run and maintain XTunnel Server') {
+            throw 'Windows amd64 Server help output is incomplete'
+          }
+          $serverToolchain = go version $serverPath
+          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server toolchain readback failed' }
+          if (($serverToolchain -join "`n") -notmatch 'go1\.27\.0') {
+            throw 'Windows amd64 Server toolchain readback must contain go1.27.0'
+          }
+
+      - name: Cross-build Windows arm64 Agent and Server
         shell: powershell
         run: |
           Set-StrictMode -Version Latest
@@ -516,6 +598,7 @@ jobs:
           $bootstrapTest = Join-Path $env:RUNNER_TEMP 'agent-bootstrap-arm64.test.exe'
           $serviceTest = Join-Path $env:RUNNER_TEMP 'agent-service-arm64.test.exe'
           $gateHelperPath = Join-Path $env:RUNNER_TEMP 'xtunnel-scm-gate-helper-arm64.exe'
+          $serverPath = Join-Path $env:RUNNER_TEMP 'xtunnel-server-arm64.exe'
           $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"
           $ldflags = "-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$buildVersion"
           go build -trimpath -ldflags $ldflags -o $agentPath ./cmd/agent
@@ -526,6 +609,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 service test compile failed' }
           go build -trimpath -o $gateHelperPath ./tests/windows-scm-gate
           if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 SCM Gate Helper build failed' }
+          go build -trimpath -ldflags $ldflags -o $serverPath ./cmd/server
+          if ($LASTEXITCODE -ne 0) { throw 'Windows arm64 Server build failed' }
+
+          $serverTestPackages = @(
+            @{ Package = './configs'; Output = 'server-config-example-arm64.test.exe' }
+            @{ Package = './internal/server/config'; Output = 'server-config-arm64.test.exe' }
+            @{ Package = './internal/server/datadir'; Output = 'server-datadir-arm64.test.exe' }
+            @{ Package = './internal/server/durableops'; Output = 'server-durableops-arm64.test.exe' }
+            @{ Package = './internal/server/limits'; Output = 'server-limits-arm64.test.exe' }
+            @{ Package = './internal/server/service'; Output = 'server-service-arm64.test.exe' }
+            @{ Package = './internal/server/bootstrap'; Output = 'server-bootstrap-arm64.test.exe' }
+          )
+          foreach ($serverTestPackage in $serverTestPackages) {
+            $testPath = Join-Path $env:RUNNER_TEMP $serverTestPackage.Output
+            go test -c -o $testPath $serverTestPackage.Package
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows arm64 test compile failed for $($serverTestPackage.Package)"
+            }
+          }
 
       - name: Run Windows M6 Stop timeout diagnostic unit gate
         shell: powershell
@@ -601,6 +703,14 @@ jobs:
           check-latest: false
           cache: false
 
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       - name: Verify native arm64 runner and fixed Go toolchain
         shell: powershell
         run: |
@@ -632,7 +742,26 @@ jobs:
           if ((go env CGO_ENABLED) -ne '0') {
             throw 'CGO_ENABLED must be 0'
           }
+          if ((node --version) -ne 'v24.19.0') {
+            throw 'Node version must be v24.19.0'
+          }
+          if ((npm --version) -ne '11.17.0') {
+            throw 'npm version must be 11.17.0'
+          }
           ./tools/check-go-version.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Go version check failed' }
+
+      - name: Build the embedded web assets
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          npm --prefix web ci
+          if ($LASTEXITCODE -ne 0) { throw 'web npm ci failed' }
+          npm --prefix web run check
+          if ($LASTEXITCODE -ne 0) { throw 'web check failed' }
+          npm --prefix web run build
+          if ($LASTEXITCODE -ne 0) { throw 'web build failed' }
 
       - name: Run native arm64 Bootstrap and DPAPI contract tests
         shell: powershell
@@ -649,6 +778,31 @@ jobs:
           go test -v -count=1 -timeout 60s ./internal/agent/service `
             -run '^(TestWindowsDPAPIRoundTrip|TestLoadWindowsCredentialFile|TestResolveWindowsServiceTokenPrecedence)$'
           if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 DPAPI contract tests failed' }
+
+      - name: Build and read Windows arm64 Server baseline
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          go test -count=1 -timeout 180s ./configs
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 Server config example tests failed' }
+
+          $serverPath = Join-Path $env:RUNNER_TEMP 'xtunnel-server-arm64.exe'
+          $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"
+          $ldflags = "-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$buildVersion"
+          go build -trimpath -ldflags $ldflags -o $serverPath ./cmd/server
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 Server build failed' }
+
+          $serverHelp = & $serverPath --help 2>&1
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 Server help failed' }
+          if (($serverHelp -join "`n") -notmatch 'run and maintain XTunnel Server') {
+            throw 'native Windows arm64 Server help output is incomplete'
+          }
+          $serverToolchain = go version $serverPath
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 Server toolchain readback failed' }
+          if (($serverToolchain -join "`n") -notmatch 'go1\.27\.0') {
+            throw 'native Windows arm64 Server toolchain readback must contain go1.27.0'
+          }
 
       - name: Run native arm64 Agent SCM Token Bootstrap and Shutdown smoke
         shell: powershell
