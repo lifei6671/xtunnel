@@ -10,7 +10,9 @@
 
 server:
   # 持久化数据目录。Windows 必须显式填写带盘符的绝对路径，并使用单引号保留
-  # 反斜杠。启动前应创建目录，并只向运行 Server 的身份和管理员授予访问权限。
+  # 反斜杠。启动前应创建目录，并设置 Protected DACL：SYSTEM、Administrators
+  # 具有 Full Control，服务 SID NT SERVICE\XTunnelServer 具有 Modify；不得用
+  # LocalService 主体或宽泛用户组替代服务 SID。
   # SQLite、Token 主密钥和 pinned PKI 都位于这个安全边界内。
   data_dir: 'C:\ProgramData\XTunnel\Server\data'
 
