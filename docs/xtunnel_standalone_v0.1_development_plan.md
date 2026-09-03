@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-03
 >
-> **当前阶段**：Post-Alpha M8 Windows Server · IN_PROGRESS（M8-01 · IN_PROGRESS）
+> **当前阶段**：Post-Alpha M8 Windows Server · REVIEW（M8-01 · REVIEW）
 >
-> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 新增 6 项 Windows Server 任务，当前完成数为 `95/101`，M8 为 `0/6 IN_PROGRESS`；只有 M8-01 已进入 `IN_PROGRESS`，M8-02 至 M8-06 均为 `NOT_STARTED`。M8-06 完整 Gate 与用户阶段签核完成前，不得把 Windows Server 宣称为受支持平台。
+> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 新增 6 项 Windows Server 任务，当前完成数为 `95/101`，M8 为 `0/6 REVIEW`；M8-01 的实现提交 `b99d49fcc9dcfb57bba48e57b2c51311f3b62922`、CI 修复提交 `856e3418a3b30fab6496c3273af31872f1b082a4`、[Push CI #33706041140](https://github.com/lifei6671/xtunnel/actions/runs/33706041140) 与独立复审已通过，现等待用户阶段复审；M8-02 至 M8-06 均为 `NOT_STARTED`。M8-06 完整 Gate 与用户阶段签核完成前，不得把 Windows Server 宣称为受支持平台。
 
 ---
 
@@ -115,7 +115,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 7 | `DONE` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 10 | `DONE` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| M8 Windows Server | 6 | 0 | `IN_PROGRESS` | M7-10 | M8-06 |
+| M8 Windows Server | 6 | 0 | `REVIEW` | M7-10 | M8-06 |
 | **合计** | **101** | **95** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
@@ -432,7 +432,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M8-01 | Windows Server 契约、配置示例与双架构构建基线 | M7-10 | Post-Alpha Windows Server 契约、Windows Server 配置示例、Windows amd64/arm64 Build Floor | 冻结 `XTunnelServer`、LocalService + Service SID、ProgramFiles/ProgramData 固定路径及精确 Protected DACL（Config 对 Service SID 只读，Data/Runtime 为 Modify）、SCM/Named Pipe/External Lock/Restore/Release Gate；配置示例由 Server Schema 在 Windows 原生加载且不建立第二套默认值；Windows amd64/arm64 Server Binary、测试二进制与 CLI 契约可构建，原生 CLI 读回与精确 CI 只证明构建基线，不提前宣称运行支持 | `IN_PROGRESS` |
+| M8-01 | Windows Server 契约、配置示例与双架构构建基线 | M7-10 | Post-Alpha Windows Server 契约、Windows Server 配置示例、Windows amd64/arm64 Build Floor | 冻结 `XTunnelServer`、LocalService + Service SID、ProgramFiles/ProgramData 固定路径及精确 Protected DACL（Config 对 Service SID 只读，Data/Runtime 为 Modify）、SCM/Named Pipe/External Lock/Restore/Release Gate；配置示例由 Server Schema 在 Windows 原生加载且不建立第二套默认值；Windows amd64/arm64 Server Binary、测试二进制与 CLI 契约可构建，原生 CLI 读回与精确 CI 只证明构建基线，不提前宣称运行支持 | `REVIEW` |
 | M8-02 | Stable Target、External Lock 与 Windows 文件身份 | M8-01 | Windows Data Target Resolver、External Lock、文件身份与 Reparse Point 防线 | 绝对本地路径、Volume/File Identity、大小写不敏感 leaf 规范化；Runtime 目录中的 Stable Target Hash 锁在 SQLite/Journal/Key/Listener 前取得并持有到最终关闭；第二进程无等待失败；UNC/设备路径/ADS/跨卷/Reparse Point/身份替换全部拒绝；Windows amd64/arm64 原生竞态和崩溃释放测试 | `NOT_STARTED` |
 | M8-03 | DACL、密钥耐久发布与 Restore Recovery | M8-02 | Protected DACL、Windows Durable File Publisher、Restore/Recovery 平台实现 | SYSTEM/Administrators/`NT SERVICE\XTunnelServer` 最小权限；受管 Pinned Private Key、Token Master Key、SQLite、Journal、Backup 全部防 Reparse Point并耐久发布；operator-owned Public TLS Cert/Key 验证本地普通文件、owner、DACL、Service SID 只读、文件与父目录均禁非授权写入/删除/更改 DACL 或 owner，私钥另禁非授权读取，并复核 Volume/File Identity，且不接管外部证书管理器 ACL；临时写入→Flush→同卷 Replace+Write Through→重开复核；Restore 三阶段 Journal、崩溃矩阵、回滚优先、跨卷与未知状态拒绝；不得回退为权限恒真、目录同步空操作或跟随链接删除 | `NOT_STARTED` |
 | M8-04 | Admin Bootstrap 与 Backup Barrier Named Pipe | M8-03 | Windows Admin/Backup Named Pipe 与本机授权测试 | Pipe 名绑定 Stable Target Hash；Protected Security Descriptor；Server 验证提升的 Administrator Client，Client 验证受管 Server PID/Token；协议版本、消息上限、Hash 绑定与无 Loopback TCP 回退；首个 Admin exactly-once，Backup Lease 在断连/取消/Shutdown 后 exactly-once 释放并保持 Release ACK 前 Archive 不可见 | `NOT_STARTED` |
@@ -456,7 +456,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 当前 `M0-01` 至 `M0-12`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07`、`M7-01` 至 `M7-10` 已全部完成。Post-Alpha M8 当前队列为：
 
-1. `M8-01` — `IN_PROGRESS`。用户已批准六阶段范围，Windows Server 契约、配置示例和双架构构建基线正在实施；尚无已验证的 commit-bound CI 或运行证据。
+1. `M8-01` — `REVIEW`。Windows Server 契约、完整配置示例、Schema 同步测试与 Windows amd64/arm64 Build Floor 已提交；最终 [Push CI #33706041140](https://github.com/lifei6671/xtunnel/actions/runs/33706041140) 的六个正式 Job 全部成功，独立交付复审与 CI 修复复审均为 `APPROVED`、P0/P1/P2/P3=`0/0/0/0`。当前等待用户阶段复审，不把构建基线扩大为 Windows Server 运行支持。
 2. `M8-02` — `NOT_STARTED`，等待 M8-01 完成。
 3. `M8-03` — `NOT_STARTED`，等待 M8-02 完成。
 4. `M8-04` — `NOT_STARTED`，等待 M8-03 完成。
@@ -476,7 +476,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 9. `M7-09` — `DONE`。Head `8f11f2a5d0118859ee7e0398b96517dd0be2a96d`、精确 CI `#33612503805`、状态同步 Head `cb3209d0bbb3debfa263c2bad226150a090318f5` 的精确 CI `#33615267877`、commit-bound Tier 3 复审与用户阶段批准已闭环 Linux amd64/arm64 Binary/OCI/systemd、Windows Agent amd64/arm64 Binary/SCM、Backup→Migration→Restore→Token-only Reconnect 及安全失败边界矩阵。
 10. `M7-10` — `DONE`。候选 Head `7e24cc4a11a231e4ef63f1505ed0ad92064b273a` 的普通 CI 与 Alpha Release Gate、证据提交 `a140560aaef827098c1a1de9a6c1b0be622edbb8` 的精确 CI、Checklist 九项、两路 commit-bound 独立复审与用户阶段签核均已闭环。
 
-M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数保持 95，加入 M8 后全局完成数为 `95/101`，M8 为 `0/6 IN_PROGRESS`。既有 Alpha Release Gate Checklist、精确 CI、commit-bound 独立复审和用户阶段签核均已闭环，但不覆盖 Windows Server；M8 Windows Server Release Gate 八项保持未勾选。
+M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数保持 95，加入 M8 后全局完成数为 `95/101`，M8 为 `0/6 REVIEW`。既有 Alpha Release Gate Checklist、精确 CI、commit-bound 独立复审和用户阶段签核均已闭环，但不覆盖 Windows Server；M8 Windows Server Release Gate 八项保持未勾选。
 
 推进规则：
 
@@ -2196,3 +2196,11 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 契约分区：本轮把 Post-Alpha Windows Server 契约追加到总技术方案，并在计划中建立独立 M8 任务与未勾选 Gate。既有 V0.1 Alpha 支持矩阵、M0-09、M7-09、M7-10 的 `DONE` 状态和精确证据保持历史原义，不向 Windows Server 扩大。
 - 状态影响：全局任务总数从 95 增加到 101，`DONE` 保持 95；M8 为 `0/6 IN_PROGRESS`，只有 M8-01 进入 `IN_PROGRESS`，M8-02 至 M8-06 保持 `NOT_STARTED`。当前尚无已验证或 commit-bound 的 Windows Server 配置示例、双架构构建、原生运行、SCM 或 Release Gate 通过证据，本次未勾选任何产品任务或 Gate。
 - 发布边界：M8-06 的同一候选 Commit 完整 CI、双架构原生证据、发布产物、commit-bound 独立复审和用户阶段签核全部完成前，不得宣称 Windows Server 受支持。README、`docs/static` 图片、Proto、OpenAPI、Server Schema、Migration、依赖、CI/CD、部署资产、权限模型和日志契约不属于本轮文档分区改动。
+
+## 2026-09-03 · M8-01 Windows Server 契约、配置示例与双架构构建基线 · REVIEW
+
+- 提交与产物：实现提交 `b99d49fcc9dcfb57bba48e57b2c51311f3b62922` 新增 Windows Server 完整配置示例、Schema 同步测试、Post-Alpha M8 冻结契约和 Windows amd64/arm64 CI Build Floor；CI 修复提交 `856e3418a3b30fab6496c3273af31872f1b082a4` 将 M8-02 才验收的 Data Target Runtime 测试保持为双架构编译证据，并让 Windows PowerShell 在保留退出码检查的前提下读取 CLI stderr 帮助输出。
+- 精确 CI：实现提交的 [Push CI #33704844143](https://github.com/lifei6671/xtunnel/actions/runs/33704844143) 暴露上述两个 Build Floor 边界并返回失败；修复提交的 [Push CI #33706041140](https://github.com/lifei6671/xtunnel/actions/runs/33706041140) 为 `completed / success`。最终 Run 的 Windows amd64/arm64 Server 配置加载、Test/Vet/测试二进制编译、Binary 构建、CLI 帮助与 Go 1.27.0 工具链读回通过，两个 Linux Verify 与两个特权 Chaos Job 也全部成功；Alpha Release-only Job 在普通 Push 按设计跳过。
+- 复审：六文件分区复审与最终集成复审均完成；修复后的 `.github/workflows/ci.yml` 由独立 `CHILD_AGENT` 重新审查，Verdict=`APPROVED`、Review Gate=`PASSED`、Coverage=`COMPLETE`、Freshness=`FRESH`、P0/P1/P2/P3=`0/0/0/0`。Windows Public TLS operator-owned Cert/Key 的文件身份与权限边界、Binary/Config/Data/Runtime 精确 DACL，以及 M8-01/M8-02/M8-06 证据隔离均已复核。
+- 状态影响：M8-01 从 `IN_PROGRESS` 进入 `REVIEW`，全局 `DONE` 保持 `95/101`，M8 为 `0/6 REVIEW`；M8-02 至 M8-06 保持 `NOT_STARTED`，M8 Release Gate 八项保持未勾选。本次未勾选任何产品任务，等待用户明确阶段复审后再决定是否转为 `DONE` 并解锁 M8-02。
+- 文档同步：只更新开发计划的当前阶段、任务状态与精确证据。根 README、总技术方案、配置示例、Schema、Proto、OpenAPI、Migration、依赖、生产部署资产、权限实现、日志契约和 `docs/static` 图片无需再次修改，因为本轮只回写已提交的构建基线证据，没有新增用户可见运行支持。
