@@ -288,8 +288,6 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 		})
 		initialized = true
 	}
-	runCLI(t, audit, server, "create first admin", []string{"admin", "create", "--config", configPath, "--username", "gate-admin", "--password-file", passwordPath}, true)
-	must(t, os.Remove(passwordPath), "remove password file")
 	start := func() {
 		if mode == "scm" {
 			must(t, service.Start(), "SCM start")
@@ -308,8 +306,19 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 			foreground = nil
 		}
 	}
-	start()
 	api := newManagement(t, ports[0], audit)
+	if mode == "foreground" {
+		// 首次数据库与 pinned 身份必须由同一次正式启动建立；离线 admin create
+		// 只负责管理员事务，不能抢先创建一个缺少 Gateway 身份的既有数据库。
+		start()
+		api.waitReady(t, foreground)
+		api.assertSetupRequired(t, password)
+		stop()
+		assertBindable(t, ports)
+	}
+	runCLI(t, audit, server, "create first admin", []string{"admin", "create", "--config", configPath, "--username", "gate-admin", "--password-file", passwordPath}, true)
+	must(t, os.Remove(passwordPath), "remove password file")
+	start()
 	api.waitReady(t, foreground)
 	api.login(t, password)
 	api.systemInfo(t, version)

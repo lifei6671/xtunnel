@@ -83,7 +83,8 @@ CI 首次安装启动失败时，可通过 `-DiagnosticPath` 指定 `internal/se
 ## Windows 候选产品验收
 
 M8-05 的产品入口只用于全新、提升权限的 Windows amd64 隔离 Runner。它会实际运行
-候选 Server 与 Agent，在前台和 SCM 模式分别完成 Management 登录、配置业务、签发
+候选 Server 与 Agent。前台首次启动先建立数据库及 Gateway 身份，停止后离线创建管理员；
+随后在前台和 SCM 模式分别完成 Management 登录、配置业务、签发
 Connection Token、HTTP 响应、WebSocket 帧往返与 TCP 字节转发，并在重启后复验业务。
 前台第二进程必须被外部锁拒绝；SCM 运行期间离线维护必须被拒绝。
 

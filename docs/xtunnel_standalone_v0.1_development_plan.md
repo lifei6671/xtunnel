@@ -2557,3 +2557,9 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 产品测试增加原始进程退出状态，唯一 Wait 发布结果后可立即终止就绪等待。失败诊断在全部进程清理后，对完整有界输出先执行实际凭据、冻结形状和溢出检查，通过后最多输出末尾 8192 字节；检查未通过只记录固定标签。新增回归覆盖秘密位于截断头部、PEM、溢出和干净有界诊断。
 - 本次定向 Test/Race/Vet 与独立诊断增量复审通过。生产实现、就绪 401 准入和完整 CI 要求保持；继续取得下一候选的具体启动失败证据。
 - 同轮 Linux arm64 的既有 `TestProxyAggregatesConcurrentPendingOpensAndRefillsBeyondInitialDemand` 在 `CloseWrite` 报 `ENOTCONN`；本次未改其依赖实现，只读复核确认存在并发期限竞争可能，但尚未证明根因。当前失败记录保留，后续同命令原样验证，不放宽断言。
+
+## 2026-09-04 · M8-05 首次数据库与身份初始化
+
+- 诊断候选 `b5e9cbe1e8bbe8aada01af3e358c75b37c06b21c` 的 [CI #33860292410](https://github.com/lifei6671/xtunnel/actions/runs/33860292410) 中，前台进程实际 exit 1，经过完整 Secret 检查的错误为 `load gateway TLS identity: gateway pinned TLS identity is missing`。未产生任何成功产品或 Artifact 证据。
+- `loadGatewayIdentity` 只在启动前数据库不存在时允许创建 Pinned 身份；原验收顺序的离线 `admin create` 提前建立数据库。前台验收现按正式顺序执行 `init → 首次启动 → Management 401 与登录 SETUP_REQUIRED → 正常停止及端口释放 → 离线创建管理员 → 正式业务启动`，保持已有数据库缺身份时的生产 fail-closed。
+- 真实 Management Handler 回归新增登录 409、生成契约 `SETUP_REQUIRED` 及 Request ID 断言，产品测试包 Test/Race/Vet 通过。继续在下一精确候选运行双模式产品与完整 CI，M8-05 保持 IN_PROGRESS。

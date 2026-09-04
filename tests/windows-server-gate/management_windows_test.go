@@ -4,6 +4,7 @@ package windowsservergate
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
@@ -225,4 +226,16 @@ func TestManagementReadinessTrustedHTTPSProxy(t *testing.T) {
 		t.Fatalf("missing proxy protocol status=%d want=400", response.StatusCode)
 	}
 	client.waitReady(t)
+	client.assertSetupRequired(t, rand.Text()+rand.Text())
+}
+
+// 首次运行的生产 Management 明确返回 SETUP_REQUIRED，证明受支持的 bootstrap
+// 阶段已可服务；管理员仍由干净停止后的离线命令创建。
+func (c *managementClient) assertSetupRequired(t *testing.T, password string) {
+	t.Helper()
+	var response api.ErrorResponse
+	c.request(t, http.MethodPost, "/auth/login", api.LoginRequest{Username: "gate-admin", Password: &password}, http.StatusConflict, &response, false)
+	if response.Error.Code != api.APIErrorCodeSETUPREQUIRED || response.Error.RequestId == "" {
+		t.Fatal("initial runtime did not report SETUP_REQUIRED")
+	}
 }
