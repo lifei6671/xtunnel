@@ -48,6 +48,15 @@ func TestWindowsAcquireRejectsExistingLockDACLWithoutMutation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			runtimeDir := newWindowsRuntimeDir(t)
 			path := filepath.Join(runtimeDir, "server-lock-"+windowsTestTargetHash+".lock")
+			// 管理员令牌的默认文件 Owner 可能是 Administrators。
+			// 先经正式入口固定正确 Owner，再仅改变 DACL，确保命中目标拒绝分支。
+			lock, err := Acquire(runtimeDir, windowsTestTargetHash)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := lock.Close(); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.WriteFile(path, []byte("existing lock contents"), 0o600); err != nil {
 				t.Fatal(err)
 			}

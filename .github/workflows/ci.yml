@@ -583,7 +583,7 @@ jobs:
           )
           go test -count=1 -timeout 180s @serverTestPackages
           if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server baseline tests failed' }
-          go test -race -count=1 -timeout 180s ./internal/server/datadir ./internal/server/externallock
+          go test -v -race -count=1 -timeout 180s ./internal/server/datadir ./internal/server/externallock
           if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 M8-02 race tests failed' }
           go vet @serverVetPackages
           if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server baseline vet failed' }

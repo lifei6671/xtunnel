@@ -2373,3 +2373,16 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 覆盖限制：Owner 不符的 Runtime/lock 两个原生子用例因当前令牌设置 Administrators Owner 返回 `ERROR_INVALID_OWNER` 而跳过，未计为通过。上述均为未提交工作树的开发证据；新增 CI 清单尚无对应提交的远端执行结果。
 - 独立复审：`CHILD_AGENT` Tier 3 对五个可执行变更文件及配置说明完成全覆盖，结果 `PASSED`、P0/P1/P2/P3=`0/0/0/0`；原 Runtime/lock 权限 P1 在本次范围内已解决。生产文件 SHA-256 为 `E6F384853ACE7278F09EBFDBD214432670E51DC6917FC3CC655DE044A2C3EAB2`，CI 文件为 `779480C2A985984C7B165B21E98AC88850336584F386E53106AD1B4E10EB4472`，新增负向测试为 `E887C686C0FA07BB1F418ABB54B9B56D848A2EFEE6BD56E99D9A01D69D069AE8`。复审者未重跑测试，验证证据来自协调者实际执行记录。
 - 状态与 Gate：M8-03 保持 `IN_PROGRESS`，等待修复提交对应 CI、剩余原生证据与用户阶段签核；M8-04 保持 `NOT_STARTED`。本次未勾选任何产品任务或 Gate，未提交或推送。
+
+## 2026-09-04 · M8-03 修复提交与复审绑定
+
+- 用户授权后，七个已复审文件以 `7aa52859bd9c82447b36107d7c233691d957595f` 提交并推送至 `origin/master`；提交信息为 `fix(externallock): enforce Windows runtime and lock ACLs`。
+- 独立复审者完成提交绑定核验：五个可执行文件及配置 README 的 SHA-256 与已通过复审的冻结目标完全一致，提交仅包含授权范围，既有 `PASSED` 的覆盖与新鲜度继续有效。本次绑定核验未重跑测试，不改变 Owner 原生用例跳过的证据边界。
+- [修复提交 CI #33838434655](https://github.com/lifei6671/xtunnel/actions/runs/33838434655) 已触发，查询时六个正式 Job 仍在运行，条件跳过的 Alpha Release Job 不计为通过。M8-03 保持 `IN_PROGRESS`，等待本提交 CI 和剩余原生证据、用户阶段签核；M8-04 保持 `NOT_STARTED`，本次未勾选任何产品任务或 Gate。
+
+## 2026-09-04 · M8-03 Windows 管理员测试夹具
+
+- CI 发现：[Windows Job #100915596107](https://github.com/lifei6671/xtunnel/actions/runs/33838434655/job/100915596107) 的既有锁 DACL 负向测试先触发 Owner 拒绝，未进入预期 DACL 分支。管理员令牌下普通文件创建的默认 Owner 与前台受管 Owner 不同；测试现先通过 `Acquire/Close` 创建受管锁，再写入测试内容并仅改变 DACL，保持拒绝原因及对象不变断言。生产权限校验未变。
+- 验证：`go1.27.1/local` 下 externallock 原生详细测试、Race、Vet、`go mod verify` 通过；Docker `./scripts/verify.ps1` exit 0，Web Check/Build、Linux 全包 Test/Vet/Build 通过。Windows CI 既有 datadir/externallock Race 命令增加 `-v`，保留 Owner 子用例实际 PASS/SKIP 证据；本机两子用例仍因 `ERROR_INVALID_OWNER` 跳过。
+- 增量独立复审：测试与 CI 两文件 `CHILD_AGENT PASSED`，P0/P1/P2/P3=`0/0/0/0`，其余已审生产内容未变；新测试 SHA-256 `CC9EF255C19415DDD80F0B6CB49ED2EF4CBDD35F27207EA4179B28C416493DCF`，CI SHA-256 `47FCE66FE099FE794CDC5BB39F02952D97D82BD1195FBE8E35F45E8F568D48B0`。修复后远端 CI 待执行，M8-03 保持 `IN_PROGRESS`。
+- 共享 Linux 复审后续项（P2）：V1 `installed + target + rollback` 成功重验后，清理 rollback 前尚未升级 V2 Journal；若在删除 rollback 后、删除 Journal 前再失败，可能留下被保守拒绝的 V1 target-only 状态。该项位于 `durableops/restore_linux.go`，不影响当前 Windows 不支持自动 Restore 的路径；本轮仅修复已确认的 Windows 权限与 CI 范围，保留此项作为 Linux 恢复后续工作，不声明已解决。
