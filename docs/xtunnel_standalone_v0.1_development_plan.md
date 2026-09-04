@@ -2569,3 +2569,9 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 候选 `6bba74de1c53588bb1957cbcf07b1e0982de86c3` 的 [CI #33861329863](https://github.com/lifei6671/xtunnel/actions/runs/33861329863) 已实际完成前台首次身份初始化、SETUP_REQUIRED、正常停止、离线管理员创建、业务启动、登录与 Tunnel 创建；随后 Service 创建因缺少父 Tunnel 的 If-Match 返回 428，产品 Gate 仍未通过。
 - 验收请求按 OpenAPI 使用当前父 Tunnel 强 ETag：保留缺少 If-Match 时的 428/PRECONDITION_REQUIRED 断言，再创建 HTTP Service；重新读取并确认父 ETag 变化后创建 TCP Service。未放宽生产前置条件。
 - 当前 Gate 所有 API 的必填 Header、Origin/Exposure 联合类型及 HTTP/TCP 默认语义已核对。产品包 Test/Race/Vet、生产 Service TLS 生命周期、前置条件矩阵、ETag 与联合类型回归通过；继续下一精确候选完整 CI。
+
+## 2026-09-04 · M8-05 Service 创建副作用验证
+
+- 候选 `04669aac95818b058c14e5af2123e150a7a1f7cf` 的 [CI #33862553668](https://github.com/lifei6671/xtunnel/actions/runs/33862553668) 已实际通过 HTTP Service 创建，随后验收中的“父 ETag 必须变化”断言失败。
+- 冻结模型中 Service 创建推进 Tunnel DesiredRevision，Tunnel ETag 则由独立的元数据 Version 产生。仓储 `TestAdvanceDesiredRevisionUsesIndependentCAS` 已实证 Version 保持、DesiredRevision 推进与旧 CAS 拒绝；未修改生产版本语义。
+- 产品检查继续每次读取当前父强 ETag，实际副作用改为 ServicesCount 0→1→2（缺失前置条件的拒绝无新增记录）及两个 Service ID 不同、归属正确、启用状态正确。定向仓储、Service TLS 生命周期及产品包 Test/Race/Vet 通过，继续精确候选原生验收。

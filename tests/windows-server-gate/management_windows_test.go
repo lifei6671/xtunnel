@@ -154,16 +154,14 @@ func (c *managementClient) configure(t *testing.T, origin *origins, publicPort i
 	if rejected.Error.Code != api.APIErrorCodePRECONDITIONREQUIRED {
 		t.Fatal("missing If-Match did not report PRECONDITION_REQUIRED")
 	}
-	// Service 创建修改父 Tunnel 的版本。每次 Mutation 前读取当前强 ETag，不能
-	// 用第一个创建响应中的 Service ETag 或旧 Tunnel ETag 为第二次创建授权。
-	before := c.tunnelETag(t, tunnel)
+	// Service 创建推进父 Tunnel DesiredRevision，不等同于 Tunnel 元数据 Version。
+	// 每次创建仍读取当前父强 ETag，提交结果用父 ServicesCount 与 Service 实体验证。
+	before := c.tunnelETag(t, tunnel, 0)
 	c.request(t, http.MethodPost, "/services", httpInput, http.StatusCreated, &httpService, true, before)
-	after := c.tunnelETag(t, tunnel)
-	if before == after {
-		t.Fatal("Service creation did not advance parent Tunnel ETag")
-	}
+	after := c.tunnelETag(t, tunnel, 1)
 	c.request(t, http.MethodPost, "/services", api.CreateServiceRequest{Name: "gate-tcp", TunnelId: tunnel, Origin: tcpOrigin, Exposure: tcpExposure}, http.StatusCreated, &tcpService, true, after)
-	if httpService.Id == "" || tcpService.Id == "" || !httpService.Enabled || !tcpService.Enabled {
+	c.tunnelETag(t, tunnel, 2)
+	if httpService.Id == "" || tcpService.Id == "" || httpService.Id == tcpService.Id || httpService.TunnelId != tunnel || tcpService.TunnelId != tunnel || !httpService.Enabled || !tcpService.Enabled {
 		t.Fatal("created services missing identity/enabled state")
 	}
 	return tunnel, httpService.Id, tcpService.Id, credential.Credential.ConnectionToken
@@ -256,11 +254,14 @@ func (c *managementClient) assertSetupRequired(t *testing.T, password string) {
 	}
 }
 
-func (c *managementClient) tunnelETag(t *testing.T, tunnel string) string {
+func (c *managementClient) tunnelETag(t *testing.T, tunnel string, serviceCount int) string {
 	t.Helper()
 	var parent api.Tunnel
 	response := c.request(t, http.MethodGet, "/tunnels/"+tunnel, nil, http.StatusOK, &parent, false)
 	etag := response.Header.Get("ETag")
+	if parent.ServicesCount != serviceCount {
+		t.Fatalf("parent ServicesCount=%d want=%d", parent.ServicesCount, serviceCount)
+	}
 	if parent.Id != tunnel || len(etag) < 2 || etag[0] != '"' || etag[len(etag)-1] != '"' {
 		t.Fatal("parent Tunnel did not return its strong ETag")
 	}
