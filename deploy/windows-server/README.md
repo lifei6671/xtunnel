@@ -74,6 +74,6 @@ Application Event Log 中的记录使用共享 JSON 日志格式。
 CI 随后显式运行 `TestServiceTokenIsolation`，用真实 SCM LocalService 令牌验证同服务与
 其他服务的权限边界。普通单测不执行这项主机操作；原生 Smoke 与令牌证据不能由交叉编译替代。
 
-CI 首次安装启动失败时，可通过 `-DiagnosticPath` 指定 `tests/windows-server-startup`
-构建的调查程序。脚本在停止服务后临时替换 Binary，读取受管 Runtime 中的完整错误报告，
+CI 首次安装启动失败时，可通过 `-DiagnosticPath` 指定 `internal/server/bootstrap`
+构建的测试程序。脚本在停止服务后临时替换 Binary，读取服务回调返回前写入的诊断事件，
 再还原候选；原安装失败仍返回失败。此入口仅用于固定测试配置、没有真实凭据的一次性 Runner。

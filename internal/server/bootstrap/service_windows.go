@@ -23,32 +23,38 @@ import (
 // SCM 固定 ImagePath 的配置参数，生命周期使用 SCM 的取消信号而非控制台信号。
 func executeService(args, environ []string) (bool, error) {
 	return service.RunIfService(func(ctx context.Context, writer io.Writer, ready func()) error {
-		configPath, err := service.FixedConfigPath()
-		if err != nil {
-			return err
-		}
-		if len(args) != 2 || args[0] != "--config" || !strings.EqualFold(args[1], configPath) {
-			return errors.New("Windows Server service requires only its fixed --config path")
-		}
-		content, err := service.ReadConfig()
-		if err != nil {
-			return err
-		}
-		config, err := serverconfig.LoadService(baseconfig.Options{YAML: content, Environment: environ})
-		if err != nil {
-			return fmt.Errorf("load Server service config: %w", err)
-		}
-		startedAt := time.Now()
-		return runConfigured(ctx, config, writer, func(ctx context.Context, dataDir string) (storage, error) {
-			profile, err := pathprofile.ResolveService(dataDir)
-			if err != nil {
-				return nil, err
-			}
-			return openServerStorage(ctx, profile.DataDir, profile.RuntimeDir)
-		}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger, tracing *tracing.Runtime) (io.Closer, error) {
-			return openGatewayAndBootstrapAtTracing(ctx, config, resources, logger, startedAt, tracing)
-		}, ready)
+		return runService(ctx, writer, ready, args, environ)
 	})
+}
+
+// runService 在 Dispatcher 回调内装配固定 Service Profile，资源与停止路径仍由
+// runConfigured 唯一拥有；隔离 CI 测试入口复用相同生命周期以报告启动失败。
+func runService(ctx context.Context, writer io.Writer, ready func(), args, environ []string) error {
+	configPath, err := service.FixedConfigPath()
+	if err != nil {
+		return err
+	}
+	if len(args) != 2 || args[0] != "--config" || !strings.EqualFold(args[1], configPath) {
+		return errors.New("Windows Server service requires only its fixed --config path")
+	}
+	content, err := service.ReadConfig()
+	if err != nil {
+		return err
+	}
+	config, err := serverconfig.LoadService(baseconfig.Options{YAML: content, Environment: environ})
+	if err != nil {
+		return fmt.Errorf("load Server service config: %w", err)
+	}
+	startedAt := time.Now()
+	return runConfigured(ctx, config, writer, func(ctx context.Context, dataDir string) (storage, error) {
+		profile, err := pathprofile.ResolveService(dataDir)
+		if err != nil {
+			return nil, err
+		}
+		return openServerStorage(ctx, profile.DataDir, profile.RuntimeDir)
+	}, func(ctx context.Context, config serverconfig.Config, resources storage, logger *slog.Logger, tracing *tracing.Runtime) (io.Closer, error) {
+		return openGatewayAndBootstrapAtTracing(ctx, config, resources, logger, startedAt, tracing)
+	}, ready)
 }
 
 // maintenanceOptions 只在管理员显式指定固定受管 Config 时选择 Service Profile。

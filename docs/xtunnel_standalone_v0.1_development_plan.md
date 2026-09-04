@@ -2458,3 +2458,8 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 修复提交 `0f315a0766b64df3cf2df1078d6b9ac0ada9ca5a` 对应 [CI #33844241742](https://github.com/lifei6671/xtunnel/actions/runs/33844241742)。Windows Server Test/Vet/Build 与既有 Agent SCM 验证通过，正式 Server 启动仍失败；Event Log 显示已进入 callback 并报告 `RUNTIME_FAILED`，尚不能确定具体失败操作。父目录规则失配已由代码与定向测试修复，未将其宣称为全部根因。
 - 增加隔离 Runner 启动调查入口：`tests/windows-server-startup` 捕获既有 `bootstrap.Execute` 标准错误，仅在 SCM Dispatcher 返回后保存于受管 Runtime，报告完成后发布完成标记。Smoke 只在首次正式安装失败时、停止服务后临时替换程序，等待完整报告并还原原候选和检查 ACL/SHA-256；原失败始终保留。正式成功验收仍使用 `cmd/server` 构建产物，不以调查程序替代。
 - 验证：调查程序 Windows `go1.27.1/local` build/vet、PowerShell 5.1 语法检查通过；Docker Desktop `./scripts/verify.ps1` 再次 exit 0。此增量只增强诊断，SCM 成功、跨服务 Token 与完整 CI 仍待验证，M8-04 保持 `IN_PROGRESS`。
+
+## 2026-09-04 · M8-04 回调内启动诊断
+
+- [诊断候选 CI #33845605614](https://github.com/lifei6671/xtunnel/actions/runs/33845605614) 的正式 Server SCM 启动仍失败，停止后的文件报告未生成；该结果不能证明具体失败操作。Windows 基础 Test/Vet/Build、既有 Agent SCM、Windows arm64 与双架构网络混沌均通过各自范围验证。
+- 调查入口改用 bootstrap 的 Windows 测试程序。正式 SCM 回调体提取为同包私有函数，测试入口复用该函数并在其返回错误后、向 SCM 报告停止前写入隔离诊断事件。CI 通过 `go test -c` 构建测试程序，Smoke 有界等待诊断事件；固定测试配置、临时替换与还原、保留原失败的边界不变。生产日志契约与权限策略未修改。

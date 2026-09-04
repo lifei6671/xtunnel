@@ -79,13 +79,15 @@ try {
             try {
                 Copy-Item -LiteralPath $DiagnosticPath -Destination $installedBinary -Force
                 if ((Get-Acl -LiteralPath $installedBinary).Sddl -ne $binaryAcl) { throw 'Diagnostic copy changed binary ACL' }
+                $diagnosticStart = [DateTime]::Now.AddSeconds(-1)
                 Start-Service XTunnelServer -ErrorAction SilentlyContinue
-                $report = Join-Path $dataRoot 'runtime\scm-startup-diagnostic.txt'
-                $complete = $report + '.complete'
                 $deadline = [DateTime]::UtcNow.AddSeconds(20)
-                while (-not (Test-Path -LiteralPath $complete) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
-                if (Test-Path -LiteralPath $complete) { Get-Content -LiteralPath $report }
-                else { Write-Warning 'SCM diagnostic report was not produced' }
+                do {
+                    $diagnostics = @(Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='XTunnelServer'; StartTime=$diagnosticStart} -MaxEvents 20 -ErrorAction SilentlyContinue | ForEach-Object { $_.Properties } | ForEach-Object { $_.Value } | Where-Object { $_ -like 'XTunnelServer startup diagnostic: *' })
+                    if ($diagnostics.Count -gt 0) { $diagnostics | Write-Output; break }
+                    Start-Sleep -Milliseconds 200
+                } while ([DateTime]::UtcNow -lt $deadline)
+                if ($diagnostics.Count -eq 0) { Write-Warning 'SCM diagnostic event was not produced' }
             } finally {
                 if ((Get-Service XTunnelServer).Status -ne 'Stopped') { Stop-Service XTunnelServer }
                 Wait-State 'Stopped'
