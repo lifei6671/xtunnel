@@ -2,11 +2,11 @@
 
 > **文档用途**：将《XTunnel Standalone 第一阶段完整技术方案 V0.1》转换为可执行、可推进、可验收的开发 Backlog
 >
-> **进度基线日期**：2026-09-03
+> **进度基线日期**：2026-09-04
 >
-> **当前阶段**：Post-Alpha M8 Windows Server · IN_PROGRESS（M8-03 · IN_PROGRESS）
+> **当前阶段**：Post-Alpha M8 Windows Server · IN_PROGRESS（M8-03 · DONE；下一任务 M8-04）
 >
-> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 收敛为 5 项 Windows Server 基础支持任务，当前完成数为 `97/100`，M8 为 `2/5 IN_PROGRESS`；M8-01、M8-02 的实现、精确 CI、commit-bound 独立复审和用户阶段签核均已闭环，状态为 `DONE`。M8-03 已进入 `IN_PROGRESS`，M8-04、M8-05 均为 `NOT_STARTED`。M8-05 的 amd64 Preview Gate 与用户阶段签核完成前，不得把 Windows Server 宣称为正式支持平台。
+> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 收敛为 5 项 Windows Server 基础支持任务，当前完成数为 `98/100`，M8 为 `3/5 IN_PROGRESS`；M8-01、M8-02 的实现、精确 CI、commit-bound 独立复审和用户阶段签核均已闭环，状态为 `DONE`。M8-03 的实现、原生验证、精确 CI、独立代码复审与用户阶段验收已闭环，状态为 `DONE`；M8-04、M8-05 均为 `NOT_STARTED`。M8-05 的 amd64 Preview Gate 与用户阶段签核完成前，不得把 Windows Server 宣称为正式支持平台。
 
 ---
 
@@ -115,8 +115,8 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 7 | `DONE` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 10 | `DONE` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| M8 Windows Server | 5 | 2 | `IN_PROGRESS` | M7-10 | M8-05 |
-| **合计** | **100** | **97** |  |  |  |
+| M8 Windows Server | 5 | 3 | `IN_PROGRESS` | M7-10 | M8-05 |
+| **合计** | **100** | **98** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -434,7 +434,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | --- | --- | --- | --- | --- | --- |
 | M8-01 | Windows Server 契约、配置示例与双架构构建基线 | M7-10 | Post-Alpha Windows Server 契约、Windows Server 配置示例、Windows amd64/arm64 Build Floor | 冻结 `XTunnelServer`、LocalService + Service SID、ProgramFiles/ProgramData 固定路径、Protected DACL、External Lock、SCM Runtime 与 amd64 Preview Gate；配置示例由 Server Schema 在 Windows 原生加载且不建立第二套默认值；Windows amd64/arm64 Server Binary、测试二进制与 CLI 契约可构建，arm64 构建不代表运行或发布支持 | `DONE` |
 | M8-02 | Stable Target、External Lock 与 Windows 文件身份 | M8-01 | Windows Data Target Resolver、External Lock、文件身份与 Reparse Point 防线 | 绝对本地路径、Volume/File Identity、大小写不敏感 leaf 规范化；Runtime 目录中的 Stable Target Hash 锁在 SQLite/Journal/Key/Listener 前取得并持有到最终关闭；第二进程无等待失败；UNC/设备路径/ADS/跨卷/Reparse Point/身份替换全部拒绝；Windows amd64/arm64 原生竞态和崩溃释放测试 | `DONE` |
-| M8-03 | Windows Security Baseline | M8-02 | Protected DACL、Secret Durable Publisher、Public TLS 安全性质校验 | 前台 Profile 的受管 Pinned Private Key、Token Master Key 与 Data Root 通过 no-follow、对象身份与耐久发布防止低权限替换；SQLite Driver 管理其自身 Windows VFS 语义，XTunnel 不自定义 VFS；Public TLS 使用可信 Owner + 有效安全性质校验，不接管 ACL；Journal、staging 或 rollback 残留 fail-closed 并保留现场。Service Profile 的实际 DACL 随 M8-04 SCM 入口生效。在线 Backup、自动 Restore、Restore Journal 自动恢复、目录级事务切换与跨崩溃矩阵不属于本任务 | `IN_PROGRESS` |
+| M8-03 | Windows Security Baseline | M8-02 | Protected DACL、Secret Durable Publisher、Public TLS 安全性质校验 | 前台 Profile 的受管 Pinned Private Key、Token Master Key 与 Data Root 通过 no-follow、对象身份与耐久发布防止低权限替换；SQLite Driver 管理其自身 Windows VFS 语义，XTunnel 不自定义 VFS；Public TLS 使用可信 Owner + 有效安全性质校验，不接管 ACL；Journal、staging 或 rollback 残留 fail-closed 并保留现场。Service Profile 的实际 DACL 随 M8-04 SCM 入口生效。在线 Backup、自动 Restore、Restore Journal 自动恢复、目录级事务切换与跨崩溃矩阵不属于本任务 | `DONE` |
 | M8-04 | `XTunnelServer` SCM Runtime | M8-03 | Server Windows Service Runtime、Installer/Uninstaller、Event Log 与提升权限 Smoke | Windows amd64 + Administrator + SCM/NTFS 前置检查无副作用；固定 Binary/Config/Data/Runtime 路径、LocalService + Service SID、Config 只读与 Data/Runtime Modify 的 Protected DACL、受管 Marker 与只含 Config 路径的 ImagePath；install/start/stop/失败后有限重启/uninstall、30 秒 Stop/Shutdown、Event Log、非受管对象拒绝和保留 Config/Data 通过。升级由维护窗口的外部部署工具执行，不实现事务回滚、运行中 EXE 替换、自卸载或延迟删除 | `NOT_STARTED` |
 | M8-05 | Windows amd64 Preview Gate | M8-01 至 M8-04 | Windows Server amd64 Native/SCM/Release Evidence、聚合 Gate、发布文档 | Windows amd64 原生全包 Test/Vet、前台与 SCM、Management/HTTP/WebSocket/TCP/Agent Gateway、抢锁、重启恢复和基础安全测试通过；候选 Artifact 含 Windows amd64 Server PE Binary 并验证版本/架构/SHA-256/Secret；arm64 仅交叉构建兼容性；干净 checkout 精确 CI、commit-bound 独立复审无 P0/P1、文档同步和用户明确阶段签核全部完成 | `NOT_STARTED` |
 
@@ -456,8 +456,8 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 1. `M8-01` — `DONE`。Windows Server 契约、完整配置示例、Schema 同步测试与 Windows amd64/arm64 Build Floor 已提交；最终 Head `fcdc701f03c260b2f61b4f18d4cb98ad916ac6fa` 的 [Push CI #33709519721](https://github.com/lifei6671/xtunnel/actions/runs/33709519721) 六个正式 Job 全部成功，commit-bound 独立复审为 `APPROVED`、P0/P1/P2/P3=`0/0/0/0`，用户阶段签核已完成。构建基线不扩大为 Windows Server 运行支持。
 2. `M8-02` — `DONE`。最终实现 Head `3bdaed22ad22080a9b5668533bcf3447f032c9e1` 的 [Push CI #33722274859](https://github.com/lifei6671/xtunnel/actions/runs/33722274859) 六个正式 Job 全部成功；证据提交 `4159e02939ace7a93387fd48b739e8228653c807` 的 [Push CI #33723985760](https://github.com/lifei6671/xtunnel/actions/runs/33723985760) 同样六个正式 Job 全部成功。最终 commit-bound 独立复审为 `APPROVED`、Coverage=`COMPLETE`、Freshness=`FRESH`、P0/P1/P2/P3=`0/0/0/0`，用户阶段签核已完成。
-3. `M8-03` — `IN_PROGRESS`。M8-02 依赖已闭环，实施 Windows Security Baseline：Protected DACL、Secret Durable Publisher 与 Public TLS 安全性质校验。
-4. `M8-04` — `NOT_STARTED`，等待 M8-03 完成。
+3. `M8-03` — `DONE`。Windows Security Baseline 实现与独立代码复审已完成；候选 `683c8cbbf44a50bab119bf2426df719da7aa6f29` 的 [CI #33839053263](https://github.com/lifei6671/xtunnel/actions/runs/33839053263) 六个正式 Job 全部成功，Windows Owner 负向原生证据已补齐，用户已明确确认“M8-03 阶段验收通过”。
+4. `M8-04` — `NOT_STARTED`，M8-03 依赖已闭环，可进入实施准备。
 5. `M8-05` — `NOT_STARTED`，等待 M8-01 至 M8-04 全部完成。
 
 以下保留 M7 完成记录：
@@ -473,7 +473,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 9. `M7-09` — `DONE`。Head `8f11f2a5d0118859ee7e0398b96517dd0be2a96d`、精确 CI `#33612503805`、状态同步 Head `cb3209d0bbb3debfa263c2bad226150a090318f5` 的精确 CI `#33615267877`、commit-bound Tier 3 复审与用户阶段批准已闭环 Linux amd64/arm64 Binary/OCI/systemd、Windows Agent amd64/arm64 Binary/SCM、Backup→Migration→Restore→Token-only Reconnect 及安全失败边界矩阵。
 10. `M7-10` — `DONE`。候选 Head `7e24cc4a11a231e4ef63f1505ed0ad92064b273a` 的普通 CI 与 Alpha Release Gate、证据提交 `a140560aaef827098c1a1de9a6c1b0be622edbb8` 的精确 CI、Checklist 九项、两路 commit-bound 独立复审与用户阶段签核均已闭环。
 
-M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数保持 95，加入收敛后的 M8 后全局完成数为 `97/100`，M8 为 `2/5 IN_PROGRESS`。M8-01、M8-02 已闭环，M8-03 正在实施；既有 Alpha Release Gate 不覆盖 Windows Server，M8 Windows Server amd64 Preview Gate 七项保持未勾选。
+M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数保持 95，加入收敛后的 M8 后全局完成数为 `98/100`，M8 为 `3/5 IN_PROGRESS`。M8-01、M8-02 已闭环，M8-03 阶段验收已通过；既有 Alpha Release Gate 不覆盖 Windows Server，M8 Windows Server amd64 Preview Gate 七项保持未勾选。
 
 推进规则：
 
@@ -2386,3 +2386,21 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 验证：`go1.27.1/local` 下 externallock 原生详细测试、Race、Vet、`go mod verify` 通过；Docker `./scripts/verify.ps1` exit 0，Web Check/Build、Linux 全包 Test/Vet/Build 通过。Windows CI 既有 datadir/externallock Race 命令增加 `-v`，保留 Owner 子用例实际 PASS/SKIP 证据；本机两子用例仍因 `ERROR_INVALID_OWNER` 跳过。
 - 增量独立复审：测试与 CI 两文件 `CHILD_AGENT PASSED`，P0/P1/P2/P3=`0/0/0/0`，其余已审生产内容未变；新测试 SHA-256 `CC9EF255C19415DDD80F0B6CB49ED2EF4CBDD35F27207EA4179B28C416493DCF`，CI SHA-256 `47FCE66FE099FE794CDC5BB39F02952D97D82BD1195FBE8E35F45E8F568D48B0`。修复后远端 CI 待执行，M8-03 保持 `IN_PROGRESS`。
 - 共享 Linux 复审后续项（P2）：V1 `installed + target + rollback` 成功重验后，清理 rollback 前尚未升级 V2 Journal；若在删除 rollback 后、删除 Journal 前再失败，可能留下被保守拒绝的 V1 target-only 状态。该项位于 `durableops/restore_linux.go`，不影响当前 Windows 不支持自动 Restore 的路径；本轮仅修复已确认的 Windows 权限与 CI 范围，保留此项作为 Linux 恢复后续工作，不声明已解决。
+
+## 2026-09-04 · M8-03 Windows Owner 原生证据补齐
+
+- 当前候选：`683c8cbbf44a50bab119bf2426df719da7aa6f29`，已推送至 `origin/master`。增量测试与 CI 复审通过，原生产实现及其复审结论保持新鲜。
+- [Windows amd64 Job #100917407440](https://github.com/lifei6671/xtunnel/actions/runs/33839053263/job/100917407440) 已成功。`go1.27.1/local` 的原生 Race 日志明确记录 `TestWindowsAcquireRejectsOwnerMismatchWithoutMutation/runtime` 与 `/lock` 均 `PASS`，时间分别为 `2026-09-04T05:11:01.9686558Z`、`05:11:01.9687278Z`；既有锁 DACL 的两个负向子用例同样通过。本机跳过的 Owner 运行证据现由当前提交的 CI 补齐。
+- 当前提交的 Windows arm64 Agent runtime、双架构 privileged network chaos 也已成功；两项 Linux verify 仍在运行，尚不形成完整 CI 通过结论。M8-03 保持 `IN_PROGRESS`，本次未勾选产品任务或 Gate。
+
+## 2026-09-04 · M8-03 精确 CI 与最终复审完成 · REVIEW
+
+- 验收候选：`683c8cbbf44a50bab119bf2426df719da7aa6f29`。[CI #33839053263](https://github.com/lifei6671/xtunnel/actions/runs/33839053263) 为 `completed/success`；Linux amd64/arm64 verify、双架构 privileged network chaos、Windows Agent service、Windows arm64 Agent runtime 六个正式 Job 全部成功。五个条件跳过的 Alpha Release Job 不计为通过，也不扩大 Windows Preview Gate。
+- Windows 原生验收：新增安全包测试、External Lock Race、既有锁 DACL 拒绝、Runtime/lock Owner 不符拒绝及 SCM/构建检查均有当前提交的 CI 证据。Owner 两个用例的实际 PASS 已经由独立复审者直接读取 Job 日志复核。
+- 最终复审：`CHILD_AGENT PASSED`，Binding 为上述候选 SHA，已审范围 Coverage=`COMPLETE`、Freshness=`FRESH`；当前 Windows M8-03 受支持路径累计分区与启动链集成复审闭合，原 Runtime/lock P1 已解决。Linux V1 Restore 清理 P2 继续作为已记录的范围外后续项，不声明已修复。
+- 状态：任务表、当前队列与仪表盘同步为 M8-03 `REVIEW`。实现、验证和独立代码复审已完成，等待用户明确阶段验收；M8-04、M8-05 仍为 `NOT_STARTED`，完成计数保持 `97/100`，本次不勾选产品任务或聚合 Gate。
+
+## 2026-09-04 · M8-03 用户阶段验收 · DONE
+
+- 用户明确确认：M8-03 阶段验收通过。验收实现为 `683c8cbbf44a50bab119bf2426df719da7aa6f29`，对应 [CI #33839053263](https://github.com/lifei6671/xtunnel/actions/runs/33839053263) 六个正式 Job 成功，独立复审 `PASSED`、Coverage=`COMPLETE`、Freshness=`FRESH`。详细命令与原生断言见前述证据记录。
+- M8-03 更新为 `DONE`，全局完成计数 `98/100`，M8 完成 `3/5`；M8-04 的前置依赖已满足。M8-04、M8-05 保持 `NOT_STARTED`，Windows Preview Gate 仍按 M8-05 独立验收。
