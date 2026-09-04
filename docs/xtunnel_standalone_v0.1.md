@@ -8254,6 +8254,12 @@ Pinned Gateway Private Key 按长期私钥材料保护，原始 Archive 不得�
 上传。Protocol Golden 只允许路径与 SHA-256 同时固定的确定性公开测试 Token/Session
 Secret；相同字节若出现在生产 Binary、OCI、日志或普通测试输出中仍属于泄漏。
 
+Windows Server 候选 EXE 的 ASCII Token 形状扫描允许一项精确公开常量分类：
+完整匹配逐字节等于 `xta_sha1PortbitsTypePref` 时识别为编译后的公开静态串。
+此分类仅由 Windows Server Artifact 入口显式启用，不依赖文件名或字节偏移。
+不同或更长匹配、同文件其他匹配、其他 Secret 规则、UTF-16LE 两种对齐、通用扫描、
+日志、元数据和实际凭据检查继续拒绝；流式扫描必须读至 EOF 并保留跨窗口检查。
+
 首个 Alpha 采用例外 `ALPHA-LIMIT-WIN-REBOOT-001`：GitHub-hosted Windows Runner 只能
 验证 SCM Service、受管 Event Source 删除、DPAPI Machine-scope Credential 保留，以及
 `MoveFileEx(DELAY_UNTIL_REBOOT)` 对运行中安装 EXE 的精确登记，不能在同一 Runner 生命周期

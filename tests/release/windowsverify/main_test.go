@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/lifei6671/xtunnel/tests/release/internal/secretcheck"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -100,7 +101,7 @@ func TestCandidateSecretScanAndDigest(t *testing.T) {
 	if err := os.WriteFile(path, content, 0600); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := scanAndHash(path)
+	entry, err := scanAndHash(path, secretcheck.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +111,36 @@ func TestCandidateSecretScanAndDigest(t *testing.T) {
 	if err := os.WriteFile(path, []byte("xta_"+strings.Repeat("A", 24)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scanAndHash(path); err == nil {
+	if _, err := scanAndHash(path, secretcheck.Reader); err == nil {
 		t.Fatal("accepted forbidden token shape")
+	}
+}
+
+func TestCandidateScanPurposeIsExplicit(t *testing.T) {
+	content := []byte("xta_sha1PortbitsTypePref")
+	path := filepath.Join(t.TempDir(), "xtunnel-server-windows-amd64.exe")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scanAndHash(path, secretcheck.Reader); err == nil {
+		t.Fatal("filename enabled Server classification")
+	}
+	entry, err := scanAndHash(path, secretcheck.WindowsServerBinaryReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.SHA256 != fmt.Sprintf("%x", sha256.Sum256(content)) || entry.Size != int64(len(content)) {
+		t.Fatal("classification changed scanned bytes or hash")
+	}
+	// 元数据与日志使用通用入口，即使内容是已分类的公开拼接也必须拒绝。
+	for _, name := range []string{"product-report.json", "manifest.json", "artifact-sha256.txt", "server.log"} {
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := scanAndHash(path, secretcheck.Reader); err == nil {
+			t.Fatalf("accepted %s", name)
+		}
 	}
 }
 
@@ -126,11 +155,11 @@ func TestManifestRejectsTamperingAndUnscannedFiles(t *testing.T) {
 	if err := os.WriteFile(path, []byte("candidate"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := scanAndHash(path)
+	entry, err := scanAndHash(path, secretcheck.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := scanAndHash(filepath.Join(directory, "product-report.json"))
+	report, err := scanAndHash(filepath.Join(directory, "product-report.json"), secretcheck.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}

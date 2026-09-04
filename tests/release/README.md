@@ -41,6 +41,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows candidate verification failed' }
 产品报告中的实际版本与摘要绑定和 Secret 形状，生成标准命名的 `xtunnel-server-windows-amd64.exe`、
 `manifest.json`、`artifact-sha256.txt` 及产品报告。
 
+Server EXE 的 ASCII Token 形状扫描仅对完整公开静态串
+`xta_sha1PortbitsTypePref` 使用精确分类。其他匹配和规则、UTF-16LE、日志及元数据
+继续按通用规则拒绝；文件仍须完整扫描至 EOF，并校验跨读取窗口的匹配。
+
 CI 上传 `m8-05-windows-amd64-<Commit>-attempt-<Run Attempt>` 候选证据，保留 14 天。
 它不是正式 Release；M8-05 聚合 Gate 与用户阶段验收完成后才能更新 Windows Server
 Preview 支持声明。此入口不改变既有 Linux OCI 的精确双平台集合。

@@ -6,7 +6,7 @@
 >
 > **当前阶段**：Post-Alpha M8 Windows Server · IN_PROGRESS（M8-05 · IN_PROGRESS）
 >
-> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 共 5 项，当前完成数为 `99/100`，M8 为 `4/5 IN_PROGRESS`。M8-01 至 M8-04 的实现、验证、精确提交 CI、独立复审及用户阶段验收已闭环，状态为 `DONE`；M8-05 已获实施授权，状态为 `IN_PROGRESS`。Windows amd64 Preview Gate 与用户阶段签核完成前，不更新平台支持声明。
+> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 共 5 项，当前完成数为 `99/100`，M8 为 `4/5 IN_PROGRESS`。M8-01 至 M8-04 的实现、验证、精确提交 CI、独立复审及用户阶段验收已闭环，状态为 `DONE`；M8-05 产品双模式验收已通过，Artifact 精确扫描分类已获授权，状态为 `IN_PROGRESS`。Windows amd64 Preview Gate 与用户阶段签核完成前，不更新平台支持声明。
 
 ---
 
@@ -458,7 +458,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 2. `M8-02` — `DONE`。最终实现 Head `3bdaed22ad22080a9b5668533bcf3447f032c9e1` 的 [Push CI #33722274859](https://github.com/lifei6671/xtunnel/actions/runs/33722274859) 六个正式 Job 全部成功；证据提交 `4159e02939ace7a93387fd48b739e8228653c807` 的 [Push CI #33723985760](https://github.com/lifei6671/xtunnel/actions/runs/33723985760) 同样六个正式 Job 全部成功。最终 commit-bound 独立复审为 `APPROVED`、Coverage=`COMPLETE`、Freshness=`FRESH`、P0/P1/P2/P3=`0/0/0/0`，用户阶段签核已完成。
 3. `M8-03` — `DONE`。Windows Security Baseline 实现与独立代码复审已完成；候选 `683c8cbbf44a50bab119bf2426df719da7aa6f29` 的 [CI #33839053263](https://github.com/lifei6671/xtunnel/actions/runs/33839053263) 六个正式 Job 全部成功，Windows Owner 负向原生证据已补齐，用户已明确确认“M8-03 阶段验收通过”。
 4. `M8-04` — `DONE`。用户已明确阶段验收通过，证据绑定 cfbe201 与 CI #33851737928。
-5. `M8-05` — `IN_PROGRESS`。实施 Windows 候选产品链路、Artifact 校验和 CI 接入，取得完整证据后提交阶段验收。
+5. `M8-05` — `IN_PROGRESS`。实现已授权的 Windows Server EXE 精确公开常量扫描分类，重新取得同一候选的产品、Artifact 与完整 CI。
 
 以下保留 M7 完成记录：
 
@@ -2582,3 +2582,23 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 现有 TCP Ingress Shutdown 与 M7 硬截止测试保留 `DeadlineExceeded` 返回语义。验收区分普通成功停止与活动硬截止停止，后者核对限定错误、实际 Socket/PID 时限、端口释放和重启业务。SCM 的通用 `RUNTIME_FAILED` 事件只作状态证据，具体截止错误传播由受控运行回调测试补充。
 - TLS `closeNotify` 超时的完整错误同时明确底层连接仍被关闭；真实 TLS 受控期限竞争回归用于核对错误传播、对端 EOF、底层 exactly-once Close 与 WorkPool 归零。保留生产错误语义，继续定向复验、独审及下一候选完整 CI，M8-05 保持 IN_PROGRESS。
 - Windows 原生产品包、WorkPool 与 Service 定向 Test/Race/Vet 通过；Docker Desktop 正式 `./scripts/verify.ps1` 完成 Web check/build、Linux 全包 Test/Vet 和构建。TLS 与 SCM 截止回归已独立复审通过；这些是开发与语义证据，不能替代下一候选的双模式原生产品与 Artifact 验收。
+
+## 2026-09-04 · M8-05 双模式产品证据与 Artifact 扫描
+
+- 候选 `0e1c612a7dd1a1bf6adaac00355b0abde53408b1` 的 [CI #33865749259](https://github.com/lifei6671/xtunnel/actions/runs/33865749259) 中，`TestWindowsServerProductGate` 真实运行 128.57 秒并通过，前台与 SCM 分别为 63.53 秒、64.91 秒；两模式均完成管理、数据面、抢锁/维护拒绝、重启、活动停止与 Secret 扫描。
+- 前台活动 Socket 在 30.019 秒关闭、进程在 30.049 秒退出；SCM 为 30.001 秒和 30.049 秒。随后既有 Server SCM smoke 与真实 Service SID Token 隔离通过。14 文件的提交绑定独立覆盖核对通过。
+- Windows Artifact 验证随后因 EXE 命中冻结 `xta_` 长字符串形状规则失败，未上传候选产物。本地同提交构建复现单个 ASCII 匹配，继续核对静态数据来源；当前双模式产品证据不替代 Artifact Gate 或完整 CI，M8-05 保持 IN_PROGRESS。
+
+## 2026-09-04 · M8-05 Windows Server 扫描分类待裁定
+
+- 唯一匹配为公开静态字符串 `xta_sha1PortbitsTypePref`，由固定前缀和相邻短常量组成，匹配 SHA-256 为 `413143F20030632BD624D5EA514BF8569B871249DF9B848007C91C883DF1EFB7`。五项规则的 ASCII 命中计数为 `1/0/0/0/0`，UTF-16LE 两种对齐均为零；该串后缀仅解码为 15 字节，不能承载冻结 Token 的 32 字节认证 Secret。
+- 待授权的最小分类：仅 Windows Server 候选 EXE 的 ASCII Token 形状扫描，把完整匹配逐字节等于该公开串的情况识别为非 Secret；任何不同或更长匹配、同文件其他匹配、其他四项规则、UTF-16、日志、元数据及实际凭据检查保持拒绝。入口须显式限定 Server Binary，不按文件名自动启用，不依赖固定偏移。
+- 独立方案审查认为此精确分类可接受，要求覆盖通用入口拒绝、变体与追加字符拒绝、多个匹配、跨读取边界、UTF-16 拒绝及其他规则回归。现有扫描器与生产实现均保持原状；根 AGENTS.md 要求安全验收规则变更先取得明确确认，M8-05 标记 BLOCKED，解除条件为用户批准上述精确分类。后续仍须重新运行同一干净候选的产品、Artifact 和完整 CI。
+- CI #33865749259 已完成：Linux amd64/arm64 完整 verify、两架构网络混沌和 Windows arm64 作业均成功；Windows amd64 仅 Artifact Secret 形状验证失败。双模式产品与 Service SID 隔离证据绑定 `0e1c612`，不能将五个作业成功表述为完整 CI 或 Preview Gate 通过。
+
+## 2026-09-04 · M8-05 精确扫描分类授权
+
+- 用户明确允许上述精确 Windows Server EXE ASCII 分类。总方案和候选验收文档同步限定完整公开字符串、用途、编码与扫描范围；M8-05 恢复 IN_PROGRESS，完成计数保持 99/100。
+- 实施后执行精确匹配、变体、追加字符、多个匹配、跨窗口、UTF-16 与通用入口负向回归，独立复审后提交并重新取得同一干净候选的完整 CI 与 Artifact。授权不改变其他 Secret 判定或 Preview 阶段签核要求。
+- 精确分类与显式 Artifact 接线的定向 Test/Race/Vet 通过，覆盖全部 64 种 Token 后缀字符、64 KiB 窗口、单字节读取、数据与 EOF 同返、UTF-16 两种对齐及通用入口拒绝。实际开发 EXE 的 Server 专用全规则扫描通过，通用入口仍拒绝同文件；该结果不作为干净候选 Artifact 证据。
+- Docker Desktop 正式 `./scripts/verify.ps1` 通过，包含 Web check/build、Linux 全包 Test/Vet 和构建。继续按冻结目标完成独审、提交推送及完整 CI。

@@ -208,7 +208,7 @@ func verifyBinary(path, commit string) (artifact, error) {
 	if err := verifyBuildInfo(info, commit); err != nil {
 		return entry, err
 	}
-	entry, err = scanAndHash(path)
+	entry, err = scanAndHash(path, secretcheck.WindowsServerBinaryReader)
 	if err != nil {
 		return entry, err
 	}
@@ -259,7 +259,7 @@ func verifyProductReport(content []byte, commit, digest string) error {
 	}
 	return nil
 }
-func scanAndHash(path string) (entry artifact, resultErr error) {
+func scanAndHash(path string, scan func(string, io.Reader) error) (entry artifact, resultErr error) {
 	before, err := os.Lstat(path)
 	if err != nil {
 		return entry, err
@@ -280,7 +280,7 @@ func scanAndHash(path string) (entry artifact, resultErr error) {
 		return entry, errors.New("candidate is not a regular file")
 	}
 	hash := sha256.New()
-	if err := secretcheck.Reader(filepath.Base(path), io.TeeReader(file, hash)); err != nil {
+	if err := scan(filepath.Base(path), io.TeeReader(file, hash)); err != nil {
 		return entry, err
 	}
 	return artifact{Name: filepath.Base(path), SHA256: hex.EncodeToString(hash.Sum(nil)), Size: info.Size()}, nil
@@ -294,7 +294,7 @@ func verifyManifest(directory string, result manifest) error {
 			return errors.New("duplicate or invalid manifest artifact")
 		}
 		allowed[entry.Name] = true
-		actual, err := scanAndHash(filepath.Join(directory, entry.Name))
+		actual, err := scanAndHash(filepath.Join(directory, entry.Name), secretcheck.WindowsServerBinaryReader)
 		if err != nil {
 			return err
 		}
@@ -305,7 +305,7 @@ func verifyManifest(directory string, result manifest) error {
 	if !allowed["xtunnel-server-windows-amd64.exe"] {
 		return errors.New("Server artifact is missing")
 	}
-	report, err := scanAndHash(filepath.Join(directory, "product-report.json"))
+	report, err := scanAndHash(filepath.Join(directory, "product-report.json"), secretcheck.Reader)
 	if err != nil {
 		return err
 	}
@@ -324,7 +324,7 @@ func verifyManifest(directory string, result manifest) error {
 	fmt.Fprintf(&checksums, "%s  product-report.json\n", result.ProductReportSHA256)
 	fmt.Fprintf(&checksums, "%x  manifest.json\n", sha256.Sum256(encoded))
 	for name, expected := range map[string][]byte{"manifest.json": encoded, "artifact-sha256.txt": []byte(checksums.String())} {
-		actual, err := scanAndHash(filepath.Join(directory, name))
+		actual, err := scanAndHash(filepath.Join(directory, name), secretcheck.Reader)
 		if err != nil {
 			return err
 		}
