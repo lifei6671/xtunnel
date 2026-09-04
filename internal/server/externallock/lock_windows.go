@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"unsafe"
 
+	"github.com/lifei6671/xtunnel/internal/server/winsecurity"
 	"golang.org/x/sys/windows"
 )
 
@@ -39,6 +41,20 @@ func acquire(runtimeDir, targetHash string) (func() error, error) {
 		return nil, errors.Join(cause, closeDirectories())
 	}
 
+	// 普通启动也必须复核受管 Runtime，不能依赖此前 init 的权限快照。
+	// 只校验已固定的最终目录；祖先路径继续由 no-follow Handle 链保护。
+	directorySecurity, err := winsecurity.NewForegroundDirectorySecurity()
+	if err != nil {
+		return failDirectory(err)
+	}
+	if err := directorySecurity.ValidateDirectory(directoryHandles[len(directoryHandles)-1]); err != nil {
+		return failDirectory(fmt.Errorf("validate server runtime security: %w", err))
+	}
+	fileSecurity, err := winsecurity.NewForegroundFileSecurity()
+	if err != nil {
+		return failDirectory(err)
+	}
+
 	lockPath := filepath.Join(runtimeDir, "server-lock-"+targetHash+".lock")
 	pointer, err := windows.UTF16PtrFromString(lockPath)
 	if err != nil {
@@ -46,28 +62,26 @@ func acquire(runtimeDir, targetHash string) (func() error, error) {
 	}
 	lockHandle, err := windows.CreateFile(
 		pointer,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
-		nil,
+		fileSecurity.Attributes(),
 		windows.OPEN_ALWAYS,
 		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
 		0,
 	)
+	runtime.KeepAlive(fileSecurity)
 	if err != nil {
 		return failDirectory(fmt.Errorf("open server external lock %q: %w", lockPath, err))
 	}
 	failLock := func(cause error) (func() error, error) {
 		return nil, errors.Join(cause, windows.CloseHandle(lockHandle), closeDirectories())
 	}
+	// OPEN_ALWAYS 对既有文件不会应用创建权限；同一 Handle 验证失败时
+	// 保留文件及其 ACL，关闭资源，不接管对象，也不进入 LockFileEx。
+	if err := fileSecurity.ValidateFile(lockHandle); err != nil {
+		return failLock(fmt.Errorf("validate server external lock security: %w", err))
+	}
 
-	var information windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(lockHandle, &information); err != nil {
-		return failLock(fmt.Errorf("inspect server external lock %q: %w", lockPath, err))
-	}
-	if information.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
-		information.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		return failLock(fmt.Errorf("server external lock %q must be a non-reparse regular file", lockPath))
-	}
 	lockVolume, err := volumeForHandle(lockHandle)
 	if err != nil {
 		return failLock(fmt.Errorf("read server external lock identity %q: %w", lockPath, err))
@@ -140,14 +154,18 @@ func openRuntimeDirectory(runtimeDir string) ([]windows.Handle, uint64, error) {
 		}
 		return closeErr
 	}
-	for _, path := range paths {
+	for index, path := range paths {
 		pointer, err := windows.UTF16PtrFromString(path)
 		if err != nil {
 			return nil, 0, errors.Join(fmt.Errorf("encode runtime directory component %q: %w", path, err), closeAll())
 		}
+		access := uint32(windows.FILE_READ_ATTRIBUTES)
+		if index == len(paths)-1 {
+			access |= windows.READ_CONTROL
+		}
 		handle, err := windows.CreateFile(
 			pointer,
-			windows.FILE_READ_ATTRIBUTES,
+			access,
 			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 			nil,
 			windows.OPEN_EXISTING,

@@ -28,8 +28,8 @@ func TestWindowsOpenServerStorageAllowsCleanManagedTarget(t *testing.T) {
 		t.Fatalf("CreateForegroundDirectory(data) error = %v", err)
 	}
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
-	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
-		t.Fatalf("os.Mkdir(runtime) error = %v", err)
+	if err := winsecurity.CreateForegroundDirectory(runtimeDir, directorySecurity); err != nil {
+		t.Fatalf("CreateForegroundDirectory(runtime) error = %v", err)
 	}
 
 	storage, err := openServerStorage(context.Background(), dataDir, runtimeDir)
@@ -48,8 +48,12 @@ func TestWindowsOpenServerStorageLocksBeforeDurableState(t *testing.T) {
 		t.Fatalf("os.Mkdir(data) error = %v", err)
 	}
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
-	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
-		t.Fatalf("os.Mkdir(runtime) error = %v", err)
+	directorySecurity, err := winsecurity.NewForegroundDirectorySecurity()
+	if err != nil {
+		t.Fatalf("NewForegroundDirectorySecurity() error = %v", err)
+	}
+	if err := winsecurity.CreateForegroundDirectory(runtimeDir, directorySecurity); err != nil {
+		t.Fatalf("CreateForegroundDirectory(runtime) error = %v", err)
 	}
 	target, err := datadir.Resolve(dataDir)
 	if err != nil {

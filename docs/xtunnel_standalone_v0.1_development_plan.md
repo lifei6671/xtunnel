@@ -2340,3 +2340,36 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 产物：`FILE_ID_INFO` 现在同时要求非零 Volume Serial 与完整非零 128-bit File ID；Runtime 最终目录和 lock 文件任一对象身份无效时，均在 `LockFileEx` 前 fail-closed 并关闭已打开 Handle。锁名、Stable Target Hash、DACL/Profile 与 SCM 生命周期保持不变。
 - 验证：本机 `go1.27.1/local` 下 `go test -count=1 -timeout 10m ./internal/server/externallock` 与 `go vet ./internal/server/externallock` 通过；Docker Desktop `./scripts/verify.ps1` exit 0，完成 Web Check/Build 与 Linux 全仓 Go Test/Vet/Build。冻结工作树的独立 `CHILD_AGENT` 复审通过，P0/P1/P2=`0/0/0`。
 - 状态与 Gate：上述均为本地开发证据；M8-03 保持 `IN_PROGRESS`，M8-04 保持 `NOT_STARTED`，尚无 commit-bound CI 或用户阶段签核，未勾选任何产品任务或 Gate。
+
+## 2026-09-04 · M8-03 当前提交 Windows 原生验收复核
+
+- 负责人：Codex。验证对象为干净工作区的 `81c1fa64cc054aecf8ca3e9e574460013f5e356d`；本轮只追加验收证据。
+- Windows 原生验证：`GOTOOLCHAIN=local`，`./tools/check-go-version.ps1` 确认 `go1.27.1/local`；`go vet ./...` exit 0；`go test -p 1 -count=1 -timeout 10m ./...` exit 0。串行 package 执行覆盖全包，测试内的平台跳过仍不构成对应能力的通过证据。
+- 默认并发验证：`go test -count=1 -timeout 10m ./...` 两次 exit 1，均为 `TestVersionAcceptsLinkerInjection` 在约 30 秒时报告子进程失败，其余包通过。该测试内部子进程设置 30 秒超时；`go test -count=1 -timeout 60s ./internal/buildinfo` 单独执行通过。串行成功与并发失败提示执行环境或并发负载相关问题，但尚未证实根因，默认并发全包结果仍记为 `FAIL`。
+- CI 快照：[当前提交 CI #33836700301](https://github.com/lifei6671/xtunnel/actions/runs/33836700301) 查询时仍为 `in_progress`，两项 privileged network chaos 已成功；完整 CI 结论待返回。上一提交 CI #33834267994 的双架构 systemd 步骤均报 `expected go1.27.0, got go1.27.1`，当前提交已调整候选构建的工具链检查入口，其实际成功结论仍以本次 CI 为准。
+- 验收边界：本轮未重新执行 Docker Linux 验证、SCM Smoke 或独立代码复审；既有证据保持各自提交与平台范围。M8-03 保持 `IN_PROGRESS`，等待默认并发失败收敛、完整 CI、最终复审和用户阶段签核；M8-04 保持 `NOT_STARTED`，全局计数保持 `97/100`，本次未勾选任何产品任务或 Gate。
+
+## 2026-09-04 · M8-03 Windows 默认并发复跑与超时调查
+
+- 验证对象：实现仍为 `81c1fa64cc054aecf8ca3e9e574460013f5e356d`，工作区只有开发计划证据增补。在 `go1.27.1/local` 下，`go test -json -count=1 -timeout 10m ./...` 与随后原样复跑的 `go test -count=1 -timeout 10m ./...` 均 exit 0；JSON 记录中的版本注入测试耗时 2.34 秒。
+- 调查结论：独立只读子代理核查当前 Go 工具链源码，确认测试内部 30 秒 Deadline 覆盖嵌套 Go 命令的加载、编译、链接与执行；现有失败输出不足以定位阶段。默认并发与 JSON 模式本轮均成功，历史两次失败保留为间歇性验证风险，根因仍未证实。后续若复现，应在失败窗口采集子进程状态与构建动作，区分编译等待、执行失败及 Context 超时。
+- CI 快照：[CI #33836700301](https://github.com/lifei6671/xtunnel/actions/runs/33836700301) 查询时 Windows Agent service、Windows arm64 Agent runtime 和双架构 privileged network chaos 均已成功，两项 Linux verify 仍在运行；条件跳过的 Alpha Release Job 不计为通过。
+- 状态与 Gate：本轮仅追加验证与调查证据，未修改测试或生产实现。M8-03 保持 `IN_PROGRESS`，M8-04 保持 `NOT_STARTED`，仍需完整 CI、最终复审和用户阶段签核；本次未勾选任何产品任务或 Gate。
+
+## 2026-09-04 · M8-03 分区静态复审与验收缺口
+
+- 复审目标：`81c1fa64cc054aecf8ca3e9e574460013f5e356d`，三名独立只读子代理按当前第 191 节基础支持范围复审；本轮只增补开发计划。`winsecurity` 全部 6 个文件与 Gateway/Tokenkey 的 21 个变更文件分区均为 `PASSED`，未发现已证实缺陷；启动、Profile、初始化、External Lock 与 Windows 恢复预检分区为 `BLOCKED`。
+- P1（M8-03 基线验收缺口）：`internal/server/externallock/lock_windows.go` 的 `acquire` 与 `openRuntimeDirectory` 未读取或验证 Runtime/既有 lock 的 Owner/DACL。正常启动在取得锁后仅继续检查 Data 安全边界，init 也未检查既有锁文件权限；权限被放宽或 Owner 漂移的对象仍可能被接受，其他获权主体可抢持锁阻断运行。正常初始化的安全继承与 Handle 禁止删除共享不覆盖该情形。本问题是既有安全验收缺口，不归因于本轮文档变更。
+- 最小修复边界：沿用当前前台 `winsecurity` 策略，在同一 no-follow Handle 上复核 Runtime 目录及锁文件 Owner/DACL，并在创建新锁时设置受管安全描述符；不合规既有对象应拒绝且保留现场。补充 Runtime 权限漂移、宽泛既有锁、Owner 不符的负向断言，以及安全锁复用和原有抢锁行为回归。
+- CI 覆盖缺口：Windows amd64 的 `serverTestPackages` / `serverVetPackages` 未列入 `internal/server/winsecurity`、`gateway`、`tokenkey`、`provision`、`pathprofile`。Bootstrap 测试可间接执行部分实现，但不运行这些包各自的核心测试；Linux Job 也不能覆盖其 Windows 构建约束下的测试。拟将上述 5 包加入既有 Windows amd64 Test/Vet 清单，取得修复提交对应证据。
+- 复审限制：本轮未执行恶意 ACL 原生重现、权限变更或测试；Linux 共享恢复变更仅检查相关 diff，不构成完整 Linux 恢复矩阵复审。外部 TLS Service Token 正向运行、物理断电持久化与后续 SCM/Preview Gate 均不由本次静态复审证明。读取受管文件使用同一 no-follow Handle，不应描述为每次读取均调用完整 `FILE_ID_INFO`；原子替换后的错误也不构成旧文件自动回滚保证。
+- 状态与 Gate：[CI #33836700301](https://github.com/lifei6671/xtunnel/actions/runs/33836700301) 查询时四项 Job 成功、两项 Linux verify 仍在运行。M8-03 保持 `IN_PROGRESS`，需要先收敛上述 P1、补齐 CI 覆盖并重新复审；权限校验与 CI 修改按项目变更边界确认后实施。M8-04 保持 `NOT_STARTED`，本次未勾选任何产品任务或 Gate。
+
+## 2026-09-04 · M8-03 Runtime 与 External Lock 权限校验
+
+- 授权与产物：用户明确确认权限校验及 CI 修改范围。Windows `Acquire` 复用 `winsecurity`，在已固定的最终 Runtime Handle 上校验 Owner/Protected DACL；新锁在 `OPEN_ALWAYS` 创建时设置受管文件安全描述符，既有锁通过同一 no-follow Handle 验证权限后才进入 `LockFileEx`。拒绝时关闭 Handle 并保留对象，不修改既有 ACL。祖先 Handle 仅保留路径固定所需权限，最终目录额外请求 `READ_CONTROL`。
+- 测试与 CI：Runtime 夹具使用正式受保护目录创建入口；新增测试覆盖 Runtime DACL 漂移、继承/宽泛既有锁拒绝、拒绝后身份/内容/权限不变、新锁安全属性及身份复用，并保留跨进程抢锁、崩溃释放、Reparse 拒绝测试。Windows amd64 Test/Vet 清单加入 winsecurity、gateway、tokenkey、provision、pathprofile 五包。配置 README 同步日常权限复核和不合规旧锁保留现场的行为。
+- 本地证据：`go1.27.1/local` 下七个相关包的 `go test -count=1 -timeout 180s` 通过；新增测试冻结后 `go test -v -count=1 -timeout 180s ./internal/server/externallock`、`go test -race -count=1 -timeout 180s ./internal/server/externallock`、`go vet ./...`、`go mod verify` 均 exit 0。Docker Desktop `./scripts/verify.ps1` exit 0，完成最新 `golang:1.27-bookworm` 拉取及 Go 版本门禁、Web Check/Build、Linux 全包 Test/Vet/Build。`git diff --check` 通过。
+- 覆盖限制：Owner 不符的 Runtime/lock 两个原生子用例因当前令牌设置 Administrators Owner 返回 `ERROR_INVALID_OWNER` 而跳过，未计为通过。上述均为未提交工作树的开发证据；新增 CI 清单尚无对应提交的远端执行结果。
+- 独立复审：`CHILD_AGENT` Tier 3 对五个可执行变更文件及配置说明完成全覆盖，结果 `PASSED`、P0/P1/P2/P3=`0/0/0/0`；原 Runtime/lock 权限 P1 在本次范围内已解决。生产文件 SHA-256 为 `E6F384853ACE7278F09EBFDBD214432670E51DC6917FC3CC655DE044A2C3EAB2`，CI 文件为 `779480C2A985984C7B165B21E98AC88850336584F386E53106AD1B4E10EB4472`，新增负向测试为 `E887C686C0FA07BB1F418ABB54B9B56D848A2EFEE6BD56E99D9A01D69D069AE8`。复审者未重跑测试，验证证据来自协调者实际执行记录。
+- 状态与 Gate：M8-03 保持 `IN_PROGRESS`，等待修复提交对应 CI、剩余原生证据与用户阶段签核；M8-04 保持 `NOT_STARTED`。本次未勾选任何产品任务或 Gate，未提交或推送。

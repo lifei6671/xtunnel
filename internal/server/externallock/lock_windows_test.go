@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/lifei6671/xtunnel/internal/server/winsecurity"
 )
 
 const windowsTestTargetHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -203,8 +205,12 @@ func TestWindowsAcquireSeparatesTargetHashes(t *testing.T) {
 func newWindowsRuntimeDir(t *testing.T) string {
 	t.Helper()
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
-	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
-		t.Fatalf("os.Mkdir(runtime) error = %v", err)
+	security, err := winsecurity.NewForegroundDirectorySecurity()
+	if err != nil {
+		t.Fatalf("NewForegroundDirectorySecurity() error = %v", err)
+	}
+	if err := winsecurity.CreateForegroundDirectory(runtimeDir, security); err != nil {
+		t.Fatalf("CreateForegroundDirectory(runtime) error = %v", err)
 	}
 	return runtimeDir
 }

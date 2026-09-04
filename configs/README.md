@@ -51,8 +51,10 @@ Windows 手工前台运行前，先使用已校验的配置显式准备 Data 和
 .\xtunnel-server.exe init --config .\server.windows.yaml
 ```
 
-`init` 只创建或复核目录，不启动 Server、SQLite 或 Listener，也不会接管或放宽既有目录
-的 ACL/owner；日常启动不会隐式创建目录。
+`init` 准备或复核受管目录及 External Lock，不启动 Server、SQLite 或 Listener；
+日常启动仍要求目录已存在。每次取得锁前都通过同一 no-follow Handle 验证 Runtime
+目录和锁文件的 Owner/Protected DACL，新锁在创建时设置受管权限。旧版本或手工创建的
+锁文件若不符合该权限边界，启动及 `init` 都会拒绝并保留现场，不会自动修改 ACL/owner。
 Linux systemd 自安装会创建默认的 `/var/lib/xtunnel/data`：
 
 ```sh
