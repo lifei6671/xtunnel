@@ -265,7 +265,7 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 			t.Fatal("installed SCM identity differs from LocalService + Service SID")
 		}
 		serviceProcess = serviceProcessHandle(t, service)
-		stopService(t, service, serviceProcess)
+		stopService(t, service, serviceProcess, false)
 		must(t, windows.CloseHandle(serviceProcess), "close stopped SCM process")
 		serviceProcess = 0
 		configPath = paths.config
@@ -296,13 +296,13 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 			foreground = startCandidate(t, audit, server, []string{"--config", configPath}, nil)
 		}
 	}
-	stop := func() {
+	stop := func(hardDeadline bool) {
 		if mode == "scm" {
-			stopService(t, service, serviceProcess)
+			stopService(t, service, serviceProcess, hardDeadline)
 			must(t, windows.CloseHandle(serviceProcess), "close stopped SCM process")
 			serviceProcess = 0
 		} else {
-			foreground.stop(t)
+			foreground.stop(t, hardDeadline)
 			foreground = nil
 		}
 	}
@@ -313,7 +313,7 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 		start()
 		api.waitReady(t, foreground)
 		api.assertSetupRequired(t, password)
-		stop()
+		stop(false)
 		assertBindable(t, ports)
 	}
 	runCLI(t, audit, server, "create first admin", []string{"admin", "create", "--config", configPath, "--username", "gate-admin", "--password-file", passwordPath}, true)
@@ -341,7 +341,7 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 	checkTraffic(t, ports[1], ports[3])
 	audit.loadMasterKey(t, root)
 	identity := persistentIdentity(t, root)
-	stop()
+	stop(false)
 	assertBindable(t, ports)
 	start()
 	api.waitReady(t, foreground)
@@ -379,7 +379,7 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 			t.Error("active-read owner did not exit")
 		}
 	})
-	stop()
+	stop(true)
 	processElapsed := time.Since(began)
 	<-readDone
 	if socketErr == nil || socketBytes != 0 {
@@ -388,7 +388,7 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 	if ne, ok := socketErr.(net.Error); ok && ne.Timeout() {
 		t.Fatal("active socket exceeded 30-second drain plus scheduling allowance")
 	}
-	if socketElapsed > 31*time.Second || processElapsed > 35*time.Second {
+	if socketElapsed < 29*time.Second || processElapsed < 29*time.Second || socketElapsed > 31*time.Second || processElapsed > 35*time.Second {
 		t.Fatal("active stop exceeded socket/process bounds")
 	}
 	t.Logf("active socket closed in %s; process exited in %s (30s drain, 1s socket scheduling allowance, 35s process bound)", socketElapsed, processElapsed)
@@ -398,8 +398,8 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 	api.login(t, password)
 	api.waitRoutes(t, tunnel, httpService, tcpService)
 	checkTraffic(t, ports[1], ports[3])
-	agentProcess.stop(t)
-	stop()
+	agentProcess.stop(t, false)
+	stop(false)
 	assertBindable(t, ports)
 	audit.scanFile(t, "server binary", server, false)
 	audit.scanFile(t, "agent binary", agent, false)

@@ -2575,3 +2575,10 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 候选 `04669aac95818b058c14e5af2123e150a7a1f7cf` 的 [CI #33862553668](https://github.com/lifei6671/xtunnel/actions/runs/33862553668) 已实际通过 HTTP Service 创建，随后验收中的“父 ETag 必须变化”断言失败。
 - 冻结模型中 Service 创建推进 Tunnel DesiredRevision，Tunnel ETag 则由独立的元数据 Version 产生。仓储 `TestAdvanceDesiredRevisionUsesIndependentCAS` 已实证 Version 保持、DesiredRevision 推进与旧 CAS 拒绝；未修改生产版本语义。
 - 产品检查继续每次读取当前父强 ETag，实际副作用改为 ServicesCount 0→1→2（缺失前置条件的拒绝无新增记录）及两个 Service ID 不同、归属正确、启用状态正确。定向仓储、Service TLS 生命周期及产品包 Test/Race/Vet 通过，继续精确候选原生验收。
+
+## 2026-09-04 · M8-05 活动连接硬截止验收
+
+- 候选 `91171ee45a4d94724545fbfd6e3087b69fa9c086` 的 [CI #33864025256](https://github.com/lifei6671/xtunnel/actions/runs/33864025256) 已通过前台真实 HTTP、WebSocket、TCP 半关闭、竞争锁拒绝和重启恢复。刻意保持活动 TCP 的停止场景在约 30.024 秒关闭连接后返回非零，现有统一成功退出断言导致产品 Gate 失败；没有成功 Artifact。
+- 现有 TCP Ingress Shutdown 与 M7 硬截止测试保留 `DeadlineExceeded` 返回语义。验收区分普通成功停止与活动硬截止停止，后者核对限定错误、实际 Socket/PID 时限、端口释放和重启业务。SCM 的通用 `RUNTIME_FAILED` 事件只作状态证据，具体截止错误传播由受控运行回调测试补充。
+- TLS `closeNotify` 超时的完整错误同时明确底层连接仍被关闭；真实 TLS 受控期限竞争回归用于核对错误传播、对端 EOF、底层 exactly-once Close 与 WorkPool 归零。保留生产错误语义，继续定向复验、独审及下一候选完整 CI，M8-05 保持 IN_PROGRESS。
+- Windows 原生产品包、WorkPool 与 Service 定向 Test/Race/Vet 通过；Docker Desktop 正式 `./scripts/verify.ps1` 完成 Web check/build、Linux 全包 Test/Vet 和构建。TLS 与 SCM 截止回归已独立复审通过；这些是开发与语义证据，不能替代下一候选的双模式原生产品与 Artifact 验收。

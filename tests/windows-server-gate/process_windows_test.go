@@ -4,10 +4,13 @@ package windowsservergate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -25,6 +28,7 @@ type candidateProcess struct {
 	command *exec.Cmd
 	done    chan struct{}
 	err     error
+	stderr  boundedOutput
 }
 
 func childEnvironment(extra []string) []string {
@@ -83,16 +87,16 @@ func startCandidate(t *testing.T, audit *secretAudit, binary string, args, extra
 	command := exec.Command(binary, args...)
 	command.Env = childEnvironment(extra)
 	command.Stdout = &audit.output
-	command.Stderr = &audit.output
+	p := &candidateProcess{command: command, done: make(chan struct{})}
+	command.Stderr = io.MultiWriter(&p.stderr, &audit.output)
 	// 独立隐藏 Console 提供真实 Ctrl-Break 生命周期；信号辅助进程只附着此 Console，
 	// 不向测试 Runner 或其他候选进程广播停止。
 	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_CONSOLE, HideWindow: true}
 	must(t, command.Start(), "start candidate")
-	p := &candidateProcess{command: command, done: make(chan struct{})}
 	go func() { p.err = command.Wait(); close(p.done) }()
 	return p
 }
-func (p *candidateProcess) stop(t *testing.T) {
+func (p *candidateProcess) stop(t *testing.T, hardDeadline bool) {
 	t.Helper()
 	select {
 	case <-p.done:
@@ -111,7 +115,20 @@ func (p *candidateProcess) stop(t *testing.T) {
 	}
 	select {
 	case <-p.done:
-		must(t, p.err, "candidate graceful exit")
+		_, code := p.exitStatus()
+		if !expectedExitCode(code, hardDeadline) {
+			t.Fatalf("candidate stop exit_code=%d hard_deadline=%t", code, hardDeadline)
+		}
+		if hardDeadline {
+			data, overflow := p.stderr.snapshot()
+			valid := matchesDeadlineError(data, p.command.Path, overflow)
+			clear(data)
+			if !valid {
+				t.Fatal("active stop did not return the exact expected deadline error")
+			}
+		} else {
+			must(t, p.err, "candidate graceful exit")
+		}
 	case <-time.After(35 * time.Second):
 		p.cleanup(t)
 		t.Fatal("candidate exceeded process stop bound")
@@ -184,7 +201,7 @@ func serviceProcessHandle(t *testing.T, s *mgr.Service) windows.Handle {
 	t.Fatal("SCM did not become ready")
 	return 0
 }
-func stopService(t *testing.T, s *mgr.Service, h windows.Handle) {
+func stopService(t *testing.T, s *mgr.Service, h windows.Handle, hardDeadline bool) {
 	t.Helper()
 	began := time.Now()
 	_, err := s.Control(svc.Stop)
@@ -197,8 +214,8 @@ func stopService(t *testing.T, s *mgr.Service, h windows.Handle) {
 		if state.State == svc.Stopped && wait == windows.WAIT_OBJECT_0 {
 			var code uint32
 			must(t, windows.GetExitCodeProcess(h, &code), "SCM exit code")
-			if code != 0 {
-				t.Fatalf("SCM process exit code=%d", code)
+			if !expectedServiceExit(state, code, hardDeadline) {
+				t.Fatalf("SCM stop status mismatch: process_exit=%d win32_exit=%d service_exit=%d hard_deadline=%t", code, state.Win32ExitCode, state.ServiceSpecificExitCode, hardDeadline)
 			}
 			return
 		}
@@ -321,5 +338,115 @@ func (p *candidateProcess) exitStatus() (bool, int) {
 		return true, -1
 	default:
 		return false, -1
+	}
+}
+
+func expectedExitCode(code int, hardDeadline bool) bool {
+	if hardDeadline {
+		return code == 1
+	}
+	return code == 0
+}
+func expectedServiceExit(state svc.Status, code uint32, hardDeadline bool) bool {
+	if state.State != svc.Stopped || !expectedExitCode(int(code), hardDeadline) {
+		return false
+	}
+	if hardDeadline {
+		return state.Win32ExitCode == uint32(windows.ERROR_SERVICE_SPECIFIC_ERROR) && state.ServiceSpecificExitCode == 1
+	}
+	return state.Win32ExitCode == 0 && state.ServiceSpecificExitCode == 0
+}
+
+var deadlineCloseLine = regexp.MustCompile(`^close active work conn_[0-9A-HJKMNP-TV-Z]{26}: close WorkConn: close WorkConn: tls: failed to send closeNotify alert \(but connection was closed anyway\): write tcp ([^ ]+)->([^ ]+): i/o timeout$`)
+
+// 只识别本次候选的完整 stderr；结构化日志之后必须恰有 deadline 主错误，
+// 以及至多一条已确认的 loopback TLS closeNotify 超时。其他错误、重复和截断均拒绝。
+func matchesDeadlineError(data []byte, program string, overflow bool) bool {
+	if overflow {
+		return false
+	}
+	mainError := program + ": close admin bootstrap socket: context deadline exceeded"
+	found, closeFound := false, false
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if line == mainError {
+			if found {
+				return false
+			}
+			found = true
+			continue
+		}
+		if !found {
+			var record struct {
+				Event     string `json:"event"`
+				Component string `json:"component"`
+				Level     string `json:"level"`
+			}
+			if json.Unmarshal([]byte(line), &record) != nil || record.Event == "" || record.Component != "server" || record.Level == "" {
+				return false
+			}
+			continue
+		}
+		match := deadlineCloseLine.FindStringSubmatch(line)
+		if closeFound || match == nil {
+			return false
+		}
+		for _, endpoint := range match[1:] {
+			address, err := netip.ParseAddrPort(endpoint)
+			if err != nil || !address.Addr().IsLoopback() || address.Port() == 0 {
+				return false
+			}
+		}
+		closeFound = true
+	}
+	return found
+}
+func TestDeadlineExitContract(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		code       int
+		hard, want bool
+	}{
+		{"ordinary zero", 0, false, true}, {"ordinary failure", 1, false, false}, {"deadline failure", 1, true, true}, {"deadline zero", 0, true, false}, {"other failure", 2, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if expectedExitCode(test.code, test.hard) != test.want {
+				t.Fatal("exit classification mismatch")
+			}
+		})
+	}
+	state := svc.Status{State: svc.Stopped, Win32ExitCode: uint32(windows.ERROR_SERVICE_SPECIFIC_ERROR), ServiceSpecificExitCode: 1}
+	if !expectedServiceExit(state, 1, true) {
+		t.Fatal("expected SCM deadline status rejected")
+	}
+	for _, mutate := range []func(*svc.Status){func(s *svc.Status) { s.State = svc.Running }, func(s *svc.Status) { s.Win32ExitCode = 0 }, func(s *svc.Status) { s.ServiceSpecificExitCode = 2 }} {
+		changed := state
+		mutate(&changed)
+		if expectedServiceExit(changed, 1, true) {
+			t.Fatal("unrelated SCM failure accepted")
+		}
+	}
+}
+func TestDeadlineErrorParser(t *testing.T) {
+	program := `C:\candidate\server.exe`
+	mainError := program + ": close admin bootstrap socket: context deadline exceeded\n"
+	closeLine := "close active work conn_01M1P0EJ3Y25KAST8HRYD7WV6H: close WorkConn: close WorkConn: tls: failed to send closeNotify alert (but connection was closed anyway): write tcp 127.0.0.1:60495->127.0.0.1:60589: i/o timeout\n"
+	for _, test := range []struct {
+		name, body     string
+		overflow, want bool
+	}{
+		{"deadline", mainError, false, true}, {"expected TLS close", mainError + closeLine, false, true},
+		{"structured log", `{"event":"process_started","component":"server","level":"info"}` + "\n" + mainError, false, true},
+		{"duplicate deadline", mainError + mainError, false, false}, {"extra error", mainError + "close SQLite: failure\n", false, false},
+		{"foreign program", strings.ReplaceAll(mainError, program, "other.exe"), false, false},
+		{"remote TLS", mainError + strings.ReplaceAll(closeLine, "127.0.0.1:60589", "192.0.2.1:60589"), false, false},
+		{"duplicate TLS", mainError + closeLine + closeLine, false, false}, {"TLS only", closeLine, false, false},
+		{"overflow", mainError, true, false}, {"malformed prefix", "unrelated failure\n" + mainError, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if matchesDeadlineError([]byte(test.body), program, test.overflow) != test.want {
+				t.Fatal("deadline error classification mismatch")
+			}
+		})
 	}
 }

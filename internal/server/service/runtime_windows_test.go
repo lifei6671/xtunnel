@@ -4,9 +4,11 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -150,5 +152,94 @@ func TestWindowsServiceFailureExit(t *testing.T) {
 				t.Fatalf("failure exit %v %d %v", specific, code, handler.err)
 			}
 		})
+	}
+}
+
+// 硬期限触发后 callback 仍拥有资源收敛。SCM 必须等待它完成，并保留
+// DeadlineExceeded 的失败语义与事件，而不能把“进程已经退出”改写成正常停止。
+func TestWindowsServiceStopRetainsDrainDeadline(t *testing.T) {
+	log := &fakeWindowsEventLogger{}
+	cancelled := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseOwner := func() { releaseOnce.Do(func() { close(release) }) }
+	joined := make(chan struct{})
+	handler := &windowsServiceHandler{
+		open: func() (*windowsEventLogWriter, error) {
+			return openWindowsEventLogWriter("test", func(string) (windowsEventLogger, error) { return log, nil })
+		},
+		callback: func(ctx context.Context, _ io.Writer, ready func()) error {
+			ready()
+			<-ctx.Done()
+			close(cancelled)
+			<-release
+			close(joined)
+			return context.DeadlineExceeded
+		},
+	}
+	requests := make(chan svc.ChangeRequest, 1)
+	changes := make(chan svc.Status, 16)
+	type exit struct {
+		specific bool
+		code     uint32
+	}
+	done := make(chan exit, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		specific, code := handler.Execute(nil, requests, changes)
+		done <- exit{specific, code}
+	}()
+	t.Cleanup(func() {
+		releaseOwner()
+		close(requests)
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("SCM test owner cleanup did not finish")
+		}
+	})
+	waitState(t, changes, svc.Running)
+	requests <- svc.ChangeRequest{Cmd: svc.Stop}
+	waitState(t, changes, svc.StopPending)
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SCM stop did not cancel callback")
+	}
+	select {
+	case <-done:
+		t.Fatal("SCM exited before callback owner completed")
+	default:
+	}
+	releaseOwner()
+	select {
+	case result := <-done:
+		if !result.specific || result.code != 1 || !errors.Is(handler.err, context.DeadlineExceeded) {
+			t.Fatalf("drain failure result: specific=%v code=%d err=%v", result.specific, result.code, handler.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SCM did not join callback owner")
+	}
+	select {
+	case <-joined:
+	default:
+		t.Fatal("callback owner was not joined")
+	}
+	failed := 0
+	for _, entry := range log.records {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(entry.message), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event["event"] == "windows_service_failed" && event["error_code"] == "RUNTIME_FAILED" {
+			failed++
+		}
+		if event["event"] == "windows_service_stopped" {
+			t.Fatal("drain failure reported normal service stop")
+		}
+	}
+	if failed != 1 {
+		t.Fatalf("RUNTIME_FAILED event count=%d want=1", failed)
 	}
 }
