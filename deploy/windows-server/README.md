@@ -1,6 +1,6 @@
 # Windows Server SCM
 
-本入口用于 M8-04 的 Windows amd64 + NTFS 服务实现与开发验收。Windows Server
+本入口用于 Windows amd64 + NTFS 服务运行、维护与候选验收。Windows Server
 发布支持以 M8-05 Preview Gate 为准，任务证据见[开发计划](../../docs/xtunnel_standalone_v0.1_development_plan.md)。
 
 ## 安装与首个管理员
@@ -79,3 +79,48 @@ CI 随后显式运行 `TestServiceTokenIsolation`，用真实 SCM LocalService �
 CI 首次安装启动失败时，可通过 `-DiagnosticPath` 指定 `internal/server/bootstrap`
 构建的测试程序。脚本在停止服务后临时替换 Binary，读取服务回调返回前写入的诊断事件，
 再还原候选；原安装失败仍返回失败。此入口仅用于固定测试配置、没有真实凭据的一次性 Runner。
+
+## Windows 候选产品验收
+
+M8-05 的产品入口只用于全新、提升权限的 Windows amd64 隔离 Runner。它会实际运行
+候选 Server 与 Agent，在前台和 SCM 模式分别完成 Management 登录、配置业务、签发
+Connection Token、HTTP 响应、WebSocket 帧往返与 TCP 字节转发，并在重启后复验业务。
+前台第二进程必须被外部锁拒绝；SCM 运行期间离线维护必须被拒绝。
+
+入口先拒绝已有 Server 服务、事件源与固定 Profile 对象，只清理本轮创建的测试状态。
+它必须在保留测试数据的 `smoke.ps1` 之前运行。所有密码和 Token 都是临时随机值，
+经测试文件或仅限子进程的环境传入。验收在有界内存中扫描实际进程日志、候选 Binary、
+配置及 SCM Registry/Event Log；命中敏感值、私钥等禁止形状或日志超限均失败，
+检查内容不进入 CI 输出或候选 Artifact。
+
+```powershell
+$env:GOTOOLCHAIN = 'local'
+.\tools\check-go-version.ps1
+$env:XTUNNEL_WINDOWS_SERVER_GATE = '1'
+$env:XTUNNEL_SERVER_BINARY = Join-Path $env:RUNNER_TEMP 'xtunnel-server.exe'
+$env:XTUNNEL_AGENT_BINARY = Join-Path $env:RUNNER_TEMP 'xtunnel-agent.exe'
+$env:XTUNNEL_CANDIDATE_COMMIT = (git rev-parse HEAD).Trim()
+$env:XTUNNEL_PRODUCT_REPORT = Join-Path $env:RUNNER_TEMP 'm8-05-product.json'
+try {
+    go test -v -count=1 -timeout 600s ./tests/windows-server-gate -run '^TestWindowsServerProductGate$'
+    if ($LASTEXITCODE -ne 0) { throw 'Windows product gate failed' }
+} finally {
+    Remove-Item Env:\XTUNNEL_WINDOWS_SERVER_GATE
+    Remove-Item Env:\XTUNNEL_SERVER_BINARY
+    Remove-Item Env:\XTUNNEL_AGENT_BINARY
+    Remove-Item Env:\XTUNNEL_CANDIDATE_COMMIT
+    Remove-Item Env:\XTUNNEL_PRODUCT_REPORT
+}
+```
+
+候选构建必须注入 `v0.1.0-ci.<完整 Commit SHA>`。产品测试经已认证的 System Info API
+读取真实运行时版本、系统与架构，并把成功结果绑定到输入 Server EXE 的 SHA-256。
+普通 `go test ./...` 会跳过隔离主机操作，不能作为此产品 Gate 的通过证据。
+
+活动连接停止按两个边界记录：生产排空期限为 30 秒，测试允许最多 1 秒调度观测容差来
+确认 Socket 已关闭；进程及资源 owner 收尾须在停止请求后的 35 秒内完成。该观测容差
+不改变生产排空配置，也不把 35 秒总退出表述成 30 秒总停止。退出后复验 Listener 释放
+及重新启动，防止以强杀测试进程掩盖资源未收敛。
+
+通过后的报告与同一候选 EXE 交由 [Windows 候选 Artifact 校验](../../tests/release/README.md)
+验证并归档。Artifact 仅作为候选证据；平台支持状态以 M8-05 全部 Gate 和阶段签核为准。

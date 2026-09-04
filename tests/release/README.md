@@ -16,3 +16,31 @@ GOTOOLCHAIN=local ./tests/release/run-m7-10.sh -o /tmp/xtunnel-m7-10
 签核输入，本身不是正式发布物。任何构建日志或 Layout 校验失败都会阻止总 Gate。
 Backup Archive 含技术方案白名单内的 Token Master Key，属于受控 Secret 载体，
 不进入本候选证据。
+
+## M8-05 Windows amd64 候选 Artifact
+
+Windows CI 使用与产品 Gate、SCM smoke 相同的候选 EXE。产品 Gate 通过已认证的
+System Info API 读取实际运行时版本，并生成包含完整 Commit SHA、Server SHA-256、
+Windows/amd64 与前台/SCM 两种模式的成功报告。候选验证器将该报告与最终 EXE 字节绑定。
+
+在干净的 Windows amd64 checkout、Go 1.27.1+ / GOTOOLCHAIN=local 环境中执行：
+
+```powershell
+$env:GOTOOLCHAIN = 'local'
+.\tools\check-go-version.ps1
+$serverPath = Join-Path $env:RUNNER_TEMP 'xtunnel-server.exe'
+$productReport = Join-Path $env:RUNNER_TEMP 'm8-05-product.json'
+$outputPath = Join-Path $env:RUNNER_TEMP 'm8-05-windows-candidate'
+$commit = (git rev-parse HEAD).Trim()
+go run ./tests/release/windowsverify -server $serverPath -commit $commit -product-report $productReport -output $outputPath
+if ($LASTEXITCODE -ne 0) { throw 'Windows candidate verification failed' }
+```
+
+输出目录必须位于仓库外且预先不存在。输入 Binary 必须从该提交构建并注入
+`v0.1.0-ci.<完整 Commit SHA>`。验证器检查 PE amd64、Go 构建元数据、VCS 身份、
+产品报告中的实际版本与摘要绑定和 Secret 形状，生成标准命名的 `xtunnel-server-windows-amd64.exe`、
+`manifest.json`、`artifact-sha256.txt` 及产品报告。
+
+CI 上传 `m8-05-windows-amd64-<Commit>-attempt-<Run Attempt>` 候选证据，保留 14 天。
+它不是正式 Release；M8-05 聚合 Gate 与用户阶段验收完成后才能更新 Windows Server
+Preview 支持声明。此入口不改变既有 Linux OCI 的精确双平台集合。

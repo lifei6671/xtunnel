@@ -454,9 +454,9 @@ jobs:
           retention-days: 14
 
   windows-agent:
-    name: Windows Agent service
+    name: Windows amd64 Agent and Server
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -545,48 +545,17 @@ jobs:
           go build -trimpath -o $gateHelperPath ./tests/windows-scm-gate
           if ($LASTEXITCODE -ne 0) { throw 'Windows SCM Gate Helper build failed' }
 
-      - name: Test vet and build Windows amd64 Server baseline
+      - name: Test vet and build Windows amd64 Server
         shell: powershell
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-          $serverTestPackages = @(
-            './configs'
-            './internal/server/config'
-            './internal/server/datadir'
-            './internal/server/durableops'
-            './internal/server/externallock'
-            './internal/server/limits'
-            './internal/server/service'
-            './internal/server/bootstrap'
-            './internal/server/winsecurity'
-            './internal/server/gateway'
-            './internal/server/tokenkey'
-            './internal/server/provision'
-            './internal/server/pathprofile'
-          )
-          $serverVetPackages = @(
-            './configs'
-            './internal/server/config'
-            './internal/server/datadir'
-            './internal/server/durableops'
-            './internal/server/externallock'
-            './internal/server/limits'
-            './internal/server/service'
-            './internal/server/bootstrap'
-            './internal/server/winsecurity'
-            './internal/server/gateway'
-            './internal/server/tokenkey'
-            './internal/server/provision'
-            './internal/server/pathprofile'
-            './cmd/server'
-          )
-          go test -count=1 -timeout 180s @serverTestPackages
-          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server baseline tests failed' }
-          go test -v -race -count=1 -timeout 180s ./internal/server/datadir ./internal/server/externallock
-          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 M8-02 race tests failed' }
-          go vet @serverVetPackages
-          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server baseline vet failed' }
+          go test -count=1 -timeout 180s ./...
+          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 full repository tests failed' }
+          go test -v -race -count=1 -timeout 180s ./internal/server/datadir ./internal/server/externallock ./internal/server/winsecurity ./internal/server/bootstrap
+          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server lifecycle and security race tests failed' }
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 full repository vet failed' }
 
           $serverPath = Join-Path $env:RUNNER_TEMP 'xtunnel-server.exe'
           $buildVersion = "v0.1.0-ci.$env:GITHUB_SHA"
@@ -697,6 +666,30 @@ jobs:
           ./deploy/windows/smoke.ps1 -PreviousAgentPath $previousAgentPath `
             -AgentPath $agentPath -GateHelperPath $gateHelperPath
 
+      - name: Verify Windows Server candidate product gate
+        shell: powershell
+        timeout-minutes: 12
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          ./tools/check-go-version.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows product gate toolchain check failed' }
+          $env:XTUNNEL_WINDOWS_SERVER_GATE = '1'
+          $env:XTUNNEL_SERVER_BINARY = Join-Path $env:RUNNER_TEMP 'xtunnel-server.exe'
+          $env:XTUNNEL_AGENT_BINARY = Join-Path $env:RUNNER_TEMP 'xtunnel-agent.exe'
+          $env:XTUNNEL_CANDIDATE_COMMIT = $env:GITHUB_SHA
+          $env:XTUNNEL_PRODUCT_REPORT = Join-Path $env:RUNNER_TEMP 'm8-05-product.json'
+          try {
+            go test -v -count=1 -timeout 600s ./tests/windows-server-gate -run '^TestWindowsServerProductGate$'
+            if ($LASTEXITCODE -ne 0) { throw 'Windows Server candidate product gate failed' }
+          } finally {
+            Remove-Item Env:\XTUNNEL_WINDOWS_SERVER_GATE
+            Remove-Item Env:\XTUNNEL_SERVER_BINARY
+            Remove-Item Env:\XTUNNEL_AGENT_BINARY
+            Remove-Item Env:\XTUNNEL_CANDIDATE_COMMIT
+            Remove-Item Env:\XTUNNEL_PRODUCT_REPORT
+          }
+
       - name: Verify Windows Server SCM and Service SID isolation
         shell: powershell
         timeout-minutes: 8
@@ -717,6 +710,28 @@ jobs:
           } finally {
             Remove-Item Env:\XTUNNEL_SERVER_SCM_SECURITY_TEST
           }
+
+      - name: Verify Windows amd64 candidate artifact
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          ./tools/check-go-version.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows artifact toolchain check failed' }
+          $serverPath = Join-Path $env:RUNNER_TEMP 'xtunnel-server.exe'
+          $productReport = Join-Path $env:RUNNER_TEMP 'm8-05-product.json'
+          $outputPath = Join-Path $env:RUNNER_TEMP 'm8-05-windows-candidate'
+          go run ./tests/release/windowsverify -server $serverPath -commit $env:GITHUB_SHA -product-report $productReport -output $outputPath
+          if ($LASTEXITCODE -ne 0) { throw 'Windows candidate artifact verification failed' }
+
+      - name: Upload verified Windows amd64 candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: m8-05-windows-amd64-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m8-05-windows-candidate
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Verify working tree remains clean
         shell: powershell

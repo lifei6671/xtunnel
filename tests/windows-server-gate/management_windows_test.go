@@ -1,0 +1,182 @@
+//go:build windows
+
+package windowsservergate
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"testing"
+	"time"
+
+	api "github.com/lifei6671/xtunnel/internal/server/managementapi"
+)
+
+// managementClient 使用生成的 OpenAPI 请求/响应模型；Secret 只保留在内存，
+// 失败仅报告操作和状态码，不输出响应体、Cookie、CSRF 或 Connection Token。
+type managementClient struct {
+	audit  *secretAudit
+	base   string
+	client *http.Client
+	cookie *http.Cookie
+	csrf   string
+}
+
+func newManagement(t *testing.T, port int, audit *secretAudit) *managementClient {
+	transport := &http.Transport{DisableKeepAlives: true}
+	t.Cleanup(transport.CloseIdleConnections)
+	return &managementClient{audit: audit, base: fmt.Sprintf("http://127.0.0.1:%d/api/v1", port), client: &http.Client{Timeout: 5 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+}
+func (c *managementClient) request(t *testing.T, method, path string, body any, want int, result any, csrf bool) *http.Response {
+	t.Helper()
+	var data []byte
+	var err error
+	if body != nil {
+		data, err = json.Marshal(body)
+		must(t, err, "encode management request")
+	}
+	req, err := http.NewRequestWithContext(t.Context(), method, c.base+path, bytes.NewReader(data))
+	must(t, err, "create management request")
+	req.Host = "admin.gate.test"
+	req.Header.Set("Origin", "https://admin.gate.test")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.cookie != nil {
+		req.AddCookie(c.cookie)
+	}
+	if csrf {
+		req.Header.Set("X-XTunnel-CSRF", c.csrf)
+	}
+	response, err := c.client.Do(req)
+	must(t, err, "management "+method+" "+path)
+	content, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	closeErr := response.Body.Close()
+	must(t, readErr, "read management response")
+	must(t, closeErr, "close management response")
+	if response.StatusCode != want {
+		t.Fatalf("management %s %s status=%d want=%d", method, path, response.StatusCode, want)
+	}
+	if result != nil {
+		if err := json.Unmarshal(content, result); err != nil {
+			t.Fatal("management response violates JSON contract")
+		}
+	}
+	clear(content)
+	clear(data)
+	return response
+}
+func (c *managementClient) waitReady(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, c.base+"/auth/me", nil)
+		must(t, err, "readiness request")
+		req.Host = "admin.gate.test"
+		r, e := c.client.Do(req)
+		if e == nil {
+			code := r.StatusCode
+			must(t, r.Body.Close(), "close readiness")
+			if code == http.StatusUnauthorized {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("candidate Management listener did not become ready")
+}
+func (c *managementClient) login(t *testing.T, password string) {
+	t.Helper()
+	c.cookie = nil
+	c.csrf = ""
+	var session api.AuthSession
+	response := c.request(t, http.MethodPost, "/auth/login", api.LoginRequest{Username: "gate-admin", Password: &password}, http.StatusOK, &session, false)
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "xtunnel_admin_session" {
+			c.cookie = cookie
+		}
+	}
+	if c.cookie == nil || !c.cookie.Secure || !c.cookie.HttpOnly || c.cookie.Path != "/api/v1" || len(session.CsrfToken) != 43 {
+		t.Fatal("login session cookie/CSRF contract mismatch")
+	}
+	c.csrf = session.CsrfToken
+	c.audit.values = append(c.audit.values, c.cookie.Value, c.csrf)
+}
+func (c *managementClient) systemInfo(t *testing.T, version string) {
+	t.Helper()
+	var info api.SystemInfo
+	c.request(t, http.MethodGet, "/system/info", nil, http.StatusOK, &info, false)
+	if info.Version != version || info.Os != "windows" || info.Arch != "amd64" {
+		t.Fatal("authenticated running candidate version/platform mismatch")
+	}
+}
+func (c *managementClient) configure(t *testing.T, origin *origins, publicPort int) (string, string, string, string) {
+	t.Helper()
+	c.request(t, http.MethodPost, "/tunnels", api.CreateTunnelRequest{Name: "csrf-rejected"}, http.StatusForbidden, nil, false)
+	var credential api.TunnelCredentialResponse
+	c.request(t, http.MethodPost, "/tunnels", api.CreateTunnelRequest{Name: "windows-product-gate"}, http.StatusCreated, &credential, true)
+	if credential.Tunnel.Id == "" || credential.Credential.ConnectionToken == "" || credential.Credential.TunnelId != credential.Tunnel.Id {
+		t.Fatal("Tunnel creation did not issue its credential")
+	}
+	tunnel := credential.Tunnel.Id
+	var httpOrigin, tcpOrigin api.OriginInput
+	var httpExposure, tcpExposure api.ExposureInput
+	must(t, httpOrigin.FromHTTPOriginInput(api.HTTPOriginInput{Scheme: "http", Host: "127.0.0.1", Port: origin.httpPort}), "HTTP Origin union")
+	must(t, tcpOrigin.FromTCPOriginInput(api.TCPOriginInput{Scheme: "tcp", Host: "127.0.0.1", Port: origin.tcpPort}), "TCP Origin union")
+	must(t, httpExposure.FromHTTPExposureInput(api.HTTPExposureInput{Type: "http", Hostname: "public.gate.test"}), "HTTP exposure union")
+	must(t, tcpExposure.FromTCPExposureInput(api.TCPExposureInput{Type: "tcp", PublicPort: &publicPort}), "TCP exposure union")
+	var httpService, tcpService api.Service
+	c.request(t, http.MethodPost, "/services", api.CreateServiceRequest{Name: "gate-http", TunnelId: tunnel, Origin: httpOrigin, Exposure: httpExposure}, http.StatusCreated, &httpService, true)
+	c.request(t, http.MethodPost, "/services", api.CreateServiceRequest{Name: "gate-tcp", TunnelId: tunnel, Origin: tcpOrigin, Exposure: tcpExposure}, http.StatusCreated, &tcpService, true)
+	if httpService.Id == "" || tcpService.Id == "" || !httpService.Enabled || !tcpService.Enabled {
+		t.Fatal("created services missing identity/enabled state")
+	}
+	return tunnel, httpService.Id, tcpService.Id, credential.Credential.ConnectionToken
+}
+func (c *managementClient) waitRoutes(t *testing.T, tunnel, httpService, tcpService string) {
+	t.Helper()
+	deadline := time.Now().Add(40 * time.Second)
+	for time.Now().Before(deadline) {
+		var connectors api.ConnectorList
+		c.request(t, http.MethodGet, "/tunnels/"+tunnel+"/connectors", nil, http.StatusOK, &connectors, false)
+		var hs, ts api.Service
+		c.request(t, http.MethodGet, "/services/"+httpService, nil, http.StatusOK, &hs, false)
+		c.request(t, http.MethodGet, "/services/"+tcpService, nil, http.StatusOK, &ts, false)
+		if len(connectors.Items) == 1 && connectors.Items[0].ConfigReady && connectors.Items[0].IdleWorkConnections > 0 && hs.Status == "READY" && ts.Status == "READY" {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("real Agent Gateway and service configuration did not become ready")
+}
+func (c *managementClient) assertPersisted(t *testing.T, tunnel, httpService, tcpService string) {
+	t.Helper()
+	var item api.Tunnel
+	c.request(t, http.MethodGet, "/tunnels/"+tunnel, nil, http.StatusOK, &item, false)
+	if item.Name != "windows-product-gate" || item.ServicesCount != 2 {
+		t.Fatal("restart lost Tunnel/Service desired state")
+	}
+	for _, id := range []string{httpService, tcpService} {
+		var s api.Service
+		c.request(t, http.MethodGet, "/services/"+id, nil, http.StatusOK, &s, false)
+		if s.Id != id || s.TunnelId != tunnel || !s.Enabled {
+			t.Fatal("restart changed Service identity or enabled state")
+		}
+	}
+}
+func (c *managementClient) waitActive(t *testing.T, tunnel string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var state api.Tunnel
+		c.request(t, http.MethodGet, "/tunnels/"+tunnel, nil, http.StatusOK, &state, false)
+		if state.ActiveConnections > 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("active TCP did not appear in product counters")
+}
