@@ -215,3 +215,37 @@ func TestSecretSurfaceDetection(t *testing.T) {
 		})
 	}
 }
+
+// 全部捕获内容通过检查后才选择诊断尾部，避免尾部裁剪隐藏前面的泄漏或溢出。
+// 此函数不写日志；调用方只能在测试失败时输出已经核验的有限文本。
+func checkedDiagnostic(data []byte, values []string, overflow bool) (string, bool) {
+	if overflow || containsSecret(data, values, true) {
+		return "", false
+	}
+	if len(data) > 8192 {
+		data = data[len(data)-8192:]
+	}
+	return string(data), true
+}
+func TestCheckedDiagnosticFailsClosed(t *testing.T) {
+	secret := "generated-test-diagnostic-secret"
+	for _, test := range []struct {
+		name     string
+		data     []byte
+		overflow bool
+		allowed  bool
+	}{
+		{"clean startup error", []byte("initialize server storage: access denied"), false, true},
+		{"exact secret outside tail", append([]byte(secret), bytes.Repeat([]byte{'x'}, 9000)...), false, false},
+		{"private key shape", []byte("-----BEGIN PRIVATE KEY-----"), false, false},
+		{"overflow", []byte("clean retained bytes"), true, false},
+		{"bounded clean", bytes.Repeat([]byte{'x'}, 9000), false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			diagnostic, allowed := checkedDiagnostic(test.data, []string{secret}, test.overflow)
+			if allowed != test.allowed || len(diagnostic) > 8192 || (!allowed && diagnostic != "") {
+				t.Fatal("diagnostic publication policy mismatch")
+			}
+		})
+	}
+}

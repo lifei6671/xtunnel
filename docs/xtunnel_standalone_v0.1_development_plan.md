@@ -2550,3 +2550,10 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 首轮候选 `28364bc5c70d7bde46afcb9ac77fc111a7a365c2` 的 [CI #33857213840](https://github.com/lifei6671/xtunnel/actions/runs/33857213840) 中，Windows amd64 全仓 Test/Vet/Race、候选及交叉构建、既有 Agent SCM/升级通过；产品前台就绪检查失败，SCM 产品 Gate 与 Artifact 未执行。
 - 定位到就绪请求未带可信代理 HTTPS 声明，Host 被规范化为 `admin.gate.test:80`，与允许的 HTTPS `:443` 不匹配。就绪请求现与管理业务请求使用相同代理元数据，仍仅接受未认证 401，并在失败时记录状态码和传输失败布尔值。
 - 新增真实 Management Handler、临时 SQLite 和 HTTP Listener 回归：缺少代理协议声明返回 400，修正后的就绪请求得到 401；包 Test/Vet、定向 Race 与既有 ManagementSecurityPolicy 测试通过。下一候选继续取得真实完整产品和 CI 证据。
+
+## 2026-09-04 · M8-05 启动失败诊断
+
+- 候选 `c94c18aa3fdc59fedd48f7083af52ad4301a9e17` 的 [CI #33858720283](https://github.com/lifei6671/xtunnel/actions/runs/33858720283) 中，Windows 产品就绪检查仍失败：`last_status=0 transport_failed=true`，说明此次未取得任何 HTTP 响应。代理元数据回归通过，但不能据此推定候选进程已启动成功。
+- 产品测试增加原始进程退出状态，唯一 Wait 发布结果后可立即终止就绪等待。失败诊断在全部进程清理后，对完整有界输出先执行实际凭据、冻结形状和溢出检查，通过后最多输出末尾 8192 字节；检查未通过只记录固定标签。新增回归覆盖秘密位于截断头部、PEM、溢出和干净有界诊断。
+- 本次定向 Test/Race/Vet 与独立诊断增量复审通过。生产实现、就绪 401 准入和完整 CI 要求保持；继续取得下一候选的具体启动失败证据。
+- 同轮 Linux arm64 的既有 `TestProxyAggregatesConcurrentPendingOpensAndRefillsBeyondInitialDemand` 在 `CloseWrite` 报 `ENOTCONN`；本次未改其依赖实现，只读复核确认存在并发期限竞争可能，但尚未证明根因。当前失败记录保留，后续同命令原样验证，不放宽断言。

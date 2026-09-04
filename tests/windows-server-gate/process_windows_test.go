@@ -119,6 +119,10 @@ func (p *candidateProcess) stop(t *testing.T) {
 }
 func (p *candidateProcess) cleanup(t *testing.T) {
 	t.Helper()
+	if t.Failed() {
+		exited, code := p.exitStatus()
+		t.Logf("candidate state before cleanup: pid=%d exited=%t exit_code=%d", p.command.Process.Pid, exited, code)
+	}
 	select {
 	case <-p.done:
 		return
@@ -305,4 +309,17 @@ func cleanupFailedInstall(t *testing.T, audit *secretAudit, manager *mgr.Mgr, bi
 func containsRejection(output *boundedOutput, expected string) bool {
 	data, overflow := output.snapshot()
 	return !overflow && strings.Contains(string(data), expected)
+}
+
+// done 的关闭发布唯一 Wait owner 的 ProcessState；未退出时不读取并发写入状态。
+func (p *candidateProcess) exitStatus() (bool, int) {
+	select {
+	case <-p.done:
+		if p.command.ProcessState != nil {
+			return true, p.command.ProcessState.ExitCode()
+		}
+		return true, -1
+	default:
+		return false, -1
+	}
 }

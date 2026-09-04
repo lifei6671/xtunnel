@@ -73,12 +73,17 @@ func (c *managementClient) request(t *testing.T, method, path string, body any, 
 	clear(data)
 	return response
 }
-func (c *managementClient) waitReady(t *testing.T) {
+func (c *managementClient) waitReady(t *testing.T, candidates ...*candidateProcess) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	lastStatus := 0
 	transportFailed := false
 	for time.Now().Before(deadline) {
+		if len(candidates) != 0 && candidates[0] != nil {
+			if exited, code := candidates[0].exitStatus(); exited {
+				t.Fatalf("candidate exited before Management readiness: pid=%d exit_code=%d last_status=%d", candidates[0].command.Process.Pid, code, lastStatus)
+			}
+		}
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, c.base+"/auth/me", nil)
 		must(t, err, "readiness request")
 		req.Host = "admin.gate.test"

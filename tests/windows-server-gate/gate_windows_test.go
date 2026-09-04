@@ -198,11 +198,15 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 	audit := &secretAudit{}
 	t.Cleanup(func() {
 		data, overflow := audit.output.snapshot()
-		if overflow {
-			t.Error("candidate log capture limit exceeded")
+		defer clear(data)
+		diagnostic, allowed := checkedDiagnostic(data, audit.values, overflow)
+		if !allowed {
+			t.Error("candidate diagnostics withheld: output overflow or secret check failed")
+			return
 		}
-		audit.scan(t, "candidate and CLI logs", data, true)
-		clear(data)
+		if t.Failed() && diagnostic != "" {
+			t.Logf("candidate diagnostics after complete secret scan (at most 8192 bytes):\n%s", diagnostic)
+		}
 	})
 	private := filepath.Join(t.TempDir(), "private")
 	security, err := winsecurity.NewForegroundDirectorySecurity()
@@ -306,7 +310,7 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 	}
 	start()
 	api := newManagement(t, ports[0], audit)
-	api.waitReady(t)
+	api.waitReady(t, foreground)
 	api.login(t, password)
 	api.systemInfo(t, version)
 	origin := startOrigins(t)
@@ -331,7 +335,7 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 	stop()
 	assertBindable(t, ports)
 	start()
-	api.waitReady(t)
+	api.waitReady(t, foreground)
 	api.login(t, password)
 	api.systemInfo(t, version)
 	api.assertPersisted(t, tunnel, httpService, tcpService)
@@ -381,7 +385,7 @@ func runMode(t *testing.T, mode, server, agent, version string, paths productPat
 	t.Logf("active socket closed in %s; process exited in %s (30s drain, 1s socket scheduling allowance, 35s process bound)", socketElapsed, processElapsed)
 	assertBindable(t, ports)
 	start()
-	api.waitReady(t)
+	api.waitReady(t, foreground)
 	api.login(t, password)
 	api.waitRoutes(t, tunnel, httpService, tcpService)
 	checkTraffic(t, ports[1], ports[3])

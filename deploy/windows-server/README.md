@@ -91,7 +91,8 @@ Connection Token、HTTP 响应、WebSocket 帧往返与 TCP 字节转发，并�
 它必须在保留测试数据的 `smoke.ps1` 之前运行。所有密码和 Token 都是临时随机值，
 经测试文件或仅限子进程的环境传入。验收在有界内存中扫描实际进程日志、候选 Binary、
 配置及 SCM Registry/Event Log；命中敏感值、私钥等禁止形状或日志超限均失败，
-检查内容不进入 CI 输出或候选 Artifact。
+候选 Artifact 保存 Server EXE、清单与成功报告；失败诊断须先对完整捕获内容通过同等扫描，
+再输出最多 8192 字节。扫描失败或溢出时只记录固定错误标签。
 
 ```powershell
 $env:GOTOOLCHAIN = 'local'
