@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 )
 
-func validatePinnedIdentityFiles(keyPath, certPath string) error {
+func validatePinnedIdentityFiles(_ string, keyPath, certPath string) error {
 	info, err := os.Stat(keyPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return ErrIdentityMissing
@@ -28,6 +28,8 @@ func validatePinnedIdentityFiles(keyPath, certPath string) error {
 	return nil
 }
 
+func validatePinnedIdentityDataDirectory(string) error { return nil }
+
 func createPinnedIdentityDirectory(_ string, directory string) error {
 	return os.MkdirAll(directory, 0o700)
 }
@@ -36,10 +38,10 @@ func readPinnedIdentityFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-func writePinnedIdentity(keyPath, certPath string, certificate tlsCertificate) error {
+func writePinnedIdentity(_ string, keyPath, certPath string, certificate tlsCertificate) error {
 	return writeIdentity(keyPath, certPath, certificate)
 }
 
-func replacePinnedCertificate(directory, certPath string, certificate tlsCertificate) error {
+func replacePinnedCertificate(_ string, directory, certPath string, certificate tlsCertificate) error {
 	return replaceCertificateAtomically(directory, certPath, certificate)
 }

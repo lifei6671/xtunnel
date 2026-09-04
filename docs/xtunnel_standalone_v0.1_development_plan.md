@@ -2331,5 +2331,6 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 ## 2026-09-04 · M8-03 Windows 原生回归补全
 
 - 测试夹具：仅为实际写入 pinned Gateway 身份的 Windows 测试创建受保护的临时前台目录；纯配置生命周期测试使用 `server.data_dir: auto` 并只经 fake storage 观察解析结果，不创建或写入用户 Profile。生产 DACL 与路径 Profile 策略未放宽。
-- 验证：本机 `go1.27.1/local` 下 `go test -count=1 -timeout 10m ./...`、`go vet ./...` 与 `go build -trimpath ./cmd/server` 通过；Docker Desktop 拉取 `golang:1.27-bookworm` 后，`./scripts/verify.ps1` exit 0，完成 Web Check/Build 与 Linux 全仓 Go Test/Vet/Build。
-- 状态与 Gate：上述均为脏工作区开发证据；M8-03 仍为 `IN_PROGRESS`，尚无 commit-bound CI、独立复审或用户阶段签核，未勾选任何产品任务或 Gate。
+- 发布边界：Token Key 最终发布点会再次验证其直接 Data Root；即使 `credentials` 仍受管，根目录失去 Protected DACL 时也拒绝写入。新增 Windows 回归覆盖该拒绝且确认不产生主密钥；Gateway 身份的根目录、Journal、临时对象预检和 Public TLS 拒绝后对象不变覆盖保持在同一前台安全边界内。
+- 验证：本机 `go1.27.1/local` 下 `go test -count=1 -timeout 10m ./internal/server/tokenkey ./internal/server/gateway ./internal/server/winsecurity` 与对应 `go vet` 通过；Docker Desktop 拉取 `golang:1.27-bookworm` 后，`./scripts/verify.ps1` exit 0，完成 Web Check/Build 与 Linux 全仓 Go Test/Vet/Build。冻结工作树的独立 `CHILD_AGENT` 复审通过，P0/P1/P2=`0/0/0`。
+- 状态与 Gate：上述均为本地开发证据；M8-03 仍为 `IN_PROGRESS`，尚无 commit-bound CI 或用户阶段签核，未勾选任何产品任务或 Gate。

@@ -118,7 +118,7 @@ func (identity Identity) SPKIHash() [sha256.Size]byte {
 // LoadPinnedIdentity 读取已经存在的 pinned 身份；不会静默补建缺失文件。
 func LoadPinnedIdentity(dataDir string) (Identity, error) {
 	paths := identityPaths(dataDir)
-	if err := validatePinnedIdentityFiles(paths.key, paths.cert); err != nil {
+	if err := validatePinnedIdentityFiles(dataDir, paths.key, paths.cert); err != nil {
 		return Identity{}, err
 	}
 	certificate, err := loadKeyPair(paths.key, paths.cert)
@@ -179,7 +179,7 @@ func LoadOrCreatePinnedIdentity(dataDir, hostname string, mayCreate bool, now ti
 	if err != nil {
 		return Identity{}, err
 	}
-	if err := writePinnedIdentity(paths.key, paths.cert, certificate); err != nil {
+	if err := writePinnedIdentity(dataDir, paths.key, paths.cert, certificate); err != nil {
 		return Identity{}, err
 	}
 	return withPinnedRenewalSource(Identity{Certificate: certificate}, paths, hostname), nil
@@ -257,7 +257,7 @@ func RecoverRotation(dataDir string) error {
 
 func recoverRotation(dataDir string, fileOps rotationFileOps) error {
 	paths := identityPaths(dataDir)
-	journal, exists, err := readJournal(paths.journal)
+	journal, exists, err := readJournal(dataDir, paths.journal)
 	if err != nil || !exists {
 		return err
 	}
@@ -289,7 +289,7 @@ func recoverRotation(dataDir string, fileOps rotationFileOps) error {
 
 // PendingRotationAuditEvent 返回已经完成或可恢复完成的 v2 换钥审计证据。
 func PendingRotationAuditEvent(dataDir string) (PendingRotationAudit, bool, error) {
-	journal, exists, err := readJournal(identityPaths(dataDir).journal)
+	journal, exists, err := readJournal(dataDir, identityPaths(dataDir).journal)
 	if err != nil || !exists {
 		return PendingRotationAudit{}, false, err
 	}
@@ -319,7 +319,7 @@ func completeRotationAudit(
 	syncPKIDirectory func(string) error,
 ) error {
 	paths := identityPaths(dataDir)
-	journal, exists, err := readJournal(paths.journal)
+	journal, exists, err := readJournal(dataDir, paths.journal)
 	if err != nil {
 		return err
 	}
@@ -426,7 +426,7 @@ func renewPinnedIdentity(paths identityFilePaths, hostname string, identity Iden
 	if err != nil {
 		return Identity{}, fmt.Errorf("renew gateway pinned certificate: %w", err)
 	}
-	if err := replacePinnedCertificate(paths.directory, paths.cert, certificate); err != nil {
+	if err := replacePinnedCertificate(filepath.Dir(paths.directory), paths.directory, paths.cert, certificate); err != nil {
 		return Identity{}, fmt.Errorf("atomically renew gateway pinned certificate: %w", err)
 	}
 	return withPinnedRenewalSource(Identity{Certificate: certificate}, paths, hostname), nil
@@ -660,7 +660,12 @@ func writeJournalWith(path string, journal rotationJournal, fileOps rotationFile
 	return nil
 }
 
-func readJournal(path string) (rotationJournal, bool, error) {
+// readJournal 在解析未决轮换状态前先验证 Data Directory。Journal 可能决定
+// 恢复替换或删除自身，不能只因 pki 目录和 Journal 文件受保护就跳过其根边界。
+func readJournal(dataDir, path string) (rotationJournal, bool, error) {
+	if err := validatePinnedIdentityDataDirectory(dataDir); err != nil {
+		return rotationJournal{}, true, fmt.Errorf("validate server data directory before reading gateway rotation journal: %w", err)
+	}
 	data, err := readPinnedIdentityFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return rotationJournal{}, false, nil
@@ -685,19 +690,29 @@ func completeRotationWith(
 	removeJournal bool,
 	fileOps rotationFileOps,
 ) error {
-	for _, replacement := range []struct{ temporary, destination string }{
+	replacements := []struct{ temporary, destination string }{
 		{journal.KeyTemporary, paths.key},
 		{journal.CertificateTemporary, paths.cert},
-	} {
+	}
+	// 先完整验证所有已存在的临时对象，再开始正式替换。这样某个临时文件的
+	// Protected DACL/no-follow 校验失败时，不会留下“私钥已替换、证书未替换”的
+	// 部分轮换状态；实际替换仍由平台的安全发布原语在提交点再次验证。
+	temporaryExists := make([]bool, len(replacements))
+	for index, replacement := range replacements {
 		if exists, err := rotationTemporaryExists(replacement.temporary); err == nil && exists {
+			temporaryExists[index] = true
+		} else if err != nil {
+			return fmt.Errorf("inspect gateway identity replacement: %w", err)
+		}
+	}
+	for index, replacement := range replacements {
+		if temporaryExists[index] {
 			if err := fileOps.rename(replacement.temporary, replacement.destination); err != nil {
 				return fmt.Errorf("atomically replace gateway identity file: %w", err)
 			}
 			if err := fileOps.syncDirectory(paths.directory); err != nil {
 				return fmt.Errorf("sync gateway identity replacement: %w", err)
 			}
-		} else if err != nil {
-			return fmt.Errorf("inspect gateway identity replacement: %w", err)
 		}
 	}
 	if _, err := LoadPinnedIdentity(filepath.Dir(paths.directory)); err != nil {

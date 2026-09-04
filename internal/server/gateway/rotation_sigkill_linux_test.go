@@ -63,7 +63,7 @@ func TestRotatePinnedIdentityRecoversAfterSIGKILL(t *testing.T) {
 
 			runRotationUntilSIGKILLBoundary(t, dataDir, test.boundary)
 			paths := identityPaths(dataDir)
-			journal, exists, err := readJournal(paths.journal)
+			journal, exists, err := readJournal(dataDir, paths.journal)
 			if err != nil || !exists {
 				t.Fatalf("readJournal() after SIGKILL = %#v, %t, %v", journal, exists, err)
 			}

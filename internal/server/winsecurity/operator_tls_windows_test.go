@@ -77,6 +77,14 @@ func TestReadOperatorTLSFilesRejectsUnmanagedFilesWithoutMutation(t *testing.T) 
 		t.Fatalf("WriteFile(key) error = %v", err)
 	}
 	certBefore, keyBefore := sha256.Sum256(cert), sha256.Sum256(key)
+	certInfoBefore, err := os.Stat(certPath)
+	if err != nil {
+		t.Fatalf("Stat(cert before rejection) error = %v", err)
+	}
+	keyInfoBefore, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("Stat(key before rejection) error = %v", err)
+	}
 	if _, _, err := ReadOperatorTLSFiles(certPath, keyPath); err == nil {
 		t.Fatal("ReadOperatorTLSFiles() error = nil, want unmanaged parent rejection")
 	}
@@ -90,6 +98,17 @@ func TestReadOperatorTLSFilesRejectsUnmanagedFilesWithoutMutation(t *testing.T) 
 	}
 	if sha256.Sum256(certAfter) != certBefore || sha256.Sum256(keyAfter) != keyBefore {
 		t.Fatal("ReadOperatorTLSFiles() changed operator-owned TLS bytes")
+	}
+	certInfoAfter, err := os.Stat(certPath)
+	if err != nil {
+		t.Fatalf("Stat(cert after rejection) error = %v", err)
+	}
+	keyInfoAfter, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("Stat(key after rejection) error = %v", err)
+	}
+	if !os.SameFile(certInfoBefore, certInfoAfter) || !os.SameFile(keyInfoBefore, keyInfoAfter) {
+		t.Fatal("ReadOperatorTLSFiles() replaced operator-owned TLS files")
 	}
 }
 

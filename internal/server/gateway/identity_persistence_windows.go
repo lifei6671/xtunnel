@@ -14,7 +14,10 @@ import (
 // validatePinnedIdentityFiles refuses to inspect a Windows pinned identity
 // through os.Stat: that would follow a reparse point before the protected
 // no-follow reader has validated the object boundary.
-func validatePinnedIdentityFiles(keyPath, certPath string) error {
+func validatePinnedIdentityFiles(dataDir, keyPath, certPath string) error {
+	if err := validatePinnedIdentityDataDirectory(dataDir); err != nil {
+		return fmt.Errorf("validate server data directory before reading gateway pinned identity: %w", err)
+	}
 	if _, err := readPinnedIdentityFile(keyPath); errors.Is(err, os.ErrNotExist) {
 		return ErrIdentityMissing
 	} else if err != nil {
@@ -26,6 +29,10 @@ func validatePinnedIdentityFiles(keyPath, certPath string) error {
 		return fmt.Errorf("inspect gateway certificate: %w", err)
 	}
 	return nil
+}
+
+func validatePinnedIdentityDataDirectory(dataDir string) error {
+	return winsecurity.ValidateForegroundDirectory(dataDir)
 }
 
 // The Windows foreground profile owns every pinned identity object. Public
@@ -52,9 +59,13 @@ func readPinnedIdentityFile(path string) ([]byte, error) {
 	return winsecurity.ReadForegroundFile(filepath.Dir(path), filepath.Base(path))
 }
 
-func writePinnedIdentity(keyPath, certPath string, certificate tlsCertificate) error {
-	if filepath.Dir(keyPath) != filepath.Dir(certPath) {
-		return errors.New("gateway pinned key and certificate must share a directory")
+func writePinnedIdentity(dataDir, keyPath, certPath string, certificate tlsCertificate) error {
+	directory := filepath.Dir(keyPath)
+	if filepath.Dir(keyPath) != filepath.Dir(certPath) || filepath.Dir(directory) != dataDir {
+		return errors.New("gateway pinned identity files must share a PKI directory directly beneath the server data directory")
+	}
+	if err := validatePinnedIdentityDataDirectory(dataDir); err != nil {
+		return fmt.Errorf("validate server data directory before publishing gateway pinned identity: %w", err)
 	}
 	keyPEM, certPEM, err := pinnedIdentityPEM(certificate)
 	if err != nil {
@@ -64,7 +75,6 @@ func writePinnedIdentity(keyPath, certPath string, certificate tlsCertificate) e
 	if err != nil {
 		return fmt.Errorf("create gateway pinned identity security policy: %w", err)
 	}
-	directory := filepath.Dir(keyPath)
 	if err := winsecurity.PublishForegroundFile(directory, filepath.Base(keyPath), keyPEM, security); err != nil {
 		return fmt.Errorf("publish gateway private key: %w", err)
 	}
@@ -74,9 +84,12 @@ func writePinnedIdentity(keyPath, certPath string, certificate tlsCertificate) e
 	return nil
 }
 
-func replacePinnedCertificate(directory, certPath string, certificate tlsCertificate) error {
-	if filepath.Dir(certPath) != directory {
+func replacePinnedCertificate(dataDir, directory, certPath string, certificate tlsCertificate) error {
+	if filepath.Dir(directory) != dataDir || filepath.Dir(certPath) != directory {
 		return errors.New("gateway pinned certificate must be directly beneath its PKI directory")
+	}
+	if err := validatePinnedIdentityDataDirectory(dataDir); err != nil {
+		return fmt.Errorf("validate server data directory before renewing gateway pinned certificate: %w", err)
 	}
 	_, certPEM, err := pinnedIdentityPEM(certificate)
 	if err != nil {
