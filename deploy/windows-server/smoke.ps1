@@ -138,16 +138,18 @@ Wait-State 'Stopped'
 
 # 人工维护窗口中制造配置加载失败，确认 non-crash 恢复两次后停止。
 $original = [IO.File]::ReadAllBytes($installedConfig)
+# 服务已停止，按最后一条事件的记录编号划定本轮边界，排除紧邻的正常启动。
+$recoveryRecordId = (Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='XTunnelServer'} -MaxEvents 1).RecordId
+if ($null -eq $recoveryRecordId) { throw 'Recovery event boundary has no record identifier' }
 [IO.File]::WriteAllText($installedConfig, 'invalid_field: true')
-$recoveryStart = [DateTime]::Now.AddSeconds(-1)
 try {
     & sc.exe start XTunnelServer | Out-Null
     Start-Sleep -Seconds 18
     Wait-State 'Stopped'
-    $failures = @(Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='XTunnelServer';StartTime=$recoveryStart} | Where-Object { $_.Message -match 'windows_service_starting' })
+    $failures = @(Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='XTunnelServer'} | Where-Object { $_.RecordId -gt $recoveryRecordId -and ($_.Properties[0].Value | ConvertFrom-Json).event -eq 'windows_service_starting' })
     if ($failures.Count -ne 3) { throw "Expected initial start and two bounded retries; got $($failures.Count)" }
     Start-Sleep -Seconds 6
-    $later = @(Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='XTunnelServer';StartTime=$recoveryStart} | Where-Object { $_.Message -match 'windows_service_starting' })
+    $later = @(Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='XTunnelServer'} | Where-Object { $_.RecordId -gt $recoveryRecordId -and ($_.Properties[0].Value | ConvertFrom-Json).event -eq 'windows_service_starting' })
     if ($later.Count -ne 3) { throw 'Recovery continued after final NoAction' }
 } finally { [IO.File]::WriteAllBytes($installedConfig, $original) }
 Start-Service XTunnelServer

@@ -2490,3 +2490,9 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 回归补充非提升权限下的真实继承创建、写入同步、权限漂移与 WRITE_DAC/WRITE_OWNER 拒绝；真实 SCM 测试覆盖产品锁、凭据及证书目录、密钥、SQLite/WAL/SHM、两级子目录，以及另一 LocalService 服务的拒绝访问。
 - 本地开发反馈：Go 1.27.1 / GOTOOLCHAIN=local 下 winsecurity、externallock、tokenkey、gateway、durableops、bootstrap、service 七包 Test，winsecurity/externallock/bootstrap 三包 Race、全仓 go vet、go mod verify 通过；Docker Desktop ./scripts/verify.ps1 exit 0。真实 SCM 仅由隔离 CI 执行，本地普通测试的 skip 不计该项通过。
 - 安全实现、SCM Token 测试和契约/调用点说明已分别独立复审通过；最终集成独立复审 PASSED / Tier3，0 新发现，分区绑定未漂移；精确提交 CI 待验证，M8-04 保持 IN_PROGRESS。
+
+## 2026-09-04 · M8-04 SCM 恢复事件计数
+
+- 继承权限候选 a772c25afc0cd8f4853ca3defa52298aca7606f2 的 [CI #33849194831](https://github.com/lifei6671/xtunnel/actions/runs/33849194831) 已通过 Windows Server Test/Vet/Build、既有 Agent SCM，并完成正式 Server 安装启动、离线管理员初始化、业务端口就绪及停止。此前 External Lock 首次创建拒绝已消除。
+- 后续有限恢复检查记录 4 条 starting，预期为首次失败加两次重启共 3 条。脚本使用 Now 减一秒作为事件起点，可能包含紧邻的上一轮正常启动；运行时恢复策略仍精确校验为两次五秒重启后 NoAction。修复将恢复测试限定在启动前捕获的 Event RecordId 之后，保留严格 3 次和额外等待后仍 3 次断言。该轮未完成 Server 全部 smoke 与跨服务 Token 验证，不能计为 M8-04 通过。
+- 验证与复审：Windows PowerShell 5.1 AST 解析、UTF-8 BOM/CRLF 和 diff 检查通过；smoke 单文件增量独立复审 PASSED / Tier3，0 findings，绑定 SHA256 CB30C2330675183AC604E66290AE1DE5C6AC629AC879BC6D9471BAD381C0C6AB。真实恢复计数待新候选 CI。
