@@ -37,7 +37,7 @@ func TestServiceDescriptorRightsAndOwners(t *testing.T) {
 				t.Fatal(err)
 			}
 			control, _, err := descriptor.Control()
-			if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
+			if err != nil || (control&windows.SE_DACL_PROTECTED == 0) != tc.runtime {
 				t.Fatalf("unprotected descriptor: control=%x err=%v", control, err)
 			}
 			if len(entries) != tc.count {
@@ -48,6 +48,9 @@ func TestServiceDescriptorRightsAndOwners(t *testing.T) {
 				flags := uint8(0)
 				if tc.directory {
 					flags = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+				}
+				if tc.runtime {
+					flags |= windows.INHERITED_ACE
 				}
 				if ace.flags != flags {
 					t.Fatalf("inheritance flags=%x, want %x", ace.flags, flags)
@@ -215,7 +218,7 @@ func TestServiceCreateFileUsesInitialDescriptor(t *testing.T) {
 		t.Skip("requires elevated token to assign Administrators owner")
 	}
 	directory := t.TempDir()
-	security, err := NewServiceFileSecurity(ServiceData)
+	security, err := NewServiceFileSecurity(ServiceConfig)
 	if err != nil {
 		t.Fatal(err)
 	}

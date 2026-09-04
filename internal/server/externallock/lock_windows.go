@@ -76,6 +76,7 @@ func acquire(runtimeDir, targetHash string) (func() error, error) {
 	failLock := func(cause error) (func() error, error) {
 		return nil, errors.Join(cause, windows.CloseHandle(lockHandle), closeDirectories())
 	}
+	// Service 子对象从已验证 Runtime 继承精确权限，前台显式设置创建权限。
 	// OPEN_ALWAYS 对既有文件不会应用创建权限；同一 Handle 验证失败时
 	// 保留文件及其 ACL，关闭资源，不接管对象，也不进入 LockFileEx。
 	if err := fileSecurity.ValidateFile(lockHandle); err != nil {

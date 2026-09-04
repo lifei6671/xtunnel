@@ -35,7 +35,7 @@ func validatePinnedIdentityDataDirectory(dataDir string) error {
 	return winsecurity.ValidateForegroundDirectory(dataDir)
 }
 
-// The Windows foreground profile owns every pinned identity object. Public
+// The selected Windows profile owns every pinned identity object. Public
 // TLS deliberately bypasses this adapter because its files remain operator
 // owned and are validated by a separate M8-03 boundary.
 func createPinnedIdentityDirectory(dataDir, directory string) error {

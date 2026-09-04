@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
@@ -97,7 +97,7 @@ func TestServiceTokenIsolation(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		// 两个 helper 的 SCM Stop/退出等待先完成，随后仅清理本轮命名的测试文件。
-		for _, path := range tokenProofPaths(data, proof)[3:] {
+		for _, path := range slices.Backward(tokenProofPaths(data, proof)[3:]) {
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("remove proof object: %v", err)
 			}
@@ -159,7 +159,7 @@ func TestServiceTokenIsolation(t *testing.T) {
 }
 
 func tokenProofPaths(data, proof string) []string {
-	return []string{filepath.Join(data, "xtunnel.db"), filepath.Join(data, "credentials", "tunnel-token.key"), filepath.Join(data, "pki", "agent-gateway.key"), filepath.Join(data, proof+".key"), filepath.Join(data, proof+".db"), filepath.Join(data, proof+".db-wal"), filepath.Join(data, proof+".db-shm")}
+	return []string{filepath.Join(data, "xtunnel.db"), filepath.Join(data, "credentials", "tunnel-token.key"), filepath.Join(data, "pki", "agent-gateway.key"), filepath.Join(data, proof+".key"), filepath.Join(data, proof+".db"), filepath.Join(data, proof+".db-wal"), filepath.Join(data, proof+".db-shm"), filepath.Join(data, proof+"-dir"), filepath.Join(data, proof+"-dir", "nested"), filepath.Join(data, proof+"-dir", "nested", "proof.key")}
 }
 
 func TestServiceTokenHelper(t *testing.T) {
@@ -219,6 +219,24 @@ func (probe *tokenProbeHandler) check() (*sql.DB, error) {
 		if err := ValidateDataParentDirectory(filepath.Dir(probe.data)); err != nil {
 			return nil, err
 		}
+		// 两级新目录覆盖父根到运行时子目录的继承传播；创建统一走生产原语。
+		for _, directory := range []string{filepath.Join(probe.data, probe.proof+"-dir"), filepath.Join(probe.data, probe.proof+"-dir", "nested")} {
+			security, err := NewDirectorySecurityForPath(directory)
+			if err != nil {
+				return nil, err
+			}
+			if err := CreateForegroundDirectory(directory, security); err != nil {
+				return nil, err
+			}
+		}
+		nested := filepath.Join(probe.data, probe.proof+"-dir", "nested")
+		nestedSecurity, err := NewFileSecurityForPath(nested)
+		if err != nil {
+			return nil, err
+		}
+		if err := PublishForegroundFile(nested, "proof.key", []byte("nested-service-token-proof"), nestedSecurity); err != nil {
+			return nil, err
+		}
 		security, err := NewFileSecurityForPath(probe.data)
 		if err != nil {
 			return nil, err
@@ -238,16 +256,28 @@ func (probe *tokenProbeHandler) check() (*sql.DB, error) {
 	} else if err := validateServiceStorageToken(); err == nil {
 		return nil, errors.New("foreign service selected XTunnelServer storage policy")
 	}
-	for _, path := range append(tokenProofPaths(probe.data, probe.proof), probe.lock) {
+	directories := map[string]bool{
+		probe.data: true,
+		filepath.Join(filepath.Dir(probe.data), "runtime"):      true,
+		filepath.Join(probe.data, "credentials"):                true,
+		filepath.Join(probe.data, "pki"):                        true,
+		filepath.Join(probe.data, probe.proof+"-dir"):           true,
+		filepath.Join(probe.data, probe.proof+"-dir", "nested"): true,
+	}
+	paths := append(tokenProofPaths(probe.data, probe.proof), probe.lock, probe.data,
+		filepath.Join(filepath.Dir(probe.data), "runtime"), filepath.Join(probe.data, "credentials"), filepath.Join(probe.data, "pki"))
+	for _, path := range paths {
 		pointer, err := windows.UTF16PtrFromString(path)
 		if err != nil {
 			return database, err
 		}
 		for _, access := range []uint32{windows.FILE_READ_DATA, windows.WRITE_DAC, windows.WRITE_OWNER} {
-			handle, openErr := windows.CreateFile(pointer, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+			handle, openErr := windows.CreateFile(pointer, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 			allowed := probe.own && access == windows.FILE_READ_DATA
 			if openErr == nil {
-				windows.CloseHandle(handle)
+				if err := windows.CloseHandle(handle); err != nil {
+					return database, err
+				}
 				if !allowed {
 					return database, fmt.Errorf("unexpected access 0x%x to %s", access, filepath.Base(path))
 				}
@@ -255,21 +285,82 @@ func (probe *tokenProbeHandler) check() (*sql.DB, error) {
 				return database, fmt.Errorf("access 0x%x to %s: %w", access, filepath.Base(path), openErr)
 			}
 		}
-		if probe.own && (strings.HasSuffix(path, ".key") || strings.HasSuffix(path, ".lock")) {
-			security, err := NewFileSecurityForPath(filepath.Dir(path))
+		if probe.own {
+			handle, err := windows.CreateFile(pointer, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+				windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING,
+				windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 			if err != nil {
 				return database, err
 			}
-			handle, err := openFileNoFollow(path)
-			if err != nil {
-				return database, err
-			}
-			validation := security.ValidateFile(handle)
+			root := path == probe.data || path == filepath.Join(filepath.Dir(probe.data), "runtime")
+			newProof := slices.Contains(tokenProofPaths(probe.data, probe.proof)[3:], path)
+			validation := validateTokenProofDescriptor(handle, directories[path], root, newProof)
 			closeErr := windows.CloseHandle(handle)
 			if err := errors.Join(validation, closeErr); err != nil {
-				return database, err
+				return database, fmt.Errorf("descriptor %s: %w", filepath.Base(path), err)
 			}
 		}
 	}
 	return database, nil
+}
+
+// validateTokenProofDescriptor 独立检查内核返回的实际 SD，固定断言四项 ACE，
+// 避免仅复用生产校验器而让同一个权限策略错误在测试中自洽通过。
+func validateTokenProofDescriptor(handle windows.Handle, directory, root, newProof bool) error {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return err
+	}
+	if owner == nil {
+		return errors.New("missing object owner")
+	}
+	if root {
+		if owner.String() != "S-1-5-32-544" && owner.String() != "S-1-5-18" {
+			return errors.New("root owner is not BA/SY")
+		}
+	} else if newProof {
+		if owner.String() != "S-1-5-19" {
+			return errors.New("new runtime object owner is not LocalService")
+		}
+	} else if owner.String() != "S-1-5-19" && owner.String() != "S-1-5-18" && owner.String() != "S-1-5-32-544" {
+		return errors.New("existing runtime object owner is outside LS/SY/BA")
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return err
+	}
+	if (control&windows.SE_DACL_PROTECTED != 0) != root {
+		return errors.New("unexpected root/child protection state")
+	}
+	actual, err := descriptorACEs(descriptor)
+	if err != nil {
+		return err
+	}
+	sid, err := serviceSID(xtunnelServerServiceName)
+	if err != nil {
+		return err
+	}
+	expected := map[string]windows.ACCESS_MASK{"S-1-5-18": 0x1f01ff, "S-1-5-32-544": 0x1f01ff, sid.String(): 0x1301bf, "S-1-3-4": windows.READ_CONTROL}
+	if len(actual) != len(expected) {
+		return fmt.Errorf("expected four ACEs, got %d", len(actual))
+	}
+	flags := uint8(windows.INHERITED_ACE)
+	if root {
+		flags = 0
+	}
+	if directory {
+		flags |= windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+	}
+	for _, ace := range actual {
+		mask, ok := expected[ace.sid.String()]
+		if !ok || ace.typeID != windows.ACCESS_ALLOWED_ACE_TYPE || ace.flags != flags || ace.mask != mask {
+			return errors.New("actual inherited ACE matrix differs from service contract")
+		}
+		delete(expected, ace.sid.String())
+	}
+	return nil
 }

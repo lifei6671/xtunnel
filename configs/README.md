@@ -35,6 +35,8 @@ Windows 前台配置默认使用 `server.data_dir: auto`。它只经 Windows Kno
 Service SID Modify（不含更改 DACL 或 owner）。不要用 LocalService 组权限、用户目录 ACL 或
 Config 可写权限替代这组精确边界。
 Data/Runtime 的 OWNER RIGHTS 限权 ACE 抑制文件 Owner 隐含的改 ACL 权限。
+安装根保持 Protected DACL；服务运行时子目录、锁和密钥继承直接父目录的精确权限，
+在使用前校验 Owner、对象身份与完整继承 ACL。
 服务安装、首个管理员创建和维护步骤见 [Windows Server SCM](../deploy/windows-server/README.md)。
 
 在 M8-05 的 Windows amd64 Preview Gate 完成前，该文件只代表构建和配置契约基线，

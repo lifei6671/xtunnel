@@ -8641,8 +8641,9 @@ ImagePath 只包含已展开并正确引用的 Binary 与 Config 路径，不得
 Key 或其他 Secret。Server 继续不增加 `run` 子命令。
 
 ProgramFiles 下的受管 Binary 使用关闭继承的 Protected DACL：SYSTEM 与 Administrators
-获得 Full Control，Service SID 只获得 Read & Execute。ProgramData 下的对象也必须关闭
-继承并使用以下精确矩阵：Config 只向 SYSTEM 与 Administrators 授予 Full Control，向
+获得 Full Control，Service SID 只获得 Read & Execute。ProgramData 下的 Config 和安装根
+使用显式 Protected DACL；Data/Runtime 内运行时子对象继承直接父目录的精确矩阵：
+Config 只向 SYSTEM 与 Administrators 授予 Full Control，向
 `NT SERVICE\XTunnelServer` 授予 Read；Data、Runtime 及其受管子对象向 SYSTEM 与
 Administrators 授予 Full Control，向 Service SID 授予 Modify。这里的 Modify 不包含
 更改 DACL 或 owner；不得用 Full Control、宽泛 LocalService 权限或模糊的“运行所需权限”
@@ -8650,12 +8651,17 @@ Administrators 授予 Full Control，向 Service SID 授予 Modify。这里的 M
 不得通过追加一个 ACE 接管未知对象。
 
 安装器新建的 Binary、Config、Data/Runtime 根目录 Owner 固定为 Builtin Administrators；
-既有安装对象仅接受 SYSTEM 或 Builtin Administrators Owner。Service 运行时创建的受管
-文件允许 LocalService Owner，离线管理员维护创建的对象使用 Builtin Administrators Owner。
+既有安装对象仅接受 SYSTEM 或 Builtin Administrators Owner。Service 运行时创建的子目录及
+受管文件允许 LocalService Owner，离线管理员维护创建的对象使用 Builtin Administrators Owner；
+运行时子对象校验接受 LocalService、SYSTEM 或 Builtin Administrators Owner。
 Data/Runtime 及其受管对象的精确 DACL 还必须包含 `OWNER RIGHTS`（`S-1-3-4`）仅
 `READ_CONTROL` 的限权 ACE，抑制 Owner 隐含的 `WRITE_DAC`，不得向 LocalService
-授予数据访问 ACE。目录把该规则传播给子目录和文件；XTunnel 显式创建或发布的受管文件
-在首次创建时设置完整 Protected DACL，不依赖先创建再修权限。SQLite Driver 创建的数据库
+授予数据访问 ACE。固定 Data/Runtime 树内的运行时子目录、锁文件和 Secret 发布候选在创建时
+从已固定并精确验证的直接父目录继承四条 ACE，子对象不设置 Protected 位；使用或发布前必须
+通过同一 no-follow Handle 校验允许 Owner、完整对象身份和精确继承 ACL。目录必须继续传播
+这四条 ACE，文件校验对应的继承标志；父链固定和验证持续到创建及同 Handle 校验完成。
+既有对象和发布候选同样严格校验，异常时拒绝并保留现场，不通过事后修改 ACL 接管。
+SQLite Driver 创建的数据库
 及 sidecar 文件从受保护 Data 目录继承限权，继续使用 Driver 的 Windows VFS；原生验证必须
 证明 XTunnelServer 和其他 LocalService 服务不能借 Owner 取得 `WRITE_DAC`/`WRITE_OWNER`。
 

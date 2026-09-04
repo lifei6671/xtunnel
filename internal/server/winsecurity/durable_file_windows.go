@@ -25,6 +25,7 @@ type ForegroundFileSecurity struct {
 	owner         *windows.SID
 	expected      []accessACE
 	serviceOwners []*windows.SID
+	inherited     bool
 }
 
 // ForegroundDirectoryGuard keeps a validated managed data directory open
@@ -32,7 +33,8 @@ type ForegroundFileSecurity struct {
 // pathname that was checked at startup cannot be replaced while sidecar files
 // are being opened underneath it.
 type ForegroundDirectoryGuard struct {
-	handle windows.Handle
+	handle  windows.Handle
+	parents []windows.Handle
 }
 
 // foregroundDirectoryIdentity 绑定目录的完整卷序列号和 128-bit File ID。
@@ -60,11 +62,15 @@ type foregroundFileIDInfo struct {
 // OpenForegroundDirectoryGuard validates a managed foreground directory and
 // pins its identity until Close. The returned guard owns the underlying handle.
 func OpenForegroundDirectoryGuard(path string) (*ForegroundDirectoryGuard, error) {
+	parents, err := pinInheritedDirectory(path)
+	if err != nil {
+		return nil, errors.Join(err, closeHandles(parents))
+	}
 	handle, err := openValidatedForegroundDirectory(path)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, closeHandles(parents))
 	}
-	return &ForegroundDirectoryGuard{handle: handle}, nil
+	return &ForegroundDirectoryGuard{handle: handle, parents: parents}, nil
 }
 
 // Close releases the directory identity pin. It is safe to call once after all
@@ -73,8 +79,9 @@ func (guard *ForegroundDirectoryGuard) Close() error {
 	if guard == nil || guard.handle == 0 {
 		return nil
 	}
-	err := windows.CloseHandle(guard.handle)
+	err := errors.Join(windows.CloseHandle(guard.handle), closeHandles(guard.parents))
 	guard.handle = 0
+	guard.parents = nil
 	return err
 }
 
@@ -105,6 +112,9 @@ func NewForegroundFileSecurity() (*ForegroundFileSecurity, error) {
 // Attributes returns descriptor-backed creation attributes. The caller must
 // keep security alive until the Windows create call has returned.
 func (security *ForegroundFileSecurity) Attributes() *windows.SecurityAttributes {
+	if security.inherited {
+		return nil
+	}
 	return &windows.SecurityAttributes{
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: security.descriptor,
@@ -152,7 +162,10 @@ func (security *ForegroundFileSecurity) ValidateFile(handle windows.Handle) erro
 	if err != nil {
 		return fmt.Errorf("read file security descriptor control: %w", err)
 	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
+	if security.inherited && control&windows.SE_DACL_PROTECTED != 0 {
+		return errors.New("service managed file DACL must inherit its protected root")
+	}
+	if !security.inherited && control&windows.SE_DACL_PROTECTED == 0 {
 		return errors.New("file DACL is not protected")
 	}
 	actual, err := descriptorACEs(descriptor)
@@ -170,6 +183,9 @@ func (security *ForegroundFileSecurity) ValidateFile(handle windows.Handle) erro
 // file, then validates the same no-follow handle before any sensitive content
 // is written. Existing files must only be validated, never repaired.
 func (security *ForegroundFileSecurity) Apply(handle windows.Handle) error {
+	if security != nil && security.inherited {
+		return errors.New("service inherited security cannot be rewritten")
+	}
 	if security == nil || security.descriptor == nil || security.owner == nil {
 		return errors.New("foreground file security is uninitialized")
 	}
@@ -193,9 +209,20 @@ func (security *ForegroundFileSecurity) Apply(handle windows.Handle) error {
 // CreateForegroundDirectory creates a new managed foreground directory or
 // verifies an existing one. It deliberately refuses to take over a directory
 // whose owner, DACL, or object type does not already match this profile.
-func CreateForegroundDirectory(path string, security *ForegroundDirectorySecurity) error {
+func CreateForegroundDirectory(path string, security *ForegroundDirectorySecurity) (resultErr error) {
 	if path == "" || !filepath.IsAbs(path) || security == nil {
 		return errors.New("managed foreground directory requires an absolute path and security policy")
+	}
+	if security.inherited {
+		parents, err := pinRequiredInheritedDirectory(filepath.Dir(path))
+		defer func() {
+			if closeErr := closeHandles(parents); closeErr != nil {
+				resultErr = errors.Join(resultErr, closeErr)
+			}
+		}()
+		if err != nil {
+			return err
+		}
 	}
 	pointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -229,6 +256,9 @@ func CreateForegroundDirectory(path string, security *ForegroundDirectorySecurit
 func CreateForegroundDirectoryChild(parent, name string, security *ForegroundDirectorySecurity) (resultErr error) {
 	if parent == "" || !filepath.IsAbs(parent) || security == nil {
 		return errors.New("managed foreground child directory requires an absolute parent and security policy")
+	}
+	if security.inherited {
+		return errors.New("service profile does not support Restore child directory operations")
 	}
 	if err := validateManagedLeafName(name); err != nil {
 		return fmt.Errorf("validate managed child directory name: %w", err)
@@ -270,6 +300,9 @@ func CreateForegroundDirectoryChild(parent, name string, security *ForegroundDir
 func MoveForegroundDirectory(parent, sourceName, destinationName string, security *ForegroundDirectorySecurity) (resultErr error) {
 	if parent == "" || !filepath.IsAbs(parent) || security == nil {
 		return errors.New("managed foreground directory move requires an absolute parent and security policy")
+	}
+	if security.inherited {
+		return errors.New("service profile does not support Restore directory moves")
 	}
 	if err := validateManagedLeafName(sourceName); err != nil {
 		return fmt.Errorf("validate managed source directory name: %w", err)
@@ -349,7 +382,16 @@ func MoveForegroundDirectory(parent, sourceName, destinationName string, securit
 // ValidateForegroundDirectory verifies a caller-supplied data root before a
 // managed child is created or used beneath it. A path check alone cannot make
 // a future CreateTemp or replacement safe against a reparse-point takeover.
-func ValidateForegroundDirectory(path string) error {
+func ValidateForegroundDirectory(path string) (resultErr error) {
+	parents, err := pinInheritedDirectory(path)
+	defer func() {
+		if closeErr := closeHandles(parents); closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
+	if err != nil {
+		return err
+	}
 	handle, err := openValidatedForegroundDirectory(path)
 	if err != nil {
 		return err
@@ -687,7 +729,16 @@ func ReadForegroundFileLimit(directory, name string, maximum int64) ([]byte, err
 	return readForegroundFile(directory, name, maximum)
 }
 
-func readForegroundFile(directory, name string, maximum int64) ([]byte, error) {
+func readForegroundFile(directory, name string, maximum int64) (result []byte, resultErr error) {
+	parents, err := pinInheritedDirectory(directory)
+	defer func() {
+		if closeErr := closeHandles(parents); closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
+	if err != nil {
+		return nil, err
+	}
 	if directory == "" || !filepath.IsAbs(directory) {
 		return nil, errors.New("managed file read requires an absolute directory and leaf name")
 	}
@@ -754,6 +805,19 @@ func ConsumeForegroundFileLimitWithPostDelete(directory, name string, maximum in
 }
 
 func consumeForegroundFileLimit(directory, name string, maximum int64, security *ForegroundFileSecurity, consume func([]byte) error, postDelete func() error) (resultErr error) {
+	var parents []windows.Handle
+	var err error
+	if security != nil && security.inherited {
+		parents, err = pinRequiredInheritedDirectory(directory)
+	}
+	defer func() {
+		if closeErr := closeHandles(parents); closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
+	if err != nil {
+		return err
+	}
 	if directory == "" || !filepath.IsAbs(directory) || security == nil || consume == nil {
 		return errors.New("managed file consumption requires an absolute directory, security policy, and validator")
 	}
@@ -833,8 +897,21 @@ func consumeForegroundFileLimit(directory, name string, maximum int64, security 
 // prior final file. The final object is re-opened without following reparse
 // points and revalidated before success is reported. An existing final file
 // must already satisfy the managed-file boundary; publication never takes over
-// an inherited-DACL or reparse-point object.
+// an object outside its exact profile DACL or a reparse-point object.
 func PublishForegroundFile(directory, name string, content []byte, security *ForegroundFileSecurity) (resultErr error) {
+	var parents []windows.Handle
+	var err error
+	if security != nil && security.inherited {
+		parents, err = pinRequiredInheritedDirectory(directory)
+	}
+	defer func() {
+		if closeErr := closeHandles(parents); closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
+	if err != nil {
+		return err
+	}
 	if directory == "" || !filepath.IsAbs(directory) {
 		return errors.New("managed file publication requires an absolute directory and leaf name")
 	}
@@ -858,8 +935,9 @@ func publishFileCandidate(directory, name string, content []byte, security *Fore
 	if err := validateExistingForegroundFile(finalPath, security); err != nil {
 		return fmt.Errorf("validate existing managed file: %w", err)
 	}
-	// 在不可预测名称上以 CREATE_NEW 一次设置完整 SD。LocalService 只有
-	// Modify，不能依赖 Owner 隐含 WRITE_DAC 或创建后重新接管安全描述符。
+	// 不可预测名称与 CREATE_NEW 防止候选接管。前台/安装显式设置 SD，Service
+	// Runtime 则从已固定根链继承；两者都必须在首次写入前验证同一创建句柄，
+	// 不能依赖 Owner 隐含 WRITE_DAC 或创建后重新接管安全描述符。
 	temporaryPath := filepath.Join(directory, "."+name+".tmp-"+rand.Text())
 	temporary, err := createSecuredFile(temporaryPath, security)
 	if err != nil {
@@ -933,6 +1011,19 @@ func publishFileCandidate(directory, name string, content []byte, security *Fore
 // final name. Rotation keeps its Journal until every such replacement has
 // completed, so a crash cannot expose a mismatched key and certificate pair.
 func ReplaceForegroundFile(directory, candidateName, finalName string, security *ForegroundFileSecurity) (resultErr error) {
+	var parents []windows.Handle
+	var err error
+	if security != nil && security.inherited {
+		parents, err = pinRequiredInheritedDirectory(directory)
+	}
+	defer func() {
+		if closeErr := closeHandles(parents); closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
+	if err != nil {
+		return err
+	}
 	if directory == "" || !filepath.IsAbs(directory) || security == nil {
 		return errors.New("managed file replacement requires an absolute directory and security policy")
 	}
@@ -1001,6 +1092,19 @@ func ReplaceForegroundFile(directory, candidateName, finalName string, security 
 // its own no-follow handle. Unlike a path-based DeleteFile call, the validated
 // object cannot be swapped between the security check and deletion.
 func DeleteForegroundFile(directory, name string, security *ForegroundFileSecurity) (resultErr error) {
+	var parents []windows.Handle
+	var err error
+	if security != nil && security.inherited {
+		parents, err = pinRequiredInheritedDirectory(directory)
+	}
+	defer func() {
+		if closeErr := closeHandles(parents); closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
+	if err != nil {
+		return err
+	}
 	if directory == "" || !filepath.IsAbs(directory) || security == nil {
 		return errors.New("managed file deletion requires an absolute directory and security policy")
 	}

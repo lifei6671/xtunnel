@@ -6,7 +6,7 @@
 >
 > **当前阶段**：Post-Alpha M8 Windows Server · IN_PROGRESS（M8-04 · IN_PROGRESS）
 >
-> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 收敛为 5 项 Windows Server 基础支持任务，当前完成数为 `98/100`，M8 为 `3/5 IN_PROGRESS`；M8-01、M8-02 的实现、精确 CI、commit-bound 独立复审和用户阶段签核均已闭环，状态为 `DONE`。M8-03 的实现、原生验证、精确 CI、独立代码复审与用户阶段验收已闭环，状态为 `DONE`；M8-04 为 `IN_PROGRESS`；M8-05 为 `NOT_STARTED`。M8-05 的 amd64 Preview Gate 与用户阶段签核完成前，不得把 Windows Server 宣称为正式支持平台。
+> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 收敛为 5 项 Windows Server 基础支持任务，当前完成数为 `98/100`，M8 为 `3/5 IN_PROGRESS`；M8-01、M8-02 的实现、精确 CI、commit-bound 独立复审和用户阶段签核均已闭环，状态为 `DONE`。M8-03 的实现、原生验证、精确 CI、独立代码复审与用户阶段验收已闭环，状态为 `DONE`；M8-04 为 `IN_PROGRESS`，实施已确认的运行时继承权限契约；M8-05 为 `NOT_STARTED`。M8-05 的 amd64 Preview Gate 与用户阶段签核完成前，不得把 Windows Server 宣称为正式支持平台。
 
 ---
 
@@ -435,7 +435,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M8-01 | Windows Server 契约、配置示例与双架构构建基线 | M7-10 | Post-Alpha Windows Server 契约、Windows Server 配置示例、Windows amd64/arm64 Build Floor | 冻结 `XTunnelServer`、LocalService + Service SID、ProgramFiles/ProgramData 固定路径、Protected DACL、External Lock、SCM Runtime 与 amd64 Preview Gate；配置示例由 Server Schema 在 Windows 原生加载且不建立第二套默认值；Windows amd64/arm64 Server Binary、测试二进制与 CLI 契约可构建，arm64 构建不代表运行或发布支持 | `DONE` |
 | M8-02 | Stable Target、External Lock 与 Windows 文件身份 | M8-01 | Windows Data Target Resolver、External Lock、文件身份与 Reparse Point 防线 | 绝对本地路径、Volume/File Identity、大小写不敏感 leaf 规范化；Runtime 目录中的 Stable Target Hash 锁在 SQLite/Journal/Key/Listener 前取得并持有到最终关闭；第二进程无等待失败；UNC/设备路径/ADS/跨卷/Reparse Point/身份替换全部拒绝；Windows amd64/arm64 原生竞态和崩溃释放测试 | `DONE` |
 | M8-03 | Windows Security Baseline | M8-02 | Protected DACL、Secret Durable Publisher、Public TLS 安全性质校验 | 前台 Profile 的受管 Pinned Private Key、Token Master Key 与 Data Root 通过 no-follow、对象身份与耐久发布防止低权限替换；SQLite Driver 管理其自身 Windows VFS 语义，XTunnel 不自定义 VFS；Public TLS 使用可信 Owner + 有效安全性质校验，不接管 ACL；Journal、staging 或 rollback 残留 fail-closed 并保留现场。Service Profile 的实际 DACL 随 M8-04 SCM 入口生效。在线 Backup、自动 Restore、Restore Journal 自动恢复、目录级事务切换与跨崩溃矩阵不属于本任务 | `DONE` |
-| M8-04 | `XTunnelServer` SCM Runtime | M8-03 | Server Windows Service Runtime、Installer/Uninstaller、Event Log 与提升权限 Smoke | Windows amd64 + Administrator + SCM/NTFS 前置检查无副作用；固定 Binary/Config/Data/Runtime 路径、LocalService + Service SID、Config 只读与 Data/Runtime Modify 的 Protected DACL、受管 Marker 与只含 Config 路径的 ImagePath；install/start/stop/失败后有限重启/uninstall、30 秒 Stop/Shutdown、Event Log、非受管对象拒绝和保留 Config/Data 通过。升级由维护窗口的外部部署工具执行，不实现事务回滚、运行中 EXE 替换、自卸载或延迟删除 | `IN_PROGRESS` |
+| M8-04 | `XTunnelServer` SCM Runtime | M8-03 | Server Windows Service Runtime、Installer/Uninstaller、Event Log 与提升权限 Smoke | Windows amd64 + Administrator + SCM/NTFS 前置检查无副作用；固定 Binary/Config/Data/Runtime 路径、LocalService + Service SID、Config 只读与 Data/Runtime Modify 的受保护安装根及精确继承子对象 ACL、受管 Marker 与只含 Config 路径的 ImagePath；install/start/stop/失败后有限重启/uninstall、30 秒 Stop/Shutdown、Event Log、非受管对象拒绝和保留 Config/Data 通过。升级由维护窗口的外部部署工具执行，不实现事务回滚、运行中 EXE 替换、自卸载或延迟删除 | `IN_PROGRESS` |
 | M8-05 | Windows amd64 Preview Gate | M8-01 至 M8-04 | Windows Server amd64 Native/SCM/Release Evidence、聚合 Gate、发布文档 | Windows amd64 原生全包 Test/Vet、前台与 SCM、Management/HTTP/WebSocket/TCP/Agent Gateway、抢锁、重启恢复和基础安全测试通过；候选 Artifact 含 Windows amd64 Server PE Binary 并验证版本/架构/SHA-256/Secret；arm64 仅交叉构建兼容性；干净 checkout 精确 CI、commit-bound 独立复审无 P0/P1、文档同步和用户明确阶段签核全部完成 | `NOT_STARTED` |
 
 ## 14.2 Windows Server amd64 Preview Gate Checklist
@@ -457,7 +457,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 1. `M8-01` — `DONE`。Windows Server 契约、完整配置示例、Schema 同步测试与 Windows amd64/arm64 Build Floor 已提交；最终 Head `fcdc701f03c260b2f61b4f18d4cb98ad916ac6fa` 的 [Push CI #33709519721](https://github.com/lifei6671/xtunnel/actions/runs/33709519721) 六个正式 Job 全部成功，commit-bound 独立复审为 `APPROVED`、P0/P1/P2/P3=`0/0/0/0`，用户阶段签核已完成。构建基线不扩大为 Windows Server 运行支持。
 2. `M8-02` — `DONE`。最终实现 Head `3bdaed22ad22080a9b5668533bcf3447f032c9e1` 的 [Push CI #33722274859](https://github.com/lifei6671/xtunnel/actions/runs/33722274859) 六个正式 Job 全部成功；证据提交 `4159e02939ace7a93387fd48b739e8228653c807` 的 [Push CI #33723985760](https://github.com/lifei6671/xtunnel/actions/runs/33723985760) 同样六个正式 Job 全部成功。最终 commit-bound 独立复审为 `APPROVED`、Coverage=`COMPLETE`、Freshness=`FRESH`、P0/P1/P2/P3=`0/0/0/0`，用户阶段签核已完成。
 3. `M8-03` — `DONE`。Windows Security Baseline 实现与独立代码复审已完成；候选 `683c8cbbf44a50bab119bf2426df719da7aa6f29` 的 [CI #33839053263](https://github.com/lifei6671/xtunnel/actions/runs/33839053263) 六个正式 Job 全部成功，Windows Owner 负向原生证据已补齐，用户已明确确认“M8-03 阶段验收通过”。
-4. `M8-04` — `IN_PROGRESS`。用户已确认 Owner/OWNER RIGHTS 补充，实施 Service Profile 安全链、SCM 生命周期、安装卸载和原生验证。
+4. `M8-04` — `IN_PROGRESS`。用户已确认运行时子对象继承精确权限矩阵；继续实现、原生 SCM 验证与提交绑定 CI。
 5. `M8-05` — `NOT_STARTED`，等待 M8-01 至 M8-04 全部完成。
 
 以下保留 M7 完成记录：
@@ -2463,3 +2463,30 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 
 - [诊断候选 CI #33845605614](https://github.com/lifei6671/xtunnel/actions/runs/33845605614) 的正式 Server SCM 启动仍失败，停止后的文件报告未生成；该结果不能证明具体失败操作。Windows 基础 Test/Vet/Build、既有 Agent SCM、Windows arm64 与双架构网络混沌均通过各自范围验证。
 - 调查入口改用 bootstrap 的 Windows 测试程序。正式 SCM 回调体提取为同包私有函数，测试入口复用该函数并在其返回错误后、向 SCM 报告停止前写入隔离诊断事件。CI 通过 `go test -c` 构建测试程序，Smoke 有界等待诊断事件；固定测试配置、临时替换与还原、保留原失败的边界不变。生产日志契约与权限策略未修改。
+
+## 2026-09-04 · M8-04 运行时子对象权限契约裁定
+
+- 精确失败证据：`767746b3fe55bd65084dd5188cc593b250865964` 的 [Windows Job #100940800803](https://github.com/lifei6671/xtunnel/actions/runs/33846937701/job/100940800803) 在正式安装启动时失败。回调内诊断明确为 `initialize server storage: acquire server external lock: open server external lock ...: Access is denied`；此前 Runtime 精确 Owner/DACL 与 Service Token 校验已通过，失败位于锁文件 `CreateFile` 首次创建。
+- 原生控制实验：非提升用户在自己临时目录模拟当前用户 Modify + OWNER RIGHTS READ_CONTROL。显式 SD 的 CREATE_NEW、OPEN_ALWAYS 首次创建均拒绝；去掉 SD 的继承创建、写入与同步通过；对既有文件使用 OPEN_ALWAYS 通过。改变子 SD 的 Owner、Protected 或 OWNER RIGHTS 项不能解除首次创建限制；父目录加 WRITE_DAC 后成功，仅加 WRITE_OWNER 仍失败。目录创建也有相同结果。继承创建的子对象具有精确四条继承 ACE，WRITE_DAC 与 WRITE_OWNER 重开仍均被拒绝。
+- 机制与限制：[Microsoft CreatePrivateObjectSecurityWithMultipleInheritance](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createprivateobjectsecuritywithmultipleinheritance) 说明父描述符可以限制创建者指定子 DACL。其 SEF_AVOID_OWNER_RESTRICTION 不是 CreateFile 参数，不作为绕过 NTFS 检查的实现。独立契约审查确认当前第 191.1 节要求与已验证创建行为存在冲突；未证明同时保留子对象 Protected、Service SID Modify 和 OWNER RIGHTS 限权的可行替代，不声称所有替代均不可能。
+
+### 待确认的最小调整
+
+1. 安装器创建的 Binary、Config、Data/Runtime 根继续使用 Administrators Owner 和精确显式 Protected DACL。
+2. 固定 Data/Runtime 树内由 XTunnel 创建的子目录及受管文件，从已固定并精确验证的直接父目录继承四条 ACE；在使用或发布前通过同一 Handle 验证允许 Owner、对象身份和完整继承 ACL。运行时子目录与文件的允许 Owner 明确为 LocalService/SYSTEM/Administrators，根目录继续仅 SYSTEM/Administrators。
+3. SYSTEM/Administrators Full Control、XTunnelServer Service SID Modify、OWNER RIGHTS READ_CONTROL 保持。目录必须继续传播矩阵，文件检查对应继承标志；不授予服务 WRITE_DAC/WRITE_OWNER，不通过删除 OWNER RIGHTS 解除限制。前台 Profile、SQLite Driver 路线保持。
+4. 新建、既有对象与发布候选分别校验。父链固定和验证持续到创建与同 Handle 校验完成；不合规对象拒绝并保留现场，不自动修复 ACL。
+5. 验收覆盖 Runtime 锁创建与重用、credentials/pki 子目录和 Secret 候选发布、同服务实际读写、其他 LocalService 服务拒绝读取与安全控制，以及 DACL/Owner 漂移拒绝；取得修复后的真实 SCM 和精确提交 CI，再做独立复审。
+
+- 状态：方案提案已完成独立只读审查，尚未实施新权限规则；总方案仍保留现行冻结契约。根 AGENTS.md 要求权限模型变更获得明确确认，M8-04 标记 `BLOCKED` 等待该裁定；M8-03 为 `DONE`，M8-05 为 `NOT_STARTED`，全局 `98/100`、M8 `3/5`。已授权的实现、修复和诊断提交均已推送；本节为待确认的本地计划增补。
+
+## 2026-09-04 · M8-04 继承权限方案确认
+
+- 用户明确确认上述最小调整。第 191.1 节同步受保护安装根、运行时子目录及受管文件的精确继承规则，并明确运行时子目录允许的 Owner。M8-04 恢复 `IN_PROGRESS`，继续实现、复审、提交和 CI 验证；完成计数及 M8-05 边界保持。
+
+## 2026-09-04 · M8-04 运行时继承权限实现与验证
+
+- 已落实第 191.1 节确认的权限矩阵：安装根保持 Protected DACL，Data/Runtime 内运行时对象继承精确四条 ACE；同句柄验证 Owner、完整文件身份和继承标志，父目录链固定至创建、读取或发布结束，候选首次写入前完成验证。External Lock 和受管密钥使用统一策略入口。
+- 回归补充非提升权限下的真实继承创建、写入同步、权限漂移与 WRITE_DAC/WRITE_OWNER 拒绝；真实 SCM 测试覆盖产品锁、凭据及证书目录、密钥、SQLite/WAL/SHM、两级子目录，以及另一 LocalService 服务的拒绝访问。
+- 本地开发反馈：Go 1.27.1 / GOTOOLCHAIN=local 下 winsecurity、externallock、tokenkey、gateway、durableops、bootstrap、service 七包 Test，winsecurity/externallock/bootstrap 三包 Race、全仓 go vet、go mod verify 通过；Docker Desktop ./scripts/verify.ps1 exit 0。真实 SCM 仅由隔离 CI 执行，本地普通测试的 skip 不计该项通过。
+- 安全实现、SCM Token 测试和契约/调用点说明已分别独立复审通过；最终集成独立复审 PASSED / Tier3，0 新发现，分区绑定未漂移；精确提交 CI 待验证，M8-04 保持 IN_PROGRESS。

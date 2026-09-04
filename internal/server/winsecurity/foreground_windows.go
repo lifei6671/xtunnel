@@ -24,6 +24,7 @@ type ForegroundDirectorySecurity struct {
 	expected   []accessACE
 	// serviceOwners 为 Service Profile 按用途冻结的可信 Owner 集合；空值保持前台语义。
 	serviceOwners []*windows.SID
+	inherited     bool
 }
 
 type accessACE struct {
@@ -61,6 +62,9 @@ func NewForegroundDirectorySecurity() (*ForegroundDirectorySecurity, error) {
 // Attributes returns descriptor-backed creation attributes. The receiver must
 // stay reachable until CreateDirectory returns.
 func (security *ForegroundDirectorySecurity) Attributes() *windows.SecurityAttributes {
+	if security.inherited {
+		return nil
+	}
 	return &windows.SecurityAttributes{
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: security.descriptor,
@@ -97,7 +101,10 @@ func (security *ForegroundDirectorySecurity) ValidateDirectory(handle windows.Ha
 	if err != nil {
 		return fmt.Errorf("read directory security descriptor control: %w", err)
 	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
+	if security.inherited && control&windows.SE_DACL_PROTECTED != 0 {
+		return errors.New("service child directory DACL must inherit its protected root")
+	}
+	if !security.inherited && control&windows.SE_DACL_PROTECTED == 0 {
 		return errors.New("directory DACL is not protected")
 	}
 	actual, err := descriptorACEs(descriptor)

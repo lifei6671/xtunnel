@@ -40,7 +40,7 @@ func NewServiceFileSecurity(kind ServiceObjectKind) (*ForegroundFileSecurity, er
 	if err != nil {
 		return nil, err
 	}
-	return &ForegroundFileSecurity{descriptor: descriptor, owner: owner, expected: expected, serviceOwners: owners}, nil
+	return &ForegroundFileSecurity{descriptor: descriptor, owner: owner, expected: expected, serviceOwners: owners, inherited: kind == ServiceData}, nil
 }
 
 func serviceDescriptor(kind ServiceObjectKind, directory, runtimeObject bool) (*windows.SECURITY_DESCRIPTOR, *windows.SID, []*windows.SID, []accessACE, error) {
@@ -81,9 +81,15 @@ func serviceDescriptor(kind ServiceObjectKind, directory, runtimeObject bool) (*
 	if directory {
 		flags = "OICI"
 	}
-	sddl := "O:" + owner.String() + "D:P(A;" + flags + ";FA;;;SY)(A;" + flags + ";FA;;;BA)(A;" + flags + ";" + access + ";;;" + policy.service.String() + ")"
+	control := "P"
+	if runtimeObject {
+		flags += "ID"
+		control = ""
+	}
+	sddl := "O:" + owner.String() + "D:" + control + "(A;" + flags + ";FA;;;SY)(A;" + flags + ";FA;;;BA)(A;" + flags + ";" + access + ";;;" + policy.service.String() + ")"
 	// OWNER RIGHTS 的显式 READ_CONTROL 取代 Owner 隐含 WRITE_DAC。
-	// 它随目录继承给 SQLite-owned 文件；受管文件直接以完整 SD 创建。
+	// 运行时子对象只能继承受保护根的精确权限。父 OW_RC 会拒绝显式 SD 创建，
+	// 因此运行时不重设 Owner/DACL；同句柄验证继承结果后才能写入内容。
 	if kind == ServiceData {
 		sddl += "(A;" + flags + ";RC;;;OW)"
 	}
@@ -112,7 +118,29 @@ func NewDirectorySecurityForPath(path string) (*ForegroundDirectorySecurity, err
 	if err != nil {
 		return nil, err
 	}
-	return &ForegroundDirectorySecurity{descriptor: descriptor, owner: owner, expected: expected, serviceOwners: owners}, nil
+	return &ForegroundDirectorySecurity{descriptor: descriptor, owner: owner, expected: expected, serviceOwners: owners, inherited: !root}, nil
+}
+
+// pinInheritedDirectory 保持从卷根到实际父目录的 no-follow 身份链。固定根必须
+// 满足 Protected DACL，后代必须逐层满足精确继承矩阵，不能仅凭叶子四条 ACE
+// 推断继承来源。调用方在创建/读取/发布和最终验证结束后逆序释放这条链。
+func pinInheritedDirectory(path string) ([]windows.Handle, error) {
+	service, _, err := serviceDataPath(path)
+	if err != nil || !service {
+		return nil, err
+	}
+	return pinServiceAncestors(filepath.Join(path, ".inheritance-pin"), false)
+}
+
+func pinRequiredInheritedDirectory(path string) ([]windows.Handle, error) {
+	service, _, err := serviceDataPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if !service {
+		return nil, errors.New("inherited service policy requires the fixed Data or Runtime tree")
+	}
+	return pinServiceAncestors(filepath.Join(path, ".inheritance-pin"), false)
 }
 
 // NewFileSecurityForPath binds runtime file creation/validation to its parent.

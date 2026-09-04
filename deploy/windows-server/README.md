@@ -31,7 +31,9 @@ Start-Service XTunnelServer
 
 服务以 LocalService 运行，权限授予精确的 `NT SERVICE\XTunnelServer` SID。
 SYSTEM/Administrators 保留完全控制；Data/Runtime 的 OWNER RIGHTS 限权防止通过 Owner
-隐含权限更改 ACL。配置、密钥、数据库和锁与前台 LocalAppData Profile 分离。
+隐含权限更改 ACL。安装根目录保持 Protected DACL；运行时子目录、锁和密钥文件继承
+已验证父目录的精确权限，并在使用前核验 Owner、对象身份与完整继承 ACL。
+配置、密钥、数据库和锁与前台 LocalAppData Profile 分离。
 同名服务、事件源或文件属性不符合受管契约时，命令返回错误并保留现场。
 
 ## 运行与维护

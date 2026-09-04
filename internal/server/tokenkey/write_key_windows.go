@@ -12,7 +12,7 @@ import (
 )
 
 // writeKeyAtomicallyPlatform publishes the Token master key with the Windows
-// foreground profile DACL. The publisher performs no-follow final verification
+// selected profile DACL. The publisher performs no-follow final verification
 // and Write Through replacement; it never weakens the requirement to Unix mode
 // bits or ordinary os.Rename semantics.
 func writeKeyAtomicallyPlatform(directoryPath, keyPath string, key []byte) error {
@@ -55,7 +55,7 @@ func loadExistingPlatform(directoryPath, keyPath string) (Key, bool, error) {
 		return Key{}, false, nil
 	}
 	if err != nil {
-		// Windows 无法证明受管目录或正式密钥仍满足 Protected DACL、no-follow
+		// Windows 无法证明受管目录或正式密钥仍满足对应 Profile DACL、no-follow
 		// 与对象身份约束时，已有密文同样不能安全地继续使用。保留底层错误供
 		// 诊断，同时统一为 ErrUnavailable，禁止调用方把它误当成可新建密钥。
 		return Key{}, false, fmt.Errorf("%w: read tunnel token master key: %w", ErrUnavailable, err)
