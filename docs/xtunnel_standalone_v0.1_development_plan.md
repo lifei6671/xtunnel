@@ -2452,3 +2452,9 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 定位与修复：启动的 Restore 残留检查对固定 `ProgramData/XTunnel/Server` 父目录使用了前台 Owner/DACL 规则，而安装器按只读 ServiceConfig 策略创建该目录。新增只读父目录验证入口，精确固定路径要求授权令牌并按 ServiceConfig 验证，其余路径保持前台规则；可写 Data/Runtime 策略不扩展到父目录。补充路径分流、非法身份拒绝及真实 SCM Token 父目录验证断言。
 - 本地复验：`go1.27.1/local` 下 winsecurity/durableops/bootstrap 三包 Test/Vet 通过；Docker Desktop `./scripts/verify.ps1` 再次 exit 0。Smoke 失败分支保存原退出码并输出 SCM 状态与最多 20 条已有结构化事件，Windows PowerShell 5.1 语法检查通过，诊断增量独立复审通过。
 - 边界：真实 SCM 修复效果与剩余完整 CI 尚待新候选验证，M8-04 保持 `IN_PROGRESS`。
+
+## 2026-09-04 · M8-04 SCM 启动诊断
+
+- 修复提交 `0f315a0766b64df3cf2df1078d6b9ac0ada9ca5a` 对应 [CI #33844241742](https://github.com/lifei6671/xtunnel/actions/runs/33844241742)。Windows Server Test/Vet/Build 与既有 Agent SCM 验证通过，正式 Server 启动仍失败；Event Log 显示已进入 callback 并报告 `RUNTIME_FAILED`，尚不能确定具体失败操作。父目录规则失配已由代码与定向测试修复，未将其宣称为全部根因。
+- 增加隔离 Runner 启动调查入口：`tests/windows-server-startup` 捕获既有 `bootstrap.Execute` 标准错误，仅在 SCM Dispatcher 返回后保存于受管 Runtime，报告完成后发布完成标记。Smoke 只在首次正式安装失败时、停止服务后临时替换程序，等待完整报告并还原原候选和检查 ACL/SHA-256；原失败始终保留。正式成功验收仍使用 `cmd/server` 构建产物，不以调查程序替代。
+- 验证：调查程序 Windows `go1.27.1/local` build/vet、PowerShell 5.1 语法检查通过；Docker Desktop `./scripts/verify.ps1` 再次 exit 0。此增量只增强诊断，SCM 成功、跨服务 Token 与完整 CI 仍待验证，M8-04 保持 `IN_PROGRESS`。

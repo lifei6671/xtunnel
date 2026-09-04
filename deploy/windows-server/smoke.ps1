@@ -1,7 +1,8 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ServerPath,
-    [Parameter(Mandatory = $true)][string]$ConfigPath
+    [Parameter(Mandatory = $true)][string]$ConfigPath,
+    [string]$DiagnosticPath
 )
 
 # 仅用于一次性提升权限 Windows amd64 Runner；入口先拒绝所有既有 Server 对象。
@@ -63,7 +64,38 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Unable to delete isolated SCM fixture' }
 }
 
-Invoke-Server @('service', 'install', '--config', $configSource)
+try {
+    Invoke-Server @('service', 'install', '--config', $configSource)
+} catch {
+    $installationFailure = $_
+    # 仅首次安装失败才使用诊断入口；原始候选已经失败，诊断结果不能替代验收。
+    if ($DiagnosticPath -and (Test-Path -LiteralPath $installedBinary)) {
+        try {
+            # 等待最多两次自动恢复耗尽，再在停止状态使用外部工具替换程序。
+            Start-Sleep -Seconds 20
+            if ((Get-Service XTunnelServer).Status -ne 'Stopped') { Stop-Service XTunnelServer }
+            Wait-State 'Stopped'
+            $binaryAcl = (Get-Acl -LiteralPath $installedBinary).Sddl
+            try {
+                Copy-Item -LiteralPath $DiagnosticPath -Destination $installedBinary -Force
+                if ((Get-Acl -LiteralPath $installedBinary).Sddl -ne $binaryAcl) { throw 'Diagnostic copy changed binary ACL' }
+                Start-Service XTunnelServer -ErrorAction SilentlyContinue
+                $report = Join-Path $dataRoot 'runtime\scm-startup-diagnostic.txt'
+                $complete = $report + '.complete'
+                $deadline = [DateTime]::UtcNow.AddSeconds(20)
+                while (-not (Test-Path -LiteralPath $complete) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+                if (Test-Path -LiteralPath $complete) { Get-Content -LiteralPath $report }
+                else { Write-Warning 'SCM diagnostic report was not produced' }
+            } finally {
+                if ((Get-Service XTunnelServer).Status -ne 'Stopped') { Stop-Service XTunnelServer }
+                Wait-State 'Stopped'
+                Copy-Item -LiteralPath $binary -Destination $installedBinary -Force
+                if ((Get-Acl -LiteralPath $installedBinary).Sddl -ne $binaryAcl -or (Get-FileHash -LiteralPath $installedBinary).Hash -ne (Get-FileHash -LiteralPath $binary).Hash) { throw 'Candidate restoration identity check failed' }
+            }
+        } catch { Write-Warning "SCM diagnostic collection failed: $_" }
+    }
+    throw $installationFailure
+}
 Wait-State 'Running'
 $instance = Get-CimInstance Win32_Service -Filter "Name='XTunnelServer'"
 if ($instance.StartName -ne 'NT AUTHORITY\LocalService') { throw 'Unexpected service identity' }
