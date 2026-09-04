@@ -56,6 +56,8 @@ const (
 	EventAgentConnectionFailed       = "agent_connection_failed"
 	EventAgentConnectionOpened       = "agent_connection_opened"
 	EventAgentConnectionClosed       = "agent_connection_closed"
+	EventAgentServerConnected        = "agent_server_connected"
+	EventAgentServerConnectionFailed = "agent_server_connection_failed"
 	EventWindowsServiceStarting      = "windows_service_starting"
 	EventWindowsServiceRunning       = "windows_service_running"
 	EventWindowsServiceStopRequested = "windows_service_stop_requested"

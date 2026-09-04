@@ -160,7 +160,21 @@ SCM 自动恢复。M6 Gate 另构建独立的 Windows-only SCM Helper，临时�
 CI Gate，不进入生产 Binary、用户 CLI 或持久 SCM 配置；普通 Stop 或 Handler 单测仍不能
 冒充该真实 Gate。
 
-## 6. 证据边界
+Server 服务名与 Event Log Provider 为 `XTunnelServer`。它的安装、首个管理员、停止、
+升级及权限要求见 [Windows Server SCM](../deploy/windows-server/README.md)，
+与上面的 Agent Credential/DPAPI 诊断分别处理。
+
+## 6. Windows Server 备份与恢复边界
+
+Windows Server Preview 不支持 `backup create`、`backup restore`，停止服务后同样不可用。
+当前使用受控维护窗口中的主机或基础设施级备份；产品尚未定义停服后的备份、恢复或
+Profile 迁移流程，不能照搬 Linux 的维护命令。
+
+启动发现未决 Restore Journal、staging、rollback 或无法证明安全的对象状态时会拒绝
+继续并保留现场。收集错误与目录状态，交由维护人员核查已有备份；不要删除 Journal、
+覆盖 Data 或自行切换目录来绕过检查。
+
+## 7. 证据边界
 
 告警 YAML、Runbook、单元测试、交叉编译或普通 Stop 只能证明各自范围。M6-07/M6 Gate
 仍需绑定当前提交的 Linux amd64/arm64 原生联合黑盒、Race、提升权限 Windows SCM

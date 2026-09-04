@@ -552,3 +552,32 @@ func allZero(value []byte) bool {
 	}
 	return true
 }
+
+func TestRunnerReportsTypedDialAndAuthenticationStage(t *testing.T) {
+	for _, stage := range []string{"dial", "authentication"} {
+		t.Run(stage, func(t *testing.T) {
+			cause := errors.New("fixture connection failure")
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			runner, err := newRunner(testRunnerConfig(t), dependencies{
+				dial: func(context.Context, string, string) (net.Conn, error) {
+					if stage == "dial" {
+						return nil, cause
+					}
+					return client, nil
+				},
+				authenticate: func(context.Context, net.Conn, controlauth.Config) (*controlauth.Session, error) { return nil, cause },
+				newOwner:     controlsession.NewOwner,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = runner.StartDetached(context.Background())
+			var failure interface{ FailureStage() string }
+			if !errors.Is(err, cause) || !errors.As(err, &failure) || failure.FailureStage() != stage {
+				t.Fatalf("failure = %v, want wrapped %s failure", err, stage)
+			}
+		})
+	}
+}

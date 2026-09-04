@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package bootstrap
 
@@ -9,5 +9,5 @@ import (
 )
 
 func readAdminPasswordFromTTY(*os.File, io.Writer) (string, error) {
-	return "", errors.New("interactive admin password input is only supported on Linux; use --password-file")
+	return "", errors.New("interactive admin password input is only supported on Linux and Windows; use --password-file")
 }

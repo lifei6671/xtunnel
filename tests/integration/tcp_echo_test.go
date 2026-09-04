@@ -109,7 +109,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		AuthenticationRecorder:    store,
 		TunnelAdmissionController: sessions,
 		ReadTimeout:               2 * time.Second, WriteTimeout: 2 * time.Second,
-		HeartbeatInterval: 100 * time.Millisecond, RetryAfter: 100 * time.Millisecond,
+		HeartbeatInterval: 10 * time.Second, RetryAfter: 100 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("create Control authenticator: %v", err)
@@ -171,6 +171,10 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	go func() { agentDone <- agentRuntime.Run(ctx) }()
 
 	waitForIdleWork(t, ctx, registry, sessions, agentConfig.Connector.ID())
+	initialSession, exists := registry.Current(testTunnelID, agentConfig.Connector.ID())
+	if !exists {
+		t.Fatal("ready Agent has no current Control Session")
+	}
 	serverOpen, err := serveropen.NewHandler(serveropen.Options{
 		HandshakeTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, ReadTimeout: 2 * time.Second,
 	})
@@ -186,10 +190,30 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	}
 
 	firstPayload := []byte("xtunnel-m3-origin-one\x00with-binary\xff")
-	if err := tunnelEchoRoundTrip(ctx, tunnelProxy, 1, firstPayload); err != nil {
+	if err := tunnelEchoRoundTrip(ctx, tunnelProxy, 1, firstPayload, true); err != nil {
 		t.Fatalf("first Tunnel Echo: %v", err)
 	}
 	waitForEchoOrigin(t, firstOriginDone, "first")
+	// 数据连接结束和 IDLE 等待均不应撤下 Control；持续核对完整身份，避免自动重连
+	// 掩盖瞬间退线。跨过两次生产 10 秒心跳后，下一条数据连接仍须复用本代。
+	idleWindow := time.NewTimer(21 * time.Second)
+	idlePoll := time.NewTicker(20 * time.Millisecond)
+	defer idleWindow.Stop()
+	defer idlePoll.Stop()
+idleCheck:
+	for {
+		current, present := registry.Current(testTunnelID, agentConfig.Connector.ID())
+		if !present || current != initialSession || !registry.Eligible(current, testServiceID) {
+			t.Fatalf("Control Session changed after data close: current=%#v present=%t, want %#v", current, present, initialSession)
+		}
+		select {
+		case <-idleWindow.C:
+			break idleCheck
+		case <-idlePoll.C:
+		case <-ctx.Done():
+			t.Fatalf("idle continuity context ended: %v", ctx.Err())
+		}
+	}
 
 	updatedOrigin := integrationOriginInput(t, secondOrigin)
 	healthBudget, err := healthbudget.New(healthbudget.Options{MaxTargetsPerTunnel: 2_000, MaxTargetsGlobal: 50_000})
@@ -212,8 +236,23 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	}
 
 	secondPayload := []byte("xtunnel-m3-origin-two\x00without-agent-restart\xfe")
-	waitForTunnelEcho(t, ctx, tunnelProxy, 2, secondPayload)
+	// 先等待新配置应用，再仅发起一次 OPEN；重试会消耗陈旧 IDLE，掩盖首请求失败。
+	configDeadline := time.Now().Add(3 * time.Second)
+	for !registry.EligibleAtRevision(initialSession, testServiceID, 2) {
+		if time.Now().After(configDeadline) {
+			t.Fatal("revision 2 did not become eligible on the original Control Session")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := tunnelEchoRoundTrip(ctx, tunnelProxy, 2, secondPayload, false); err != nil {
+		current, present := registry.Current(testTunnelID, agentConfig.Connector.ID())
+		t.Fatalf("first OPEN after idle failed (same_control=%t eligible=%t): %v",
+			present && current == initialSession, registry.EligibleAtRevision(initialSession, testServiceID, 2), err)
+	}
 	waitForEchoOrigin(t, secondOriginDone, "second")
+	if current, present := registry.Current(testTunnelID, agentConfig.Connector.ID()); !present || current != initialSession {
+		t.Fatalf("second data connection replaced Control Session: current=%#v present=%t, want %#v", current, present, initialSession)
+	}
 	if snapshot := limitManager.Snapshot(); snapshot.PendingOpens != 0 || snapshot.ActiveTotal != 0 {
 		t.Fatalf("Limit snapshot after Origin switch = %#v, want no PendingOpen or Active leak", snapshot)
 	}
@@ -232,7 +271,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 			t.Fatal("closed Server left the old Session eligible")
 		}
 		assertConnectorRemainsUnavailable(t, registry, sessions, agentConfig.Connector.ID(), 150*time.Millisecond)
-		if err := tunnelEchoRoundTrip(ctx, tunnelProxy, 2, []byte("must-not-use-local-config")); err == nil {
+		if err := tunnelEchoRoundTrip(ctx, tunnelProxy, 2, []byte("must-not-use-local-config"), false); err == nil {
 			t.Fatal("Tunnel data plane stayed available while the Server was unreachable")
 		}
 
@@ -290,7 +329,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create blocked-state Tunnel proxy: %v", err)
 		}
-		if err := tunnelEchoRoundTrip(ctx, blockedProxy, 3, []byte("must-wait-for-fresh-snapshot")); err == nil {
+		if err := tunnelEchoRoundTrip(ctx, blockedProxy, 3, []byte("must-wait-for-fresh-snapshot"), false); err == nil {
 			t.Fatal("reconnected data plane used the process-local old Snapshot before ConfigAck")
 		}
 
@@ -494,7 +533,7 @@ func currentRuntimeStatus(
 	return serverruntime.SessionStatusSnapshot{}
 }
 
-func tunnelEchoRoundTrip(ctx context.Context, proxy *tunnel.Proxy, requiredRevision uint64, payload []byte) error {
+func tunnelEchoRoundTrip(ctx context.Context, proxy *tunnel.Proxy, requiredRevision uint64, payload []byte, reset bool) error {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("listen public TCP: %w", err)
@@ -519,9 +558,36 @@ func tunnelEchoRoundTrip(ctx context.Context, proxy *tunnel.Proxy, requiredRevis
 		return fmt.Errorf("dial public TCP listener: %w", err)
 	}
 	client := clientConnection.(*net.TCPConn)
+	defer client.Close()
+	if err := client.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return fmt.Errorf("set public client deadline: %w", err)
+	}
 	if _, err := client.Write(payload); err != nil {
 		_ = client.Close()
 		return fmt.Errorf("write public payload: %w", err)
+	}
+	if reset {
+		// 先验证 RAW 双向数据已经通过，再以 RST 模拟 SSH 客户端强制退出。
+		// RST 可使 Serve 返回 IO 错误，但必须有界退出且不能终止 Control Session。
+		echoed := make([]byte, len(payload))
+		if _, err := io.ReadFull(client, echoed); err != nil {
+			return fmt.Errorf("read echoed payload before reset: %w", err)
+		}
+		if !bytes.Equal(echoed, payload) {
+			return errors.New("echoed payload before reset is not byte-identical")
+		}
+		if err := client.SetLinger(0); err != nil {
+			return fmt.Errorf("enable public TCP reset: %w", err)
+		}
+		if err := client.Close(); err != nil {
+			return fmt.Errorf("reset public TCP client: %w", err)
+		}
+		select {
+		case <-serveDone:
+			return nil
+		case <-time.After(3 * time.Second):
+			return errors.New("Tunnel proxy did not finish after TCP reset")
+		}
 	}
 	if err := client.CloseWrite(); err != nil {
 		_ = client.Close()
@@ -554,7 +620,7 @@ func waitForTunnelEcho(t *testing.T, ctx context.Context, proxy *tunnel.Proxy, r
 	deadline := time.Now().Add(8 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := tunnelEchoRoundTrip(ctx, proxy, requiredRevision, payload); err == nil {
+		if err := tunnelEchoRoundTrip(ctx, proxy, requiredRevision, payload, false); err == nil {
 			return
 		} else {
 			lastErr = err

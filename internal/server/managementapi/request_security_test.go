@@ -7,6 +7,42 @@ import (
 	"testing"
 )
 
+func TestManagementLocalHTTPBoundary(t *testing.T) {
+	policy, err := newManagementSecurityPolicy("http://127.0.0.1:8080", []string{"attacker.example:8080"}, []string{"0.0.0.0/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, peer, host string
+		valid            bool
+	}{
+		{"local", "127.0.0.1:12345", "127.0.0.1:8080", true},
+		{"remote spoof", "192.0.2.1:12345", "127.0.0.1:8080", false},
+		{"host spoof", "127.0.0.1:12345", "attacker.example:8080", false},
+		{"other port", "127.0.0.1:12345", "127.0.0.1:8081", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/", nil)
+			request.RemoteAddr, request.Host = test.peer, test.host
+			request.Header.Set("X-Forwarded-For", "127.0.0.1")
+			request.Header.Set("X-Forwarded-Proto", "https")
+			request.Header.Set("X-Forwarded-Host", "127.0.0.1:8080")
+			metadata, err := policy.metadata(request)
+			if (err == nil) != test.valid {
+				t.Fatalf("metadata error = %v, valid = %t", err, test.valid)
+			}
+			if test.valid && (metadata.scheme != "http" || !metadata.clientIP.IsLoopback()) {
+				t.Fatalf("proxy headers changed local metadata: %+v", metadata)
+			}
+		})
+	}
+	for origin, want := range map[string]bool{"http://127.0.0.1:8080": true, "http://127.0.0.1:8081": false, "http://attacker.example:8080": false, "null": false} {
+		if got := policy.allowsOrigin(origin); got != want {
+			t.Fatalf("allowsOrigin(%q) = %t", origin, got)
+		}
+	}
+}
+
 func TestManagementSecurityPolicyTrustedProxyBoundary(t *testing.T) {
 	policy, err := newManagementSecurityPolicy(
 		"https://Admin.Example.",

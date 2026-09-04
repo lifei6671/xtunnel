@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -20,102 +21,121 @@ import (
 )
 
 func TestAdminLoginSessionCSRFE2E(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), t.TempDir())
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Errorf("Store.Close() error = %v", err)
-		}
-	})
+	for _, localHTTP := range []bool{false, true} {
+		t.Run(fmt.Sprintf("local_http=%t", localHTTP), func(t *testing.T) {
+			store, err := sqlite.Open(context.Background(), t.TempDir())
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			t.Cleanup(func() {
+				if err := store.Close(); err != nil {
+					t.Errorf("Store.Close() error = %v", err)
+				}
+			})
 
-	server := httptest.NewUnstartedServer(nil)
-	publicURL := "https://" + server.Listener.Addr().String()
-	handler, err := NewHandler(HandlerOptions{
-		Management: serverconfig.Management{PublicURL: publicURL},
-		Store:      store,
-		Logger:     slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
-	server.Config.Handler = handler
-	server.StartTLS()
-	t.Cleanup(server.Close)
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatalf("cookiejar.New() error = %v", err)
-	}
-	client := server.Client()
-	client.Jar = jar
+			server := httptest.NewUnstartedServer(nil)
+			publicURL := "https://" + server.Listener.Addr().String()
+			management := serverconfig.Management{PublicURL: publicURL}
+			if localHTTP {
+				publicURL = "http://" + server.Listener.Addr().String()
+				management = serverconfig.Management{Listen: server.Listener.Addr().String()}
+			}
+			handler, err := NewHandler(HandlerOptions{
+				Management: management,
+				Store:      store,
+				Logger:     slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			})
+			if err != nil {
+				t.Fatalf("NewHandler() error = %v", err)
+			}
+			server.Config.Handler = handler
+			if localHTTP {
+				server.Start()
+			} else {
+				server.StartTLS()
+			}
+			t.Cleanup(server.Close)
+			jar, err := cookiejar.New(nil)
+			if err != nil {
+				t.Fatalf("cookiejar.New() error = %v", err)
+			}
+			client := server.Client()
+			client.Jar = jar
+			page := doRequest(t, client, http.MethodGet, server.URL+"/", "", nil)
+			if page.StatusCode != http.StatusOK || !strings.HasPrefix(page.Header.Get("Content-Type"), "text/html") {
+				page.Body.Close()
+				t.Fatalf("Web page status = %d", page.StatusCode)
+			}
+			page.Body.Close()
 
-	response := postLogin(t, client, server.URL, publicURL, "admin", "correct horse battery staple")
-	assertAPIError(t, response, http.StatusConflict, APIErrorCodeSETUPREQUIRED)
-	if err := store.CreateFirstAdmin(context.Background(), "admin", "correct horse battery staple"); err != nil {
-		t.Fatalf("CreateFirstAdmin() error = %v", err)
-	}
+			response := postLogin(t, client, server.URL, publicURL, "admin", "correct horse battery staple")
+			assertAPIError(t, response, http.StatusConflict, APIErrorCodeSETUPREQUIRED)
+			if err := store.CreateFirstAdmin(context.Background(), "admin", "correct horse battery staple"); err != nil {
+				t.Fatalf("CreateFirstAdmin() error = %v", err)
+			}
 
-	response = postLogin(t, client, server.URL, "https://attacker.example", "admin", "correct horse battery staple")
-	assertAPIError(t, response, http.StatusForbidden, APIErrorCodeORIGINNOTALLOWED)
-	response = postLogin(t, client, server.URL, publicURL, "admin", "incorrect password")
-	assertAPIError(t, response, http.StatusUnauthorized, APIErrorCodeAUTHENTICATIONFAILED)
+			response = postLogin(t, client, server.URL, "https://attacker.example", "admin", "correct horse battery staple")
+			assertAPIError(t, response, http.StatusForbidden, APIErrorCodeORIGINNOTALLOWED)
+			response = postLogin(t, client, server.URL, publicURL, "admin", "incorrect password")
+			assertAPIError(t, response, http.StatusUnauthorized, APIErrorCodeAUTHENTICATIONFAILED)
 
-	response = postLogin(t, client, server.URL, publicURL, "admin", "correct horse battery staple")
-	if response.StatusCode != http.StatusOK {
-		defer response.Body.Close()
-		body, _ := io.ReadAll(response.Body)
-		t.Fatalf("login status = %d, body = %s", response.StatusCode, body)
-	}
-	var session AuthSession
-	if err := json.NewDecoder(response.Body).Decode(&session); err != nil {
-		response.Body.Close()
-		t.Fatalf("decode login response: %v", err)
-	}
-	response.Body.Close()
-	if session.Admin.Username != "admin" || !strings.HasPrefix(session.Admin.Id, "adm_") || !validCSRF(session.CsrfToken, session.CsrfToken) {
-		t.Fatalf("login session = %#v", session)
-	}
-	cookies := response.Cookies()
-	if len(cookies) != 1 || cookies[0].Name != adminSessionCookieName || !cookies[0].Secure || !cookies[0].HttpOnly ||
-		cookies[0].SameSite != http.SameSiteLaxMode || cookies[0].Path != "/api/v1" || cookies[0].Domain != "" {
-		t.Fatalf("login cookies = %#v", cookies)
-	}
-	if got := response.Header.Get("Cache-Control"); got != "no-store" {
-		t.Fatalf("login Cache-Control = %q", got)
-	}
+			response = postLogin(t, client, server.URL, publicURL, "admin", "correct horse battery staple")
+			if response.StatusCode != http.StatusOK {
+				defer response.Body.Close()
+				body, _ := io.ReadAll(response.Body)
+				t.Fatalf("login status = %d, body = %s", response.StatusCode, body)
+			}
+			var session AuthSession
+			if err := json.NewDecoder(response.Body).Decode(&session); err != nil {
+				response.Body.Close()
+				t.Fatalf("decode login response: %v", err)
+			}
+			response.Body.Close()
+			if session.Admin.Username != "admin" || !strings.HasPrefix(session.Admin.Id, "adm_") || !validCSRF(session.CsrfToken, session.CsrfToken) {
+				t.Fatalf("login session = %#v", session)
+			}
+			cookies := response.Cookies()
+			if len(cookies) != 1 || cookies[0].Name != adminSessionCookieName || cookies[0].Secure == localHTTP || !cookies[0].HttpOnly ||
+				cookies[0].SameSite != http.SameSiteLaxMode || cookies[0].Path != "/api/v1" || cookies[0].Domain != "" {
+				t.Fatalf("login cookies = %#v", cookies)
+			}
+			if got := response.Header.Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("login Cache-Control = %q", got)
+			}
 
-	response = doRequest(t, client, http.MethodGet, server.URL+"/api/v1/auth/me", "", nil)
-	if response.StatusCode != http.StatusOK {
-		defer response.Body.Close()
-		body, _ := io.ReadAll(response.Body)
-		t.Fatalf("auth/me status = %d, body = %s", response.StatusCode, body)
-	}
-	var restored AuthSession
-	if err := json.NewDecoder(response.Body).Decode(&restored); err != nil {
-		response.Body.Close()
-		t.Fatalf("decode auth/me response: %v", err)
-	}
-	response.Body.Close()
-	if restored.CsrfToken != session.CsrfToken || restored.Admin != session.Admin {
-		t.Fatalf("auth/me session = %#v, want persisted %#v", restored, session)
-	}
+			response = doRequest(t, client, http.MethodGet, server.URL+"/api/v1/auth/me", "", nil)
+			if response.StatusCode != http.StatusOK {
+				defer response.Body.Close()
+				body, _ := io.ReadAll(response.Body)
+				t.Fatalf("auth/me status = %d, body = %s", response.StatusCode, body)
+			}
+			var restored AuthSession
+			if err := json.NewDecoder(response.Body).Decode(&restored); err != nil {
+				response.Body.Close()
+				t.Fatalf("decode auth/me response: %v", err)
+			}
+			response.Body.Close()
+			if restored.CsrfToken != session.CsrfToken || restored.Admin != session.Admin {
+				t.Fatalf("auth/me session = %#v, want persisted %#v", restored, session)
+			}
 
-	response = doRequest(t, client, http.MethodPost, server.URL+"/api/v1/auth/logout", publicURL, map[string]string{
-		"X-XTunnel-CSRF": strings.Repeat("A", 43),
-	})
-	assertAPIError(t, response, http.StatusForbidden, APIErrorCodeCSRFINVALID)
-	response = doRequest(t, client, http.MethodPost, server.URL+"/api/v1/auth/logout", publicURL, map[string]string{
-		"X-XTunnel-CSRF": session.CsrfToken,
-	})
-	if response.StatusCode != http.StatusNoContent {
-		defer response.Body.Close()
-		body, _ := io.ReadAll(response.Body)
-		t.Fatalf("logout status = %d, body = %s", response.StatusCode, body)
+			response = doRequest(t, client, http.MethodPost, server.URL+"/api/v1/auth/logout", publicURL, map[string]string{
+				"X-XTunnel-CSRF": strings.Repeat("A", 43),
+			})
+			assertAPIError(t, response, http.StatusForbidden, APIErrorCodeCSRFINVALID)
+			response = doRequest(t, client, http.MethodPost, server.URL+"/api/v1/auth/logout", publicURL, map[string]string{
+				"X-XTunnel-CSRF": session.CsrfToken,
+			})
+			if response.StatusCode != http.StatusNoContent {
+				defer response.Body.Close()
+				body, _ := io.ReadAll(response.Body)
+				t.Fatalf("logout status = %d, body = %s", response.StatusCode, body)
+			}
+			response.Body.Close()
+			response = doRequest(t, client, http.MethodGet, server.URL+"/api/v1/auth/me", "", nil)
+			assertAPIError(t, response, http.StatusUnauthorized, APIErrorCodeSESSIONEXPIRED)
+		})
 	}
-	response.Body.Close()
-	response = doRequest(t, client, http.MethodGet, server.URL+"/api/v1/auth/me", "", nil)
-	assertAPIError(t, response, http.StatusUnauthorized, APIErrorCodeSESSIONEXPIRED)
 }
 
 func TestLoginRejectsUnknownFieldsAndDuplicateSessionCookie(t *testing.T) {

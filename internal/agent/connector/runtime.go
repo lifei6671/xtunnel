@@ -157,6 +157,7 @@ func New(config Config) (*Runtime, error) {
 		tracing: config.Tracing,
 		runControlSessions: func(ctx context.Context, handler reconnect.SessionHandler[*agentsession.Session]) error {
 			return reconnect.Run(ctx, runner, handler, reconnect.Options{
+				Logger:         logging.WithCorrelationFields(config.Logger, logging.Correlation{ConnectorID: config.Connector.ID()}),
 				InitialBackoff: reconnectInitial,
 				MaximumBackoff: reconnectMaximum,
 				StableAfter:    reconnectStable,

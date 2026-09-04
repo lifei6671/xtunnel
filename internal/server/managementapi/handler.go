@@ -126,8 +126,12 @@ func NewHandler(options HandlerOptions) (*ManagementHandler, error) {
 	if options.Store == nil || options.Logger == nil {
 		return nil, errors.New("management store and logger are required")
 	}
+	publicURL, err := options.Management.EffectivePublicURL()
+	if err != nil {
+		return nil, err
+	}
 	security, err := newManagementSecurityPolicy(
-		options.Management.PublicURL,
+		publicURL,
 		options.Management.AllowedHosts,
 		options.Management.TrustedProxies,
 	)
@@ -671,6 +675,7 @@ func (api *managementStrictAPI) Login(ctx context.Context, request LoginRequestO
 	}
 	api.handler.limiter.RecordSuccess(requestContext.metadata.clientIP, username)
 	cookie := adminSessionCookie(session.SessionToken, session.ExpiresAt)
+	cookie.Secure = !api.handler.security.localHTTP
 	cacheControl, pragma, setCookie := "no-store", "no-cache", cookie.String()
 	return Login200JSONResponse{
 		Body: authSessionResponse(session),
@@ -730,7 +735,9 @@ func (api *managementStrictAPI) Logout(ctx context.Context, _ LogoutRequestObjec
 		api.handler.logInternalError(ctx, requestContext.requestID, "management_logout_failed", err)
 		return Logout500JSONResponse{InternalErrorJSONResponse(apiError(APIErrorCodeINTERNALERROR, "服务器内部错误", requestContext.requestID))}, nil
 	}
-	cookie := expiredAdminSessionCookie().String()
+	expired := expiredAdminSessionCookie()
+	expired.Secure = !api.handler.security.localHTTP
+	cookie := expired.String()
 	return Logout204Response{Headers: Logout204ResponseHeaders{SetCookie: &cookie}}, nil
 }
 

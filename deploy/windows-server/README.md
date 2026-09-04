@@ -65,6 +65,16 @@ Application Event Log 中的记录使用共享 JSON 日志格式。
 同名重装使用相同 Service SID；安装源需与保留配置一致。所有安装对象不完整或发生身份漂移时，
 先由管理员核查现场，再按维护流程处理。
 
+## 备份与恢复边界
+
+Windows Server Preview 的 `backup create` 和 `backup restore` 均不可用，停止服务后也
+不会启用这些命令。当前备份由管理员在受控维护窗口中使用主机或基础设施级能力安排；
+产品尚未定义停服后的备份、恢复或 Profile 迁移流程。
+
+启动时发现未决 Restore Journal、staging 或 rollback 会拒绝继续并保留现场，
+不会自动恢复或清理。应先保留错误、目录状态及已有备份供维护分析，不要通过删除 Journal、
+覆盖 Data 或搬移前台与服务 Profile 来尝试恢复启动。
+
 ## 隔离 Runner 验证
 
 `smoke.ps1` 只用于无既有 XTunnelServer 对象的一次性提升权限 Windows amd64 Runner。

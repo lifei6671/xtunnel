@@ -10,7 +10,6 @@ import (
 	"net"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/agent/configruntime"
@@ -306,7 +305,7 @@ func connectionErrorCode(ctx context.Context, err error) protocolv1.ErrorCode {
 	if isTimeout(ctx, err) {
 		return protocolv1.ErrorCode_ERROR_CODE_ORIGIN_TIMEOUT
 	}
-	if errors.Is(err, syscall.ECONNREFUSED) {
+	if isConnectionRefused(err) {
 		return protocolv1.ErrorCode_ERROR_CODE_ORIGIN_REFUSED
 	}
 	return protocolv1.ErrorCode_ERROR_CODE_ORIGIN_UNREACHABLE

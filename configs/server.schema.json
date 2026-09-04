@@ -47,9 +47,8 @@
         },
         "public_url": {
           "type": "string",
-          "minLength": 1,
-          "format": "uri",
-          "description": "Management 的唯一外部 HTTPS Origin。",
+          "default": "",
+          "description": "Management 的唯一外部 HTTPS Origin；空值使用 management.listen 派生的本机 HTTP Origin，监听地址必须为 Loopback IP。",
           "x-secret": false,
           "x-reloadable": false
         },
@@ -108,7 +107,7 @@
         "public_hostname": {
           "type": "string",
           "minLength": 1,
-          "description": "Agent 连接和证书校验使用的公网主机名。",
+          "description": "Agent 可连接的域名或 IP，可附端口（IPv6 使用 [地址]:端口）；省略端口时沿用 agent_gateway.listen 端口。TLS 校验使用拆分后的主机。",
           "x-secret": false,
           "x-reloadable": false
         },

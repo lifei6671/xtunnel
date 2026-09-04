@@ -27,15 +27,23 @@ type requestMetadata struct {
 
 type managementSecurityPolicy struct {
 	publicOrigin string
+	localHTTP    bool
 	allowedHosts map[string]struct{}
 	trusted      []netip.Prefix
 }
 
 func newManagementSecurityPolicy(publicURL string, allowedHosts, trustedProxies []string) (*managementSecurityPolicy, error) {
 	parsed, err := url.Parse(publicURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.User != nil ||
 		parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
 		return nil, errors.New("invalid management public URL")
+	}
+	localHTTP := parsed.Scheme == "http"
+	if localHTTP {
+		address, err := netip.ParseAddr(parsed.Hostname())
+		if err != nil || !address.IsLoopback() || address.Zone() != "" {
+			return nil, errors.New("management HTTP origin must use a loopback IP")
+		}
 	}
 	publicAuthority, err := normalizeManagementAuthority(parsed.Host, parsed.Scheme)
 	if err != nil {
@@ -43,7 +51,7 @@ func newManagementSecurityPolicy(publicURL string, allowedHosts, trustedProxies 
 	}
 	allowed := map[string]struct{}{publicAuthority: {}}
 	for _, value := range allowedHosts {
-		authority, err := normalizeManagementAuthority(value, "https")
+		authority, err := normalizeManagementAuthority(value, parsed.Scheme)
 		if err != nil {
 			return nil, fmt.Errorf("normalize management allowed host: %w", err)
 		}
@@ -61,7 +69,8 @@ func newManagementSecurityPolicy(publicURL string, allowedHosts, trustedProxies 
 		prefixes = append(prefixes, prefix.Masked())
 	}
 	return &managementSecurityPolicy{
-		publicOrigin: "https://" + publicAuthority,
+		publicOrigin: parsed.Scheme + "://" + publicAuthority,
+		localHTTP:    localHTTP,
 		allowedHosts: allowed,
 		trusted:      prefixes,
 	}, nil
@@ -78,7 +87,13 @@ func (policy *managementSecurityPolicy) metadata(request *http.Request) (request
 	if request.TLS != nil {
 		metadata.scheme = "https"
 	}
-	if policy.trusts(peer) {
+	// 本机 HTTP 模式固定直接 Peer、Host 和 Scheme；代理头不能扩大其访问边界。
+	if policy.localHTTP {
+		if !peer.IsLoopback() || request.TLS != nil {
+			return requestMetadata{}, errInvalidManagementRequest
+		}
+	}
+	if !policy.localHTTP && policy.trusts(peer) {
 		if value, present, err := managementHeader(request.Header, "X-Forwarded-For"); err != nil {
 			return requestMetadata{}, err
 		} else if present {
@@ -114,6 +129,9 @@ func (policy *managementSecurityPolicy) metadata(request *http.Request) (request
 		return requestMetadata{}, errInvalidManagementRequest
 	}
 	if _, ok := policy.allowedHosts[metadata.authority]; !ok {
+		return requestMetadata{}, errInvalidManagementRequest
+	}
+	if policy.localHTTP && "http://"+metadata.authority != policy.publicOrigin {
 		return requestMetadata{}, errInvalidManagementRequest
 	}
 	// 远端客户端只能经 HTTPS 或声明 HTTPS 的受信前置代理进入 Management。

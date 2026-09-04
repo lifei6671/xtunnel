@@ -84,6 +84,28 @@ func TestConnectionTokenIssueCurrentAndVerify(t *testing.T) {
 		t.Fatalf("Store.Close() error = %v", err)
 	}
 	assertSensitiveBytesAbsent(t, dataDir, []byte(issued.Token), parsed.GetAuthenticationSecret())
+
+	// 重新打开数据库并重建服务，验证部署凭据来自持久化密文，而非签发进程的内存。
+	reopened := openApplicationStore(t, dataDir)
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close reopened store: %v", err)
+		}
+	})
+	restarted := NewConnectionTokenService(reopened, testTokenProtector(t, 0x51))
+	lifecycle, _ := newCredentialLifecycleTestService(t, reopened, restarted)
+	for range 2 {
+		revealed, err := lifecycle.Reveal(context.Background(), applicationTestTunnelID, testSecurityAuditContext())
+		if err != nil {
+			t.Fatalf("Reveal() after reopen: %v", err)
+		}
+		if revealed != issued {
+			t.Fatal("Reveal() after reopen changed the persisted credential")
+		}
+	}
+	if _, err := restarted.Verify(context.Background(), issued.Token); err != nil {
+		t.Fatalf("Verify() after reopen: %v", err)
+	}
 }
 
 func TestConnectionTokenIssueSerializesConcurrentCreation(t *testing.T) {

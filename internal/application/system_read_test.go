@@ -94,6 +94,16 @@ func TestSystemReadServiceProjectsInfoAndSafeConfig(t *testing.T) {
 	}
 }
 
+func TestSystemConfigProjectsLocalHTTPOrigin(t *testing.T) {
+	config := validSystemReadConfig()
+	config.Management.PublicURL = ""
+	config.Management.Listen = "127.0.0.1:8080"
+	projected, err := projectSystemConfig(config)
+	if err != nil || projected.Management.PublicURL != "http://127.0.0.1:8080" {
+		t.Fatalf("local HTTP config = %+v, error = %v", projected.Management, err)
+	}
+}
+
 func TestSystemReadServiceAggregatesRealHealthChecks(t *testing.T) {
 	readyMessage := "SQLite 可读写"
 	degradedMessage := "Gateway Listener 未就绪"

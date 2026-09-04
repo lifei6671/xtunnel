@@ -518,6 +518,13 @@ Token Credential Master Key 是 Data Directory 内独立的 32 字节密钥，�
 
 Token 返回响应必须 `Cache-Control: no-store`，不得进入日志、URL、Recent Activity 或前端持久化缓存；Reveal 和 Rotate 都必须写 Security Audit Event。
 
+Web 创建 Tunnel 使用“命名隧道 → 安装连接器”两步页面，安装步骤使用创建响应中的
+Credential；从 Tunnel 管理页再次打开右侧安装抽屉时，通过 Reveal 获取当前持久化 Token。
+离开安装页面或关闭抽屉只清理页面内存，不删除服务端 Credential。页面与抽屉共用
+Windows、Linux 或 Docker 部署命令，并说明 Token 已包含
+签发时的 Gateway 地址、端口和 TLS 信任信息。Gateway 地址或 TLS 信任改变后，管理员
+必须显式 Rotate 并更新 Agent 使用的 Token，重复 Reveal 不会改写原 Token 的连接目标。
+
 ---
 
 # 18. Token Rotation
@@ -4655,7 +4662,7 @@ Name=xtunnel_admin_session
 
 HttpOnly
 
-Secure
+Secure（HTTPS 模式；public_url 为空的本机 HTTP 模式不设置）
 
 SameSite=Lax
 
@@ -4991,6 +4998,21 @@ Revoke
 ---
 
 # 123. Tunnel Detail
+
+“服务与隧道”入口先展示全宽 Tunnel 列表，选中后进入全宽详情。顶部通过面包屑返回
+列表，并提供重命名、刷新及“安装连接器”操作。“概览”页签展示基本信息与 Connector
+表格，“服务”页签承载该 Tunnel 的 Service 列表和管理操作。
+
+创建入口进入全宽分步页面：填写名称后只提交一次创建请求，成功后进入安装连接器步骤。
+底部连接器列表逐页串行读取全部结果，一轮完成后间隔 3 秒刷新并整体替换；断连项移除，
+刷新失败时保留上一轮列表并显示失败提示。离开步骤取消在途请求与计时器，401 转入登录。
+“完成”返回详情，“下一步：添加服务”读取最新 Tunnel ETag 后进入服务表单。
+Service 创建与编辑使用全宽页面，按基本信息、公网入口、源站服务组织，连接超时、
+TLS、Host Header 与健康检查归入可展开的高级设置；字段语义及 ETag 并发控制保持一致。
+
+Tunnel 与 Connector 搜索仅过滤当前已加载的记录，界面必须明确该范围。继续加载使用
+API 的 `next_page_token`，不得把已加载数量显示成全量结果或虚构总页数。状态、计数与
+时间均展示 Server 返回值，不以本地推算的在线时长替代真实运行信息。
 
 展示：
 
@@ -5870,15 +5892,18 @@ logging:
   format: json
 ```
 
-`management.public_url` 必填，必须是绝对 `https` URL，Path 只能是空或 `/`，并禁止包含 Userinfo、Query 或 Fragment。它规范化为 `scheme + IDNA ASCII host + effective port`。`allowed_hosts` 使用规范化的 `host[:port]`，只补充允许到达 Management Handler 的 Host，不扩大合法 Origin；Host 同样 lowercase、IDNA ASCII、移除尾点并规范化默认端口。
+`management.public_url` 默认空字符串。空值要求 `management.listen` 为明确的 Loopback IP 和非零端口，浏览器 Origin 固定派生为 `http://<listen>`；仅接受直接 Loopback Peer 和该精确 Host，忽略代理头且 `allowed_hosts` 不扩大本机模式访问范围。登录和退出 Cookie 在该模式不设置 Secure，保留 HttpOnly、SameSite、Host-only、Origin 与 CSRF 校验。填写时必须是绝对 `https` URL，Path 只能是空或 `/`，并禁止包含 Userinfo、Query 或 Fragment。它规范化为 `scheme + IDNA ASCII host + effective port`。`allowed_hosts` 使用规范化的 `host[:port]`，只补充允许到达 Management Handler 的 Host，不扩大合法 Origin；Host 同样 lowercase、IDNA ASCII、移除尾点并规范化默认端口。
 
 Management 请求先按 `management.trusted_proxies` 得到可信 Scheme/Host，再执行：
 
 ```text
-Request Host ∈ {public_url derived host} ∪ allowed_hosts
+HTTPS: Request Host ∈ {public_url derived host} ∪ allowed_hosts
+Local HTTP: Request Host == management.listen derived host
 
-Login Origin == normalized public_url Origin
+Login Origin == normalized effective public Origin
 ```
+
+`agent_gateway.public_hostname` 接受域名、IPv4 或 IPv6，可携带显式公网端口（IPv6 带端口使用方括号）；省略端口沿用 `agent_gateway.listen` 的端口。Connection Token 分别写入主机与端口，TLS 校验只使用主机，IP 证书使用 IP SAN；已有 Token 保持原连接地址，新地址通过正式 Token 轮换生效。
 
 开发模式的 Vite Loopback Origin 必须显式进入开发专用 `public_url/allowed_hosts`，不能由 CSRF Handler 猜测，也不能在生产配置中自动放行。`limits` 的完整字段、默认值和范围只以 `configs/server.schema.json` 为准；第 156 节是由 Schema 自动生成或 CI 校验的人类可读镜像，禁止人工独立维护默认值。其他章节中的 YAML 只能作为部署示例。
 
@@ -6435,7 +6460,8 @@ Raw TCP 在 OS `Accept` 成功后、连接登记和 Handler goroutine 创建前�
 
 HTTP Request Body 使用 `max_http_body_bytes` 做流式上限，不允许为判定大小而整体缓存；该 Schema 字段是完整受支持链路的唯一 Body 大小裁决，Caddy/Nginx 前置代理不得另设更小固定阈值。已知 `Content-Length` 超限必须在 Tunnel Dial 前返回 `413 REQUEST_BODY_TOO_LARGE`，流式读取中超限同样返回该稳定码并禁止复用客户端连接。HTTP Request Rate 或新建 WorkConn OPEN Rate 超限返回 `429 RATE_LIMITED` 与 `Retry-After: 1`。`max_http_header_bytes` 继续直接作用于 Go HTTP Server，超限在 Handler 前使用标准 `431 Request Header Fields Too Large`，不另造 JSON 错误契约；前置代理的单字段缓冲必须至少容纳 Schema 允许的最大 `1 MiB` Header，不得以默认值提前拒绝。TCP 限流拒绝不向公网连接写入带内错误文本，只关闭 Socket。
 
-Server 启动时根据 `RLIMIT_NOFILE` 校验配置：
+Linux Server 启动时根据 `RLIMIT_NOFILE` 校验配置。Windows 保留应用层连接预算和
+预算计算校验，但不执行 Linux 的操作系统 FD 上限预检：
 
 ```text
 required_fd_budget
@@ -6595,6 +6621,8 @@ agent_origin_connection_failed
 agent_connection_failed
 agent_connection_opened
 agent_connection_closed
+agent_server_connected
+agent_server_connection_failed
 windows_service_starting
 windows_service_running
 windows_service_stop_requested
@@ -6608,7 +6636,16 @@ Management 与公网 HTTP 请求分别记录 `method/status_code/duration_ms` �
 Connector、Session、Connection 与 generation；Agent 只在 OpenRequest 通过协议校验并
 提交 OPENING 后绑定 `service_id/connection_id/trace_id`。成功生命周期使用 `info`，
 客户端或容量等可恢复失败使用 `warn`，取消使用 `debug`，协议/内部错误和无法继续的
-Windows Service 失败使用 `error`。失败日志只写有限 `error_code`，不得写底层错误文本；
+Windows Service 失败使用 `error`。失败日志保留有限 `error_code`；Agent 建连、工作连接和
+TCP Ingress 另外记录 `stage` 与可读的 `error` 原因。原因只提取类型化的 EOF、超时、
+网络关闭、DNS/TLS 分类或系统 Errno 数值及系统文本；未知错误使用调用点固定描述，
+不直接序列化错误对象或任意包装错误文本。
+Agent Control 建连成功使用 `agent_server_connected`；失败或断开使用
+`agent_server_connection_failed`，记录 `attempt`、`retryable`，重试时附实际 `retry_delay_ms`，
+可恢复故障为 `warn`，永久错误为 `error`。空闲工作连接在收到 OPEN 首字节前被对端关闭，
+以 `debug` 记录关闭原因；不完整 OPEN 帧仍作为协议错误处理。
+TCP 正常 EOF 后的读半边清理将 Linux `ENOTCONN` 与 Windows `WSAENOTCONN`
+视为已完成关闭；复合错误中仍有真实失败时继续传播并记录告警。
 M6-01 只承接已存在 `trace_id` 的注入和关联，不创建 Span，也不传播 W3C Trace Context，
 该职责仍属于 M6-03。
 

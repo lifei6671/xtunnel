@@ -1,9 +1,14 @@
 package reconnect
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -373,4 +378,81 @@ func (session *fakeSession) Wait() error {
 		return errors.New("Wait 在 Close 前调用")
 	}
 	return nil
+}
+
+// stagedFailure 以固定阶段模拟 Runner，不把底层错误文本用于日志分类。
+type stagedFailure struct{ cause error }
+
+func (failure stagedFailure) Error() string        { return failure.cause.Error() }
+func (failure stagedFailure) Unwrap() error        { return failure.cause }
+func (failure stagedFailure) FailureStage() string { return "authentication" }
+
+func TestRunLogsFailureStageAndRetryWithoutUnknownErrorText(t *testing.T) {
+	for _, permanent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("permanent_%v", permanent), func(t *testing.T) {
+			var output bytes.Buffer
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cause := errors.New("private authentication payload must not be logged")
+			if permanent {
+				cause = errors.Join(controlauth.ErrProtocol, cause)
+			}
+			starter := &failingStarter{err: stagedFailure{cause: cause}}
+			err := Run(ctx, starter, func(context.Context, *fakeSession) error { return nil }, Options{
+				Logger:         slog.New(slog.NewJSONHandler(&output, nil)),
+				InitialBackoff: time.Second, MaximumBackoff: time.Second, StableAfter: time.Minute,
+				RandomUnit: func() (float64, error) { return .5, nil },
+				Sleep:      func(context.Context, time.Duration) error { cancel(); return context.Canceled },
+			})
+			if err == nil || starter.calls != 1 {
+				t.Fatal("expected one failed attempt")
+			}
+			if strings.Contains(output.String(), "private authentication payload") {
+				t.Fatal("unknown error text leaked")
+			}
+			var record map[string]any
+			if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record["msg"] != "agent_server_connection_failed" || record["stage"] != "authentication" ||
+				record["attempt"] != float64(1) || record["retryable"] != !permanent || record["error"] == "" {
+				t.Fatalf("unexpected failure record: %#v", record)
+			}
+			if permanent {
+				if record["level"] != "ERROR" || record["retry_delay_ms"] != nil {
+					t.Fatalf("permanent failure: %#v", record)
+				}
+			} else if record["level"] != "WARN" || record["retry_delay_ms"] != float64(1000) {
+				t.Fatalf("retry failure: %#v", record)
+			}
+		})
+	}
+}
+
+func TestRunLogsEstablishedThenSessionEOFAndRetry(t *testing.T) {
+	var output bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := Run(ctx, &successfulStarter{session: &fakeSession{}}, func(context.Context, *fakeSession) error { return io.EOF }, Options{
+		Logger:         slog.New(slog.NewJSONHandler(&output, nil)),
+		InitialBackoff: time.Second, MaximumBackoff: time.Second, StableAfter: time.Minute,
+		RandomUnit: func() (float64, error) { return .5, nil },
+		Sleep:      func(context.Context, time.Duration) error { cancel(); return context.Canceled },
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(&output)
+	var connected, failed map[string]any
+	if err := decoder.Decode(&connected); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&failed); err != nil {
+		t.Fatal(err)
+	}
+	if connected["msg"] != "agent_server_connected" || connected["stage"] != "established" ||
+		failed["msg"] != "agent_server_connection_failed" || failed["stage"] != "session" ||
+		failed["retry_delay_ms"] != float64(1000) || failed["error"] == "" {
+		t.Fatalf("connection lifecycle: %#v %#v", connected, failed)
+	}
 }

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -391,7 +392,12 @@ func newSelfSignedCertificateWithPrivateKey(hostname string, now time.Time, priv
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
-		DNSNames:              []string{hostname},
+	}
+	// IP 直连使用 IP SAN；DNS SAN 中的 IP 文本不能通过标准证书主机校验。
+	if address := net.ParseIP(hostname); address != nil {
+		template.IPAddresses = []net.IP{address}
+	} else {
+		template.DNSNames = []string{hostname}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
 	if err != nil {

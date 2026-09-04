@@ -15,7 +15,7 @@ management:
   # Web 管理面内部监听地址。示例只监听 Loopback，由 Caddy/Nginx 终止公网 HTTPS。
   listen: "127.0.0.1:8080"
 
-  # 浏览器实际访问的唯一外部 HTTPS Origin。只能包含 scheme、host 和可选端口；
+  # 留空可通过本机 Loopback HTTP 访问；填写时为唯一外部 HTTPS Origin。
   # 不能包含用户名、密码、Query、Fragment 或非根路径。
   public_url: "https://admin.example.com"
 
@@ -42,7 +42,7 @@ agent_gateway:
   # Agent Control/Work TLS Gateway 的监听地址；7443 需要由公网防火墙放行。
   listen: "0.0.0.0:7443"
 
-  # 写入 Connection Token 并用于证书校验的公网主机名；不要带 scheme、路径或端口。
+  # Agent 可连接的域名或 IP，可带端口（如 192.0.2.10:7443 或 [::1]:7443）。
   public_hostname: "tunnel.example.com"
 
   tls:

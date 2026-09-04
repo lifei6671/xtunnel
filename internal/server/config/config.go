@@ -184,15 +184,11 @@ func validateWithProfile(value *Config, resolve func(string) (pathprofile.Profil
 		return fmt.Errorf("tcp_ingress.bind must be an IP address: %w", err)
 	}
 
-	publicURL, err := url.Parse(value.Management.PublicURL)
-	if err != nil {
-		return fmt.Errorf("parse management.public_url: %w", err)
+	if _, err := value.Management.EffectivePublicURL(); err != nil {
+		return err
 	}
-	if publicURL.Scheme != "https" || publicURL.Host == "" {
-		return fmt.Errorf("management.public_url must be an absolute https URL")
-	}
-	if publicURL.User != nil || publicURL.RawQuery != "" || publicURL.Fragment != "" || (publicURL.Path != "" && publicURL.Path != "/") {
-		return fmt.Errorf("management.public_url must not contain userinfo, query, fragment, or a non-root path")
+	if _, _, err := value.AgentGateway.PublicEndpoint(); err != nil {
+		return err
 	}
 
 	if value.TCPIngress.MinPort > value.TCPIngress.MaxPort {
@@ -218,6 +214,30 @@ func validateWithProfile(value *Config, resolve func(string) (pathprofile.Profil
 		return fmt.Errorf("limits.max_connecting_work_connections must not exceed max_work_connections")
 	}
 	return nil
+}
+
+// EffectivePublicURL 返回固定的浏览器 Origin。空值仅从显式 Loopback 监听地址派生，
+// 不从请求 Host 或代理 Header 猜测，避免把任意外部来源纳入管理认证边界。
+func (management Management) EffectivePublicURL() (string, error) {
+	if management.PublicURL == "" {
+		address, err := netip.ParseAddrPort(management.Listen)
+		if err != nil || !address.Addr().IsLoopback() || address.Addr().Zone() != "" || address.Port() == 0 {
+			return "", fmt.Errorf("empty management.public_url requires a loopback IP listen address with a nonzero port")
+		}
+		return "http://" + address.String(), nil
+	}
+	publicURL, err := url.Parse(management.PublicURL)
+	if err != nil {
+		return "", fmt.Errorf("parse management.public_url: %w", err)
+	}
+	if publicURL.Scheme != "https" || publicURL.Host == "" {
+		return "", fmt.Errorf("management.public_url must be an absolute https URL")
+	}
+	if publicURL.User != nil || publicURL.RawQuery != "" || publicURL.Fragment != "" || (publicURL.Path != "" && publicURL.Path != "/") {
+		return "", fmt.Errorf("management.public_url must not contain userinfo, query, fragment, or a non-root path")
+	}
+
+	return management.PublicURL, nil
 }
 
 func validateListenAddress(address string) error {

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/safego"
@@ -172,12 +171,28 @@ func copyProxyStream(destination io.Writer, source io.Reader, buffers proxyBuffe
 	return io.CopyBuffer(destination, source, buffer[:])
 }
 
+// isCompletedCloseRead 只在正常 EOF 后检查读半边清理。联合错误必须逐支确认，
+// 避免 errors.Is 命中一个 ENOTCONN 就连同其他真实清理失败一起消除。
 func isCompletedCloseRead(err error) bool {
-	// io.Copy 返回 nil 已经证明源端读到了正常 EOF。Linux 在 TCP 对端完成
-	// Half-Close 后再次 shutdown(SHUT_RD) 可能返回 ENOTCONN；这表示读半边
-	// 已经没有可关闭的连接，是 CloseRead 的幂等终态，不应把成功的数据转发
-	// 重新判为失败。其他错误仍需延迟到反向复制结束后报告，避免掩盖真实清理故障。
-	return err == nil || errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ENOTCONN)
+	if err == nil {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		branches := joined.Unwrap()
+		if len(branches) == 0 {
+			return false
+		}
+		for _, branch := range branches {
+			if !isCompletedCloseRead(branch) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok && wrapped.Unwrap() != nil {
+		return isCompletedCloseRead(wrapped.Unwrap())
+	}
+	return err == net.ErrClosed || isDisconnectedRead(err)
 }
 
 func wrapNetworkError(operation string, err error) error {

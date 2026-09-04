@@ -2619,3 +2619,42 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 用户明确确认 M8-05 阶段验收通过并继续。验收绑定实现候选 `43808023fd3bff5b19243ac63ecaf9d3789ee40b`、完整 CI #33868358816、Windows Artifact #9935300650 与上述独立复审；证据记录提交为 `7343e5dc4211fa9f64f49f004ba0b6c234f9a00b`。
 - M8-05 和 M8 更新为 DONE，Windows Server amd64 Preview Gate Checklist 全部完成；计数为 100/100、M8 5/5。README、配置、部署、候选发布文档和技术方案同步 Windows Server amd64 Preview（NTFS）支持声明；Windows Server arm64 仅保持构建兼容性，既有 Alpha 历史矩阵与 Linux OCI 双平台范围保持原义。
 - 本轮为验收状态和已验证支持范围的文档收尾，未修改实现或创建正式 Release。现有权威任务清单止于 M8-05，全部 100 项已完成；后续目标须另行定义任务范围和验收标准。
+
+## 2026-09-04 · Connector 安装抽屉与跨平台错误处理修正
+
+- 本轮维护范围关联 M1 Agent Origin 错误分类、M5-09/M5-10 管理 UI 和 M8 Windows 使用说明。创建 Tunnel 后打开右侧安装抽屉，按 Windows/Linux/Docker 选择部署命令；再次打开读取同一枚服务端加密持久化 Token。抽屉关闭清理页面内存，刷新后可重新获取；Gateway 地址、端口和 TLS 信任来自签发时 Token，地址变更后需显式 Rotate。
+- Windows Winsock 拒绝连接正确映射为 ORIGIN_REFUSED；非 Linux 缺少 Token 时提示受支持的输入；Linux 密码读取传播终端恢复及收尾输出错误。补充 Windows 备份/恢复维护边界、平台 FD 预检差异及 Docker Desktop 验证指引。
+- Windows Go 1.27.1 原生 Agent 两包 Test/Vet、真实关闭端口回归和数据库重开后的重复 Reveal/Verify 通过；Docker Desktop 三包定向测试通过，完整 `scripts/verify.ps1` 的 Web check/build、全包 Go test/vet/build 通过。抽屉焦点修正后另跑 Web check/build、Windows Edge Web-only mock（创建、平台切换、复制、关闭清理、刷新后重复获取、Escape 焦点恢复）通过。
+- Windows Server/Agent 已构建到 `bin/xtunnel-server.exe` 与 `bin/xtunnel-agent.exe`。两个独立 CHILD_AGENT 分区复审通过，覆盖本轮 20 个实现、测试和文档文件，无遗留发现；保留此前工作树修改和暂存状态。
+- 真实 Linux 浏览器/反向代理 E2E 已尝试，但现有 go-runner 缺少 docker 命令，结果为 UNAVAILABLE；Web-only mock 不替代该证据。本轮为未提交工作树开发反馈，没有新 CI 或产品 Gate 证据；任务计数和既有 Gate 状态保持不变，本次未勾选任何产品任务。
+
+## 2026-09-04 · 服务与隧道列表和详情布局
+
+- 本轮关联 M5-09/M5-10 的前端维护：服务与隧道菜单先显示全宽隧道列表；详情通过面包屑返回列表，以“概览/服务”页签组织基本信息、连接器表格及 Service 管理。隧道和连接器支持当前已加载记录搜索，继续使用 API 游标加载；保留现有创建、编辑、生命周期确认及安装连接器抽屉。
+- 修改范围为 `web/src/management.tsx`、`web/src/management.css`、`web/e2e/management.spec.ts`、README、总方案第 123 节及本执行记录。机器契约、依赖及 Go 实现未变，保留此前工作树和暂存内容。
+- Windows `npm --prefix web ci`、`npm --prefix web run check`、`npm --prefix web run build`、`git diff --check` 通过。Windows Edge 全部 Web-only mock 2/2 通过，覆盖导航、页签、搜索与分页、Service 操作入口及失败反馈、详情重试、安装抽屉和重复获取 Token；临时副本桌面与 390px 移动截图检查通过，宽表保留容器内滚动，页面无横向溢出。
+- Windows Go 1.27.1 版本检查和 `go build -trimpath -o bin/xtunnel-server.exe ./cmd/server` 通过，新 EXE 已嵌入本轮 Web 产物。真实 Caddy/Nginx 后端浏览器 E2E 本轮未运行；已有 Runner 缺少所需 docker 命令，Web-only mock 不替代该 Gate。
+- 本轮是未提交工作树开发反馈，没有新 CI 运行或产品验收。既有任务计数和 Gate 状态保持不变，本次未勾选任何产品任务。
+
+## 2026-09-04 · Agent 空闲工作连接与 TCP 连续连接回归
+
+- 本轮关联 M1-09/M1-10/M1-14：Agent 在 WorkReady 后的 IDLE 等待只受会话 Context 约束，收到 OpenRequest 首字节后才启动完整帧读取预算。取消仍解除阻塞并等待回调退出；半帧超时和 Frame/RAW 字节边界继续受原有协议约束。
+- Windows 真实 Gateway 对照复现确认：旧 Agent 关闭空闲 Work 后，Server 保留的陈旧 IDLE 会在下一次 OPEN 时失败；同一 Connector 两次 RAW 前传输失败后，备用选择排除唯一 Connector，错误链含 `ErrPreRAWTransport` 与 `ErrNoAvailableConnector`，日志映射为 TUNNEL_OFFLINE。对照失败时 Control identity 和 Eligibility 均保持有效；相同单次 OPEN 探针在修复后通过。
+- 修复范围为 `internal/agent/open/handler.go` 及其测试，补充过期 Deadline 清理、超出读取预算的空闲等待、OPEN 后紧随 RAW、空闲/半帧取消和半帧超时。`tests/integration/tcp_echo_test.go` 使用真实 pinned TLS Gateway、生产 10 秒心跳和 TCP RST，持续 21 秒检查同代 Control/Eligibility；等待新 Revision 生效后，第二次连接必须单次 OPEN 成功并正常半关闭。
+- Windows Go 1.27.1、GOTOOLCHAIN=local 下，OPEN/WorkPool 定向测试、真实 TCP 集成测试、相关七包 Race 和集成包 Vet 通过；Agent 构建至 `bin/xtunnel-agent.exe`。Docker Desktop `scripts/test.ps1 -timeout=120s ./...`、现有 go-runner 内 `go vet ./...` 和 `go build ./...` 通过。
+- `scripts/verify.ps1` 已执行，但 Web check 因 `tsc: not found` 失败；容器内重新安装及 rebuild 后仍未生成可用命令入口。完整脚本结果为 FAILED，独立 Go 验证不替代完整脚本或 CI。本轮保留此前工作区和暂存内容，没有提交、部署或新 CI/Gate 证据，任务计数与既有 Gate 状态保持不变。
+
+## 2026-09-04 · Tunnel 创建向导与 Service 配置页面
+
+- 本轮关联 M5-09/M5-10：创建 Tunnel 使用全宽“命名隧道 → 安装连接器”流程；安装步骤展示分平台命令与连接凭据，底部每轮串行读完全部 Connector 分页后间隔 3 秒刷新，整体替换结果以移除断连项。刷新失败保留上一轮列表并提示，离页取消请求与计时器，401 返回登录并释放页面 Token。
+- 安装完成可返回详情，或读取最新 Tunnel ETag 后进入添加 Service。创建/编辑 Service 使用全宽表单，突出公网入口与源站服务，将连接超时、TLS、Host Header 与健康检查放入高级设置；HTTP Path Prefix 和已有请求体/并发控制语义保持一致。
+- 修改范围为 `web/src/management.tsx`、`web/src/management.css`、`web/e2e/management.spec.ts`、README、技术方案及本执行记录。Windows npm ci/check/build 通过，Edge Web-only mock 2/2 通过，覆盖分步创建、命令复制、连接器分页/接入/断连/失败/离页/401、下一步创建服务、HTTPS/TCP 请求内容、失败保留字段及既有详情/抽屉流程。桌面和 390px 手机截图检查通过，宽表在容器内滚动。
+- Windows Go 1.27.1 版本检查和 `go build -trimpath -o bin/xtunnel-server.exe ./cmd/server` 通过，产物嵌入当前 Web 页面。真实 Server/Agent 与反向代理浏览器 E2E 本轮 NOT_RUN，Web-only mock 不替代产品 Gate；没有新 CI 或提交，既有任务计数和 Gate 状态保持不变。
+
+## 2026-09-04 · SSH 关闭分类与 Agent 连接诊断
+
+- Windows 正常 EOF 后的 CloseRead 清理识别 WSAENOTCONN；复合错误逐支判断，ENOTCONN 与真实失败同时出现时仍传播失败。真实 Winsock errno 回归在旧分类下失败、新分类下通过。完整客户端 Close 的真实 TLS 链路验证通过；用户现场的 SSH 退出告警未复现，不能断言全部来自此平台差异。
+- TCP Ingress 告警增加 stage 与安全 error 原因；Agent 控制连接记录成功、失败阶段、attempt、retryable 及实际 retry_delay_ms。空闲工作连接在 OPEN 首字节前收到 EOF/网络关闭使用 debug，完整 OPEN 后响应写失败和不完整帧仍保留错误。安全摘要提取类型化网络、TLS、DNS 和系统 errno，未知错误使用固定描述。
+- Windows Go 1.27.1、GOTOOLCHAIN=local 下，logging/proxy/agent open、reconnect、session、connector/server bootstrap 七包定向测试及 Race 通过，相关 Vet 通过。Server 与 Agent 构建至 bin。Windows bootstrap 旧测试补齐 Gateway Listen 字段。
+- Docker Desktop scripts/test.ps1 -timeout=120s ./...、现有 go-runner 的 go vet ./... 与 go build ./... 通过。scripts/verify.ps1 已执行，Web check 因 tsc: not found 失败，完整脚本状态为 FAILED；独立 Go 验证不替代完整脚本或 CI。
+- 本轮 17 个实现/测试文件及技术方案日志段独立复审通过；非 IDLE 错误误降级与复合错误遗漏均已修复并回归。git diff --check 通过。这些结果为 HEAD 7e532ca07ac0ac87a89f10a8faf497c6a5b5ce2f 上的未提交工作树开发反馈，没有新增 CI 或产品验收证据，既有任务和 Gate 状态保持不变。

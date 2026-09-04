@@ -7,11 +7,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"time"
 
 	"github.com/lifei6671/xtunnel/internal/agent/controlauth"
 	agentgateway "github.com/lifei6671/xtunnel/internal/agent/gateway"
+	"github.com/lifei6671/xtunnel/internal/logging"
 	connectiontoken "github.com/lifei6671/xtunnel/internal/protocol/token"
 )
 
@@ -38,6 +40,7 @@ type SessionHandler[S Session] func(context.Context, S) error
 
 // Options 固定指数退避、稳定窗口和可测试依赖。
 type Options struct {
+	Logger         *slog.Logger
 	InitialBackoff time.Duration
 	MaximumBackoff time.Duration
 	StableAfter    time.Duration
@@ -61,6 +64,7 @@ func Run[S Session](ctx context.Context, starter Starter[S], handler SessionHand
 	}
 
 	backoff := options.InitialBackoff
+	attempt := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -68,9 +72,15 @@ func Run[S Session](ctx context.Context, starter Starter[S], handler SessionHand
 		// Dial/AUTH 仍由进程 Context 取消；成功后的 Session 则由 Starter 脱离该
 		// 取消链。这样 SIGTERM 能先由 Handler 在仍可写的 Control socket 上完成
 		// Drain，再由本循环统一 Close/Wait，且旧代退出前绝不会启动新一代。
+		attempt++
+		stage := "connect"
 		session, err := starter.StartDetached(ctx)
 		var retryAfter time.Duration
 		if err == nil {
+			stage = "session"
+			if options.Logger != nil {
+				options.Logger.InfoContext(ctx, logging.EventAgentServerConnected, "stage", "established", "attempt", attempt)
+			}
 			startedAt := time.Now()
 			handlerErr := handler(ctx, session)
 			session.Close()
@@ -84,8 +94,38 @@ func Run[S Session](ctx context.Context, starter Starter[S], handler SessionHand
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
+		// 阶段只来自 Runner 的类型化固定标记，未知错误使用当前生命周期阶段。
+		var staged interface{ FailureStage() string }
+		if errors.As(err, &staged) {
+			stage = staged.FailureStage()
+		}
 		permanent, suggested := classify(err)
+		fallback := "control connection ended; reconnect scheduled"
+		switch stage {
+		case "dial":
+			fallback = "unable to establish connection to server gateway"
+		case "authentication":
+			fallback = "server control authentication failed"
+		case "session_setup":
+			fallback = "unable to initialize authenticated control session"
+		}
+		var authFailure *controlauth.Failure
+		if errors.As(err, &authFailure) {
+			fallback = "server rejected control authentication: " + authFailure.Code.String()
+		} else if errors.Is(err, agentgateway.ErrPinnedCertificate) {
+			fallback = "server certificate does not match the connection token pin"
+		} else if errors.Is(err, agentgateway.ErrUnsupportedALPN) {
+			fallback = "server did not negotiate the required control protocol"
+		} else if errors.Is(err, controlauth.ErrProtocol) {
+			fallback = "control authentication protocol violation"
+		}
+		detail := logging.ErrorDetail(err, fallback)
 		if permanent {
+			if options.Logger != nil {
+				options.Logger.ErrorContext(ctx, logging.EventAgentServerConnectionFailed,
+					"stage", stage, "attempt", attempt, "retryable", false,
+					"error", detail)
+			}
 			return err
 		}
 		retryAfter = suggested
@@ -95,6 +135,11 @@ func Run[S Session](ctx context.Context, starter Starter[S], handler SessionHand
 		}
 		if retryAfter > delay {
 			delay = retryAfter
+		}
+		if options.Logger != nil {
+			options.Logger.WarnContext(ctx, logging.EventAgentServerConnectionFailed,
+				"stage", stage, "attempt", attempt, "retryable", true, "retry_delay_ms", delay.Milliseconds(),
+				"error", detail)
 		}
 		if err := options.Sleep(ctx, delay); err != nil {
 			return err

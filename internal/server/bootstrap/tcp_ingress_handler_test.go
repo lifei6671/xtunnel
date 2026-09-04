@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -172,6 +173,7 @@ func TestTCPIngressHandlerLogsOnlyStableFailureCode(t *testing.T) {
 	for _, want := range []string{
 		`"msg":"tcp_ingress_connection_failed"`,
 		`"error_code":"ORIGIN_TIMEOUT"`,
+		`"error":"TCP ingress connection failed"`,
 		`"tunnel_id":"` + tcpHandlerTunnelID + `"`,
 		`"service_id":"` + tcpHandlerServiceID + `"`,
 		`"public_port":22023`,
@@ -184,6 +186,82 @@ func TestTCPIngressHandlerLogsOnlyStableFailureCode(t *testing.T) {
 	if strings.Contains(logLine, secret) || strings.Contains(logLine, "origin-secret.internal") {
 		t.Fatalf("log leaked Origin or underlying error text: %q", logLine)
 	}
+}
+
+func TestTCPIngressHandlerHalfCloseReportsOnlyRealCleanupFailure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		cleanupErr error
+	}{
+		{name: "normal SSH exit"},
+		{name: "read-half cleanup failure", cleanupErr: fmt.Errorf("private-origin.internal:22: %w", io.ErrUnexpectedEOF)},
+		{name: "completed read joined with cleanup failure", cleanupErr: errors.Join(syscall.ENOTCONN, fmt.Errorf("private-origin.internal:22: %w", io.ErrUnexpectedEOF))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			publicPeer, publicClient := tcpHandlerConnectionPair(t)
+			tunnelConnection, tunnelPeer := tcpHandlerConnectionPair(t)
+			dialer := &recordingTCPProxy{
+				connection: &tcpCleanupConnection{TCPConn: tunnelConnection, err: test.cleanupErr},
+				calls:      make(chan tcpDialCall, 1),
+			}
+			var output bytes.Buffer
+			handler, err := newTCPIngressHandler(dialer, slog.New(slog.NewJSONHandler(&output, nil)), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				handler(context.Background(), publicPeer, serverroute.TCPRoute{
+					TunnelID: tcpHandlerTunnelID, ServiceID: tcpHandlerServiceID, PublicPort: 22022,
+				})
+			}()
+			setTCPHandlerDeadline(t, publicClient, tunnelPeer)
+			if err := publicClient.CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadAll(tunnelPeer); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tunnelPeer.Write([]byte("SSH exit response")); err != nil {
+				t.Fatal(err)
+			}
+			if err := tunnelPeer.CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+			response, err := io.ReadAll(publicClient)
+			if err != nil || string(response) != "SSH exit response" {
+				t.Fatalf("response=%q error=%v", response, err)
+			}
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("handler did not finish after half-close")
+			}
+			line := output.String()
+			if test.cleanupErr == nil {
+				if line != "" {
+					t.Fatalf("normal half-close emitted failure: %s", line)
+				}
+				return
+			}
+			if !strings.Contains(line, `"msg":"tcp_ingress_connection_failed"`) ||
+				!strings.Contains(line, `"error_code":"INTERNAL_ERROR"`) ||
+				!strings.Contains(line, `"error":`) || strings.Contains(line, "TCP ingress connection failed") ||
+				strings.Contains(line, "private-origin.internal") {
+				t.Fatalf("cleanup failure missing safe typed reason or leaked address: %s", line)
+			}
+		})
+	}
+}
+
+type tcpCleanupConnection struct {
+	*net.TCPConn
+	err error
+}
+
+func (connection *tcpCleanupConnection) CloseRead() error {
+	return errors.Join(connection.TCPConn.CloseRead(), connection.err)
 }
 
 func newTCPIngressTraceRuntime(t *testing.T) (*internaltracing.Runtime, *tracetest.SpanRecorder) {

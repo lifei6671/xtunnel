@@ -352,14 +352,14 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   expect(errorCode(csrfRejected)).toBe("CSRF_INVALID");
 
   await page.getByRole("button", { name: "服务与隧道" }).click();
-  await expect(page.getByRole("heading", { name: "链路工作台" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "服务与隧道" })).toBeVisible();
   await page.getByRole("button", { name: "创建 Tunnel", exact: true }).click();
-  const createTunnelDialog = page.getByRole("dialog", { name: "创建 Tunnel" });
+  const createTunnelDialog = page.getByRole("region", { name: "创建 Tunnel", exact: true });
   await createTunnelDialog.getByLabel("名称").fill("browser-e2e");
   const createTunnelResponsePromise = page.waitForResponse((response) =>
     response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/tunnels",
   );
-  await createTunnelDialog.getByRole("button", { name: "创建并显示部署指引" }).click();
+  await createTunnelDialog.getByRole("button", { name: "创建并继续" }).click();
   const createTunnelResponse = await createTunnelResponsePromise;
   expect(createTunnelResponse.status()).toBe(201);
   await expectNoStore(await createTunnelResponse.allHeaders());
@@ -372,13 +372,21 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   expect(/^xta_[A-Za-z0-9_-]+$/.test(firstToken)).toBe(true);
   expect(created.credential.deployment_commands).toHaveLength(4);
 
-  const credentialDialog = page.getByRole("dialog", { name: "部署第一个 Connector" });
+  const credentialDialog = page.getByRole("region", { name: "安装连接器", exact: true });
   await expect(credentialDialog).toBeVisible();
   expect(await credentialDialog.locator(".credential-token code").evaluate((element, token) => element.textContent === token, firstToken)).toBe(true);
-  await expect(credentialDialog.locator(".deployment-list article")).toHaveCount(4);
+  await expect(credentialDialog.locator(".deployment-list article")).toHaveCount(1);
+  await expect(credentialDialog.getByRole("button", { name: "Windows", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await credentialDialog.getByRole("button", { name: "前台运行", exact: true }).click();
+  expect(await credentialDialog.locator(".deployment-list code").evaluate((element) => element.textContent?.startsWith(".\\xtunnel-agent.exe run --token "))).toBe(true);
+  await credentialDialog.getByRole("button", { name: "Linux", exact: true }).click();
+  await credentialDialog.getByRole("button", { name: "系统服务", exact: true }).click();
+  expect(await credentialDialog.locator(".deployment-list code").evaluate((element) => element.textContent?.startsWith("sudo xtunnel-agent service install "))).toBe(true);
+  await credentialDialog.getByRole("button", { name: "Docker", exact: true }).click();
+  expect(await credentialDialog.locator(".deployment-list code").evaluate((element) => element.textContent?.startsWith("docker run "))).toBe(true);
   expect(page.url().includes(firstToken)).toBe(false);
   expect(await browserStorageIsEmpty(page, firstToken)).toBe(true);
-  await credentialDialog.getByRole("button", { name: "完成并清除页面 Secret" }).click();
+  await credentialDialog.getByRole("button", { name: "完成", exact: true }).click();
   await expect(credentialDialog).toBeHidden();
   expect(await page.locator("body").evaluate((body, token) => !body.textContent?.includes(token), firstToken)).toBe(true);
   expect(await browserStorageIsEmpty(page, firstToken)).toBe(true);
@@ -517,6 +525,7 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   expect(auditExport.includes(firstToken)).toBe(false);
 
   await page.getByRole("button", { name: "服务与隧道" }).click();
+  await page.getByRole("button", { name: "打开隧道 browser-e2e", exact: true }).click();
   await expect(page.getByRole("heading", { name: "browser-e2e" })).toBeVisible();
   const tunnelBefore = await browserRequest(page, tunnelPath);
   expect(tunnelBefore.status).toBe(200);
@@ -559,26 +568,28 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   await page.reload();
   await expect(page.getByText("e2e-admin", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "服务与隧道" }).click();
+  await page.getByRole("button", { name: "打开隧道 browser-e2e-current", exact: true }).click();
   await expect(page.getByRole("heading", { name: "browser-e2e-current" })).toBeVisible();
 
   const revealResponsePromise = page.waitForResponse((response) =>
     response.request().method() === "GET" && new URL(response.url()).pathname === `/api/v1/tunnels/${tunnelID}/token`,
   );
-  await page.getByRole("button", { name: "添加 Connector" }).click();
+  await page.getByRole("button", { name: "安装连接器" }).click();
   const revealResponse = await revealResponsePromise;
   expect(revealResponse.status()).toBe(200);
   await expectNoStore(await revealResponse.allHeaders());
   const revealed = await revealResponse.json() as { connection_token: string };
   expect(revealed.connection_token === firstToken).toBe(true);
-  const connectorGuide = page.getByRole("dialog", { name: "添加 Connector" });
+  const connectorGuide = page.getByRole("dialog", { name: "安装连接器" });
   await expect(connectorGuide).toBeVisible();
   expect(await connectorGuide.locator(".credential-token code").evaluate((element, token) => element.textContent === token, firstToken)).toBe(true);
-  await connectorGuide.getByRole("button", { name: "完成并清除页面 Secret" }).click();
+  await connectorGuide.getByRole("button", { name: "完成", exact: true }).click();
   expect(await page.locator("body").evaluate((body, token) => !body.textContent?.includes(token), firstToken)).toBe(true);
   expect(await browserStorageIsEmpty(page, firstToken)).toBe(true);
 
+  await page.getByRole("tab", { name: /^服务/ }).click();
   await page.getByRole("button", { name: "创建 Service" }).click();
-  const serviceDialog = page.getByRole("dialog", { name: "创建 Service" });
+  const serviceDialog = page.getByRole("region", { name: "创建 Service" });
   await serviceDialog.getByLabel("名称").fill("browser-service");
   await serviceDialog.getByLabel("公网域名").fill("browser-service.example.test");
   const createServiceResponsePromise = page.waitForResponse((response) =>
@@ -604,16 +615,18 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   expect(errorCode(serviceMissingPrecondition)).toBe("PRECONDITION_REQUIRED");
 
   await page.getByRole("button", { name: "编辑 browser-service" }).click();
-  const staleServiceDialog = page.getByRole("dialog", { name: "编辑 Service" });
+  const staleServiceDialog = page.getByRole("region", { name: "编辑 Service" });
   await expect(staleServiceDialog).toBeVisible();
 
   const concurrentPage = await context.newPage();
   await concurrentPage.goto("/");
   await expect(concurrentPage.getByText("e2e-admin", { exact: true })).toBeVisible();
   await concurrentPage.getByRole("button", { name: "服务与隧道" }).click();
+  await concurrentPage.getByRole("button", { name: "打开隧道 browser-e2e-current", exact: true }).click();
   await expect(concurrentPage.getByRole("heading", { name: "browser-e2e-current" })).toBeVisible();
+  await concurrentPage.getByRole("tab", { name: /^服务/ }).click();
   await concurrentPage.getByRole("button", { name: "编辑 browser-service" }).click();
-  const concurrentEditDialog = concurrentPage.getByRole("dialog", { name: "编辑 Service" });
+  const concurrentEditDialog = concurrentPage.getByRole("region", { name: "编辑 Service" });
   await concurrentEditDialog.getByLabel("名称").fill("server-side-version");
   const concurrentEditResponsePromise = concurrentPage.waitForResponse((response) =>
     response.request().method() === "PATCH" && new URL(response.url()).pathname === servicePath,
@@ -637,7 +650,7 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   await expect(page.getByText("server-side-version", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "编辑 server-side-version" }).click();
-  const editServiceDialog = page.getByRole("dialog", { name: "编辑 Service" });
+  const editServiceDialog = page.getByRole("region", { name: "编辑 Service" });
   await editServiceDialog.getByLabel("名称").fill("browser-service-edited");
   const editServiceResponsePromise = page.waitForResponse((response) =>
     response.request().method() === "PATCH" && new URL(response.url()).pathname === servicePath,
@@ -675,9 +688,9 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   const rotated = await rotateResponse.json() as { connection_token: string };
   expect(/^xta_[A-Za-z0-9_-]+$/.test(rotated.connection_token)).toBe(true);
   expect(rotated.connection_token === firstToken).toBe(false);
-  const rotatedDialog = page.getByRole("dialog", { name: "Token 已轮换" });
+  const rotatedDialog = page.getByRole("dialog", { name: "安装连接器 · Token 已轮换" });
   await expect(rotatedDialog).toBeVisible();
-  await rotatedDialog.getByRole("button", { name: "完成并清除页面 Secret" }).click();
+  await rotatedDialog.getByRole("button", { name: "完成", exact: true }).click();
   expect(await page.locator("body").evaluate((body, token) => !body.textContent?.includes(token), rotated.connection_token)).toBe(true);
   expect(await browserStorageIsEmpty(page, rotated.connection_token)).toBe(true);
 
@@ -712,4 +725,273 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   await expect(page.getByRole("heading", { name: "管理员登录" })).toBeVisible();
   expect((await context.cookies()).some((cookie) => cookie.name === "xtunnel_admin_session")).toBe(false);
   expect((await browserRequest(page, "/api/v1/auth/me")).status).toBe(401);
+});
+
+test("Web-only mock 隧道详情导航、连接器分页搜索、服务入口及安装抽屉", async ({ page }) => {
+  const token = "xta_mock_connector_installation";
+  const tunnel = {
+    id: "tun_01J00000000000000000000000", name: "安装测试", version: 1, desired_revision: 1,
+    status: "PENDING", connectors_online: 0, services_count: 0, active_connections: 0,
+    last_seen_at: null, first_authenticated_at: null, revoked_at: null,
+    created_at: "2026-09-04T00:00:00Z", updated_at: "2026-09-04T00:00:00Z",
+  } satisfies Tunnel;
+  const credential = {
+    tunnel_id: tunnel.id, token_id: "tok_01J00000000000000000000000", token_version: 1, status: "ACTIVE",
+    connection_token: token,
+    deployment_commands: [
+      { environment: "FOREGROUND", command: `xtunnel-agent run --token '${token}'` },
+      { environment: "CONTAINER", command: `docker run --rm -e XTUNNEL_TOKEN='${token}' xtunnel-agent:v0.1.0` },
+      { environment: "LINUX_SYSTEMD", command: `sudo xtunnel-agent service install --token '${token}'` },
+      { environment: "WINDOWS_SCM", command: `.\\xtunnel-agent.exe service install --token '${token}'` },
+    ],
+  } satisfies components["schemas"]["ConnectionCredential"];
+  let revealCount = 0;
+  let createTunnelRequests = 0;
+  let installState: "waiting" | "connected" | "error" | "disconnected" | "unauthorized" = "waiting";
+  let installPollRequests = 0;
+  let installationActive = true;
+  let created = false;
+  let workspaceUnavailable = false;
+  let createServiceRequests = 0;
+  const serviceBodies: JSONRecord[] = [];
+  const connectorPageRequests: URL[] = [];
+  const connectors = [
+    { id: "con_01J00000000000000000000001", hostname: "office-windows", os: "windows", arch: "amd64" },
+    { id: "con_01J00000000000000000000002", hostname: "remote-linux", os: "linux", arch: "arm64" },
+  ].map((connector) => ({
+    ...connector, tunnel_id: tunnel.id, version: "v0.1.0", status: "ONLINE" as const,
+    idle_work_connections: 2, active_connections: 0, connected_at: "2026-09-04T00:00:00Z",
+    last_heartbeat_at: "2026-09-04T00:00:00Z", config_ready: true, observed_revision: 1,
+  })) satisfies components["schemas"]["Connector"][];
+  const service = {
+    id: "svc_01J00000000000000000000000", tunnel_id: tunnel.id, name: "详情服务", required_revision: 1,
+    origin: { scheme: "http", host: "127.0.0.1", port: 8081, connect_timeout_ms: 5000 },
+    proxy_options: { disable_chunked_encoding: false, disable_happy_eyeballs: false, http_idle_connection_timeout_ms: 90000, http_max_idle_connections: 100, tcp_keepalive_interval_ms: 30000 },
+    health: null, exposure: { type: "http", hostname: "detail.example.test", path_prefix: "/", preserve_host: true },
+    enabled: true, version: 1, status: "READY", apply_failure: null, healthy_connectors: 1, active_connections: 0,
+    usage: { availability: "AVAILABLE", connections_today: 0, ingress_bytes_today: 0, egress_bytes_today: 0 },
+    created_at: "2026-09-04T00:00:00Z", updated_at: "2026-09-04T00:00:00Z",
+  } satisfies components["schemas"]["Service"];
+  let services: components["schemas"]["Service"][] = [];
+  const unexpectedRequests: string[] = [];
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      writeText: async (value: string) => { (window as unknown as { copiedCommand: string }).copiedCommand = value; },
+    } });
+  });
+  await page.route("**/api/v1/**", async (route) => {
+    const requestURL = new URL(route.request().url());
+    const path = requestURL.pathname;
+    let body: unknown;
+    let status = 200;
+    if (path === "/api/v1/auth/me") body = { admin: { id: "adm_mock", username: "mock-admin" }, csrf_token: "mock-csrf", expires_at: "2099-01-01T00:00:00Z" };
+    else if (path === "/api/v1/dashboard") body = {
+      server_status: "READY", counts: { tunnels_total: 0, tunnels_online: 0, tunnels_offline: 0, connectors_online: 0, services_total: 0, services_ready: 0, services_error: 0, active_connections: 0 },
+      traffic: { availability: "AVAILABLE", connections_today: 0, ingress_bytes_today: 0, egress_bytes_today: 0 }, recent_errors: { availability: "AVAILABLE", items: [] }, generated_at: "2026-09-04T00:00:00Z",
+    };
+    else if (path === "/api/v1/tunnels" && route.request().method() === "POST") { createTunnelRequests += 1; created = true; status = 201; body = { tunnel, credential }; }
+    else if (path === "/api/v1/tunnels") body = { items: created ? [tunnel] : [] };
+    else if (path === `/api/v1/tunnels/${tunnel.id}`) {
+      status = workspaceUnavailable ? 503 : 200;
+      body = workspaceUnavailable ? { error: { code: "INTERNAL_ERROR", message: "详情暂时不可用，请重试。" } } : tunnel;
+    }
+    else if (path === `/api/v1/tunnels/${tunnel.id}/token`) { revealCount += 1; body = credential; }
+    else if (path === `/api/v1/tunnels/${tunnel.id}/connectors`) {
+      connectorPageRequests.push(requestURL);
+      if (installationActive) {
+        installPollRequests += 1;
+        if (installState === "unauthorized") {
+          status = 401;
+          body = { error: { code: "AUTH_REQUIRED", message: "管理会话已过期，请重新登录。" } };
+        } else if (installState === "error") {
+          status = 503;
+          body = { error: { code: "INTERNAL_ERROR", message: "连接器状态暂时不可用。" } };
+        } else if (installState === "waiting" || installState === "disconnected") body = { items: [] };
+        else body = requestURL.searchParams.get("page_token") === "connector-page-two"
+          ? { items: [connectors[1]] }
+          : { items: [connectors[0]], next_page_token: "connector-page-two" };
+      } else body = requestURL.searchParams.get("page_token") === "connector-page-two"
+        ? { items: [connectors[1]] }
+        : { items: [connectors[0]], next_page_token: "connector-page-two" };
+    }
+    else if (path === "/api/v1/services" && route.request().method() === "POST") {
+      createServiceRequests += 1;
+      serviceBodies.push(route.request().postDataJSON() as JSONRecord);
+      status = 400;
+      body = { error: { code: "VALIDATION_FAILED", message: "公网域名不允许使用，请修改。" } };
+    }
+    else if (path === "/api/v1/services") body = { items: services };
+    else if (path === `/api/v1/services/${service.id}`) body = services[0];
+    else { unexpectedRequests.push(path); return route.abort(); }
+    await route.fulfill({ status, contentType: "application/json", headers: { ETag: '"1"', "Cache-Control": "no-store" }, body: JSON.stringify(body) });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "服务与隧道" }).click();
+  await page.getByRole("button", { name: "创建 Tunnel", exact: true }).click();
+  await page.getByLabel("名称").fill(tunnel.name);
+  await page.getByRole("button", { name: "创建并继续" }).click();
+  const installation = page.getByRole("region", { name: "安装连接器", exact: true });
+  await expect(installation).toBeVisible();
+  await expect(installation.getByText(/Token 已加密保存在服务端/)).toBeVisible();
+  await expect(installation.locator(".deployment-list code")).toHaveText(credential.deployment_commands[3].command);
+  await installation.getByRole("button", { name: "前台运行", exact: true }).click();
+  await expect(installation.locator(".deployment-list code")).toHaveText(`.\\xtunnel-agent.exe run --token '${token}'`);
+  await installation.getByRole("button", { name: "Linux", exact: true }).click();
+  await expect(installation.locator(".deployment-list code")).toHaveText(credential.deployment_commands[0].command);
+  await installation.getByRole("button", { name: "系统服务", exact: true }).click();
+  await expect(installation.locator(".deployment-list code")).toHaveText(credential.deployment_commands[2].command);
+  await installation.getByRole("button", { name: "Docker", exact: true }).click();
+  await expect(installation.getByRole("group", { name: "运行方式" })).toHaveCount(0);
+  await installation.getByRole("button", { name: "复制命令", exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { copiedCommand: string }).copiedCommand)).toBe(credential.deployment_commands[1].command);
+  const installTable = installation.getByRole("table", { name: "安装进度连接器" });
+  await expect(installation.getByText("每 3 秒自动刷新", { exact: false })).toBeVisible();
+  await expect(installTable.getByText("office-windows")).toHaveCount(0);
+  installState = "connected";
+  await expect(installTable.getByText("office-windows", { exact: true })).toBeVisible();
+  await expect(installTable.getByText("remote-linux", { exact: true })).toBeVisible();
+  installState = "error";
+  await expect(installation.getByRole("alert")).toContainText("已显示的列表保留供参考");
+  await expect(installTable.getByText("office-windows", { exact: true })).toBeVisible();
+  installState = "disconnected";
+  await expect(installTable.getByText("office-windows", { exact: true })).toHaveCount(0);
+  await expect(installTable.getByText("remote-linux", { exact: true })).toHaveCount(0);
+  expect(createTunnelRequests).toBe(1);
+  expect(revealCount).toBe(0);
+  installationActive = false;
+  await installation.getByRole("button", { name: "下一步：添加服务", exact: true }).click();
+  const initialService = page.getByRole("region", { name: "创建 Service", exact: true });
+  await expect(initialService).toBeVisible();
+  await expect(initialService.getByRole("heading", { name: "公网入口", exact: true })).toBeVisible();
+  await expect(initialService.getByRole("heading", { name: "源站服务", exact: true })).toBeVisible();
+  await initialService.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(installation).toBeHidden();
+  expect(await page.locator("body").evaluate((body, value) => !body.textContent?.includes(value), token)).toBe(true);
+  expect(await browserStorageIsEmpty(page, token)).toBe(true);
+  await expect(page.getByRole("heading", { name: tunnel.name, exact: true })).toBeVisible();
+  const requestsAfterExit = connectorPageRequests.length;
+  await page.waitForTimeout(3500);
+  expect(connectorPageRequests).toHaveLength(requestsAfterExit);
+  const drawer = page.getByRole("dialog", { name: "安装连接器", exact: true });
+  await page.reload();
+  await page.getByRole("button", { name: "服务与隧道" }).click();
+  await page.getByRole("button", { name: `打开隧道 ${tunnel.name}`, exact: true }).click();
+  for (let index = 0; index < 2; index += 1) {
+    const open = page.getByRole("button", { name: "安装连接器", exact: true });
+    await open.click();
+    await expect(drawer.locator(".credential-token code")).toHaveText(token);
+    await page.keyboard.press("Escape");
+    await expect(drawer).toBeHidden();
+    await expect(open).toBeFocused();
+  }
+  expect(revealCount).toBe(2);
+
+  // 搜索仅作用于已加载项；分页追加后，原页及新页必须都能被检索。
+  const connectorTable = page.getByRole("table", { name: "连接器列表" });
+  const connectorSearch = page.getByRole("searchbox", { name: "搜索连接器" });
+  await expect(page.getByRole("tab", { name: "概览", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(connectorTable.getByText("office-windows", { exact: true })).toBeVisible();
+  await expect(page.getByText("搜索当前已加载的连接器", { exact: true })).toBeVisible();
+  const requestsBeforeSearch = connectorPageRequests.length;
+  await connectorSearch.fill("remote-linux");
+  await expect(connectorTable.getByText("office-windows", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("显示 0 条 · 已加载 1 条", { exact: true })).toBeVisible();
+  expect(connectorPageRequests).toHaveLength(requestsBeforeSearch);
+  await page.getByRole("button", { name: "加载更多 Connector", exact: true }).click();
+  await expect(connectorTable.getByText("remote-linux", { exact: true })).toBeVisible();
+  await expect(page.getByText("显示 1 条 · 已加载 2 条", { exact: true })).toBeVisible();
+  expect(connectorPageRequests.at(-1)?.searchParams.get("page_token")).toBe("connector-page-two");
+  await expect(page.getByRole("button", { name: "加载更多 Connector", exact: true })).toHaveCount(0);
+  await connectorSearch.fill("");
+  await expect(connectorTable.locator("tbody tr")).toHaveCount(2);
+  await expect(connectorTable.getByText("office-windows", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "下一页", exact: true })).toHaveCount(0);
+
+  await page.getByRole("tab", { name: "概览", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("tab", { name: /^服务/ })).toBeFocused();
+  await expect(page.getByRole("tab", { name: /^服务/ })).toHaveAttribute("aria-selected", "true");
+  await expect(connectorTable).toHaveCount(0);
+  await page.getByRole("button", { name: "创建 Service", exact: true }).click();
+  const createService = page.getByRole("region", { name: "创建 Service", exact: true });
+  await createService.getByLabel("名称", { exact: true }).fill(service.name);
+  await createService.getByLabel("公网域名", { exact: true }).fill("detail.example.test");
+  await createService.getByRole("group", { name: "Origin 协议" }).getByRole("button", { name: "HTTPS", exact: true }).click();
+  await createService.getByLabel("端口", { exact: true }).fill("443");
+  await createService.getByText("高级设置", { exact: true }).click();
+  await createService.getByLabel("TLS Server Name（可选）").fill("origin.example.test");
+  await createService.getByLabel("Origin Host Header（可选）").fill("app.example.test");
+  await createService.getByRole("button", { name: "创建 Service", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("公网域名不允许使用，请修改。");
+  expect(createServiceRequests).toBe(1);
+  expect(serviceBodies[0]).toMatchObject({ tunnel_id: tunnel.id, origin: { scheme: "https", port: 443, tls_verify: true, tls_server_name: "origin.example.test", http_host_header: "app.example.test" }, exposure: { type: "http", hostname: "detail.example.test", path_prefix: "/" } });
+  await createService.getByRole("group", { name: "公网入口类型" }).getByRole("button", { name: "TCP", exact: true }).click();
+  await createService.getByRole("group", { name: "Origin 协议" }).getByRole("button", { name: "TCP", exact: true }).click();
+  await createService.getByLabel("端口", { exact: true }).fill("22");
+  await createService.getByLabel("公网端口（留空自动分配）").fill("10000");
+  await createService.getByRole("button", { name: "创建 Service", exact: true }).click();
+  await expect.poll(() => createServiceRequests).toBe(2);
+  expect(serviceBodies[1]).toMatchObject({ origin: { scheme: "tcp", port: 22 }, exposure: { type: "tcp", public_port: 10000 } });
+  expect(serviceBodies[1].origin).not.toHaveProperty("tls_server_name");
+  expect(serviceBodies[1].origin).not.toHaveProperty("http_host_header");
+  await expect(createService.getByLabel("名称", { exact: true })).toHaveValue(service.name);
+  await createService.getByRole("button", { name: "取消", exact: true }).click();
+  await page.getByRole("button", { name: "关闭提示", exact: true }).click();
+  services = [service];
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await expect(page.getByRole("tab", { name: /^服务/ })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("button", { name: `编辑 ${service.name}`, exact: true }).click();
+  const editService = page.getByRole("region", { name: "编辑 Service", exact: true });
+  await expect(editService.getByLabel("名称", { exact: true })).toHaveValue(service.name);
+  await editService.getByRole("button", { name: "取消", exact: true }).click();
+  for (const action of ["禁用", "删除"] as const) {
+    await page.getByRole("button", { name: `${action} ${service.name}`, exact: true }).click();
+    await expect(page.getByRole("dialog", { name: `${action} Service`, exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+  }
+  services = [{ ...service, enabled: false, status: "DISABLED" }];
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await page.getByRole("button", { name: `启用 ${service.name}`, exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "启用 Service", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  // 手机下列表、概览和服务区域允许内部表格滚动，页面自身不能横向溢出。
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "返回隧道列表", exact: true }).click();
+  await expect(page.getByRole("table", { name: "隧道列表" })).toBeVisible();
+  const tunnelSearch = page.getByRole("searchbox", { name: "搜索隧道" });
+  await tunnelSearch.fill("不存在的隧道");
+  await expect(page.getByRole("button", { name: `打开隧道 ${tunnel.name}`, exact: true })).toHaveCount(0);
+  await tunnelSearch.fill(tunnel.name);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole("button", { name: `打开隧道 ${tunnel.name}`, exact: true }).click();
+  await expect(page.getByRole("tab", { name: "概览", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("heading", { name: "基本信息", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole("tab", { name: /^服务/ }).click();
+  await expect(page.getByRole("button", { name: `编辑 ${service.name}`, exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  workspaceUnavailable = true;
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("详情暂时不可用，请重试。");
+  await expect(page.getByRole("button", { name: "重试", exact: true })).toBeVisible();
+  workspaceUnavailable = false;
+  await page.getByRole("button", { name: "重试", exact: true }).click();
+  await expect(page.getByRole("heading", { name: tunnel.name, exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "返回隧道列表", exact: true }).click();
+  await expect(page.getByRole("table", { name: "隧道列表" })).toBeVisible();
+  // 安装步骤会话失效时释放凭据并退出，不能继续轮询或停留在安装页。
+  installationActive = true;
+  installState = "unauthorized";
+  await page.getByRole("button", { name: "创建 Tunnel", exact: true }).click();
+  await page.getByRole("region", { name: "创建 Tunnel", exact: true }).getByLabel("名称").fill("会话失效测试");
+  await page.getByRole("button", { name: "创建并继续", exact: true }).click();
+  await expect(page.getByText("管理会话已过期，请重新登录。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "安装连接器", exact: true })).toHaveCount(0);
+  const requestsAfterUnauthorized = installPollRequests;
+  await page.waitForTimeout(3500);
+  expect(installPollRequests).toBe(requestsAfterUnauthorized);
+  expect(await page.locator("body").evaluate((body, value) => !body.textContent?.includes(value), token)).toBe(true);
+  expect(unexpectedRequests).toEqual([]);
 });

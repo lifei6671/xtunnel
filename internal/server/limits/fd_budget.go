@@ -53,9 +53,9 @@ func (failure *FDBudgetError) Error() string {
 // Unwrap 允许调用方用 errors.Is 分类启动失败。
 func (*FDBudgetError) Unwrap() error { return ErrFDBudgetExceeded }
 
-// CheckFDBudget 在支持的部署平台读取 RLIMIT_NOFILE 并执行启动前校验。
-// 非 Linux 不属于 V0.1 Server 部署范围，平台实现明确采用 no-op，而不是猜测一个
-// 不可靠的 FD 上限；各分项的结构与溢出校验仍会执行。
+// CheckFDBudget 在 Linux 读取 RLIMIT_NOFILE 并执行启动前校验。
+// Windows Server Preview 等非 Linux 平台只执行分项结构与溢出校验；
+// 返回成功不表示已验证 Windows 句柄上限或容量。
 func CheckFDBudget(budget FDBudget) error {
 	required, err := requiredFDs(budget)
 	if err != nil {

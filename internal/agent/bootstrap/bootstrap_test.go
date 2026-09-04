@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,16 @@ import (
 	"github.com/lifei6671/xtunnel/internal/agent/service"
 	"github.com/lifei6671/xtunnel/internal/logging"
 )
+
+func TestMissingTokenHintMatchesPlatform(t *testing.T) {
+	_, err := resolveTokenSource("", false, nil)
+	if err == nil || !strings.Contains(err.Error(), "--token") || !strings.Contains(err.Error(), "XTUNNEL_TOKEN") {
+		t.Fatalf("missing token hint = %v", err)
+	}
+	if strings.Contains(err.Error(), "systemd") != (runtime.GOOS == "linux") {
+		t.Fatalf("missing token hint does not match %s: %v", runtime.GOOS, err)
+	}
+}
 
 func TestResolveTokenSourcesAndPrecedence(t *testing.T) {
 	credentialDirectory := writeCredential(t, "xta_credential_secret")

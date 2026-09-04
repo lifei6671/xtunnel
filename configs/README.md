@@ -44,8 +44,8 @@ Windows Server amd64 Preview 已通过 M8-05 Gate 和阶段验收，本配置适
 
 至少需要替换：
 
-- `management.public_url`：浏览器实际访问的 HTTPS Origin。
-- `agent_gateway.public_hostname`：Agent 可从公网连接的 Gateway 主机名。
+- `management.public_url`：浏览器实际访问的 HTTPS Origin；本机访问可留空，此时监听地址必须是 Loopback IP，通过 `http://127.0.0.1:8080` 等对应地址访问。
+- `agent_gateway.public_hostname`：Agent 可连接的域名或 IP，可附端口，如 `192.0.2.10:7443` 或 `[2001:db8::10]:7443`；省略端口时沿用 Gateway 监听端口。填写 Agent 实际能到达的地址。
 - Windows 前台部署应保留 `server.data_dir: auto`，并为当前用户 Profile 配置受限 ACL；不要将
   `%LOCALAPPDATA%` 作为普通环境变量字符串手工展开或把用户目录传给服务安装器。
 

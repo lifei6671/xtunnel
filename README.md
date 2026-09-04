@@ -69,8 +69,10 @@ Caddy / Nginx ── XTunnel Server
 ### 1. 构建 Server 与 Agent
 
 Server 支持 Linux `amd64` / `arm64`，并提供 Windows `amd64` Preview（NTFS）。
-Windows 安装与运行见 [Windows Server SCM](deploy/windows-server/README.md)。以下为 Linux
-源码构建流程，构建环境需要 Go `1.27.1` 或更新的 `1.27.x` 补丁版、Node 24.19.0 与 npm 11.17.0：
+构建环境需要 Go `1.27.1` 或更新的 `1.27.x` 补丁版、Node 24.19.0 与 npm 11.17.0。
+以下命令均在仓库根目录执行。
+
+**Linux：**
 
 ```sh
 export GOTOOLCHAIN=local
@@ -83,7 +85,23 @@ go build -trimpath -o bin/xtunnel-server ./cmd/server
 go build -trimpath -o bin/xtunnel-agent ./cmd/agent
 ```
 
+**Windows PowerShell：**
+
+```powershell
+$env:GOTOOLCHAIN = 'local'
+.\tools\check-go-version.ps1
+npm --prefix web ci
+npm --prefix web run check
+npm --prefix web run build
+go build -trimpath -o server.exe ./cmd/server
+go build -trimpath -o agent.exe ./cmd/agent
+```
+
+每条命令成功后再执行下一条；Web 构建产物会嵌入 Server。
+
 ### 2. 准备并安装 Server
+
+#### Linux systemd
 
 复制完整配置示例，至少替换 `admin.example.com` 与 `tunnel.example.com`：
 
@@ -99,9 +117,98 @@ Management 与 HTTP Ingress 默认只监听 Loopback。使用仓库提供的
 [Caddy / Nginx HTTPS/WSS 示例](deploy/reverse-proxy/README.md)终止公网 TLS，
 然后通过 `management.public_url` 打开 Web 控制台。
 
+#### Windows 前台运行
+
+首次部署时复制完整示例；已有配置可直接编辑：
+
+```powershell
+Copy-Item .\configs\server.windows.example.yaml .\configs\server.yaml
+```
+
+在该文件中修改下面几个字段，其余配置保留。这个示例适用于 Server 与 Agent 在同一台电脑：
+
+```yaml
+management:
+  listen: "127.0.0.1:8080"
+  public_url: ""
+
+agent_gateway:
+  listen: "0.0.0.0:7443"
+  public_hostname: "127.0.0.1:7443"
+```
+
+- `management.public_url` 可以留空：浏览器直接访问 `http://127.0.0.1:8080`，
+  `management.listen` 必须为 Loopback IP。通过远程域名访问时，填写实际 HTTPS Origin，
+  并按 [反向代理示例](deploy/reverse-proxy/README.md)配置 HTTPS。
+- `agent_gateway.public_hostname` 必须填写 Agent 可达的域名或 IP，可以附端口。
+  Agent 在其他电脑时，将 `127.0.0.1` 换成 Server 的局域网或公网地址，
+  并确保防火墙及端口映射允许连接。IPv6 带端口写成 `[2001:db8::10]:7443`；
+  省略端口时沿用 Gateway 监听端口。
+- `listen` 是绑定地址，`0.0.0.0` 表示监听所有 IPv4 网卡；
+  `public_hostname` 是写入 Connection Token 的连接地址。
+
+**首次运行按以下顺序操作：**
+
+1. 初始化当前用户的数据目录和运行目录：
+
+   ```powershell
+   .\server.exe init --config .\configs\server.yaml
+   ```
+
+2. 首次启动，建立数据库和 Gateway 身份：
+
+   ```powershell
+   .\server.exe --config .\configs\server.yaml
+   ```
+
+   等待 `process_started` 日志。此时管理页面提示初始化管理员（`SETUP_REQUIRED`），
+   仅管理端和 Metrics 监听。按 `Ctrl+C` 停止，等待进程退出后执行下一步。
+
+3. 创建首个管理员。**账号名由你指定，密码在终端提示后输入，不会回显：**
+
+   ```powershell
+   .\server.exe admin create --config .\configs\server.yaml --username admin
+   ```
+
+   请在 PowerShell 或 Windows Terminal 的交互终端中执行。重定向输入或自动化运行时，
+   使用 `--password-file` 指定由你保护的密码文件。
+
+   XTunnel 的初始管理员由这个命令创建。务必先完成上一步首次启动；
+   创建管理员时 Windows 前台 Server 必须已经停止。
+
+4. 再次启动：
+
+   ```powershell
+   .\server.exe --config .\configs\server.yaml
+   ```
+
+   打开 [本机 Web 控制台](http://127.0.0.1:8080)，使用 `admin` 和刚设置的密码登录。
+   之后日常运行只需执行本步骤；配置变更后重启生效。
+
+初始化和运行命令均使用同一个 Windows 用户及配置文件。前台数据位于当前用户
+`%LOCALAPPDATA%\XTunnel\Server`，服务模式使用独立数据目录。
+作为 Windows 服务运行时，按 [Windows Server SCM](deploy/windows-server/README.md)
+中的安装、停服创建管理员及启动步骤操作。
+
+Server 在各入口成功绑定后输出 `info` 级别的 `listener_started` JSON 日志，
+`listener` 标识入口，`address` 给出实际监听地址与端口。管理入口还记录
+`public_url`，用于打开 Web 控制台。首次管理员创建前仅记录 Management 和 Metrics；
+HTTP Ingress、Agent Gateway 及已配置的 TCP 转发端口在管理员初始化后启动时记录。
+
 ### 3. 创建 Tunnel 并连接 Agent
 
-在 Web 控制台创建 Tunnel，复制当前的 `xta_...` Connection Token，然后安装 Agent：
+进入 Web 控制台的“服务与隧道”，点击“创建 Tunnel”。第一步填写名称并点击
+“创建并继续”；第二步选择平台并复制安装命令，在源站设备运行 Agent。页面底部每
+3 秒自动刷新已连接的连接器，接入后可点击“下一步：添加服务”，也可点击“完成”稍后配置。
+添加服务页面依次填写名称、公网入口与源站服务；连接超时、TLS、Host Header 和健康检查
+位于“高级设置”。HTTP 路径使用前缀匹配，TCP 公网端口可以留空自动分配。
+详情页的“概览”展示基本信息和连接器表格，“服务”页签管理服务；点击“安装连接器”
+可再次打开安装抽屉。
+Server 会将完整 Connection Token 加密持久保存；只要它仍有效，就可以重新打开
+“安装连接器”获取同一枚 Token，为其他机器安装 Agent。Rotate 后获取的是新一代 Token，
+Revoke 后不能再获取或使用已撤销的 Token 建立新认证。
+
+以下命令中的 `xta_...` 仅表示占位符，`--token` 必须传入从控制台复制的完整值：
 
 ```sh
 # Linux systemd；安装器会把 Token 保存为 root-only Credential。
@@ -111,10 +218,17 @@ sudo ./bin/xtunnel-agent service install --token 'xta_...'
 ```powershell
 # Windows amd64 / arm64；请在提升权限的 PowerShell 中执行。
 # 安装器会使用 DPAPI Machine-scope 加密 Token。
-.\xtunnel-agent.exe service install --token 'xta_...'
+.\agent.exe service install --token 'xta_...'
 ```
 
-回到 Web 控制台创建 Service，填写内网 Origin，再选择 HTTP 或 TCP 公网入口。
+回到该 Tunnel 的“服务”页签创建 Service，填写内网 Origin，再选择 HTTP 或 TCP 公网入口。
+
+Connection Token 内含签发时的 Gateway IP 或 DNS 名称、端口及 TLS 信任信息，Agent
+据此连接 Server。地址来自 `agent_gateway.public_hostname`：可以填写 `IP:端口`、
+`域名:端口` 或 `[IPv6]:端口`；省略端口时使用 `agent_gateway.listen` 的端口。
+管理页面使用的 `management.listen`（示例为 `127.0.0.1:8080`）不用于 Agent 连接。
+修改 Gateway 对外地址后，先重启 Server 使配置生效，再对受影响 Tunnel 执行 Rotate，
+重新获取 Token 并更新 Agent；重复获取原 Token 不会改写其中的旧地址。
 
 > [!IMPORTANT]
 > Connection Token 同时包含连接地址、TLS 信任、Tunnel 身份与认证 Secret。
@@ -149,7 +263,11 @@ Agent 刻意不提供 YAML、`--config` 或本地业务 Schema。Service、Origi
   [双栈 Compose 模板](deploy/docker/compose.dualstack.yaml)。
 - **公网 HTTPS / WSS**：参见 [Caddy / Nginx 前置代理示例](deploy/reverse-proxy/README.md)。
 
-完整的证书、诊断、日志、指标、审计导出、备份与恢复流程见
+Windows Server Preview 的 `backup create`、`backup restore` 在停服后也不可用；
+当前使用维护窗口中的主机或基础设施级备份，具体边界见
+[Windows Server SCM](deploy/windows-server/README.md#备份与恢复边界)。
+
+证书、诊断、日志、指标、审计导出及平台维护边界见
 [运维诊断 Runbook](docs/operations_runbook.md)。
 
 ## 当前边界

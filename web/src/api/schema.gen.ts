@@ -1213,7 +1213,7 @@ export interface components {
         readonly NoStore: "no-store";
         /** @description 兼容缓存禁止指令。 */
         readonly NoCache: "no-cache";
-        /** @description xtunnel_admin_session；Secure、HttpOnly、SameSite=Lax、Host-only、Path=/api/v1。 */
+        /** @description xtunnel_admin_session；HTTPS 模式使用 Secure，本机 HTTP 模式不设置 Secure；HttpOnly、SameSite=Lax、Host-only、Path=/api/v1。 */
         readonly SessionCookie: string;
         /** @description 建议等待秒数。 */
         readonly RetryAfter: number;

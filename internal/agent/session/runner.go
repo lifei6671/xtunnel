@@ -136,6 +136,18 @@ func (runner *Runner) Start(ctx context.Context) (*Session, error) {
 	return runner.start(ctx, lifetimeContext, cancelLifetime)
 }
 
+// attemptFailure 保留失败发生的固定阶段，日志不依赖可能包含凭据的错误文本。
+type attemptFailure struct {
+	stage string
+	cause error
+}
+
+func (failure *attemptFailure) Error() string {
+	return "connector control " + failure.stage + " failed"
+}
+func (failure *attemptFailure) Unwrap() error        { return failure.cause }
+func (failure *attemptFailure) FailureStage() string { return failure.stage }
+
 // StartDetached 使用 ctx 限制 Dial/AUTH，但已建立 Session 不再继承其取消信号。
 //
 // 该入口只供进程级重连器使用：SIGTERM 后 Agent 仍需在存活的 Control socket 上完成
@@ -174,7 +186,7 @@ func (runner *Runner) start(
 
 	connection, err := runner.dependencies.dial(attemptContext, runner.config.ConnectionToken, servergateway.ControlALPN)
 	if err != nil {
-		return nil, fmt.Errorf("dial connector control session: %w", err)
+		return nil, &attemptFailure{stage: "dial", cause: err}
 	}
 
 	authentication, err := runner.dependencies.authenticate(attemptContext, connection, controlauth.Config{
@@ -191,7 +203,7 @@ func (runner *Runner) start(
 		ReadTimeout:     runner.config.AuthReadTimeout,
 	})
 	if err != nil {
-		return nil, closeUnownedConnection(connection, fmt.Errorf("authenticate connector control session: %w", err))
+		return nil, closeUnownedConnection(connection, &attemptFailure{stage: "authentication", cause: err})
 	}
 	// Detached 仅从成功建连之后生效；若进程在 Dial/AUTH 期间已经取消，不能发布一条
 	// 调用方尚未来得及进入 Drain 流程的半存活 Session。
@@ -205,11 +217,11 @@ func (runner *Runner) start(
 	owner, err := runner.dependencies.newOwner(connection, authentication.Control, ownerOptions)
 	if err != nil {
 		return nil, cleanupAuthenticatedConnection(connection, authentication,
-			fmt.Errorf("create connector control session owner: %w", err))
+			&attemptFailure{stage: "session_setup", cause: err})
 	}
 	if err := owner.Start(lifetimeContext); err != nil {
 		return nil, cleanupAuthenticatedConnection(connection, authentication,
-			fmt.Errorf("start connector control session owner: %w", err))
+			&attemptFailure{stage: "session_setup", cause: err})
 	}
 
 	session := &Session{

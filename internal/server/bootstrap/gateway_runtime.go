@@ -65,6 +65,10 @@ const (
 )
 
 func loadGatewayIdentity(config serverconfig.Config, resources *serverStorage) (gateway.Identity, error) {
+	host, _, endpointErr := config.AgentGateway.PublicEndpoint()
+	if endpointErr != nil {
+		return gateway.Identity{}, endpointErr
+	}
 	var (
 		identity gateway.Identity
 		err      error
@@ -73,7 +77,7 @@ func loadGatewayIdentity(config serverconfig.Config, resources *serverStorage) (
 	case gateway.PinnedMode:
 		identity, err = gateway.LoadOrCreatePinnedIdentity(
 			resources.dataDir,
-			config.AgentGateway.PublicHostname,
+			host,
 			!resources.databaseExisted,
 			time.Now(),
 		)
@@ -94,15 +98,11 @@ func managementGatewayConnectionDescription(
 	config serverconfig.Config,
 	identity gateway.Identity,
 ) (*protocolv1.GatewayEndpoint, *protocolv1.TlsTrustDescriptor, error) {
-	_, portText, err := net.SplitHostPort(config.AgentGateway.Listen)
+	host, port, err := config.AgentGateway.PublicEndpoint()
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse agent gateway listen: %w", err)
+		return nil, nil, err
 	}
-	port, err := strconv.ParseUint(portText, 10, 16)
-	if err != nil {
-		return nil, nil, errors.New("agent gateway public port is invalid")
-	}
-	endpoint := &protocolv1.GatewayEndpoint{Host: config.AgentGateway.PublicHostname, Port: uint32(port)}
+	endpoint := &protocolv1.GatewayEndpoint{Host: host, Port: uint32(port)}
 	trust := &protocolv1.TlsTrustDescriptor{}
 	switch config.AgentGateway.TLS.Mode {
 	case gateway.PublicMode:
@@ -961,9 +961,16 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 	if err := metricsServer.Start(lifecycleContext); err != nil {
 		return nil, errors.Join(fmt.Errorf("start Prometheus metrics listener: %w", err), cleanupBeforeOwnershipTransfer())
 	}
+	// 仅在绑定成功后记录实际地址，包含系统分配的端口；延迟启动的入口在各自 Start 后记录。
+	logger.InfoContext(ctx, "listener_started", "listener", "metrics", "address", metricsServer.Addr().String())
 	if err := managementServer.Start(lifecycleContext); err != nil {
 		return nil, errors.Join(fmt.Errorf("start management listener: %w", err), cleanupBeforeOwnershipTransfer())
 	}
+	managementURL, err := config.Management.EffectivePublicURL()
+	if err != nil {
+		return nil, errors.Join(err, cleanupBeforeOwnershipTransfer())
+	}
+	logger.InfoContext(ctx, "listener_started", "listener", "management", "address", managementServer.Addr().String(), "public_url", managementURL)
 	startGateway := func() error {
 		// 冻结启动顺序是 Route Snapshot → TCP Listener Restore → HTTP Ingress →
 		// Gateway → Runtime Reconciler。TCP Handler 按准入时 Route 建立精确
@@ -978,6 +985,9 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 			reportRuntimeError(startErr)
 			return startErr
 		}
+		for _, listener := range tcpIngress.Actual() {
+			logger.InfoContext(ctx, "listener_started", "listener", "tcp_ingress", "address", listener.Address, logging.ServiceIDKey, listener.Route.ServiceID)
+		}
 		if err := httpIngress.Start(lifecycleContext); err != nil {
 			startErr := errors.Join(
 				fmt.Errorf("start HTTP ingress after admin bootstrap: %w", err),
@@ -988,6 +998,7 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 			reportRuntimeError(startErr)
 			return startErr
 		}
+		logger.InfoContext(ctx, "listener_started", "listener", "http_ingress", "address", httpIngress.Addr().String())
 		if err := gatewayServer.Start(lifecycleContext); err != nil {
 			httpHandler.CloseIdleConnections()
 			startErr := errors.Join(
@@ -999,6 +1010,7 @@ func openGatewayAndBootstrapWithStartedAtTracing(
 			reportRuntimeError(startErr)
 			return startErr
 		}
+		logger.InfoContext(ctx, "listener_started", "listener", "agent_gateway", "address", gatewayServer.Addr().String())
 		// 极短窗口内到达的 HTTP 或 Control 请求因 Reconciler 未启动而 fail-closed；
 		// 不查询 SQLite 热路径，也不回落到本地或旧配置。
 		if err := sessions.Start(lifecycleContext); err != nil {

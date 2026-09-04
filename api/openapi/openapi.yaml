@@ -566,7 +566,7 @@ components:
       type: apiKey
       in: cookie
       name: xtunnel_admin_session
-      description: 256-bit Token；Secure、HttpOnly、SameSite=Lax、Host-only、Path=/api/v1。
+      description: 256-bit Token；HTTPS 模式使用 Secure，本机 HTTP 模式不设置 Secure；HttpOnly、SameSite=Lax、Host-only、Path=/api/v1。
     csrfToken:
       type: apiKey
       in: header
@@ -614,7 +614,7 @@ components:
     NoStore: { description: Secret 响应禁止存储。, schema: { type: string, const: no-store } }
     NoCache: { description: 兼容缓存禁止指令。, schema: { type: string, const: no-cache } }
     SessionCookie:
-      description: xtunnel_admin_session；Secure、HttpOnly、SameSite=Lax、Host-only、Path=/api/v1。
+      description: xtunnel_admin_session；HTTPS 模式使用 Secure，本机 HTTP 模式不设置 Secure；HttpOnly、SameSite=Lax、Host-only、Path=/api/v1。
       schema: { type: string }
     RetryAfter: { description: 建议等待秒数。, schema: { type: integer, minimum: 1 } }
     Location: { description: 新资源的同源 `/api/v1` 路径。, schema: { type: string, pattern: '^/api/v1/' } }

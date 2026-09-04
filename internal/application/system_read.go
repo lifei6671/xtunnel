@@ -3,7 +3,6 @@ package application
 import (
 	"context"
 	"errors"
-	"net/url"
 	"runtime"
 	"strings"
 	"time"
@@ -246,9 +245,8 @@ func (service *SystemReadService) Config(ctx context.Context) (SystemConfig, err
 }
 
 func projectSystemConfig(config serverconfig.Config) (SystemConfig, error) {
-	publicURL, err := url.Parse(config.Management.PublicURL)
-	if err != nil || publicURL.Scheme != "https" || publicURL.Host == "" || publicURL.User != nil ||
-		publicURL.RawQuery != "" || publicURL.Fragment != "" || (publicURL.Path != "" && publicURL.Path != "/") {
+	publicURL, err := config.Management.EffectivePublicURL()
+	if err != nil {
 		return SystemConfig{}, ErrSystemReadInput
 	}
 	if strings.TrimSpace(config.AgentGateway.PublicHostname) == "" ||
@@ -259,7 +257,7 @@ func projectSystemConfig(config serverconfig.Config) (SystemConfig, error) {
 		return SystemConfig{}, ErrSystemReadInput
 	}
 	return SystemConfig{
-		Management: SystemManagementConfig{PublicURL: config.Management.PublicURL},
+		Management: SystemManagementConfig{PublicURL: publicURL},
 		AgentGateway: SystemAgentGatewayConfig{
 			PublicHostname: config.AgentGateway.PublicHostname,
 			TLSMode:        config.AgentGateway.TLS.Mode,

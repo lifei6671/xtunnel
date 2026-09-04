@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -34,7 +35,7 @@ const (
 	testTimeout      = 2 * time.Second
 )
 
-func TestHandlePreservesRawBytesFollowingOpenRequestFrame(t *testing.T) {
+func TestHandlePreservesRawBytesFollowingOpenRequestFrameAfterIdle(t *testing.T) {
 	agentConnection, serverConnection := net.Pipe()
 	originConnection, originPeer := net.Pipe()
 	defer serverConnection.Close()
@@ -54,12 +55,18 @@ func TestHandlePreservesRawBytesFollowingOpenRequestFrame(t *testing.T) {
 		rawReceived <- buffer
 		return nil
 	})
+	if err := agentConnection.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	handler.options.ReadTimeout = 60 * time.Millisecond
+	reader := &firstReadConnection{Conn: agentConnection, started: make(chan struct{})}
+	started := reader.started
 	ready := idleReady(t)
 	result := make(chan error, 1)
 	transitions := make([]state.WorkPhase, 0, 2)
 	go func() {
 		result <- handler.HandleObserved(
-			context.Background(), agentConnection, ready,
+			context.Background(), reader, ready,
 			func(target state.WorkPhase, commit func() error) error {
 				if err := commit(); err != nil {
 					return err
@@ -69,6 +76,20 @@ func TestHandlePreservesRawBytesFollowingOpenRequestFrame(t *testing.T) {
 			},
 		)
 	}()
+
+	select {
+	case <-started:
+	case <-time.After(testTimeout):
+		t.Fatal("Handle() did not start waiting for OPEN")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("IDLE ended before OPEN: %v", err)
+	case <-time.After(3 * handler.options.ReadTimeout):
+	}
+	if err := serverConnection.SetDeadline(time.Now().Add(testTimeout)); err != nil {
+		t.Fatal(err)
+	}
 
 	request := validOpenRequest()
 	var encoded bytes.Buffer
@@ -537,4 +558,188 @@ func validTracedOpenRequest() *protocolv1.OpenRequest {
 	request.Traceparent = testTraceparent
 	request.Tracestate = testTracestate
 	return request
+}
+
+// firstReadConnection 观察首次读取的进入点，确保测试确实经历 IDLE 等待。
+type firstReadConnection struct {
+	net.Conn
+	started chan struct{}
+	reads   chan struct{}
+}
+
+func (connection *firstReadConnection) Read(buffer []byte) (int, error) {
+	if connection.reads != nil {
+		connection.reads <- struct{}{}
+	}
+	if connection.started != nil {
+		close(connection.started)
+		connection.started = nil
+	}
+	return connection.Conn.Read(buffer)
+}
+
+func TestHandleIdleCancellationAndPartialFrameTimeout(t *testing.T) {
+	for _, scenario := range []string{"cancel idle", "cancel partial frame", "partial frame timeout"} {
+		t.Run(scenario, func(t *testing.T) {
+			agentConnection, serverConnection := net.Pipe()
+			defer serverConnection.Close()
+			if err := serverConnection.SetDeadline(time.Now().Add(testTimeout)); err != nil {
+				t.Fatal(err)
+			}
+			dialed := false
+			handler := newTestHandler(t, OriginDialerFunc(func(context.Context, string) (net.Conn, protocolv1.ErrorCode, error) {
+				dialed = true
+				return nil, protocolv1.ErrorCode_ERROR_CODE_ORIGIN_REFUSED, errors.New("unexpected origin dial")
+			}), nil)
+			handler.options.ReadTimeout = 60 * time.Millisecond
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reader := &firstReadConnection{Conn: agentConnection, started: make(chan struct{})}
+			started := reader.started
+			ready := idleReady(t)
+			result := make(chan error, 1)
+			go func() { result <- handler.Handle(ctx, reader, ready) }()
+			select {
+			case <-started:
+			case <-time.After(testTimeout):
+				t.Fatal("Handle() did not start waiting for OPEN")
+			}
+			if scenario != "cancel idle" {
+				if _, err := serverConnection.Write([]byte{0x80}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario != "partial frame timeout" {
+				cancel()
+			}
+			select {
+			case err := <-result:
+				want := context.Canceled
+				if scenario == "partial frame timeout" {
+					want = ErrProtocol
+				}
+				if !errors.Is(err, want) {
+					t.Fatalf("Handle() error = %v, want %v", err, want)
+				}
+			case <-time.After(testTimeout):
+				t.Fatal("Handle() did not close after cancellation or frame timeout")
+			}
+			if dialed || ready.State.Phase() != state.WorkClosed {
+				t.Fatalf("dialed = %v, phase = %v; want false, CLOSED", dialed, ready.State.Phase())
+			}
+			if _, err := serverConnection.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+				t.Fatalf("WorkConn read = %v, want EOF", err)
+			}
+		})
+	}
+}
+
+func TestHandleDistinguishesIdleEOFAndTruncatedOpen(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial_%v", partial), func(t *testing.T) {
+			agent, server := net.Pipe()
+			defer server.Close()
+			var output bytes.Buffer
+			handler := newTestHandler(t, OriginDialerFunc(func(context.Context, string) (net.Conn, protocolv1.ErrorCode, error) {
+				t.Error("unexpected origin dial")
+				return nil, protocolv1.ErrorCode_ERROR_CODE_INTERNAL_ERROR, nil
+			}), nil)
+			handler.options.Logger = slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			result := make(chan error, 1)
+			ready := idleReady(t)
+			reads := make(chan struct{}, 2)
+			go func() {
+				result <- handler.Handle(context.Background(), &firstReadConnection{Conn: agent, reads: reads}, ready)
+			}()
+			select {
+			case <-reads:
+			case <-time.After(testTimeout):
+				t.Fatal("idle read did not start")
+			}
+			if partial {
+				if _, err := server.Write([]byte{0x80}); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-reads:
+				case <-time.After(testTimeout):
+					t.Fatal("partial frame read did not start")
+				}
+			}
+			if err := server.Close(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-result:
+				if errors.Is(err, ErrProtocol) != partial {
+					t.Fatalf("protocol classification = %v, want %v", err, partial)
+				}
+				if !partial && !errors.Is(err, io.EOF) {
+					t.Fatalf("idle error = %v, want EOF", err)
+				}
+			case <-time.After(testTimeout):
+				t.Fatal("handler did not close")
+			}
+			var record map[string]any
+			if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+				t.Fatal(err)
+			}
+			if partial {
+				if record["error_code"] != "PROTOCOL_ERROR" || record["stage"] != "open_request" {
+					t.Fatalf("truncated frame: %#v", record)
+				}
+			} else if record["msg"] != logging.EventAgentConnectionClosed || record["level"] != "DEBUG" || record["stage"] != "idle_wait" {
+				t.Fatalf("idle closure: %#v", record)
+			}
+		})
+	}
+}
+
+// responseWriteFailureConnection 保留真实 OPEN 读取，仅注入响应写入时的网络关闭。
+type responseWriteFailureConnection struct{ net.Conn }
+
+func (connection responseWriteFailureConnection) Write([]byte) (int, error) {
+	return 0, &net.OpError{Op: "write", Net: "tcp", Err: net.ErrClosed}
+}
+
+func TestHandleOpenResponseNetworkFailureRemainsVisible(t *testing.T) {
+	agent, server := net.Pipe()
+	origin, originPeer := net.Pipe()
+	defer server.Close()
+	defer originPeer.Close()
+	var output bytes.Buffer
+	handler := newTestHandler(t, OriginDialerFunc(func(context.Context, string) (net.Conn, protocolv1.ErrorCode, error) {
+		return origin, protocolv1.ErrorCode_ERROR_CODE_OK, nil
+	}), func(context.Context, net.Conn, net.Conn) error {
+		t.Error("RAW proxy must not start after failed OPEN response")
+		return nil
+	})
+	handler.options.Logger = slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	ready := idleReady(t)
+	result := make(chan error, 1)
+	go func() { result <- handler.Handle(context.Background(), responseWriteFailureConnection{agent}, ready) }()
+	if err := server.SetDeadline(time.Now().Add(testTimeout)); err != nil {
+		t.Fatal(err)
+	}
+	if err := frame.WriteWork(server, validOpenRequest()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("response error = %v, want network close", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("handler did not finish after response write failure")
+	}
+	var record map[string]any
+	if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["msg"] != logging.EventAgentConnectionFailed || record["level"] != "ERROR" || record["stage"] != "origin_dial" {
+		t.Fatalf("response write failure log = %#v", record)
+	}
+	if ready.State.Phase() != state.WorkClosed {
+		t.Fatalf("phase = %v, want CLOSED", ready.State.Phase())
+	}
 }

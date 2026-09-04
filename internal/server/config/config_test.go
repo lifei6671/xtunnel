@@ -17,6 +17,37 @@ func testDataDir(t *testing.T) string {
 	return t.TempDir()
 }
 
+func TestManagementLocalHTTPConfig(t *testing.T) {
+	for _, test := range []struct {
+		name, yaml, want string
+		invalid          bool
+	}{
+		{name: "omitted", want: "http://127.0.0.1:8080"},
+		{name: "empty", yaml: "management:\n  public_url: ''\n", want: "http://127.0.0.1:8080"},
+		{name: "ipv6", yaml: "management:\n  listen: '[::1]:8080'\n", want: "http://[::1]:8080"},
+		{name: "wildcard", yaml: "management:\n  listen: '0.0.0.0:8080'\n", invalid: true},
+		{name: "remote", yaml: "management:\n  listen: '192.0.2.1:8080'\n", invalid: true},
+		{name: "external https", yaml: "management:\n  public_url: 'https://admin.example'\n", want: "https://admin.example"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value, err := Load(baseconfig.Options{YAML: []byte(test.yaml + "agent_gateway:\n  public_hostname: '127.0.0.1:7443'\n"), CLI: map[string]string{"server.data_dir": testDataDir(t)}})
+			if test.invalid {
+				if err == nil {
+					t.Fatal("accepted non-loopback HTTP listener")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := value.Management.EffectivePublicURL()
+			if err != nil || got != test.want {
+				t.Fatalf("EffectivePublicURL = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadUsesStableParentDataLeafByDefault(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("production Server defaults use Linux absolute paths")

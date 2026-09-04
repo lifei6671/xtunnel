@@ -5,6 +5,7 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"gorm.io/gorm"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
+	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
@@ -110,11 +112,16 @@ func TestFirstAdminCreationStartsGateway(t *testing.T) {
 		}
 	})
 	config := gatewayLifecycleTestConfig(dataDir, "127.0.0.1:0")
+	var output m7ProcessOutput
+	logger, err := logging.New(&output, logging.Options{Level: "info", Format: "json", Component: "server"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	closer, err := openGatewayAndBootstrapWith(
 		ctx,
 		config,
 		resources,
-		slog.Default(),
+		logger,
 		runtimeDir,
 		func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
 			return openAdminBootstrapSocketWithRuntime(ctx, runtimeDir, targetHash, store, func(*net.UnixConn) error { return nil }, afterCreate, reportRuntimeError)
@@ -135,6 +142,37 @@ func TestFirstAdminCreationStartsGateway(t *testing.T) {
 	if address := gatewayCloser.gateway.Addr(); address != nil {
 		t.Fatalf("gateway address before first admin = %v, want nil", address)
 	}
+	assertListenerLogs := func(expected map[string]string) {
+		t.Helper()
+		seen := make(map[string]string)
+		for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+			var entry map[string]any
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				t.Fatalf("decode startup log: %v", err)
+			}
+			if entry["event"] != "listener_started" {
+				continue
+			}
+			name, _ := entry["listener"].(string)
+			address, _ := entry["address"].(string)
+			if _, exists := seen[name]; exists {
+				t.Fatalf("duplicate listener log for %s", name)
+			}
+			if entry["level"] != "info" || address != expected[name] || address == "" || strings.HasSuffix(address, ":0") {
+				t.Fatalf("unexpected listener log: %v, expected %v", entry, expected)
+			}
+			if name == "management" && entry["public_url"] != config.Management.PublicURL {
+				t.Fatalf("management public_url = %v", entry["public_url"])
+			}
+			seen[name] = address
+		}
+		if len(seen) != len(expected) {
+			t.Fatalf("listener logs = %v, want %v", seen, expected)
+		}
+	}
+	assertListenerLogs(map[string]string{
+		"metrics": gatewayCloser.metrics.Addr().String(), "management": gatewayCloser.management.Addr().String(),
+	})
 	if actual := gatewayCloser.tcpIngress.Actual(); len(actual) != 0 {
 		t.Fatalf("TCP listeners before first admin = %v, want none", actual)
 	}
@@ -154,6 +192,10 @@ func TestFirstAdminCreationStartsGateway(t *testing.T) {
 	if address == nil {
 		t.Fatal("gateway did not start after first admin creation")
 	}
+	assertListenerLogs(map[string]string{
+		"metrics": gatewayCloser.metrics.Addr().String(), "management": gatewayCloser.management.Addr().String(),
+		"http_ingress": gatewayCloser.httpIngress.Addr().String(), "agent_gateway": address.String(),
+	})
 	connection, err := net.DialTimeout("tcp", address.String(), time.Second)
 	if err != nil {
 		t.Fatalf("dial started gateway %q error = %v", address, err)

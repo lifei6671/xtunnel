@@ -46,6 +46,7 @@ func TestLoadGatewayIdentityUsesResolvedStorageDataDirectory(t *testing.T) {
 	_, err = loadGatewayIdentity(serverconfig.Config{
 		Server: serverconfig.Server{DataDir: pathprofile.AutomaticDataDir},
 		AgentGateway: serverconfig.AgentGateway{
+			Listen:         "127.0.0.1:8443",
 			PublicHostname: "gateway.example.test",
 			TLS:            serverconfig.AgentGatewayTLS{Mode: gateway.PinnedMode},
 		},

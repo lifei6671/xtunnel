@@ -49,8 +49,8 @@ func newTCPIngressHandler(
 		}
 		if err := serveTCPRoute(ctx, dialer, peer, route); err != nil {
 			// Raw TCP 没有安全的带内错误响应；Manager 会在 Handler 返回后
-			// 关闭公网连接。日志只记录 Proto 稳定码与路由标识，底层错误可能
-			// 包含 Origin 地址，不得记录其文本。进程排空取消是预期收敛，不记为单连接失败。
+			// 关闭公网连接。原因只从类型化错误提取，底层错误可能包含 Origin
+			// 地址，不得记录其文本。进程排空取消是预期收敛，不记为单连接失败。
 			if ctx != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 				return
 			}
@@ -69,6 +69,8 @@ func newTCPIngressHandler(
 				ctx,
 				"tcp_ingress_connection_failed",
 				"error_code", code,
+				"error", logging.ErrorDetail(err, "TCP ingress connection failed"),
+				"stage", "tcp_ingress",
 				"tunnel_id", route.TunnelID,
 				"service_id", route.ServiceID,
 				"public_port", route.PublicPort,

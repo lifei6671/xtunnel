@@ -13,7 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func readAdminPasswordFromTTY(input *os.File, stderr io.Writer) (string, error) {
+func readAdminPasswordFromTTY(input *os.File, stderr io.Writer) (password string, resultErr error) {
 	info, err := input.Stat()
 	if err != nil {
 		return "", fmt.Errorf("inspect password input: %w", err)
@@ -31,14 +31,22 @@ func readAdminPasswordFromTTY(input *os.File, stderr io.Writer) (string, error) 
 		return "", fmt.Errorf("disable TTY echo: %w", err)
 	}
 	defer func() {
-		_ = unix.IoctlSetTermios(int(input.Fd()), unix.TCSETS, termios)
-		_, _ = fmt.Fprintln(stderr)
+		// 恢复失败时不能继续创建管理员；同时保留读取或提示输出的原始错误链。
+		if err := unix.IoctlSetTermios(int(input.Fd()), unix.TCSETS, termios); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("restore TTY settings: %w", err))
+		}
+		if _, err := fmt.Fprintln(stderr); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("finish password prompt: %w", err))
+		}
+		if resultErr != nil {
+			password = ""
+		}
 	}()
 
 	if _, err := fmt.Fprint(stderr, "Admin password: "); err != nil {
 		return "", fmt.Errorf("write password prompt: %w", err)
 	}
-	password, err := bufio.NewReader(input).ReadString('\n')
+	password, err = bufio.NewReader(input).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", fmt.Errorf("read password from TTY: %w", err)
 	}

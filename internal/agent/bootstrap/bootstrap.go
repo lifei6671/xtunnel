@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -468,6 +469,9 @@ func resolveTokenSource(cliToken string, cliTokenSet bool, environ []string) (st
 
 	directory, ok := lookupEnvironment(environ, credentialsDirectory)
 	if !ok {
+		if runtime.GOOS != "linux" {
+			return "", errors.New("token is required: use --token or XTUNNEL_TOKEN")
+		}
 		return "", errors.New("token is required: use --token, XTUNNEL_TOKEN, or the systemd credential")
 	}
 	if directory == "" {

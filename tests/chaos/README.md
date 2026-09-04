@@ -6,6 +6,17 @@
 
 ## 前置条件
 
+Windows 本地开发使用仓库已有的 Docker Desktop 入口，在仓库根目录执行：
+
+```powershell
+.\scripts\test.ps1 ./internal/server/bootstrap
+.\scripts\verify.ps1
+```
+
+这些命令提供相关包和全仓基础验证，不自动启用本文各项 Chaos Gate。
+Windows 本地不使用 WSL，也不另外创建 Docker Runner；专门的 Chaos Gate 在符合条件的
+原生 Linux Runner 或 CI 中执行。以下交叉编译产物仅供传送到独立 Linux 验证主机使用。
+
 - 运行环境必须是 Linux，且仓库中存在可执行的 `tools/check-go-version.sh`。
 - 直接运行源码时，Linux 必须安装 Go `go1.27.1` 或更新的 `1.27.x`；Runner 会先设置
   `GOTOOLCHAIN=local` 并执行项目版本检查，不会下载或切换工具链。
@@ -20,8 +31,7 @@
   `toolchain`、`goos`、`goarch`、`goamd64`、`cgo_enabled` 和
   `bootstrap_sha256`。Runner 会校验平台、工具链、当前 Commit 与 Binary SHA-256。
 - `full` 模式要求当前工作区和预编译 Manifest 都是干净状态。预编译 Binary 会先复制到
-  Linux-native `/tmp`，设置最小权限并再次校验 Manifest/Binary SHA-256，避免从 WSL
-  DrvFS 长跑执行。
+  Linux-native `/tmp`，设置最小权限并再次校验 Manifest/Binary SHA-256。
 - 5000 Connector 档要求当前 Shell 的 Soft `ulimit -n` 至少为 `16384`；不足时
   Runner 失败，不会跳过该档或降低 Connector 数。测试 Binary 还会按实际 Server 与
   Client FD 预算核验 Hard Limit；当前 5000 control-only 档要求至少 `51216`，满足时才把
@@ -39,10 +49,10 @@ Runner 使用 `/tmp/xtunnel-m7-02.XXXXXX` 保存单档临时输出，并通过 T
 ./tests/chaos/run-m7-02.sh -m smoke
 ```
 
-使用 Windows 交叉编译 Binary 的快速验证：
+将 Windows 交叉编译产物传送到独立 Linux 验证主机的 `/tmp/xtunnel-m7-02-bin` 后运行：
 
 ```sh
-./tests/chaos/run-m7-02.sh -m smoke -b /mnt/c/Temp/xtunnel-m7-02-bin
+./tests/chaos/run-m7-02.sh -m smoke -b /tmp/xtunnel-m7-02-bin
 ```
 
 正式模式依次运行全部容量档：
@@ -53,7 +63,7 @@ Runner 使用 `/tmp/xtunnel-m7-02.XXXXXX` 保存单档临时输出，并通过 T
 
 ```sh
 ./tests/chaos/run-m7-02.sh -m full \
-  -b /mnt/c/Temp/xtunnel-m7-02-bin
+  -b /tmp/xtunnel-m7-02-bin
 ```
 
 每档都会设置 `XTUNNEL_M7_02_CONNECTORS`，然后执行精确测试：
@@ -93,8 +103,8 @@ Pending TLS/Auth 数值。
 
 - `smoke` 只证明 100 Connector 档在当前环境可执行，不覆盖 500/1000/5000，也不构成
   M7-02 正式验收。
-- `full` 的四档成功只构成当前 Commit、当前 Linux 环境的 Chaos Test 证据；WSL2 结果必须
-  明确标注为 WSL2，不能描述为原生裸机结果。
+- `full` 的四档成功只构成当前 Commit、当前 Linux 环境的 Chaos Test 证据；历史 WSL2
+  结果保留其原始环境标注，不能描述为原生裸机结果。
 - Manifest 和 SHA-256 校验只证明实际执行的 Binary 与记录一致；交叉编译不等于 Linux
   原生 Runtime 验收，最终结论仍需结合完整输出、环境记录和独立复审。
 - 本 Runner 不据测试数值自动调整 Gateway Rate/Burst、TLS Session Resumption、Server
@@ -140,11 +150,11 @@ Linux 没有 Go 时，可在 Windows 使用项目固定工具链生成 `linux/am
 ./tests/chaos/build-m7-03-linux.ps1 -OutputDirectory C:\Temp\xtunnel-m7-03-bin
 ```
 
-然后在 Linux/WSL2 中运行：
+将产物传送到独立 Linux 验证主机的 `/tmp/xtunnel-m7-03-bin` 后运行：
 
 ```sh
-./tests/chaos/run-m7-03.sh -m smoke -b /mnt/c/Temp/xtunnel-m7-03-bin
-./tests/chaos/run-m7-03.sh -m full -b /mnt/c/Temp/xtunnel-m7-03-bin
+./tests/chaos/run-m7-03.sh -m smoke -b /tmp/xtunnel-m7-03-bin
+./tests/chaos/run-m7-03.sh -m full -b /tmp/xtunnel-m7-03-bin
 ```
 
 `smoke` 只运行 TCP Half-Close 自然排空场景；`full` 执行完整场景矩阵。两种模式都把
@@ -155,7 +165,7 @@ Binary 和输出复制到 Linux-native `/tmp/xtunnel-m7-03.XXXXXX`，并在退�
 ## 证据边界
 
 - Windows 交叉编译只证明 Linux Test Binary 可生成，不构成 Linux Runtime 证据。
-- WSL2 是 Linux 内核运行证据，但不等于独立原生 Linux 主机或代表性网络条件。
+- 历史 WSL2 结果只反映当时的 Linux 内核运行，不等于独立原生 Linux 主机或代表性网络条件。
 - `smoke` 不覆盖完整矩阵，不能作为 M7-03 正式通过证据。
 - `full` 只绑定 Manifest 中的 Commit、工具链、平台与 Binary SHA-256；仍需结合定向
   Test/Race/Vet、精确 CI 和独立交付复审。
@@ -186,11 +196,11 @@ Linux 没有 Go 时，可在 Windows 生成三个 `linux/amd64`、`GOAMD64=v1`�
 ./tests/chaos/build-m7-04-linux.ps1 -OutputDirectory C:\Temp\xtunnel-m7-04-bin
 ```
 
-然后在 Linux/WSL2 中运行：
+将产物传送到独立 Linux 验证主机的 `/tmp/xtunnel-m7-04-bin` 后运行：
 
 ```sh
-./tests/chaos/run-m7-04.sh -m smoke -b /mnt/c/Temp/xtunnel-m7-04-bin
-./tests/chaos/run-m7-04.sh -m full -b /mnt/c/Temp/xtunnel-m7-04-bin
+./tests/chaos/run-m7-04.sh -m smoke -b /tmp/xtunnel-m7-04-bin
+./tests/chaos/run-m7-04.sh -m full -b /tmp/xtunnel-m7-04-bin
 ```
 
 Runner 校验 Manifest 中的 Commit、clean 状态、固定工具链、目标平台与三个 Binary 的
@@ -236,9 +246,11 @@ Linux 没有 Go 时，可在 Windows 交叉构建 `linux/amd64`、`GOAMD64=v1`�
 ./tests/chaos/build-m7-08-linux.ps1 -OutputDirectory C:\Temp\xtunnel-m7-08-bin
 ```
 
+将产物传送到独立 Linux 验证主机的 `/tmp/xtunnel-m7-08-bin` 后运行：
+
 ```sh
 ./tests/chaos/run-m7-08.sh -m smoke \
-  -b /mnt/c/Temp/xtunnel-m7-08-bin \
+  -b /tmp/xtunnel-m7-08-bin \
   -o /var/tmp/xtunnel-m7-08-smoke
 ```
 
@@ -258,10 +270,10 @@ namespace。
   reject table，避免拦截内核将要发送的 RST，再用 `ss -K` 销毁精确公网 socket，让
   对端收到 TCP Reset；故障撤销后必须建立新连接。
 - 内核必须支持 `SOCK_DESTROY`。如果 `ss -K` 后活动 socket 仍存在，Runner 明确失败；
-  读 Deadline 超时不能冒充 TCP Reset。当前 WSL2 内核返回
-  `RTNETLINK answers: Invalid argument`，因此 WSL2 只能提供 netem 传输开发反馈，不能
+  读 Deadline 超时不能冒充 TCP Reset。历史 WSL2 验证曾返回
+  `RTNETLINK answers: Invalid argument`，该次结果仅证明 netem 传输开发反馈，不能
   作为 Reset 或正式 `full` 证据。
-- Windows 交叉编译、WSL2 Smoke、单个网络档或当前工作树运行都不等于专用原生 Linux
+- Windows 交叉编译、历史 WSL2 Smoke、单个网络档或当前工作树运行都不等于专用原生 Linux
   特权 Runner、精确 CI、Race、完整 Artifact 与发布 Gate 通过。
 
 ## CI 分级
@@ -272,6 +284,6 @@ Linux amd64/arm64 Runner 上执行 `full`。CI 先构建 Embed Web，再以 root
 进入独立 namespace；任一架构缺少命令、权限、`SOCK_DESTROY`、完整矩阵或 Artifact
 校验都会让 Job 失败。
 
-每个架构上传独立 Artifact，包含 Runner 预检、完整控制台日志、环境、逐档日志、Reset
-网络计数与 SHA-256 清单。即使 Runner 失败，已经生成的诊断仍会上传并保留 14 天；成功
-结果必须先在 Job 内执行 `sha256sum -c artifact-sha256.txt`。
+每个架构在测试、Secret 扫描及校验成功后上传独立 Artifact，包含 Runner 预检、完整控制台
+日志、环境、逐档日志、Reset 网络计数与 SHA-256 清单，保留 14 天。结果必须先在 Job 内
+执行 `sha256sum -c artifact-sha256.txt`；失败作业不上传此 Artifact。

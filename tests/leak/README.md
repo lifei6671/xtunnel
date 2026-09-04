@@ -25,7 +25,18 @@ Harness 不检查 TCP `TIME_WAIT=0`，也不把旧 generation 合法存续的 AC
 
 ## 运行
 
-直接在 Go `go1.27.1` 或更新的 `1.27.x` Linux amd64 环境运行：
+Windows 本地开发使用仓库已有的 Docker Desktop 入口，在仓库根目录执行：
+
+```powershell
+.\scripts\test.ps1 ./internal/server/bootstrap
+.\scripts\verify.ps1
+```
+
+这些命令提供相关包和全仓基础验证，不自动启用下面的 M7-07 Full Gate。
+不使用 WSL，也不另外创建 Docker Runner。专门的 Leak Gate 在符合条件的原生 Linux
+Runner 或 CI 中执行；本地基础验证不能替代其泄漏与资源收敛证据。
+
+在 Go `go1.27.1` 或更新的 `1.27.x` 原生 Linux 验证环境执行：
 
 ```sh
 sh ./tests/leak/run-m7-07.sh -m smoke
@@ -43,24 +54,9 @@ sh ./tests/leak/run-m7-07.sh -m full -o /tmp/xtunnel-m7-07-full
   精确命令、前后 Commit/Tree/工作树、Web、普通测试、Race 与 prebuilt Binary（如有）
   都进入相对路径 SHA-256 清单，并在搬移到第二个临时目录后再次读回校验。
 
-Windows 没有 Go 的 Linux 环境时，可生成仅供开发 Smoke 的测试 Binary：
-
-```powershell
-./tests/leak/build-m7-07-linux.ps1 \
-  -OutputDirectory C:\Temp\xtunnel-m7-07-bin \
-  -AllowDirty
-```
-
-然后在 Linux/WSL2 运行：
-
-```sh
-sh ./tests/leak/run-m7-07.sh -m smoke \
-  -b /mnt/c/Temp/xtunnel-m7-07-bin
-```
-
-预编译 Binary 必须匹配当前 checkout 的 Commit、Go 版本、目标平台和 SHA-256；它只
-支持 `smoke`。Windows 交叉编译与 WSL2 运行都不能替代原生 Linux amd64/arm64 Full、
-目标 Commit 的精确 CI 或 commit-bound 最终复审。
+现有预编译入口仅用于向独立 Linux 验证主机提供 Smoke Binary。预编译 Binary 必须匹配
+当前 checkout 的 Commit、Go 版本、目标平台和 SHA-256，不能替代原生 Linux
+amd64/arm64 Full、目标 Commit 的精确 CI 或 commit-bound 最终复审。
 
 ## 证据边界
 

@@ -236,6 +236,27 @@ func TestDialOriginUsesCompiledConnectionOptions(t *testing.T) {
 	_ = connection.Close()
 }
 
+func TestConnectionErrorCodeForNativeRefusedPort(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	connection, err := (&net.Dialer{}).DialContext(ctx, "tcp4", address)
+	if err == nil {
+		connection.Close()
+		t.Fatal("closed listener unexpectedly accepted connection")
+	}
+	if code := connectionErrorCode(ctx, err); code != protocolv1.ErrorCode_ERROR_CODE_ORIGIN_REFUSED {
+		t.Fatalf("native refused connection code = %v, error = %v", code, err)
+	}
+}
+
 func TestDialOriginUsesPerServiceTimeoutAndErrorCodes(t *testing.T) {
 	tests := []struct {
 		name     string

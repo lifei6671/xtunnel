@@ -61,6 +61,10 @@ func runGatewayRotateKeyWithProfile(ctx context.Context, options baseconfig.Opti
 	if config.AgentGateway.TLS.Mode != gateway.PinnedMode {
 		return gateway.ErrPublicRotation
 	}
+	hostname, _, err := config.AgentGateway.PublicEndpoint()
+	if err != nil {
+		return err
+	}
 	logger, err := logging.New(stderr, logging.Options{
 		Level: config.Logging.Level, Format: config.Logging.Format, Component: "server",
 	})
@@ -138,9 +142,9 @@ func runGatewayRotateKeyWithProfile(ctx context.Context, options baseconfig.Opti
 	}
 	audit := gateway.RotationAuditMetadata{
 		EventID: eventID, OperationID: operationID,
-		OccurredAt: now.UTC().Unix(), ResourceID: config.AgentGateway.PublicHostname,
+		OccurredAt: now.UTC().Unix(), ResourceID: hostname,
 	}
-	_, err = gateway.RotatePinnedIdentity(target.Path, config.AgentGateway.PublicHostname, now, audit)
+	_, err = gateway.RotatePinnedIdentity(target.Path, hostname, now, audit)
 	if err != nil {
 		return fmt.Errorf("rotate gateway pinned TLS identity: %w", err)
 	}

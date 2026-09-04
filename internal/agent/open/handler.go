@@ -2,9 +2,11 @@
 package open
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net"
@@ -53,6 +55,7 @@ type RawProxy func(context.Context, net.Conn, net.Conn) error
 // Options 固定 OPEN Frame、Origin Dial 与 RAW 交接边界。每个 Service 的连接超时
 // 由 Snapshot OriginDialer 统一覆盖 DNS、TCP 与 TLS，不在 Handler 叠加固定上限。
 type Options struct {
+	// ReadTimeout 从首字节到达起限制 OpenRequest Frame，不限制 IDLE 等待。
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	Dialer       OriginDialer
@@ -132,9 +135,13 @@ func (handler *Handler) handle(
 	connectionStartedAt := time.Now()
 	connectionLogger := handler.options.Logger
 	opened := false
+	stage := "idle_wait"
 	originFailureCode := ""
 	defer func() {
-		attributes := []any{"duration_ms", time.Since(connectionStartedAt).Milliseconds()}
+		attributes := []any{"duration_ms", time.Since(connectionStartedAt).Milliseconds(), "stage", stage}
+		if resultErr != nil {
+			attributes = append(attributes, "error", logging.ErrorDetail(resultErr, "work connection failed"))
+		}
 		if opened {
 			if resultErr == nil || errors.Is(resultErr, context.Canceled) {
 				connectionLogger.InfoContext(ctx, logging.EventAgentConnectionClosed, attributes...)
@@ -157,6 +164,13 @@ func (handler *Handler) handle(
 			connectionLogger.DebugContext(ctx, logging.EventAgentConnectionFailed, attributes...)
 			return
 		}
+		var networkError net.Error
+		if stage == "idle_wait" && !errors.Is(resultErr, ErrProtocol) && (errors.Is(resultErr, io.EOF) ||
+			errors.Is(resultErr, net.ErrClosed) || errors.As(resultErr, &networkError)) {
+			attributes = append(attributes, logging.ErrorCodeKey, "CONNECTION_CLOSED")
+			connectionLogger.DebugContext(ctx, logging.EventAgentConnectionClosed, attributes...)
+			return
+		}
 		code := "INTERNAL_ERROR"
 		if errors.Is(resultErr, ErrProtocol) {
 			code = "PROTOCOL_ERROR"
@@ -170,15 +184,44 @@ func (handler *Handler) handle(
 			resultErr = errors.Join(resultErr, fmt.Errorf("close Agent WorkConn: %w", err))
 		}
 	}()
-	stopContextIO := context.AfterFunc(ctx, func() { _ = workConnection.SetDeadline(time.Now()) })
-	defer stopContextIO()
-
+	// READY 后的 IDLE 可以长期等待业务，不属于 OPEN Frame 的读取预算。
+	// 先按会话 Context 设置等待边界，再注册取消回调，避免清零覆盖已触发的取消。
+	idleDeadline, _ := ctx.Deadline()
+	if err := workConnection.SetReadDeadline(idleDeadline); err != nil {
+		return fmt.Errorf("set idle WorkConn read deadline: %w", err)
+	}
+	contextIODone := make(chan struct{})
+	stopContextIO := context.AfterFunc(ctx, func() {
+		defer close(contextIODone)
+		_ = workConnection.SetDeadline(time.Now())
+	})
+	defer func() {
+		// 取消回调已开始时等待其结束，再交由外层关闭 WorkConn。
+		if !stopContextIO() {
+			<-contextIODone
+		}
+	}()
+	var firstByte [1]byte
+	if _, err := io.ReadFull(workConnection, firstByte[:]); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("wait for OpenRequest: %w", err)
+	}
+	stage = "open_request"
+	// 首字节到达后才限制完整帧的剩余读取；只预读一个字节，不消费后续 RAW 数据。
 	if err := workConnection.SetReadDeadline(operationDeadline(ctx, handler.options.ReadTimeout)); err != nil {
 		return fmt.Errorf("set OpenRequest read deadline: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	request := &protocolv1.OpenRequest{}
-	if err := frame.ReadWork(workConnection, request); err != nil {
-		return fmt.Errorf("%w: read OpenRequest: %v", ErrProtocol, err)
+	if err := frame.ReadWork(io.MultiReader(bytes.NewReader(firstByte[:]), workConnection), request); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("%w: read OpenRequest: %w", ErrProtocol, err)
 	}
 	if err := validate.RejectUnknownFields(request); err != nil {
 		return fmt.Errorf("%w: unknown fields", ErrProtocol)
@@ -199,6 +242,7 @@ func (handler *Handler) handle(
 		TraceID: tracing.TraceID(ctx), ServiceID: request.GetServiceId(), ConnectionID: request.GetConnectionId(),
 	})
 
+	stage = "origin_dial"
 	originStartedAt := time.Now()
 	originContext, originSpan := handler.tracer.Start(ctx, "origin.Dial")
 	origin, code, dialErr := handler.options.Dialer.DialOrigin(originContext, request.GetServiceId())
@@ -245,6 +289,7 @@ func (handler *Handler) handle(
 	if err := workConnection.SetDeadline(time.Time{}); err != nil {
 		return fmt.Errorf("clear Agent WorkConn OPEN deadline: %w", err)
 	}
+	stage = "raw_proxy"
 	opened = true
 	connectionLogger.InfoContext(ctx, logging.EventAgentConnectionOpened,
 		"origin_connect_latency_ms", durationMilliseconds(latency),
