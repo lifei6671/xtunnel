@@ -2544,3 +2544,9 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 修复后的产品测试与 Artifact 校验定向 Test/Race/Vet 全部通过，包含 ASCII/UTF16 泄漏、PEM/Bearer、干净文本及日志超限回归。普通测试仍跳过真实候选主机操作，不能替代隔离 CI。
 - 分区独审与最终集成 PASSED / Tier3，Coverage COMPLETE，最终 SHA256 绑定已核对，无剩余 P0/P1/P2；Artifact、产品主流程/清理、敏感信息扫描及 CI/文档均有独立覆盖。最终可执行文件范围为 CI、两个 windowsverify 文件和五个 windows-server-gate 文件；其余为 README 与计划同步。
 - 继续提交推送并取得精确候选 CI；M8-05 保持 IN_PROGRESS，候选 Artifact 和原生产品 Gate 待实际执行。
+
+## 2026-09-04 · M8-05 原生候选就绪请求回归
+
+- 首轮候选 `28364bc5c70d7bde46afcb9ac77fc111a7a365c2` 的 [CI #33857213840](https://github.com/lifei6671/xtunnel/actions/runs/33857213840) 中，Windows amd64 全仓 Test/Vet/Race、候选及交叉构建、既有 Agent SCM/升级通过；产品前台就绪检查失败，SCM 产品 Gate 与 Artifact 未执行。
+- 定位到就绪请求未带可信代理 HTTPS 声明，Host 被规范化为 `admin.gate.test:80`，与允许的 HTTPS `:443` 不匹配。就绪请求现与管理业务请求使用相同代理元数据，仍仅接受未认证 401，并在失败时记录状态码和传输失败布尔值。
+- 新增真实 Management Handler、临时 SQLite 和 HTTP Listener 回归：缺少代理协议声明返回 400，修正后的就绪请求得到 401；包 Test/Vet、定向 Race 与既有 ManagementSecurityPolicy 测试通过。下一候选继续取得真实完整产品和 CI 证据。

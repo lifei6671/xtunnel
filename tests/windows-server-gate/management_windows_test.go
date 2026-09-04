@@ -6,8 +6,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
+	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -72,13 +76,19 @@ func (c *managementClient) request(t *testing.T, method, path string, body any, 
 func (c *managementClient) waitReady(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
+	lastStatus := 0
+	transportFailed := false
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, c.base+"/auth/me", nil)
 		must(t, err, "readiness request")
 		req.Host = "admin.gate.test"
+		// 与实际管理请求使用同一受信 HTTPS 前置代理语义，Host 才规范化为 :443。
+		req.Header.Set("X-Forwarded-Proto", "https")
 		r, e := c.client.Do(req)
+		transportFailed = e != nil
 		if e == nil {
 			code := r.StatusCode
+			lastStatus = code
 			must(t, r.Body.Close(), "close readiness")
 			if code == http.StatusUnauthorized {
 				return
@@ -86,7 +96,7 @@ func (c *managementClient) waitReady(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatal("candidate Management listener did not become ready")
+	t.Fatalf("candidate Management listener did not become ready: last_status=%d transport_failed=%t", lastStatus, transportFailed)
 }
 func (c *managementClient) login(t *testing.T, password string) {
 	t.Helper()
@@ -179,4 +189,35 @@ func (c *managementClient) waitActive(t *testing.T, tunnel string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("active TCP did not appear in product counters")
+}
+
+// 使用生产 Handler 验证 readiness 的代理元数据；SQLite 只在临时目录初始化，
+// 不启动候选或接触任何固定 Profile。401 仍是唯一就绪状态，400 不能被当作 ready。
+func TestManagementReadinessTrustedHTTPSProxy(t *testing.T) {
+	store, err := sqlite.Open(t.Context(), t.TempDir())
+	must(t, err, "open readiness fixture")
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error("close readiness fixture", err)
+		}
+	})
+	handler, err := api.NewHandler(api.HandlerOptions{
+		Management: serverconfig.Management{PublicURL: "https://admin.gate.test", TrustedProxies: []string{"127.0.0.1/32"}},
+		Store:      store, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	must(t, err, "construct production Management handler")
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	client := newManagement(t, 0, &secretAudit{})
+	client.base = server.URL + "/api/v1"
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, client.base+"/auth/me", nil)
+	must(t, err, "construct missing-proto request")
+	request.Host = "admin.gate.test"
+	response, err := client.client.Do(request)
+	must(t, err, "request missing proxy protocol")
+	must(t, response.Body.Close(), "close rejected readiness response")
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing proxy protocol status=%d want=400", response.StatusCode)
+	}
+	client.waitReady(t)
 }
