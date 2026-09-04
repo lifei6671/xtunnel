@@ -107,8 +107,14 @@ select_go_command() {
         generator_build_output=$(wslpath -w "$generator_temp")
         actual_go_version=$(run_go env GOVERSION)
         actual_toolchain_mode=$(run_go env GOTOOLCHAIN)
-        [ "$actual_go_version" = 'go1.27.0' ] || \
-            fail "Go version mismatch: got $actual_go_version, want go1.27.0"
+        case "$actual_go_version" in
+            go1.27.*)
+                go_patch=${actual_go_version#go1.27.}
+                case "$go_patch" in ''|0*|*[!0-9]*) fail "Go version mismatch: got $actual_go_version, want Go 1.27.x" ;; esac
+                [ "$go_patch" -ge 1 ] || fail "Go version mismatch: got $actual_go_version, want Go 1.27.x"
+                ;;
+            *) fail "Go version mismatch: got $actual_go_version, want Go 1.27.x" ;;
+        esac
         [ "$actual_toolchain_mode" = 'local' ] || \
             fail "GOTOOLCHAIN mismatch: got $actual_toolchain_mode, want local"
         return

@@ -35,6 +35,18 @@ verify_manifest_value() {
         fail "prebuilt manifest $manifest_key must equal $expected_value"
 }
 
+verify_go_127_patch() {
+    actual_version=$(manifest_value go_version)
+    case "$actual_version" in
+        go1.27.*)
+            patch=${actual_version#go1.27.}
+            case "$patch" in ''|0*|*[!0-9]*) fail "prebuilt manifest go_version must be Go 1.27.x, got $actual_version" ;; esac
+            [ "$patch" -ge 1 ] || fail "prebuilt manifest go_version must be Go 1.27.x, got $actual_version"
+            ;;
+        *) fail "prebuilt manifest go_version must be Go 1.27.x, got $actual_version" ;;
+    esac
+}
+
 verify_file_hash() {
     verify_path=$1
     expected_hash=$2
@@ -179,7 +191,7 @@ if [ -n "$prebuilt_dir" ]; then
         [ -f "$prebuilt_dir/$binary_name" ] || fail "prebuilt $binary_name not found"
     done
 
-    verify_manifest_value go_version go1.27.0
+    verify_go_127_patch
     verify_manifest_value toolchain local
     verify_manifest_value goos linux
     verify_manifest_value goarch amd64

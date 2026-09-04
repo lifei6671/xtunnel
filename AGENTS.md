@@ -23,9 +23,9 @@
 ## Go 1.27 强制基线
 
 - 项目必须使用 Go 1.27。根 `go.mod` 必须声明 `go 1.27`。
-- 根 `go.mod` 的 `toolchain` 指令记录稳定的精确 `go1.27.x` 补丁版本；`tools/go.mod`、 CI、OCI Builder 和版本检查入口必须使用同一版本，禁止写入 `latest`、`stable` 或占位值。
-- `compose.codex.yml` 的 Docker Desktop 本地验证 Runner 固定为 `golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466`，并强制 `GOTOOLCHAIN=local`、`GOFLAGS=-mod=readonly`；本地结果仅作为开发反馈，不替代 CI、OCI 或 Release 证据。
-- 本地开发、测试、代码生成、CI 和发布构建必须设置 `GOTOOLCHAIN=local`。执行 Go 命令前先检查 `go env GOVERSION` 和 `go env GOTOOLCHAIN`；版本或模式不匹配时快速失败，不得自动下载或切换工具链，也不得把结果作为验收证据。
+- 根 `go.mod` 的 `toolchain` 指令记录当前最低稳定补丁 `go1.27.1`；`tools/go.mod` 使用相同下限。CI、OCI Builder、Docker Desktop Runner 和版本检查入口只允许稳定的 `go1.27.[1-9][0-9]*`，每次构建选择该分支可用的最新补丁，禁止写入 `latest`、`stable` 或 1.28。
+- `compose.codex.yml` 的 Docker Desktop 本地验证 Runner 使用 `golang:1.27-bookworm` 并在每次入口执行 `--pull always`，同时强制 `GOTOOLCHAIN=local`、`GOFLAGS=-mod=readonly`；本地结果仅作为开发反馈，不替代 CI、OCI 或 Release 证据。
+- 本地开发、测试、代码生成、CI 和发布构建必须设置 `GOTOOLCHAIN=local`。执行 Go 命令前先检查 `go env GOVERSION` 和 `go env GOTOOLCHAIN`；版本或模式不匹配时快速失败，不得自动下载、切换到 1.28 或把结果作为验收证据。
 - 项目允许并应在适合的实现中优先采用稳定 Go 1.27 能力，不兼容 Go 1.26 及更早工具链，但不得为了展示新语法增加无关复杂度。
 - 不得新增旧 Go 版本兼容垫片。`GOEXPERIMENT`、tip-only API、开发分支能力和未进入稳定 Go 1.27 的特性默认禁止；确需使用时必须先获得明确授权并同步技术方案和验收规则。
 - 调整 Go minor/patch 版本、放宽兼容范围或改变工具链固定策略属于开发基线变更，必须先获得明确确认，并同步技术方案、开发计划、根/工具 Module、CI、OCI Builder 和验证证据。
@@ -147,7 +147,7 @@ Do not create ad-hoc Docker runners.
 
 Do not mount host Go module or build caches into containers.
 
-The runner uses the repository-pinned `golang:1.27.0-bookworm` image digest and rejects any Go version other than `go1.27.0`.
+The runner pulls `golang:1.27-bookworm` on every run and rejects every version outside stable Go `1.27.1+`.
 
 If Docker validation cannot run because of an environment problem, report the failure.
 Do not fall back to WSL or another Linux environment.

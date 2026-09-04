@@ -52,7 +52,7 @@ func TestTCPEchoEndToEnd(t *testing.T) {
 	firstOrigin, firstOriginDone := startEchoOrigin(t, ctx)
 	secondOrigin, secondOriginDone := startEchoOrigin(t, ctx)
 	store := openStoreWithTunnelAndService(t, ctx, firstOrigin)
-	gatewayIdentity, err := gateway.LoadOrCreatePinnedIdentity(t.TempDir(), "gateway.integration.test", true, time.Now())
+	gatewayIdentity, err := gateway.LoadOrCreatePinnedIdentity(newGatewayTestDataDir(t), "gateway.integration.test", true, time.Now())
 	if err != nil {
 		t.Fatalf("create Gateway identity: %v", err)
 	}

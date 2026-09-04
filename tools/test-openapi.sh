@@ -270,7 +270,7 @@ cat >"$fake_go_bin/go" <<'EOF'
 #!/bin/sh
 case "${1-}:${2-}" in
     env:GOVERSION)
-        printf 'go1.27.0\n'
+        printf '%s\n' "${FAKE_GO_VERSION:-go1.27.1}"
         ;;
     env:GOTOOLCHAIN)
         printf 'local\n'
@@ -284,6 +284,12 @@ chmod 0755 "$generator_bootstrap_tools/bootstrap-openapi.sh" \
     "$generator_bootstrap_tools/check-go-version.sh" \
     "$generator_bootstrap_bin/vacuum" "$generator_bootstrap_bin/oapi-codegen" \
     "$fake_go_bin/go"
+expect_status 0 accepts-current-go-127-patch env GOTOOLCHAIN=local \
+    PATH="$fake_go_bin:$PATH" sh "$generator_bootstrap_tools/check-go-version.sh"
+expect_status 1 rejects-go-128 env GOTOOLCHAIN=local FAKE_GO_VERSION=go1.28.0 \
+    PATH="$fake_go_bin:$PATH" sh "$generator_bootstrap_tools/check-go-version.sh"
+expect_status 1 rejects-go-127-leading-zero-patch env GOTOOLCHAIN=local FAKE_GO_VERSION=go1.27.01 \
+    PATH="$fake_go_bin:$PATH" sh "$generator_bootstrap_tools/check-go-version.sh"
 expect_status 1 generator-build-failure env GOTOOLCHAIN=local \
     PATH="$fake_go_bin:$PATH" sh "$generator_bootstrap_tools/bootstrap-openapi.sh"
 grep -F 'oapi-codegen build failed' "$test_root/generator-build-failure.out" >/dev/null || \

@@ -68,7 +68,7 @@ Caddy / Nginx ── XTunnel Server
 
 ### 1. 构建 Server 与 Agent
 
-Server 只支持 Linux `amd64` / `arm64`。构建环境需要仓库固定的 Go 1.27.0、
+Server 只支持 Linux `amd64` / `arm64`。构建环境需要 Go `1.27.1` 或更新的 `1.27.x` 补丁版、
 Node 24.19.0 与 npm 11.17.0：
 
 ```sh

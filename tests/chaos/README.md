@@ -7,7 +7,7 @@
 ## 前置条件
 
 - 运行环境必须是 Linux，且仓库中存在可执行的 `tools/check-go-version.sh`。
-- 直接运行源码时，Linux 必须安装项目固定的 Go `go1.27.0`；Runner 会先设置
+- 直接运行源码时，Linux 必须安装 Go `go1.27.1` 或更新的 `1.27.x`；Runner 会先设置
   `GOTOOLCHAIN=local` 并执行项目版本检查，不会下载或切换工具链。
 - Linux 没有 Go 时，可在 Windows 使用项目固定工具链生成 `linux/amd64`、
   `GOAMD64=v1`、`CGO_ENABLED=0` 的 `bootstrap.test` 与 `manifest.txt`：
@@ -126,7 +126,7 @@ ID、旧 Ack、OPENING、Usage exactly-once、单边 EOF 和 SIGTERM 接线仍�
 
 ## 构建与运行
 
-直接在装有项目固定 Go `go1.27.0` 的 Linux 环境运行：
+直接在装有 Go `go1.27.1` 或更新的 `1.27.x` 的 Linux 环境运行：
 
 ```sh
 ./tests/chaos/run-m7-03.sh -m smoke
@@ -172,7 +172,7 @@ Restore 在 write/fsync/rename 边界的确定性故障注入；`full` 额外运
 hard-exit、Gateway Key/Certificate rename 后真实子进程 `SIGKILL`、Restore 两次目录
 切换后真实子进程 `SIGKILL`，以及 Restore interrupted-state 恢复矩阵。
 
-直接在装有项目固定 Go `go1.27.0` 的 Linux 环境运行：
+直接在装有 Go `go1.27.1` 或更新的 `1.27.x` 的 Linux 环境运行：
 
 ```sh
 ./tests/chaos/run-m7-04.sh -m smoke
@@ -221,7 +221,7 @@ Listener 进入生产 Server/Gateway，经 Token-only Agent 到 Origin，不使�
 
 ## 构建与运行
 
-直接运行要求 Linux root、项目固定 Go `go1.27.0`、`GOTOOLCHAIN=local`，并安装
+直接运行要求 Linux root、Go `go1.27.1` 或更新的 `1.27.x`、`GOTOOLCHAIN=local`，并安装
 `ip`、`tc`、`nft`、`ss`、`timeout` 和 `sha256sum`：
 
 ```sh

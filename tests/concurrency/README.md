@@ -20,7 +20,7 @@
 ## 环境要求
 
 - Linux amd64；
-- 项目固定 Go `1.27.0`，`GOTOOLCHAIN=local`；
+- Go `1.27.1` 或更新的 `1.27.x` 补丁版，`GOTOOLCHAIN=local`；
 - `CGO_ENABLED=1`，用于原生 Race Detector；
 - Git、`go tool pprof`，以及可用的 C 编译器；
 - `full` 需要仓库 CI 使用的 Node/npm；Runner 会先执行 Web 的 `npm ci`、静态检查和

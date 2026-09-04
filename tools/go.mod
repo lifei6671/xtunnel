@@ -2,7 +2,7 @@ module github.com/lifei6671/xtunnel/tools
 
 go 1.27
 
-toolchain go1.27.0
+toolchain go1.27.1
 
 require (
 	github.com/dprotaso/go-yit v0.0.0-20220510233725-9ba8df137936 // indirect

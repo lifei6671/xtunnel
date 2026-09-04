@@ -1,7 +1,6 @@
 #!/bin/sh
 set -eu
 
-expected_version='go1.27.0'
 
 # 必须在调用 Go 前检查环境；否则 toolchain 指令可能先下载或切换工具链，导致
 # 不合规的工具链进入构建过程后才被发现。
@@ -18,9 +17,24 @@ if [ "$actual_mode" != 'local' ]; then
     exit 1
 fi
 
-if [ "$actual_version" != "$expected_version" ]; then
-    echo "expected $expected_version, got $actual_version" >&2
-    exit 1
-fi
+case "$actual_version" in
+    go1.27.*)
+        patch=${actual_version#go1.27.}
+        case "$patch" in
+            ''|0*|*[!0-9]*)
+                echo "expected Go 1.27.x, got $actual_version" >&2
+                exit 1
+                ;;
+        esac
+        [ "$patch" -ge 1 ] || {
+            echo "expected Go 1.27.x, got $actual_version" >&2
+            exit 1
+        }
+        ;;
+    *)
+        echo "expected Go 1.27.x, got $actual_version" >&2
+        exit 1
+        ;;
+esac
 
 echo "Go toolchain check passed: $actual_version ($actual_mode)"

@@ -355,7 +355,7 @@ func (connection *countingConn) Close() error {
 
 func startPinnedDiagnosticGateway(t *testing.T, tokenHost string) string {
 	t.Helper()
-	identity, err := servergateway.LoadOrCreatePinnedIdentity(t.TempDir(), tokenHost, true, time.Now())
+	identity, err := servergateway.LoadOrCreatePinnedIdentity(newGatewayTestDataDir(t), tokenHost, true, time.Now())
 	if err != nil {
 		t.Fatalf("LoadOrCreatePinnedIdentity() error = %v", err)
 	}

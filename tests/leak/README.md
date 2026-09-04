@@ -25,7 +25,7 @@ Harness 不检查 TCP `TIME_WAIT=0`，也不把旧 generation 合法存续的 AC
 
 ## 运行
 
-直接在固定 Go `go1.27.0` 的 Linux amd64 环境运行：
+直接在 Go `go1.27.1` 或更新的 `1.27.x` Linux amd64 环境运行：
 
 ```sh
 sh ./tests/leak/run-m7-07.sh -m smoke

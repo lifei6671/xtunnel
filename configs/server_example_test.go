@@ -12,6 +12,7 @@ import (
 	configschemas "github.com/lifei6671/xtunnel/configs"
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
+	"github.com/lifei6671/xtunnel/internal/server/pathprofile"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -70,11 +71,15 @@ func serverExampleSection(t *testing.T, example map[string]any) map[string]any {
 
 func assertServerExampleCoversSchemaAndLoads(t *testing.T, data []byte, example map[string]any, nativeOS string) {
 	t.Helper()
-	// 两份示例在各自原生平台直接验证路径语义；其他测试宿主以临时绝对路径覆盖。
-	// 两条路径都只验证同一 Schema，不把示例值维护成第二套默认值。
+	// 两份示例在各自原生平台直接验证路径语义；其他测试宿主使用该宿主允许的覆盖值。
+	// Windows 前台 Profile 不接受任意临时目录，故使用 auto 触发同一份默认路径解析。
 	var overrides map[string]string
 	if runtime.GOOS != nativeOS {
-		overrides = map[string]string{"server.data_dir": t.TempDir()}
+		dataDir := t.TempDir()
+		if runtime.GOOS == "windows" {
+			dataDir = pathprofile.AutomaticDataDir
+		}
+		overrides = map[string]string{"server.data_dir": dataDir}
 	}
 	if _, err := serverconfig.Load(baseconfig.Options{
 		YAML: data,

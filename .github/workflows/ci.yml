@@ -47,11 +47,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Setup Go 1.27.0
+      - name: Setup latest Go 1.27.x
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.27.0'
-          check-latest: false
+          go-version: '1.27.x'
+          check-latest: true
           cache: false
 
       - name: Setup Node 24.19.0
@@ -64,12 +64,11 @@ jobs:
             tools/openapi-ts/package-lock.json
             web/package-lock.json
 
-      - name: Verify runner and fixed toolchains
+      - name: Verify runner and supported toolchains
         shell: bash
         run: |
           set -euo pipefail
           test "$(uname -m)" = "${{ matrix.uname_arch }}"
-          test "$(go env GOVERSION)" = 'go1.27.0'
           test "$(go env GOTOOLCHAIN)" = 'local'
           test "$(node --version)" = 'v24.19.0'
           test "$(npm --version)" = '11.17.0'
@@ -271,6 +270,7 @@ jobs:
             shift
             log="$RUNNER_TEMP/oci-version-$name.log"
             if docker buildx build \
+              --pull \
               --progress plain \
               --platform '${{ matrix.platform }}' \
               --target versioned-go-source \
@@ -358,11 +358,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Setup Go 1.27.0
+      - name: Setup latest Go 1.27.x
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.27.0'
-          check-latest: false
+          go-version: '1.27.x'
+          check-latest: true
           cache: false
 
       - name: Setup Node 24.19.0
@@ -396,7 +396,6 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = '${{ matrix.uname_arch }}'
-          test "$(go env GOVERSION)" = 'go1.27.0'
           test "$(go env GOTOOLCHAIN)" = 'local'
           ./tools/check-go-version.sh
 
@@ -463,11 +462,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Setup Go 1.27.0
+      - name: Setup latest Go 1.27.x
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.27.0'
-          check-latest: false
+          go-version: '1.27.x'
+          check-latest: true
           cache: false
 
       - name: Setup Node 24.19.0
@@ -478,7 +477,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Verify fixed toolchains
+      - name: Verify supported toolchains
         shell: powershell
         run: |
           Set-StrictMode -Version Latest
@@ -499,9 +498,6 @@ jobs:
           }
           if ((go env GOARCH) -ne 'amd64') {
             throw 'Go target architecture must be amd64'
-          }
-          if ((go env GOVERSION) -ne 'go1.27.0') {
-            throw 'Go version must be go1.27.0'
           }
           if ((go env GOTOOLCHAIN) -ne 'local') {
             throw 'GOTOOLCHAIN must be local'
@@ -598,8 +594,8 @@ jobs:
           }
           $serverToolchain = go version $serverPath
           if ($LASTEXITCODE -ne 0) { throw 'Windows amd64 Server toolchain readback failed' }
-          if (($serverToolchain -join "`n") -notmatch 'go1\.27\.0') {
-            throw 'Windows amd64 Server toolchain readback must contain go1.27.0'
+          if (($serverToolchain -join "`n") -notmatch 'go1\.27\.[1-9]\d*') {
+            throw 'Windows amd64 Server toolchain readback must contain Go 1.27.x'
           }
 
       - name: Cross-build Windows arm64 Agent and Server
@@ -713,11 +709,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Setup Go 1.27.0
+      - name: Setup latest Go 1.27.x
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.27.0'
-          check-latest: false
+          go-version: '1.27.x'
+          check-latest: true
           cache: false
 
       - name: Setup Node 24.19.0
@@ -728,7 +724,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Verify native arm64 runner and fixed Go toolchain
+      - name: Verify native arm64 runner and supported Go toolchain
         shell: powershell
         run: |
           Set-StrictMode -Version Latest
@@ -749,9 +745,6 @@ jobs:
           }
           if ((go env GOARCH) -ne 'arm64') {
             throw 'Go target architecture must be arm64'
-          }
-          if ((go env GOVERSION) -ne 'go1.27.0') {
-            throw 'Go version must be go1.27.0'
           }
           if ((go env GOTOOLCHAIN) -ne 'local') {
             throw 'GOTOOLCHAIN must be local'
@@ -825,8 +818,8 @@ jobs:
           }
           $serverToolchain = go version $serverPath
           if ($LASTEXITCODE -ne 0) { throw 'native Windows arm64 Server toolchain readback failed' }
-          if (($serverToolchain -join "`n") -notmatch 'go1\.27\.0') {
-            throw 'native Windows arm64 Server toolchain readback must contain go1.27.0'
+          if (($serverToolchain -join "`n") -notmatch 'go1\.27\.[1-9]\d*') {
+            throw 'native Windows arm64 Server toolchain readback must contain Go 1.27.x'
           }
 
       - name: Run native arm64 Agent SCM Token Bootstrap and Shutdown smoke
@@ -894,11 +887,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Setup Go 1.27.0
+      - name: Setup latest Go 1.27.x
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.27.0'
-          check-latest: false
+          go-version: '1.27.x'
+          check-latest: true
           cache: false
 
       - name: Setup Node 24.19.0
@@ -947,11 +940,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Setup Go 1.27.0
+      - name: Setup latest Go 1.27.x
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.27.0'
-          check-latest: false
+          go-version: '1.27.x'
+          check-latest: true
           cache: false
 
       - name: Setup Node 24.19.0
@@ -997,11 +990,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Setup Go 1.27.0
+      - name: Setup latest Go 1.27.x
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.27.0'
-          check-latest: false
+          go-version: '1.27.x'
+          check-latest: true
           cache: false
 
       - name: Setup Node 24.19.0
@@ -1050,11 +1043,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Setup Go 1.27.0
+      - name: Setup latest Go 1.27.x
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.27.0'
-          check-latest: false
+          go-version: '1.27.x'
+          check-latest: true
           cache: false
 
       - name: Setup Node 24.19.0

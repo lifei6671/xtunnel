@@ -310,7 +310,7 @@ AGENTS.md 明确禁止 Token 进入错误文本。
 
 | Gate | 内容 | 平台 |
 |------|------|------|
-| 工具链验证 | `go1.27.0` + `GOTOOLCHAIN=local` + Node `v24.19.0` + npm `11.17.0` | Linux amd64/arm64 |
+| 工具链验证 | Go `1.27.1+`（仅 `1.27.x`）+ `GOTOOLCHAIN=local` + Node `v24.19.0` + npm `11.17.0` | Linux amd64/arm64 |
 | Proto 契约 | `lint` + `breaking` + `generate-check` | Linux amd64/arm64 |
 | OpenAPI 契约 | `validate` + `test-openapi.sh` | Linux amd64/arm64 |
 | Web 构建 | `ci` + `check` + `build` | Linux amd64/arm64 |

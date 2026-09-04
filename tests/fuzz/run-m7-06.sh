@@ -126,7 +126,6 @@ git_root=$(git rev-parse --show-toplevel) || fail 'cannot resolve Git repository
 
 export GOTOOLCHAIN=local
 "$repo_root/tools/check-go-version.sh"
-[ "$(go env GOVERSION)" = go1.27.0 ] || fail 'Go version must equal go1.27.0'
 [ "$(go env GOTOOLCHAIN)" = local ] || fail 'GOTOOLCHAIN must equal local'
 
 if [ "$mode" = full ] && [ -n "$(git status --porcelain --untracked-files=all)" ]; then

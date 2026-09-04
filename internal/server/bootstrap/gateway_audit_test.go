@@ -20,7 +20,7 @@ import (
 
 func TestReconcileGatewayRotationAuditPersistsBeforeClearingJournal(t *testing.T) {
 	ctx := context.Background()
-	dataDir := t.TempDir()
+	dataDir := newGatewayAuditTestDataDir(t)
 	store, err := sqlite.Open(ctx, dataDir)
 	if err != nil {
 		t.Fatalf("sqlite.Open() error = %v", err)
@@ -80,7 +80,7 @@ func TestReconcileGatewayRotationAuditPersistsBeforeClearingJournal(t *testing.T
 
 func TestReconcileGatewayRotationAuditRetriesAfterDatabaseFailure(t *testing.T) {
 	ctx := context.Background()
-	dataDir := t.TempDir()
+	dataDir := newGatewayAuditTestDataDir(t)
 	store, err := sqlite.Open(ctx, dataDir)
 	if err != nil {
 		t.Fatalf("sqlite.Open() error = %v", err)
@@ -138,7 +138,7 @@ func TestReconcileGatewayRotationAuditRetriesAfterDatabaseFailure(t *testing.T) 
 
 func TestReconcileGatewayRotationAuditTreatsPostUnlinkSyncFailureAsWarning(t *testing.T) {
 	ctx := context.Background()
-	dataDir := t.TempDir()
+	dataDir := newGatewayAuditTestDataDir(t)
 	store, err := sqlite.Open(ctx, dataDir)
 	if err != nil {
 		t.Fatalf("sqlite.Open() error = %v", err)

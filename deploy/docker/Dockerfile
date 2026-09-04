@@ -11,14 +11,17 @@ RUN test "$(node --version)" = "v24.19.0" \
 COPY web/ ./
 RUN npm run check && npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS go-source
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS go-source
 ENV GOTOOLCHAIN=local \
     CGO_ENABLED=0
 
 WORKDIR /src
 
 COPY go.mod go.sum ./
-RUN test "$(go env GOVERSION)" = "go1.27.0" \
+RUN go_version="$(go env GOVERSION)" \
+    && case "$go_version" in go1.27.*) go_patch=${go_version#go1.27.} ;; *) exit 1 ;; esac \
+    && case "$go_patch" in ''|0*|*[!0-9]*) exit 1 ;; esac \
+    && test "$go_patch" -ge 1 \
     && test "$(go env GOTOOLCHAIN)" = "local"
 RUN go mod download && go mod verify
 

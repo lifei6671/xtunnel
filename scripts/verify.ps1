@@ -19,23 +19,9 @@ try {
     }
 
     if ($exitCode -eq 0) {
-        # 与仓库 toolchain、CI 和 OCI Builder 使用同一个精确补丁版本。
-        $goVersion = (& docker compose -f $composeFile exec -T go-runner go env GOVERSION).Trim()
+        & docker compose -f $composeFile exec -T go-runner sh ./tools/check-go-version.sh
         if ($LASTEXITCODE -ne 0) {
             $exitCode = $LASTEXITCODE
-        }
-        elseif ($goVersion -ne 'go1.27.0') {
-            throw "go-runner must use go1.27.0, got $goVersion"
-        }
-    }
-
-    if ($exitCode -eq 0) {
-        $goToolchain = (& docker compose -f $composeFile exec -T go-runner go env GOTOOLCHAIN).Trim()
-        if ($LASTEXITCODE -ne 0) {
-            $exitCode = $LASTEXITCODE
-        }
-        elseif ($goToolchain -ne 'local') {
-            throw "go-runner GOTOOLCHAIN must be local, got $goToolchain"
         }
     }
 

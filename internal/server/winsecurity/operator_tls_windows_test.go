@@ -22,7 +22,7 @@ func TestServiceSIDUsesDocumentedServiceNameAlgorithm(t *testing.T) {
 	}
 }
 
-func TestOperatorTLSSecurityPolicyAcceptsOnlyDocumentedDescriptors(t *testing.T) {
+func TestOperatorTLSSecurityPolicyValidatesSecurityProperties(t *testing.T) {
 	policy, err := newOperatorTLSSecurity()
 	if err != nil {
 		t.Fatalf("newOperatorTLSSecurity() error = %v", err)
@@ -31,26 +31,32 @@ func TestOperatorTLSSecurityPolicyAcceptsOnlyDocumentedDescriptors(t *testing.T)
 	if err != nil {
 		t.Fatalf("serviceSID(XTunnelServer) error = %v", err)
 	}
-	validKey := "O:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;" + service.String() + ")"
+	validKey := "O:SYD:(A;;FA;;;SY)(A;;GR;;;BA)(A;;GR;;;" + service.String() + ")"
 	validCert := validKey + "(A;;GR;;;BU)"
 	for _, test := range []struct {
-		name     string
-		sddl     string
-		expected []accessACE
-		wantErr  bool
+		name       string
+		sddl       string
+		privateKey bool
+		directory  bool
+		wantErr    bool
 	}{
-		{name: "system owned private key", sddl: validKey, expected: policy.privateKey},
-		{name: "administrators owned certificate", sddl: "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;" + service.String() + ")(A;;GR;;;BU)", expected: policy.certificate},
-		{name: "private key users read", sddl: validCert, expected: policy.privateKey, wantErr: true},
-		{name: "unknown owner", sddl: "O:BUD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;" + service.String() + ")", expected: policy.privateKey, wantErr: true},
-		{name: "inherited dacl", sddl: "O:SYD:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;" + service.String() + ")", expected: policy.privateKey, wantErr: true},
+		{name: "system owned private key with split owner ACEs", sddl: validKey, privateKey: true},
+		{name: "administrators owned certificate with users read", sddl: "O:BAD:(A;;FA;;;SY)(A;;GR;;;BA)(A;;GR;;;" + service.String() + ")(A;;GR;;;BU)"},
+		{name: "certificate accepts inherited service read", sddl: "O:SYD:AI(A;ID;GR;;;" + service.String() + ")(A;;GR;;;BU)"},
+		{name: "private key users read", sddl: validCert, privateKey: true, wantErr: true},
+		{name: "untrusted file write", sddl: validCert + "(A;;GW;;;BU)", wantErr: true},
+		{name: "service SID write", sddl: validKey + "(A;;GW;;;" + service.String() + ")", privateKey: true, wantErr: true},
+		{name: "untrusted parent delete child", sddl: validCert + "(A;;0x40;;;BU)", directory: true, wantErr: true},
+		{name: "service SID has no read", sddl: "O:SYD:(A;;FA;;;SY)(A;;GR;;;BU)", privateKey: true, wantErr: true},
+		{name: "unknown owner", sddl: "O:BUD:(A;;FA;;;SY)(A;;GR;;;" + service.String() + ")", privateKey: true, wantErr: true},
+		{name: "deny ACE cannot prove effective access", sddl: validKey + "(D;;GW;;;BU)", privateKey: true, wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			descriptor, err := windows.SecurityDescriptorFromString(test.sddl)
 			if err != nil {
 				t.Fatalf("SecurityDescriptorFromString() error = %v", err)
 			}
-			err = validateOperatorTLSDescriptor(descriptor, policy.owners, test.expected)
+			err = validateOperatorTLSDescriptor(descriptor, policy, test.privateKey, test.directory)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("validateOperatorTLSDescriptor() error = %v, wantErr %t", err, test.wantErr)
 			}

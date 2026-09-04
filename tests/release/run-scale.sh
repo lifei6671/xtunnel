@@ -27,11 +27,12 @@ case "$mode" in smoke|full) ;; *) usage >&2; exit 2 ;; esac
 command -v go >/dev/null 2>&1 || fail 'Go is required'
 command -v timeout >/dev/null 2>&1 || fail 'timeout is required'
 command -v sha256sum >/dev/null 2>&1 || fail 'sha256sum is required'
-[ "$(go env GOVERSION)" = go1.27.0 ] || fail 'Go version must be go1.27.0'
 [ "$(go env GOTOOLCHAIN)" = local ] || fail 'GOTOOLCHAIN must be local'
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
+[ -x "$repo_dir/tools/check-go-version.sh" ] || fail 'repository root does not contain an executable Go version check'
+"$repo_dir/tools/check-go-version.sh"
 initial_commit=$(git -C "$repo_dir" rev-parse HEAD)
 initial_tree=$(git -C "$repo_dir" rev-parse 'HEAD^{tree}')
 initial_status=$(git -C "$repo_dir" status --porcelain --untracked-files=all)

@@ -104,8 +104,8 @@ trap 'exit 143' TERM
 compose config --quiet
 if [ "$build" -eq 1 ]; then
 	# 两个纯 Go Binary 顺序冷编译，避免资源受限的 WSL Builder 同时展开两棵编译图。
-	compose build server
-	compose build agent
+	compose build --pull server
+	compose build --pull agent
 fi
 
 start_compose() {

@@ -12,19 +12,22 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf16"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 const xtunnelServerServiceName = "XTunnelServer"
 
+// FILE_DELETE_CHILD is directory-specific access 0x40. x/sys exposes the
+// file aliases used by CreateFile but not this directory-only name.
+const fileDeleteChild windows.ACCESS_MASK = 0x00000040
+
 // ReadOperatorTLSFiles reads an external public-TLS pair without modifying it.
-// The M8 Windows policy deliberately accepts only a small, auditable ACL: the
-// operator retains SYSTEM/Administrators ownership, XTunnelServer has read
-// access, and the certificate may additionally be readable by Builtin Users.
-// Unknown, inherited, or deny ACEs fail closed instead of being interpreted as
-// an effective-access calculation that could miss group or parent-directory
-// privileges.
+// 外部证书管理器保留其 ACL 的组织方式；XTunnel 只验证启动所需的安全性质：
+// SYSTEM/Administrators 拥有对象，Service SID 能读取，且任何非所有者主体
+// 都不能借由文件或直接父目录修改、删除或接管对象。无法从 DACL 证明这些性质
+// 时快速失败，绝不通过修复或重写 operator-owned 文件来换取启动成功。
 func ReadOperatorTLSFiles(certPath, keyPath string) ([]byte, []byte, error) {
 	if filepath.Clean(certPath) == filepath.Clean(keyPath) {
 		return nil, nil, errors.New("public TLS certificate and private key must be distinct files")
@@ -45,10 +48,8 @@ func ReadOperatorTLSFiles(certPath, keyPath string) ([]byte, []byte, error) {
 }
 
 type operatorTLSSecurity struct {
-	owners      []*windows.SID
-	parentACEs  []accessACE
-	certificate []accessACE
-	privateKey  []accessACE
+	owners  []*windows.SID
+	service *windows.SID
 }
 
 func newOperatorTLSSecurity() (*operatorTLSSecurity, error) {
@@ -64,35 +65,10 @@ func newOperatorTLSSecurity() (*operatorTLSSecurity, error) {
 	if err != nil {
 		return nil, err
 	}
-	parent, err := externalTLSACEs(service, false)
-	if err != nil {
-		return nil, err
-	}
-	certificate, err := externalTLSACEs(service, true)
-	if err != nil {
-		return nil, err
-	}
 	return &operatorTLSSecurity{
-		owners:      []*windows.SID{system, administrators},
-		parentACEs:  parent,
-		certificate: certificate,
-		privateKey:  parent,
+		owners:  []*windows.SID{system, administrators},
+		service: service,
 	}, nil
-}
-
-func externalTLSACEs(service *windows.SID, certificate bool) ([]accessACE, error) {
-	if service == nil {
-		return nil, errors.New("XTunnelServer service SID is nil")
-	}
-	sddl := "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;" + service.String() + ")"
-	if certificate {
-		sddl += "(A;;GR;;;BU)"
-	}
-	descriptor, err := windows.SecurityDescriptorFromString(sddl)
-	if err != nil {
-		return nil, fmt.Errorf("create public TLS security descriptor: %w", err)
-	}
-	return descriptorACEs(descriptor)
 }
 
 func readOperatorTLSFile(path string, policy *operatorTLSSecurity, certificate bool) (result []byte, resultErr error) {
@@ -181,7 +157,7 @@ func openOperatorTLSParents(directory string, policy *operatorTLSSecurity) ([]wi
 			return fail(errors.New("public TLS path component is not a non-reparse directory"))
 		}
 		if index == len(components)-1 {
-			if err := validateOperatorTLSSecurity(handle, policy.owners, policy.parentACEs); err != nil {
+			if err := validateOperatorTLSSecurity(handle, policy, false, true); err != nil {
 				return fail(fmt.Errorf("validate public TLS parent directory: %w", err))
 			}
 		}
@@ -197,23 +173,48 @@ func validateOperatorTLSFile(handle windows.Handle, policy *operatorTLSSecurity,
 	if information.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || information.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 || (information.FileAttributes&windows.FILE_ATTRIBUTE_DEVICE) != 0 || information.VolumeSerialNumber == 0 || information.FileIndexHigh == 0 && information.FileIndexLow == 0 {
 		return errors.New("public TLS file is not a stable regular local-volume file")
 	}
-	expected := policy.privateKey
-	if certificate {
-		expected = policy.certificate
+	if err := validateOperatorTLSFileIdentity(handle); err != nil {
+		return err
 	}
-	return validateOperatorTLSSecurity(handle, policy.owners, expected)
+	return validateOperatorTLSSecurity(handle, policy, !certificate, false)
 }
 
-func validateOperatorTLSSecurity(handle windows.Handle, owners []*windows.SID, expected []accessACE) error {
+func validateOperatorTLSFileIdentity(handle windows.Handle) error {
+	var information operatorTLSFileIDInfo
+	if err := windows.GetFileInformationByHandleEx(
+		handle,
+		windows.FileIdInfo,
+		(*byte)(unsafe.Pointer(&information)),
+		uint32(unsafe.Sizeof(information)),
+	); err != nil {
+		return fmt.Errorf("read public TLS file identity: %w", err)
+	}
+	if information.volume == 0 {
+		return errors.New("public TLS file has an invalid volume identity")
+	}
+	for _, value := range information.file {
+		if value != 0 {
+			return nil
+		}
+	}
+	return errors.New("public TLS file has an invalid file identity")
+}
+
+type operatorTLSFileIDInfo struct {
+	volume uint64
+	file   [16]byte
+}
+
+func validateOperatorTLSSecurity(handle windows.Handle, policy *operatorTLSSecurity, privateKey, directory bool) error {
 	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return fmt.Errorf("read public TLS security descriptor: %w", err)
 	}
-	return validateOperatorTLSDescriptor(descriptor, owners, expected)
+	return validateOperatorTLSDescriptor(descriptor, policy, privateKey, directory)
 }
 
-func validateOperatorTLSDescriptor(descriptor *windows.SECURITY_DESCRIPTOR, owners []*windows.SID, expected []accessACE) error {
-	if descriptor == nil {
+func validateOperatorTLSDescriptor(descriptor *windows.SECURITY_DESCRIPTOR, policy *operatorTLSSecurity, privateKey, directory bool) error {
+	if descriptor == nil || policy == nil || policy.service == nil {
 		return errors.New("public TLS security descriptor is nil")
 	}
 	owner, _, err := descriptor.Owner()
@@ -221,7 +222,7 @@ func validateOperatorTLSDescriptor(descriptor *windows.SECURITY_DESCRIPTOR, owne
 		return fmt.Errorf("read public TLS owner: %w", err)
 	}
 	ownerAllowed := false
-	for _, allowed := range owners {
+	for _, allowed := range policy.owners {
 		if owner != nil && allowed != nil && owner.Equals(allowed) {
 			ownerAllowed = true
 			break
@@ -230,21 +231,94 @@ func validateOperatorTLSDescriptor(descriptor *windows.SECURITY_DESCRIPTOR, owne
 	if !ownerAllowed {
 		return errors.New("public TLS owner is not SYSTEM or Administrators")
 	}
-	control, _, err := descriptor.Control()
-	if err != nil {
-		return fmt.Errorf("read public TLS security descriptor control: %w", err)
-	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
-		return errors.New("public TLS DACL is not protected")
-	}
-	actual, err := descriptorACEs(descriptor)
+	entries, err := operatorTLSACEs(descriptor)
 	if err != nil {
 		return fmt.Errorf("read public TLS DACL: %w", err)
 	}
-	if !sameACEs(actual, expected) {
-		return errors.New("public TLS DACL does not match the strict external-file policy")
+	serviceReadable := false
+	for _, entry := range entries {
+		if entry.flags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		if entry.typeID != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return errors.New("public TLS DACL contains an ACE whose effective access cannot be proven")
+		}
+		if entry.sid == nil {
+			return errors.New("public TLS DACL contains an ACE without a SID")
+		}
+		if sidIn(entry.sid, policy.owners) {
+			continue
+		}
+		if entry.mask&operatorTLSDangerousAccess(directory) != 0 {
+			return errors.New("public TLS DACL grants modification, deletion, or security-control access outside its trusted owner")
+		}
+		serviceSID := entry.sid.Equals(policy.service)
+		if privateKey && !serviceSID && entry.mask&operatorTLSReadAccess() != 0 {
+			return errors.New("public TLS private key DACL grants read access outside its trusted owner or Service SID")
+		}
+		if serviceSID && entry.mask&operatorTLSReadAccess() != 0 {
+			serviceReadable = true
+		}
+	}
+	if !serviceReadable {
+		return errors.New("public TLS DACL does not grant the XTunnelServer Service SID read access")
 	}
 	return nil
+}
+
+type operatorTLSACE struct {
+	typeID uint8
+	flags  uint8
+	mask   windows.ACCESS_MASK
+	sid    *windows.SID
+}
+
+func operatorTLSACEs(descriptor *windows.SECURITY_DESCRIPTOR) ([]operatorTLSACE, error) {
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return nil, err
+	}
+	if dacl == nil {
+		return nil, errors.New("DACL is absent")
+	}
+	entries := make([]operatorTLSACE, 0, dacl.AceCount)
+	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			return nil, fmt.Errorf("read DACL ACE %d: %w", index, err)
+		}
+		entries = append(entries, operatorTLSACE{
+			typeID: ace.Header.AceType,
+			flags:  ace.Header.AceFlags,
+			mask:   ace.Mask,
+			sid:    (*windows.SID)(unsafe.Pointer(&ace.SidStart)),
+		})
+	}
+	return entries, nil
+}
+
+func sidIn(candidate *windows.SID, allowed []*windows.SID) bool {
+	for _, value := range allowed {
+		if candidate != nil && value != nil && candidate.Equals(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func operatorTLSReadAccess() windows.ACCESS_MASK {
+	return windows.FILE_READ_DATA | windows.GENERIC_READ | windows.GENERIC_ALL | windows.MAXIMUM_ALLOWED
+}
+
+func operatorTLSDangerousAccess(directory bool) windows.ACCESS_MASK {
+	mask := windows.ACCESS_MASK(windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.FILE_WRITE_EA |
+		windows.FILE_WRITE_ATTRIBUTES | windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER |
+		windows.GENERIC_WRITE | windows.GENERIC_ALL | windows.MAXIMUM_ALLOWED)
+	if directory {
+		// 目录上的 FILE_DELETE_CHILD 允许删除不带 DELETE 权限的子文件。
+		mask |= fileDeleteChild
+	}
+	return mask
 }
 
 func validateOperatorTLSPath(path string) error {

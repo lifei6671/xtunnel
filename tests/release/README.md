@@ -5,7 +5,7 @@ OCI Layout。校验器逐个验证 OCI Descriptor 的 SHA-256 与大小、精确
 非 root 用户、进程入口、Agent 默认 `run`、Server 数据卷，以及 Image Config 和
 Layer 中不得出现的 Connection Token、Bearer Authorization 或 PEM Private Key 形状。
 
-正式入口只在固定 Go 1.27 和可用的 Docker Buildx 环境运行：
+正式入口只在 Go `1.27.1` 或更新的 `1.27.x` 与可用的 Docker Buildx 环境运行：
 
 ```sh
 GOTOOLCHAIN=local ./tests/release/run-m7-10.sh -o /tmp/xtunnel-m7-10

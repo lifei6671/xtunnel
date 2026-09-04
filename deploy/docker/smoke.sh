@@ -100,6 +100,7 @@ if [ "$build_image" -eq 1 ]; then
 		exit 1
 	fi
 	docker buildx build \
+		--pull \
 		--load \
 		--platform "$platform" \
 		--target "$target" \

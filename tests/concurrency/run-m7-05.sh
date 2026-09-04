@@ -177,7 +177,6 @@ case $(uname -m) in
     x86_64|amd64) ;;
     *) fail 'runner requires native Linux amd64' ;;
 esac
-[ "$(go env GOVERSION)" = go1.27.0 ] || fail 'Go version must equal go1.27.0'
 [ "$(go env GOTOOLCHAIN)" = local ] || fail 'GOTOOLCHAIN must equal local'
 [ "$(go env GOOS)" = linux ] || fail 'GOOS must equal linux'
 [ "$(go env GOARCH)" = amd64 ] || fail 'GOARCH must equal amd64'

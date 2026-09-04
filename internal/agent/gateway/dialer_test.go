@@ -16,7 +16,7 @@ import (
 )
 
 func TestDialContextUsesOnlyConnectionTokenPin(t *testing.T) {
-	identity, err := servergateway.LoadOrCreatePinnedIdentity(t.TempDir(), "gateway.example.test", true, time.Now())
+	identity, err := servergateway.LoadOrCreatePinnedIdentity(newGatewayTestDataDir(t), "gateway.example.test", true, time.Now())
 	if err != nil {
 		t.Fatalf("创建测试 Gateway 身份失败: %v", err)
 	}

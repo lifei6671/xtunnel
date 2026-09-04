@@ -6,7 +6,7 @@
 >
 > **当前阶段**：Post-Alpha M8 Windows Server · IN_PROGRESS（M8-03 · IN_PROGRESS）
 >
-> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 新增 6 项 Windows Server 任务，当前完成数为 `97/101`，M8 为 `2/6 IN_PROGRESS`；M8-01、M8-02 的实现、精确 CI、commit-bound 独立复审和用户阶段签核均已闭环，状态为 `DONE`。M8-03 已进入 `IN_PROGRESS`，M8-04 至 M8-06 均为 `NOT_STARTED`。M8-06 完整 Gate 与用户阶段签核完成前，不得把 Windows Server 宣称为受支持平台。
+> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 收敛为 5 项 Windows Server 基础支持任务，当前完成数为 `97/100`，M8 为 `2/5 IN_PROGRESS`；M8-01、M8-02 的实现、精确 CI、commit-bound 独立复审和用户阶段签核均已闭环，状态为 `DONE`。M8-03 已进入 `IN_PROGRESS`，M8-04、M8-05 均为 `NOT_STARTED`。M8-05 的 amd64 Preview Gate 与用户阶段签核完成前，不得把 Windows Server 宣称为正式支持平台。
 
 ---
 
@@ -48,7 +48,7 @@
 - 任务相关单元/集成/契约测试通过，断言覆盖关键业务字段和失败分支。
 - 验收命令在干净 checkout 或 CI 中成功。
 - 证据包含：Commit SHA、命令与结果摘要。M0-10 完成前，允许使用干净 checkout 的本地命令记录；M0-10 完成后，所有新 `DONE` 证据必须再附 CI Run 链接/编号。
-- Go 任务的证据必须记录 `go env GOVERSION` 和 `go env GOTOOLCHAIN`；实际工具链必须是 M0-01 批准的精确 `go1.27.x` 版本，且 `GOTOOLCHAIN=local`。
+- Go 任务的证据必须记录 `go env GOVERSION` 和 `go env GOTOOLCHAIN`；实际工具链必须是稳定的 `go1.27.1+`，且 `GOTOOLCHAIN=local`。
 - 没有未处理的安全、数据一致性、协议或资源泄漏类错误。
 - 若修改契约，总方案、Proto/Schema/OpenAPI 和相关 Golden Fixture 已同步。
 
@@ -87,7 +87,7 @@ M1 Secure TCP Data Plane Baseline
                                            ↓
                                   M8 Windows Server
 
-M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate ──→ M8-01 至 M8-06
+M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate ──→ M8-01 至 M8-05
 ```
 
 依赖规则：
@@ -98,7 +98,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 - M5 的 OpenAPI Entry Gate 可在 M4 后半段提前准备，Handler 和 Web 实现必须等 Gate 通过。
 - M6 的 Logging/Metrics 骨架可从 M0/M1 纵向渗透，但 M6 Registry、告警、查询 API 和 Dashboard 不得反向成为 M1 Gate 的依赖；安全操作的最小 Audit Event 契约与 append-only 写入由对应安全任务自身完成，M5/M6 只增加查询、导出和运维消费。
 - M7 只调优和验证已存在的正确性边界，不允许第一次实现 M1/M3 应有的上限与恢复机制。
-- M8 是 Alpha Gate 完成后的 Windows Server 范围扩展；M8-01 先冻结平台契约与构建基线，M8-02 至 M8-05 串行完成运行时、耐久性、本机 IPC、SCM 和发布矩阵，M8-06 才能改变用户可见支持结论。
+- M8 是 Alpha Gate 完成后的 Windows Server 范围扩展；M8-01 冻结契约与构建基线，M8-02 完成 Stable Target/Lock/文件身份，M8-03 至 M8-05 串行完成安全基线、SCM Runtime 与 amd64 Preview Gate。arm64 仅保持交叉构建兼容性；Windows 的在线维护、自动 Restore、事务升级回滚和自管理删除不属于当前 M8。
 
 ---
 
@@ -115,8 +115,8 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 7 | `DONE` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 10 | `DONE` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| M8 Windows Server | 6 | 2 | `IN_PROGRESS` | M7-10 | M8-06 |
-| **合计** | **101** | **97** |  |  |  |
+| M8 Windows Server | 5 | 2 | `IN_PROGRESS` | M7-10 | M8-05 |
+| **合计** | **100** | **97** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -128,7 +128,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M0-01 | 建立 Go Module 与目录骨架 | 无 | `go.mod`、`cmd/server`、`cmd/agent`、`internal/*` 骨架 | `go.mod` 声明 `go 1.27` 并由 `toolchain` 记录稳定的精确 `go1.27.x` 版本；提供 `GOTOOLCHAIN=local` 的版本检查入口；`go test ./...`、`go vet ./...`；无空壳公共抽象 | `DONE` |
+| M0-01 | 建立 Go Module 与目录骨架 | 无 | `go.mod`、`cmd/server`、`cmd/agent`、`internal/*` 骨架 | `go.mod` 声明 `go 1.27` 并由 `toolchain` 记录 `go1.27.1` 下限；提供只接受稳定 `1.27.x` 与 `GOTOOLCHAIN=local` 的版本检查入口；`go test ./...`、`go vet ./...`；无空壳公共抽象 | `DONE` |
 | M0-02 | Server Config Schema + Agent Token Bootstrap | M0-01 | `configs/server.schema.json`、Server Config、Agent Token Bootstrap CLI | Server Strict YAML 与 CLI>Env>YAML>Default；Agent 无 Schema/YAML，`run` 仅按 `--token`>`XTUNNEL_TOKEN`>OS Service Credential 取值；Linux 使用 systemd Credential，Windows SCM 使用 ProgramData DPAPI Machine-scope Credential；非空、无首尾空白、`xta_` 前缀、8192-byte 上限；未知 Flag/位置参数失败 | `DONE` |
 | M0-03 | Server/Agent 进程骨架 | M0-01、M0-02 | `cmd/server/main.go`、`cmd/agent/main.go`、启停生命周期 | 两个进程均可启动；SIGTERM 退出且释放资源 | `DONE` |
 | M0-04 | 结构化日志基座 | M0-01 | 共享 Logging 配置与 JSON Handler | 级别、时间、`request_id/trace_id` 字段稳定；无 Secret 输出 | `DONE` |
@@ -137,7 +137,7 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M0-07 | OpenAPI 骨架与校验 | M0-01 | `api/openapi/openapi.yaml`、校验入口 | 校验器选型/版本经依赖变更确认；OpenAPI Validate 通过；无占位 Server URL；CI 可执行漂移检查 | `DONE` |
 | M0-08 | Web 工程、生产构建与 Go Embed | M0-01、M0-07 | `web/package*.json`、Vite/React 骨架、`web/embed.go` | `npm ci`、Web Build、Go Embed 通过；Lockfile 不由 CI 改写 | `DONE` |
 | M0-09 | OCI/Compose 双栈与 Server/Agent Binary Service Self-install | M0-03、M0-08 | `deploy/docker`、Server/Agent `service install/uninstall`、隔离 `deploy/systemd/smoke.sh`、未接入启动路径的双栈监听原语 | OCI amd64/arm64、非 root、只读镜像、Server Data Volume + Runtime tmpfs；Agent 无 Volume，使用 `XTUNNEL_TOKEN` 且默认 `CMD ["run"]`。Linux Server/Agent 在 root/systemd>=249 快速失败，原子安装 Binary/Managed Unit，Server 另安装 `root:xtunnel-server 0640` 配置并预建 Data Target，Agent 另安装 root-only Credential；上一版官方 Server Shell Unit 只按精确内容接管，非托管 Unit 拒绝覆盖/删除。Windows Agent 支持 amd64/arm64、SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential，重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery；卸载保留持久配置/凭据/数据/服务身份；Windows 自卸载按需延迟到重启删除运行中 EXE；Compose IPv4/IPv6、原生 tcp4/tcp6、完整 Smoke | `DONE` |
-| M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-08 | CI Workflow | CI/OCI Builder 固定与 `go.mod toolchain` 一致的 `go1.27.x` 精确版本并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke。M0-09 的 Compose Runtime Smoke 仍由 M0-09 单独验收 | `DONE` |
+| M0-10 | CI 和跨平台构建矩阵 | M0-02至 M0-08 | CI Workflow | CI/OCI Builder 使用最新稳定 `1.27.x` 补丁并设置 `GOTOOLCHAIN=local`；干净 checkout 中 Proto/Web/Go 顺序构建；Linux amd64/arm64 进程 Smoke。M0-09 的 Compose Runtime Smoke 仍由 M0-09 单独验收 | `DONE` |
 | M0-11 | 首个 Admin Bootstrap | M0-03、M0-05 | `admin create`、`SETUP_REQUIRED`、本机 Bootstrap Socket/离线写入路径 | 无 Admin 时只启 Management；Server 运行时仅通过权限 `0600` 的本机 Socket 事务创建，停止时取得 External Lock 后写入；密码仅从 TTY/文件读取；重复创建拒绝 | `DONE` |
 | M0-12 | M0 Gate 验收 | M0-01至 M0-11 | M0 验收证据 | 下方 Gate Checklist 全部通过，且所有前置任务均有 CI Run 证据 | `DONE` |
 
@@ -159,7 +159,7 @@ M0-01 至 M0-11 + M0-10 ── M0-12（完整 M0 / 发布前 Gate）
 
 ## 5.3 M0 Gate Checklist
 
-- [x] 根 `go.mod` 声明 `go 1.27`，根/工具 Module、CI 和 OCI Builder 使用同一个稳定、精确的 `go1.27.x` 补丁版本；验收设置 `GOTOOLCHAIN=local`，并记录匹配的 `go env GOVERSION`/`GOTOOLCHAIN`。
+- [x] 根 `go.mod` 声明 `go 1.27`，根/工具 Module 记录 `go1.27.1` 下限，CI 和 OCI Builder 使用最新稳定 `1.27.x` 补丁；验收设置 `GOTOOLCHAIN=local`，并记录实际的 `go env GOVERSION`/`GOTOOLCHAIN`。
 - [x] `go test ./...` 通过。
 - [x] `go vet ./...` 通过。
 - [x] Server Config Schema、Strict Decode 与覆盖优先级通过；Agent Token Bootstrap 三种来源、优先级、输入边界与 Secret 不回显测试通过。
@@ -432,23 +432,21 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 | ID | 任务 | 依赖 | 产物 | 验收要点 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| M8-01 | Windows Server 契约、配置示例与双架构构建基线 | M7-10 | Post-Alpha Windows Server 契约、Windows Server 配置示例、Windows amd64/arm64 Build Floor | 冻结 `XTunnelServer`、LocalService + Service SID、ProgramFiles/ProgramData 固定路径及精确 Protected DACL（Config 对 Service SID 只读，Data/Runtime 为 Modify）、SCM/Named Pipe/External Lock/Restore/Release Gate；配置示例由 Server Schema 在 Windows 原生加载且不建立第二套默认值；Windows amd64/arm64 Server Binary、测试二进制与 CLI 契约可构建，原生 CLI 读回与精确 CI 只证明构建基线，不提前宣称运行支持 | `DONE` |
+| M8-01 | Windows Server 契约、配置示例与双架构构建基线 | M7-10 | Post-Alpha Windows Server 契约、Windows Server 配置示例、Windows amd64/arm64 Build Floor | 冻结 `XTunnelServer`、LocalService + Service SID、ProgramFiles/ProgramData 固定路径、Protected DACL、External Lock、SCM Runtime 与 amd64 Preview Gate；配置示例由 Server Schema 在 Windows 原生加载且不建立第二套默认值；Windows amd64/arm64 Server Binary、测试二进制与 CLI 契约可构建，arm64 构建不代表运行或发布支持 | `DONE` |
 | M8-02 | Stable Target、External Lock 与 Windows 文件身份 | M8-01 | Windows Data Target Resolver、External Lock、文件身份与 Reparse Point 防线 | 绝对本地路径、Volume/File Identity、大小写不敏感 leaf 规范化；Runtime 目录中的 Stable Target Hash 锁在 SQLite/Journal/Key/Listener 前取得并持有到最终关闭；第二进程无等待失败；UNC/设备路径/ADS/跨卷/Reparse Point/身份替换全部拒绝；Windows amd64/arm64 原生竞态和崩溃释放测试 | `DONE` |
-| M8-03 | DACL、密钥耐久发布与 Restore Recovery | M8-02 | Protected DACL、Windows Durable File Publisher、Restore/Recovery 平台实现 | SYSTEM/Administrators/`NT SERVICE\XTunnelServer` 最小权限；受管 Pinned Private Key、Token Master Key、SQLite Data Directory、Journal、Backup 全部防 Reparse Point 并耐久发布；SQLite Driver 独立管理数据库、WAL、SHM、journal 与临时文件的 Windows VFS 语义，XTunnel 不自定义 VFS；operator-owned Public TLS Cert/Key 验证本地普通文件、owner、DACL、Service SID 只读、文件与父目录均禁非授权写入/删除/更改 DACL 或 owner，私钥另禁非授权读取，并复核 Volume/File Identity，且不接管外部证书管理器 ACL；临时写入→Flush→同卷 Replace+Write Through→重开复核；Restore 三阶段 Journal、崩溃矩阵、回滚优先、跨卷与未知状态拒绝；不得回退为权限恒真、目录同步空操作或跟随链接删除 | `IN_PROGRESS` |
-| M8-04 | Admin Bootstrap 与 Backup Barrier Named Pipe | M8-03 | Windows Admin/Backup Named Pipe 与本机授权测试 | Pipe 名绑定 Stable Target Hash；Protected Security Descriptor；Server 验证提升的 Administrator Client，Client 验证受管 Server PID/Token；协议版本、消息上限、Hash 绑定与无 Loopback TCP 回退；首个 Admin exactly-once，Backup Lease 在断连/取消/Shutdown 后 exactly-once 释放并保持 Release ACK 前 Archive 不可见 | `NOT_STARTED` |
-| M8-05 | `XTunnelServer` SCM 安装、升级、回滚和卸载 | M8-04 | Server Windows Service Runtime、Installer/Uninstaller、Event Log 与提升权限 Smoke | amd64/arm64 + Administrator + SCM 前置检查无副作用；固定 Binary/Config/Data/Runtime 路径、LocalService + Service SID、Managed Marker 与只含 Config 路径的 ImagePath；Binary/Config/DACL/Service/Event Source/原状态单一回滚单元；候选升级、启动失败恢复、non-crash recovery、30 秒 Stop/Shutdown、非受管对象拒绝、保留 Config/Data 与运行中 EXE 延迟删除通过 | `NOT_STARTED` |
-| M8-06 | 原生运行、发布产物、完整 Gate 与阶段签核 | M8-01 至 M8-05 | Windows Server Native/SCM/Release Evidence、聚合 Gate、发布文档 | Windows amd64/arm64 原生全包 Test/Vet、前台完整产品链路、SCM、Backup/Restore Crash、Handle/goroutine/计数收敛全部通过；候选 Artifact 含两个 Windows Server PE Binary 并验证版本/架构/SHA-256/Secret，Linux OCI 仍恰好两个 Linux 平台；干净 checkout 精确 CI、commit-bound 独立复审无 P0/P1、文档同步和用户明确阶段签核全部完成 | `NOT_STARTED` |
+| M8-03 | Windows Security Baseline | M8-02 | Protected DACL、Secret Durable Publisher、Public TLS 安全性质校验 | 前台 Profile 的受管 Pinned Private Key、Token Master Key 与 Data Root 通过 no-follow、对象身份与耐久发布防止低权限替换；SQLite Driver 管理其自身 Windows VFS 语义，XTunnel 不自定义 VFS；Public TLS 使用可信 Owner + 有效安全性质校验，不接管 ACL；Journal、staging 或 rollback 残留 fail-closed 并保留现场。Service Profile 的实际 DACL 随 M8-04 SCM 入口生效。在线 Backup、自动 Restore、Restore Journal 自动恢复、目录级事务切换与跨崩溃矩阵不属于本任务 | `IN_PROGRESS` |
+| M8-04 | `XTunnelServer` SCM Runtime | M8-03 | Server Windows Service Runtime、Installer/Uninstaller、Event Log 与提升权限 Smoke | Windows amd64 + Administrator + SCM/NTFS 前置检查无副作用；固定 Binary/Config/Data/Runtime 路径、LocalService + Service SID、Config 只读与 Data/Runtime Modify 的 Protected DACL、受管 Marker 与只含 Config 路径的 ImagePath；install/start/stop/失败后有限重启/uninstall、30 秒 Stop/Shutdown、Event Log、非受管对象拒绝和保留 Config/Data 通过。升级由维护窗口的外部部署工具执行，不实现事务回滚、运行中 EXE 替换、自卸载或延迟删除 | `NOT_STARTED` |
+| M8-05 | Windows amd64 Preview Gate | M8-01 至 M8-04 | Windows Server amd64 Native/SCM/Release Evidence、聚合 Gate、发布文档 | Windows amd64 原生全包 Test/Vet、前台与 SCM、Management/HTTP/WebSocket/TCP/Agent Gateway、抢锁、重启恢复和基础安全测试通过；候选 Artifact 含 Windows amd64 Server PE Binary 并验证版本/架构/SHA-256/Secret；arm64 仅交叉构建兼容性；干净 checkout 精确 CI、commit-bound 独立复审无 P0/P1、文档同步和用户明确阶段签核全部完成 | `NOT_STARTED` |
 
-## 14.2 Windows Server Release Gate Checklist
+## 14.2 Windows Server amd64 Preview Gate Checklist
 
-- [ ] M8-01 冻结契约、Config 对 Service SID 只读且 Data/Runtime 为 Modify 的精确 DACL、Windows 原生加载的配置示例和 Windows amd64/arm64 构建基线通过；双架构构建未被描述为运行或发布支持。
-- [ ] Stable Target、External Lock、Volume/File Identity、大小写与 Reparse Point 防线在 Windows amd64/arm64 原生测试通过，第二进程在触碰 SQLite、Journal、Key 或 Listener 前快速失败。
-- [ ] Protected DACL、Pinned Private Key/Token Master Key 耐久发布、Public TLS 外部 Cert/Key 的 owner/DACL/Service SID 只读、文件与父目录禁非授权写入/删除/更改 DACL 或 owner、私钥另禁非授权读取及文件身份验证、Restore Journal/Recovery 和跨崩溃回滚矩阵通过，不存在权限恒真、目录同步空操作、接管外部证书管理器 ACL 或弱化文件身份回退。
-- [ ] Admin Bootstrap 与 Backup Barrier Named Pipe 的双向身份校验、协议上限、Stable Target Hash 绑定、取消/断连/Shutdown 收敛及 Backup Release ACK 发布边界通过。
-- [ ] `XTunnelServer` 在 Windows amd64/arm64 原生 Runner 完成提升权限 SCM 安装、候选升级、启动失败回滚、恢复重启、30 秒 Stop/Shutdown、Event Log、非受管对象拒绝、卸载保留与运行中 EXE 延迟删除验证。
-- [ ] 两个 Windows 架构的 Management、HTTP、WebSocket、TCP、Agent Gateway、首个 Admin、重启恢复、Backup→Migration→Restore→Token-only Reconnect 与资源收敛完整产品链路通过。
-- [ ] 发布候选包含 Windows amd64/arm64 Server PE Binary，版本、架构、SHA-256、日志/Binary/Config/SCM Registry/Artifact Secret 扫描通过；Server/Agent OCI 仍只包含 Linux amd64/arm64。
-- [ ] 同一候选 Commit 的干净 checkout 完整 CI 与 Windows Server Release 聚合 Gate 成功，commit-bound 独立复审无 P0/P1，发布/配置/运维文档同步并取得用户明确阶段签核。
+- [ ] M8-01 契约、Config 对 Service SID 只读且 Data/Runtime 为 Modify 的 Protected DACL、Windows 原生加载的配置示例和 Windows amd64/arm64 构建基线通过；arm64 不被描述为运行或发布支持。
+- [ ] Stable Target、External Lock、Volume/File Identity、大小写与 Reparse Point 防线在 Windows amd64 原生测试通过，第二进程在触碰 SQLite、Key 或 Listener 前快速失败。
+- [ ] Protected DACL、Pinned Private Key/Token Master Key 耐久发布、Public TLS 的可信 Owner 与有效安全性质、Service SID 读取和非可信主体的写入/删除/ACL/owner/私钥读取拒绝均通过；不接管外部证书管理器 ACL，未知状态 fail-closed。
+- [ ] `XTunnelServer` 在 Windows amd64 原生 Runner 完成提升权限 SCM 安装、失败后有限重启、30 秒 Stop/Shutdown、Event Log、非受管对象拒绝和卸载保留验证；升级由维护窗口外部流程执行。
+- [ ] Windows amd64 的 Management、HTTP、WebSocket、TCP、Agent Gateway、重启恢复、前台/SCM 生命周期与资源收敛完整产品链路通过；在线 Backup/Restore、自动恢复和 Named Pipe 不属于本 Gate。
+- [ ] 发布候选包含 Windows amd64 Server PE Binary，版本、架构、SHA-256、日志/Binary/Config/SCM Registry/Artifact Secret 扫描通过；Server/Agent OCI 仍只包含 Linux amd64/arm64。
+- [ ] 同一候选 Commit 的干净 checkout 完整 CI 与 Windows Server amd64 Preview Gate 成功，commit-bound 独立复审无 P0/P1，发布/配置/运维文档同步并取得用户明确阶段签核。
 
 ---
 
@@ -458,10 +456,9 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 
 1. `M8-01` — `DONE`。Windows Server 契约、完整配置示例、Schema 同步测试与 Windows amd64/arm64 Build Floor 已提交；最终 Head `fcdc701f03c260b2f61b4f18d4cb98ad916ac6fa` 的 [Push CI #33709519721](https://github.com/lifei6671/xtunnel/actions/runs/33709519721) 六个正式 Job 全部成功，commit-bound 独立复审为 `APPROVED`、P0/P1/P2/P3=`0/0/0/0`，用户阶段签核已完成。构建基线不扩大为 Windows Server 运行支持。
 2. `M8-02` — `DONE`。最终实现 Head `3bdaed22ad22080a9b5668533bcf3447f032c9e1` 的 [Push CI #33722274859](https://github.com/lifei6671/xtunnel/actions/runs/33722274859) 六个正式 Job 全部成功；证据提交 `4159e02939ace7a93387fd48b739e8228653c807` 的 [Push CI #33723985760](https://github.com/lifei6671/xtunnel/actions/runs/33723985760) 同样六个正式 Job 全部成功。最终 commit-bound 独立复审为 `APPROVED`、Coverage=`COMPLETE`、Freshness=`FRESH`、P0/P1/P2/P3=`0/0/0/0`，用户阶段签核已完成。
-3. `M8-03` — `IN_PROGRESS`。M8-02 依赖已闭环，开始实施 Protected DACL、Windows Durable File Publisher 与 Restore/Recovery 平台路径。
+3. `M8-03` — `IN_PROGRESS`。M8-02 依赖已闭环，实施 Windows Security Baseline：Protected DACL、Secret Durable Publisher 与 Public TLS 安全性质校验。
 4. `M8-04` — `NOT_STARTED`，等待 M8-03 完成。
-5. `M8-05` — `NOT_STARTED`，等待 M8-04 完成。
-6. `M8-06` — `NOT_STARTED`，等待 M8-01 至 M8-05 全部完成。
+5. `M8-05` — `NOT_STARTED`，等待 M8-01 至 M8-04 全部完成。
 
 以下保留 M7 完成记录：
 
@@ -476,7 +473,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 9. `M7-09` — `DONE`。Head `8f11f2a5d0118859ee7e0398b96517dd0be2a96d`、精确 CI `#33612503805`、状态同步 Head `cb3209d0bbb3debfa263c2bad226150a090318f5` 的精确 CI `#33615267877`、commit-bound Tier 3 复审与用户阶段批准已闭环 Linux amd64/arm64 Binary/OCI/systemd、Windows Agent amd64/arm64 Binary/SCM、Backup→Migration→Restore→Token-only Reconnect 及安全失败边界矩阵。
 10. `M7-10` — `DONE`。候选 Head `7e24cc4a11a231e4ef63f1505ed0ad92064b273a` 的普通 CI 与 Alpha Release Gate、证据提交 `a140560aaef827098c1a1de9a6c1b0be622edbb8` 的精确 CI、Checklist 九项、两路 commit-bound 独立复审与用户阶段签核均已闭环。
 
-M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数保持 95，加入 M8 后全局完成数为 `97/101`，M8 为 `2/6 IN_PROGRESS`。M8-01、M8-02 已闭环，M8-03 正在实施；既有 Alpha Release Gate 不覆盖 Windows Server，M8 Windows Server Release Gate 八项保持未勾选。
+M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数保持 95，加入收敛后的 M8 后全局完成数为 `97/100`，M8 为 `2/5 IN_PROGRESS`。M8-01、M8-02 已闭环，M8-03 正在实施；既有 Alpha Release Gate 不覆盖 Windows Server，M8 Windows Server amd64 Preview Gate 七项保持未勾选。
 
 推进规则：
 
@@ -500,7 +497,7 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 | OpenAPI Validator/Generator | M0-07/M5-02 开工前 | M0-07 已批准并锁定 vacuum `v0.30.0` 官方 Linux amd64/arm64 归档与二进制 SHA-256；M5-02 已批准并锁定 `oapi-codegen v2.8.0`、`oapi-codegen/runtime v1.6.0`、`nullable v1.1.0`、`openapi-typescript 7.13.0`、工具侧 TypeScript `5.9.3` 与 `openapi-fetch 0.17.0`。唯一入口为 `tools/openapi.sh validate|breaking|generate|generate-check`，CI 不维护第二套方式；TypeScript Generator 因 Web TypeScript 6 Peer Range 冲突隔离在 `tools/openapi-ts`，不得使用 `--force` 或 `--legacy-peer-deps` 绕过。 |
 | Web 依赖与 Node 版本 | M0-08 开工前 | 已批准 Node `24.19.0`、npm `11.17.0`、React/React DOM `19.2.8`、Vite `8.2.2`、Plugin React `6.1.0`、TypeScript `6.0.2` 与对应类型包；用户在管理菜单出现真实图标需求后追加批准 `lucide-react 1.34.0`，并在 M5-10 追加批准 `@playwright/test 1.62.1`；直接依赖精确锁定，npm 11 生成并提交 Lockfile，CI 只运行 `npm ci`，再通过本地锁定的 Playwright CLI 安装对应 Chromium；Tailwind/shadcn/Router/Query 等继续等待 M5 真实使用点 |
 | OCI 基础镜像、Compose 双栈与跨平台 Service 权限模型 | M0-09 开工前；Server Binary 追补于 2026-09-01 获用户明确授权 | 已批准三个固定多架构基础镜像摘要、Compose 双栈 Profile 与原生 tcp4/tcp6 监听原语；OCI 使用 `65532:65532` 与只读根，只有 Server 挂载 Data Volume 和 `/run/xtunnel` tmpfs，Agent 无 Volume，从 `XTUNNEL_TOKEN` 取得 Token 并默认执行 `run`；Compose 输入 `XTUNNEL_AGENT_TOKEN` 映射到容器环境。Linux Server/Agent 统一使用各自 Binary 的 `service install/uninstall`，不提供用户安装脚本，要求 root、amd64/arm64、systemd>=249。Server 原子安装当前 Binary、显式 `--config` 输入和内嵌 Managed Unit，保留配置/数据/服务身份，且只按精确完整内容接管上一版官方 Shell Unit；Agent 原子安装 Binary、root-only Credential 与 Managed Unit。Windows Agent 继续使用 SCM、`NT AUTHORITY\LocalService`、ProgramFiles Binary 与 ProgramData DPAPI Machine-scope Credential；重复安装 Replace Existing + Write Through，Stop/Shutdown 最多 30s，异常返回非零并配置 non-crash recovery。所有平台拒绝覆盖/删除非受管同名服务，卸载保留持久配置或 Credential 与服务身份；Windows 从运行中已安装 EXE 自卸载时使用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排重启删除 Binary。 |
-| Post-Alpha Windows Server 平台与发布契约 | M8-01 完成前冻结；M8-06 完成前不得宣称支持 | 用户已批准 M8-01 至 M8-06 六阶段范围。Windows Server 固定支持目标为 amd64/arm64、`XTunnelServer`、LocalService + Service SID、ProgramFiles Binary、ProgramData Config/Data/Runtime、Protected DACL、Stable Target External Lock、Windows 文件身份、Named Pipe、完整 Backup/Restore、SCM 回滚和双架构原生 Release Gate；Windows 不进入 OCI 平台集合。任何局部构建或单架构 Smoke 不改变用户可见支持矩阵。 |
+| Post-Alpha Windows Server 平台与发布契约 | M8-01 完成前冻结；M8-05 完成前不得宣称正式支持 | 用户已授权将剩余 M8 收敛为五阶段基础支持范围。Windows Server Preview 目标为 amd64、NTFS、`XTunnelServer`、LocalService + Service SID、ProgramFiles Binary、ProgramData Config/Data/Runtime、Protected DACL、Stable Target External Lock、Windows 文件身份、基础 SCM Runtime 与 amd64 原生 Preview Gate；arm64 只保持交叉构建兼容性。在线 Backup、自动 Restore、Named Pipe、SCM 事务升级回滚、运行中 EXE 自替换和自卸载不属于当前 M8；Windows 不进入 OCI 平台集合。任何局部构建或单架构 Smoke 不改变用户可见支持矩阵。 |
 | Minimal Security Audit Event Contract | M1-04 收口前 | 用户于 2026-08-26 明确确认数据库 Schema 变更；已冻结 bounded/nullable、`event_id`/`operation_id`、`event`/`action` 枚举、actor/resource/result、稳定失败语义和幂等边界，并以 `000003_security_audit_events.sql`、Repository 校验和 v2 Rotation Journal 落地。Security Audit append-only，禁止 UPDATE/DELETE，Secret/Credential/Private Key/Cookie 禁止入库；M1 写事件，M5 提供只读查询，M6 提供结构化导出、Dashboard 和 Runbook |
 | 首次 Buf Breaking Baseline | M05-04 完成前 | 显式记录“无历史前代”，禁止与当前文件自比较 |
 | CI/arm64/Privileged Runner | M0-10/M7-08 开工前 | 记录 Runner 架构和权限；特权 Chaos 不得静默跳过 |
@@ -2315,3 +2312,24 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 验证与复审：固定 Docker `go1.27.0` / `GOTOOLCHAIN=local` 下完成受影响 Go 文件 `gofmt`、Windows amd64 durableops/winsecurity `go vet`、amd64 测试二进制编译及 arm64 两包编译检查；同一固定工具链生成的 Windows amd64 durableops 与 winsecurity 全包测试二进制在宿主原生执行 PASS。新增回归覆盖嵌套受保护 staging 清理与重复启动、junction/未受保护子对象/未受保护 Journal/取消/rollback 残留均保留现场，以及 Journal 删除 Handle 关闭后才执行后置动作、后置动作失败的未确定清理传播。随后 `./scripts/verify.ps1` 在固定 Docker Runner 中 exit 0（Web check/build 与 Linux 全量 `go test ./...`）。
 - 恢复边界：未开启 `rollback_ready`、`installed`、V1 `rollback_restoring` 或任何其他目录组合；未接入 Windows Restore staging 提取、目录提升、Manifest 状态重验或完整崩溃矩阵。`FlushFileBuffers` 成功仍仅是当前运行时请求成功，不是物理断电持久化证明。
 - 状态与 Gate：M8-03 保持 `IN_PROGRESS`，M8-04 至 M8-06 保持 `NOT_STARTED`，M8 Windows Server Release Gate 八项仍未勾选；本次未勾选任何产品任务。
+
+## 2026-09-03 · Windows Server Scope Reset · IN_PROGRESS
+
+- 范围重设：用户明确将剩余 M8 收敛为 Windows Server amd64 + NTFS 的基础支持/Preview。M8-01、M8-02 的 `DONE` 证据保持原义；M8-03 改为 Windows Security Baseline，M8-04 改为 `XTunnelServer` SCM Runtime，M8-05 改为 Windows amd64 Preview Gate。任务总数从 101 调整为 100，已完成数保持 97，M8 为 `2/5 IN_PROGRESS`。
+- 保留边界：LocalService + Service SID、ProgramData Protected DACL、Stable Target、External Lock、Reparse/对象身份防护、Secret 安全发布与 Public TLS 的可信 Owner + 有效安全性质校验仍是发布前置。SQLite Driver 继续负责数据库文件、WAL、SHM、journal 与临时文件的 Windows VFS 语义；XTunnel 不自定义 VFS。
+- 维护边界：当前 M8 不实现在线 Admin/Backup Named Pipe、产品管理的在线 Backup、自动 Restore、Restore Journal 自动恢复、目录级事务切换、跨崩溃矩阵、SCM 事务升级回滚、运行中 EXE 自替换、自卸载或延迟删除。首个管理员创建在服务停止后通过离线 CLI 和 External Lock 完成；异常持久化状态保留现场并 fail-closed。
+- 发布边界：arm64 仅保持交叉构建兼容性，不再进入 Windows Server 原生运行或 Release Gate。只有 M8-05 的 Windows amd64 Preview Gate、同候选完整 CI、独立复审和用户阶段签核闭环后，用户可见材料才可标注 Windows Server amd64 Preview。
+- 本次仅重置未完成需求与 Gate，不改变已提交实现或其历史验证证据；本次未勾选任何产品任务。
+
+## 2026-09-03 · Go 1.27 补丁跟随构建基线
+
+- 策略：根/工具 Module 的 `toolchain` 下限更新为 `go1.27.1`；本地 Docker、OCI Builder 与 CI 在每次构建选择最新稳定 `1.27.x` 补丁，版本门禁仅接受形如 `go1.27.[1-9][0-9]*` 的稳定版本并保持 `GOTOOLCHAIN=local`。Go 1.28、预发布、开发版本与前导零补丁号均不构成可接受构建环境。每份验证证据继续记录实际 `GOVERSION`。
+- 同步范围：版本检查入口、Docker Compose/OCI、CI 八个 Go Setup Job、OpenAPI Bootstrap、M7 运行器与预构建 Artifact Manifest 校验均已使用同一范围；所有 OCI build 入口显式 `--pull`，避免浮动标签复用陈旧本地镜像。
+- 本地验证：Docker Desktop 拉取 `golang:1.27-bookworm` 后读回 `go1.27.1/local`，`./scripts/verify.ps1` 完成 Web Check/Build、全仓 Go Test/Vet/Build；本机 `go1.27.1/local` 的版本检查、Windows `winsecurity` 与 `durableops` 定向 Test/Vet、Server Build 均通过。`tools/test-openapi.sh` 在既有隔离目录被其自身 OpenAPI 命令清理后无法继续创建 fixture，记为 `BLOCKED`，不将其写为通过。
+- 状态与 Gate：该构建基线变更不改变任何产品任务状态或 Gate；M8-03 仍为 `IN_PROGRESS`，本次未勾选任何产品任务。
+
+## 2026-09-04 · M8-03 Windows 原生回归补全
+
+- 测试夹具：仅为实际写入 pinned Gateway 身份的 Windows 测试创建受保护的临时前台目录；纯配置生命周期测试使用 `server.data_dir: auto` 并只经 fake storage 观察解析结果，不创建或写入用户 Profile。生产 DACL 与路径 Profile 策略未放宽。
+- 验证：本机 `go1.27.1/local` 下 `go test -count=1 -timeout 10m ./...`、`go vet ./...` 与 `go build -trimpath ./cmd/server` 通过；Docker Desktop 拉取 `golang:1.27-bookworm` 后，`./scripts/verify.ps1` exit 0，完成 Web Check/Build 与 Linux 全仓 Go Test/Vet/Build。
+- 状态与 Gate：上述均为脏工作区开发证据；M8-03 仍为 `IN_PROGRESS`，尚无 commit-bound CI、独立复审或用户阶段签核，未勾选任何产品任务或 Gate。

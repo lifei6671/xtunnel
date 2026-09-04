@@ -28,14 +28,14 @@ Server 自动发现。Windows 的配置加载及后续原生运行必须显式�
 
 Windows 前台配置默认使用 `server.data_dir: auto`。它只经 Windows Known Folder API 解析为
 当前登录用户的 `%LOCALAPPDATA%\XTunnel\Server\data`，同级 Runtime 目录用于该用户的锁和
-本机运行资源。前台与服务不共用 SQLite、密钥、Journal 或锁。未来 M8-05 的受管 Windows
+本机运行资源。前台与服务不共用 SQLite、密钥、Journal 或锁。M8-04 的受管 Windows
 服务安装器完成后，
 `auto` 只在服务入口解析为 `%ProgramData%\XTunnel\Server\data`；`XTunnelServer` Service SID
 对配置文件只有读取权限，SYSTEM 与 Administrators 保留完全控制，Data/Runtime 则仅授予
 Service SID Modify（不含更改 DACL 或 owner）。不要用 LocalService 组权限、用户目录 ACL 或
 Config 可写权限替代这组精确边界。
 
-在 M8-06 的 Windows 原生运行与发布验证完成前，该文件只代表构建和配置契约基线，
+在 M8-05 的 Windows amd64 Preview Gate 完成前，该文件只代表构建和配置契约基线，
 不代表 Windows Server 已进入正式支持矩阵。
 
 至少需要替换：
@@ -121,8 +121,8 @@ agent_gateway:
 Secret；不要把证书私钥写进 YAML、Git、日志或备份说明。Windows 外部私钥必须位于
 本机固定卷的普通文件中，拒绝 Reparse Point，并允许 `NT SERVICE\XTunnelServer` 读取；
 证书可以向普通用户开放读取，但文件和父目录不得向普通用户或其他非授权服务开放写入、
-删除或更改 DACL/owner，私钥还不得向这些主体开放读取。Server 只验证 operator-owned 文件的 owner、
-DACL 与文件身份，不会改写证书管理器维护的 ACL。Linux 会精确要求 `key_file` 的权限为
+删除或更改 DACL/owner，私钥还不得向这些主体开放读取。Server 验证可信 owner、有效安全性质与
+文件身份，不要求精确 ACE 集合，也不会改写证书管理器维护的 ACL。Linux 会精确要求 `key_file` 的权限为
 `0600`，其他权限（包括 `0400`、`0640`）都会让 Server 启动失败：
 
 ```sh

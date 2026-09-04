@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
 	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
+	"github.com/lifei6671/xtunnel/internal/server/pathprofile"
 	"github.com/lifei6671/xtunnel/internal/tracing"
 )
 
@@ -359,13 +361,13 @@ agent_gateway:
 `)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	dataDir := t.TempDir()
+	configuredDataDir, dataDir := newBootstrapLifecycleTestDataDir(t)
 	var stderr bytes.Buffer
 	resources := &fakeStorage{}
 	go func() {
 		done <- runWithStorage(ctx, "xtunnel-server", []string{
 			"--config", configPath,
-			"--set", "server.data_dir=" + dataDir,
+			"--set", "server.data_dir=" + configuredDataDir,
 		}, nil, &stderr, func(_ context.Context, gotDataDir string) (storage, error) {
 			if gotDataDir != dataDir {
 				t.Errorf("storage dataDir = %q, want %q", gotDataDir, dataDir)
@@ -406,9 +408,10 @@ agent_gateway:
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	wantErr := errors.New("close failed")
+	configuredDataDir, _ := newBootstrapLifecycleTestDataDir(t)
 	err := runWithStorage(ctx, "xtunnel-server", []string{
 		"--config", configPath,
-		"--set", "server.data_dir=" + t.TempDir(),
+		"--set", "server.data_dir=" + configuredDataDir,
 	}, nil, &bytes.Buffer{}, func(context.Context, string) (storage, error) {
 		return &fakeStorage{closeErr: wantErr}, nil
 	})
@@ -426,10 +429,11 @@ agent_gateway:
 `)
 	resources := &fakeStorage{}
 	wantErr := errors.New("startup snapshot gate failed")
+	configuredDataDir, _ := newBootstrapLifecycleTestDataDir(t)
 	err := runWithStorageAndBootstrap(
 		context.Background(),
 		"xtunnel-server",
-		[]string{"--config", configPath, "--set", "server.data_dir=" + t.TempDir()},
+		[]string{"--config", configPath, "--set", "server.data_dir=" + configuredDataDir},
 		nil,
 		&bytes.Buffer{},
 		func(context.Context, string) (storage, error) { return resources, nil },
@@ -457,10 +461,11 @@ agent_gateway:
 	resources := &fakeStorage{}
 	bootstrapCloser := &fakeStorage{}
 	var stderr bytes.Buffer
+	configuredDataDir, _ := newBootstrapLifecycleTestDataDir(t)
 	err := runWithStorageAndBootstrap(
 		ctx,
 		"xtunnel-server",
-		[]string{"--config", configPath, "--set", "server.data_dir=" + t.TempDir()},
+		[]string{"--config", configPath, "--set", "server.data_dir=" + configuredDataDir},
 		nil,
 		&stderr,
 		func(context.Context, string) (storage, error) { return resources, nil },
@@ -499,6 +504,21 @@ func writeConfig(t *testing.T, content string) string {
 		t.Fatalf("os.WriteFile() error = %v", err)
 	}
 	return path
+}
+
+// newBootstrapLifecycleTestDataDir 为只使用 fake storage 的生命周期测试准备
+// 兼容当前平台 Profile 的配置值；Windows 不创建或写入真实用户目录。
+func newBootstrapLifecycleTestDataDir(t *testing.T) (configuredDataDir, resolvedDataDir string) {
+	t.Helper()
+	configuredDataDir = t.TempDir()
+	if runtime.GOOS == "windows" {
+		configuredDataDir = pathprofile.AutomaticDataDir
+	}
+	profile, err := pathprofile.Resolve(configuredDataDir)
+	if err != nil {
+		t.Fatalf("pathprofile.Resolve(%q) error = %v", configuredDataDir, err)
+	}
+	return configuredDataDir, profile.DataDir
 }
 
 func assertLifecycleLogs(t *testing.T, output, component string) {

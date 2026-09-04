@@ -121,7 +121,7 @@ func TestWindowsRecoverPendingRestoreRejectsValidJournalAndRollbackWithoutMutati
 	}
 }
 
-func TestWindowsRecoverPreparedJournalAfterStagingCleanupRemovesJournal(t *testing.T) {
+func TestWindowsRecoverPreparedJournalKeepsJournalAndTargetUnchanged(t *testing.T) {
 	target := newWindowsRestoreTarget(t)
 	paths, err := pathsForTarget(target)
 	if err != nil {
@@ -136,14 +136,19 @@ func TestWindowsRecoverPreparedJournalAfterStagingCleanupRemovesJournal(t *testi
 	if err := writeJournal(paths, journal); err != nil {
 		t.Fatalf("writeJournal(prepared) error = %v", err)
 	}
-	if recovered, err := RecoverPendingRestore(context.Background(), target); err != nil || !recovered {
-		t.Fatalf("RecoverPendingRestore() = (%t, %v), want (true, nil)", recovered, err)
+	before, err := os.ReadFile(paths.journal)
+	if err != nil {
+		t.Fatalf("ReadFile(Journal before recovery) error = %v", err)
 	}
-	if _, err := os.Lstat(paths.journal); !os.IsNotExist(err) {
-		t.Fatalf("prepared Journal remains after recovery: %v", err)
+	if recovered, err := RecoverPendingRestore(context.Background(), target); err == nil || recovered {
+		t.Fatalf("RecoverPendingRestore() = (%t, %v), want fail-closed error", recovered, err)
 	}
-	if err := winsecurity.ValidateForegroundDirectory(paths.target); err != nil {
-		t.Fatalf("ValidateForegroundDirectory(target) error = %v", err)
+	after, err := os.ReadFile(paths.journal)
+	if err != nil {
+		t.Fatalf("ReadFile(Journal after recovery) error = %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("prepared Journal changed: got %q, want %q", after, before)
 	}
 	marker, err := os.ReadFile(markerPath)
 	if err != nil {
@@ -159,7 +164,7 @@ func TestWindowsRecoverPreparedJournalAfterStagingCleanupRemovesJournal(t *testi
 	}
 }
 
-func TestWindowsRecoverV2RollbackRestoringTargetOnlyRemovesJournal(t *testing.T) {
+func TestWindowsRecoverRollbackRestoringKeepsJournalAndTargetUnchanged(t *testing.T) {
 	target := newWindowsRestoreTarget(t)
 	paths, err := pathsForTarget(target)
 	if err != nil {
@@ -176,11 +181,19 @@ func TestWindowsRecoverV2RollbackRestoringTargetOnlyRemovesJournal(t *testing.T)
 		t.Fatalf("writeJournal(rollback_restoring) error = %v", err)
 	}
 
-	if recovered, err := RecoverPendingRestore(context.Background(), target); err != nil || !recovered {
-		t.Fatalf("RecoverPendingRestore() = (%t, %v), want (true, nil)", recovered, err)
+	before, err := os.ReadFile(paths.journal)
+	if err != nil {
+		t.Fatalf("ReadFile(Journal before recovery) error = %v", err)
 	}
-	if _, err := os.Lstat(paths.journal); !os.IsNotExist(err) {
-		t.Fatalf("rollback_restoring Journal remains after recovery: %v", err)
+	if recovered, err := RecoverPendingRestore(context.Background(), target); err == nil || recovered {
+		t.Fatalf("RecoverPendingRestore() = (%t, %v), want fail-closed error", recovered, err)
+	}
+	after, err := os.ReadFile(paths.journal)
+	if err != nil {
+		t.Fatalf("ReadFile(Journal after recovery) error = %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("rollback_restoring Journal changed: got %q, want %q", after, before)
 	}
 	marker, err := os.ReadFile(markerPath)
 	if err != nil {
@@ -364,7 +377,7 @@ func TestWindowsRecoverV2RollbackRestoringRejectsV1JournalAndCanceledContext(t *
 	}
 }
 
-func TestWindowsRecoverPreparedJournalCleansManagedStagingBeforeRemovingJournal(t *testing.T) {
+func TestWindowsRecoverPreparedJournalKeepsStagingAndJournalUnchanged(t *testing.T) {
 	target := newWindowsRestoreTarget(t)
 	paths, err := pathsForTarget(target)
 	if err != nil {
@@ -396,13 +409,22 @@ func TestWindowsRecoverPreparedJournalCleansManagedStagingBeforeRemovingJournal(
 	if err := writeJournal(paths, journal); err != nil {
 		t.Fatalf("writeJournal(prepared) error = %v", err)
 	}
-	if recovered, err := RecoverPendingRestore(context.Background(), target); err != nil || !recovered {
-		t.Fatalf("RecoverPendingRestore() = (%t, %v), want (true, nil)", recovered, err)
+	before, err := os.ReadFile(paths.journal)
+	if err != nil {
+		t.Fatalf("ReadFile(Journal before recovery) error = %v", err)
 	}
-	for _, path := range []string{paths.staging, paths.journal} {
-		if _, err := os.Lstat(path); !os.IsNotExist(err) {
-			t.Fatalf("prepared recovery left %q: %v", path, err)
-		}
+	if recovered, err := RecoverPendingRestore(context.Background(), target); err == nil || recovered {
+		t.Fatalf("RecoverPendingRestore() = (%t, %v), want fail-closed error", recovered, err)
+	}
+	after, err := os.ReadFile(paths.journal)
+	if err != nil {
+		t.Fatalf("ReadFile(Journal after recovery) error = %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("prepared Journal changed: got %q, want %q", after, before)
+	}
+	if err := winsecurity.ValidateForegroundDirectory(paths.staging); err != nil {
+		t.Fatalf("ValidateForegroundDirectory(staging) error = %v", err)
 	}
 	marker, err := os.ReadFile(markerPath)
 	if err != nil {
@@ -410,9 +432,6 @@ func TestWindowsRecoverPreparedJournalCleansManagedStagingBeforeRemovingJournal(
 	}
 	if got, want := string(marker), "old state"; got != want {
 		t.Fatalf("target marker = %q, want %q", got, want)
-	}
-	if recovered, err := RecoverPendingRestore(context.Background(), target); err != nil || recovered {
-		t.Fatalf("RecoverPendingRestore(after cleanup) = (%t, %v), want (false, nil)", recovered, err)
 	}
 }
 

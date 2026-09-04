@@ -4,7 +4,7 @@
 # 本文件显式列出当前 pinned TLS 模式下全部可同时生效的字段，方便 Windows
 # 部署者理解和修改；它不会覆盖 Schema，也不会被程序自动发现，启动时必须
 # 显式传入 --config。
-# 本示例用于 M8 Windows Server 的构建与配置契约验证；正式支持范围以 M8-06
+# 本示例用于 M8 Windows Server 的构建与配置契约验证；正式支持范围以 M8-05
 # 完成后的原生运行证据和支持矩阵为准。
 # Server 主配置不支持热加载，修改后必须重启 Server。
 
@@ -12,7 +12,7 @@ server:
   # 前台的默认用户数据目录。auto 由 Known Folder API 解析为当前登录用户的
   # %LOCALAPPDATA%\XTunnel\Server\data；Runtime 位于同级 runtime。前台和服务
   # 永不共用 SQLite、Token 主密钥、PKI、Journal 或 External Lock。
-  # 未来 M8-05 Windows 服务安装器完成后，service install 才会把同一 auto 解析为受管的
+  # M8-04 Windows 服务安装器完成后，service install 才会把同一 auto 解析为受管的
   # %ProgramData%\XTunnel\Server\data，并使用 Service SID 的独立 Protected DACL。
   data_dir: auto
 
@@ -59,8 +59,8 @@ agent_gateway:
     # public 模式才允许启用下面两个字段；pinned 模式下保留它们会导致配置校验失败。
     # 这里只给出文件路径，不包含证书或私钥内容。外部证书与私钥必须是本机固定卷上的
     # 普通文件，不得经过 Reparse Point；Service SID 必须可读，文件和父目录禁止非授权
-    # 写入、删除或更改 DACL/owner，私钥另禁非授权读取。Server 只验证 owner、DACL 与
-    # 文件身份，不接管证书管理器的 ACL。
+    # 写入、删除或更改 DACL/owner，私钥另禁非授权读取。Server 验证可信 owner、有效安全
+    # 性质与文件身份，不要求精确 ACE 集合，也不接管证书管理器的 ACL。
     # cert_file: 'C:\ProgramData\XTunnel\Server\tls\tunnel.crt'
     # key_file: 'C:\ProgramData\XTunnel\Server\tls\tunnel.key'
     # key_file 路径不是 Secret，但私钥内容是 Secret，不得写入 YAML、Git 或日志。
