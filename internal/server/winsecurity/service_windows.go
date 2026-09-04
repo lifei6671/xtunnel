@@ -214,15 +214,6 @@ func validateServiceStorageToken() error {
 	if err != nil {
 		return err
 	}
-	if user.User.Sid.String() == "S-1-5-18" {
-		return nil
-	}
-	if token.IsElevated() {
-		return nil
-	}
-	if user.User.Sid.String() != "S-1-5-19" {
-		return errors.New("service storage requires elevated maintenance or XTunnelServer LocalService token")
-	}
 	sid, err := serviceSID(xtunnelServerServiceName)
 	if err != nil {
 		return err
@@ -231,12 +222,33 @@ func validateServiceStorageToken() error {
 	if err != nil {
 		return err
 	}
-	for _, group := range groups.AllGroups() {
-		if group.Sid.Equals(sid) && group.Attributes&windows.SE_GROUP_ENABLED != 0 && group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 {
+	return validateServiceStorageIdentity(user.User.Sid, groups.AllGroups(), token.IsElevated(), sid)
+}
+
+func validateServiceStorageIdentity(user *windows.SID, groups []windows.SIDAndAttributes, elevated bool, service *windows.SID) error {
+	if user.String() == "S-1-5-18" {
+		return nil
+	}
+	localService := user.String() == "S-1-5-19"
+	// TokenElevation 不是 Administrators 成员证明；LocalService 的完整服务令牌
+	// 同样可能被报告为 elevated。先固定 LS 的 Service SID 边界，绝不因该标志
+	// 把异名服务当成离线管理员；维护身份必须同时有启用的 BA 组和提升标志。
+	for _, group := range groups {
+		if group.Attributes&windows.SE_GROUP_ENABLED == 0 || group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY != 0 {
+			continue
+		}
+		if localService {
+			if group.Sid.Equals(service) {
+				return nil
+			}
+		} else if elevated && group.Sid.String() == "S-1-5-32-544" {
 			return nil
 		}
 	}
-	return errors.New("LocalService token does not carry enabled XTunnelServer SID")
+	if localService {
+		return errors.New("LocalService token does not carry enabled XTunnelServer SID")
+	}
+	return errors.New("service storage requires elevated maintenance or XTunnelServer LocalService token")
 }
 
 // ValidateServiceAncestors performs read-only preflight of all existing parents.

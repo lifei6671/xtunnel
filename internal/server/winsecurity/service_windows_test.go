@@ -86,6 +86,58 @@ func TestServiceDescriptorRightsAndOwners(t *testing.T) {
 	}
 }
 
+func TestServiceStorageIdentityRequiresExplicitRole(t *testing.T) {
+	service, err := serviceSID(xtunnelServerServiceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := serviceSID("XTunnelServerSecurityProbe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := windows.StringToSid("S-1-5-32-544")
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := uint32(windows.SE_GROUP_ENABLED)
+	for _, tc := range []struct {
+		name, user string
+		elevated   bool
+		groups     []windows.SIDAndAttributes
+		allowed    bool
+	}{
+		{"system", "S-1-5-18", false, nil, true},
+		{"service", "S-1-5-19", false, []windows.SIDAndAttributes{{Sid: service, Attributes: active}}, true},
+		{"elevated_service", "S-1-5-19", true, []windows.SIDAndAttributes{{Sid: service, Attributes: active}}, true},
+		{"elevated_foreign_service", "S-1-5-19", true, []windows.SIDAndAttributes{{Sid: foreign, Attributes: active}}, false},
+		{"foreign_service", "S-1-5-19", false, []windows.SIDAndAttributes{{Sid: foreign, Attributes: active}}, false},
+		{"elevated_ls_without_service", "S-1-5-19", true, nil, false},
+		{"ls_admin_cannot_replace_service", "S-1-5-19", true, []windows.SIDAndAttributes{{Sid: admin, Attributes: active}}, false},
+		{"disabled_service", "S-1-5-19", true, []windows.SIDAndAttributes{{Sid: service}}, false},
+		{"deny_only_service", "S-1-5-19", true, []windows.SIDAndAttributes{{Sid: service, Attributes: active | windows.SE_GROUP_USE_FOR_DENY_ONLY}}, false},
+		{"elevated_admin", "S-1-5-21-1-2-3-1001", true, []windows.SIDAndAttributes{{Sid: admin, Attributes: active}}, true},
+		{"unelevated_admin", "S-1-5-21-1-2-3-1001", false, []windows.SIDAndAttributes{{Sid: admin, Attributes: active}}, false},
+		{"disabled_admin", "S-1-5-21-1-2-3-1001", true, []windows.SIDAndAttributes{{Sid: admin}}, false},
+		{"deny_only_admin", "S-1-5-21-1-2-3-1001", true, []windows.SIDAndAttributes{{Sid: admin, Attributes: active | windows.SE_GROUP_USE_FOR_DENY_ONLY}}, false},
+		{"elevation_without_admin", "S-1-5-21-1-2-3-1001", true, nil, false},
+		{"non_ls_service_group", "S-1-5-21-1-2-3-1001", true, []windows.SIDAndAttributes{{Sid: service, Attributes: active}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			user, err := windows.StringToSid(tc.user)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = validateServiceStorageIdentity(user, tc.groups, tc.elevated, service)
+			if (err == nil) != tc.allowed {
+				t.Fatalf("allowed=%v err=%v", tc.allowed, err)
+			}
+			if !tc.allowed && tc.user == "S-1-5-19" && !strings.Contains(err.Error(), "enabled XTunnelServer SID") {
+				t.Fatalf("LS bypassed service-specific rejection: %v", err)
+			}
+		})
+	}
+}
+
 func TestServiceSharedAncestorRejectsReparseWriteRights(t *testing.T) {
 	system, err := windows.StringToSid("S-1-5-18")
 	if err != nil {
