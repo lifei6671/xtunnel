@@ -1,7 +1,8 @@
 # Windows Server SCM
 
-本入口用于 Windows amd64 + NTFS 服务运行、维护与候选验收。Windows Server
-发布支持以 M8-05 Preview Gate 为准，任务证据见[开发计划](../../docs/xtunnel_standalone_v0.1_development_plan.md)。
+Windows Server amd64 + NTFS Preview 已通过 M8-05 Gate 和阶段验收。本入口提供服务
+运行、维护与候选验收步骤，证据见[开发计划](../../docs/xtunnel_standalone_v0.1_development_plan.md)。
+Windows Server arm64 仅保持构建兼容性；候选 Artifact 与正式 Release 分别管理。
 
 ## 安装与首个管理员
 
@@ -131,4 +132,4 @@ TLS `closeNotify` 超时后底层连接已关闭的限定错误；SCM 核对服�
 `RUNTIME_FAILED` 事件本身不证明具体错误原因。两种模式均须满足上述资源收敛断言。
 
 通过后的报告与同一候选 EXE 交由 [Windows 候选 Artifact 校验](../../tests/release/README.md)
-验证并归档。Artifact 仅作为候选证据；平台支持状态以 M8-05 全部 Gate 和阶段签核为准。
+验证并归档。M8-05 的已验收候选、完整 CI 和摘要记录见开发计划；Artifact 作为候选证据保存。

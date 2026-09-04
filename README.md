@@ -68,8 +68,9 @@ Caddy / Nginx ── XTunnel Server
 
 ### 1. 构建 Server 与 Agent
 
-Server 只支持 Linux `amd64` / `arm64`。构建环境需要 Go `1.27.1` 或更新的 `1.27.x` 补丁版、
-Node 24.19.0 与 npm 11.17.0：
+Server 支持 Linux `amd64` / `arm64`，并提供 Windows `amd64` Preview（NTFS）。
+Windows 安装与运行见 [Windows Server SCM](deploy/windows-server/README.md)。以下为 Linux
+源码构建流程，构建环境需要 Go `1.27.1` 或更新的 `1.27.x` 补丁版、Node 24.19.0 与 npm 11.17.0：
 
 ```sh
 export GOTOOLCHAIN=local
@@ -142,8 +143,8 @@ Agent 刻意不提供 YAML、`--config` 或本地业务 Schema。Service、Origi
 
 - **Linux Binary + systemd**：Server 与 Agent 都由 Binary 自身执行 `service install/uninstall`。
 - **Windows SCM**：Agent 以 `LocalService` 运行，Token 使用 DPAPI Machine-scope 加密。
-  Server 的运行维护与候选验收步骤见 [Windows Server SCM](deploy/windows-server/README.md)，
-  Windows Server 支持矩阵待 M8-05 Preview Gate 完成后更新。
+  Server 提供 amd64 + NTFS Preview，以 `LocalService + Service SID` 运行；
+  安装维护与候选验收步骤见 [Windows Server SCM](deploy/windows-server/README.md)。
 - **OCI / Compose**：参见 [`deploy/docker`](deploy/docker) 与
   [双栈 Compose 模板](deploy/docker/compose.dualstack.yaml)。
 - **公网 HTTPS / WSS**：参见 [Caddy / Nginx 前置代理示例](deploy/reverse-proxy/README.md)。
@@ -159,9 +160,12 @@ HTTP/3、Server 集群、多租户、RBAC/OIDC、WAF/CDN、L3 VPN 或 Agent 自�
 
 | 组件 | 当前支持平台 |
 | --- | --- |
-| Server | Linux amd64 / arm64 |
+| Server | Linux amd64 / arm64；Windows amd64 Preview（NTFS） |
 | Agent | Linux amd64 / arm64；Windows amd64 / arm64 |
 | OCI | Linux amd64 / arm64 |
+
+Windows Server arm64 仅保持构建兼容性。Windows Server Preview 的维护范围和验收证据见
+[Windows Server SCM](deploy/windows-server/README.md)。
 
 ## 开发与贡献
 

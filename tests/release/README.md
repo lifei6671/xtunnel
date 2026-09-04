@@ -46,5 +46,5 @@ Server EXE 的 ASCII Token 形状扫描仅对完整公开静态串
 继续按通用规则拒绝；文件仍须完整扫描至 EOF，并校验跨读取窗口的匹配。
 
 CI 上传 `m8-05-windows-amd64-<Commit>-attempt-<Run Attempt>` 候选证据，保留 14 天。
-它不是正式 Release；M8-05 聚合 Gate 与用户阶段验收完成后才能更新 Windows Server
-Preview 支持声明。此入口不改变既有 Linux OCI 的精确双平台集合。
+Windows Server amd64 Preview 已完成 M8-05 聚合 Gate 与用户阶段验收，证据见开发计划。
+这些文件仍是候选产物，正式 Release 单独管理；Linux OCI 保持精确双平台集合。

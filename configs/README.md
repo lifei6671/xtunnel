@@ -39,8 +39,8 @@ Data/Runtime 的 OWNER RIGHTS 限权 ACE 抑制文件 Owner 隐含的改 ACL 权
 在使用前校验 Owner、对象身份与完整继承 ACL。
 服务安装、首个管理员创建和维护步骤见 [Windows Server SCM](../deploy/windows-server/README.md)。
 
-在 M8-05 的 Windows amd64 Preview Gate 完成前，该文件只代表构建和配置契约基线，
-不代表 Windows Server 已进入正式支持矩阵。
+Windows Server amd64 Preview 已通过 M8-05 Gate 和阶段验收，本配置适用于本机 NTFS
+上的前台与 SCM 部署；Windows Server arm64 仅保持构建兼容性。
 
 至少需要替换：
 

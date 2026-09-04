@@ -5940,7 +5940,7 @@ OCI/Compose 直接把部署环境中的 Secret 映射为容器内 `XTUNNEL_TOKEN
 
 # 145. Service Self-install
 
-V0.1 官方支持矩阵固定为：
+V0.1 Alpha 冻结的支持矩阵如下；Post-Alpha Windows Server amd64 Preview 的当前支持范围见第 191 节。
 
 ```text
 Server: Linux amd64 / arm64
@@ -5954,7 +5954,7 @@ Container: OCI 前台进程模式 + Compose v2 双栈部署 Profile
 
 macOS launchd、Alpine OpenRC 和其他 Unix Service Manager 不属于 V0.1 支持范围。Linux Server/Agent `service install/uninstall` 要求 root、amd64/arm64 和 systemd 249 及以上；Windows Agent 要求 amd64/arm64、提升权限的 Administrator 和可用 SCM。平台、架构、权限或 Service Manager 不满足时，必须在创建账户、注册服务或写任何目标文件前快速失败。Alpha 发布和验收只对上述矩阵作承诺。
 
-Server 与 Agent 在 Linux 都不公开或调用用户安装脚本，全部服务生命周期由对应 Binary 的 `service install/uninstall` 管理；Windows 仍只支持 Agent SCM 自安装。Server 不新增 `run` 子命令，官方 Unit 继续用根命令 `--config /etc/xtunnel/server.yaml` 启动。
+Server 与 Agent 在 Linux 都不公开或调用用户安装脚本，全部服务生命周期由对应 Binary 的 `service install/uninstall` 管理；本节 Alpha 矩阵中的 Windows 范围为 Agent SCM 自安装，Post-Alpha Server SCM 见第 191 节。Server 不新增 `run` 子命令，官方 Unit 继续用根命令 `--config /etc/xtunnel/server.yaml` 启动。
 
 Server `service install --config PATH` 创建 `xtunnel-server:xtunnel-server` 系统用户/组，把当前可执行文件、指定配置和内嵌 Unit 原子安装到 `/usr/local/bin/xtunnel-server`、`/etc/xtunnel/server.yaml` 与 `/etc/systemd/system/xtunnel-server.service`；配置权限为 `root:xtunnel-server 0640`，`/var/lib/xtunnel/data` 为服务身份所有的 `0700` Canonical Data Target。Unit 首行 marker 精确为 `# Managed by xtunnel-server service install`。上一版官方 Shell Unit 只能按完整规范化字节精确匹配后接管；其他无 marker、被修改、symlink、目录或外来同名 Unit 必须拒绝覆盖和卸载。安装完成执行 daemon-reload、enable、restart 与 is-active；文件发布或激活失败必须恢复此前 Binary、配置、Unit 和受管服务状态。
 
@@ -8600,10 +8600,10 @@ WebSocket
 冻结的 V0.1 Alpha 支持矩阵，也不把 M0-09、M7-09 或 M7-10 的既有 Linux Server /
 Windows Agent 证据扩大为 Windows Server 证据。
 
-Windows arm64 仅保持 Build Compatibility Only：交叉构建失败必须修复，但它不属于原生
-运行、SCM 或 Release Gate。M8-05 的 amd64 Gate、commit-bound 独立复审和用户阶段签核
-完成前，Windows Server 始终属于 Preview，不得宣称为正式支持平台。M8 不引入 Windows
-Container；OCI Layout 与 Manifest 继续只包含 `linux/amd64`、`linux/arm64`。
+Windows Server amd64 Preview 已通过 M8-05 Gate、commit-bound 独立复审和用户阶段签核，
+具体候选与验证证据以开发计划为准。Windows arm64 仅保持 Build Compatibility Only：
+交叉构建失败必须修复，但它不属于 Server 原生运行、SCM 或 Release Gate。
+OCI Layout 与 Manifest 继续只包含 `linux/amd64`、`linux/arm64`。
 
 ## 191.1 服务身份与固定路径
 
@@ -8802,4 +8802,4 @@ Windows Server Preview 的候选 Commit 必须同时具备：
 6. 干净 checkout 的完整 CI、commit-bound 独立复审无 P0/P1、发布/配置/运维文档同步和用户
    明确阶段签核。
 
-只有 M8-05 全部完成后，后续用户可见材料才可把 Server 标注为 Windows Server amd64 Preview。
+M8-05 已完成，用户可见材料可标注 Windows Server amd64 Preview；正式 Release 仍按发布流程单独管理。

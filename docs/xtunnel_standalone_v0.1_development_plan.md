@@ -4,9 +4,9 @@
 >
 > **进度基线日期**：2026-09-04
 >
-> **当前阶段**：Post-Alpha M8 Windows Server · IN_PROGRESS（M8-05 · REVIEW）
+> **当前阶段**：Post-Alpha M8 Windows Server · DONE（M8-05 · DONE）
 >
-> **当前结论**：M0 至 M7 的 95 项历史任务已全部 `DONE`，既有 Alpha Release Gate 结论保持 `PASS`。Post-Alpha M8 共 5 项，当前完成数为 `99/100`，M8 为 `4/5 IN_PROGRESS`。M8-01 至 M8-04 的实现、验证、精确提交 CI、独立复审及用户阶段验收已闭环，状态为 `DONE`；M8-05 的实现、双模式产品、Artifact、精确提交完整 CI 与独立复审均已通过，状态为 `REVIEW`，等待用户阶段验收。Windows amd64 Preview Gate 与用户阶段签核完成前，不更新平台支持声明。
+> **当前结论**：M0 至 M8 的 100 项任务已全部 `DONE`，完成数为 `100/100`，M8 为 `5/5 DONE`。既有 Alpha Release Gate 保持 `PASS`；Windows Server amd64 Preview Gate 的实现、完整 CI、候选 Artifact、独立复审与用户阶段验收已闭环，当前支持声明为 Windows Server amd64 Preview（NTFS）。Windows Server arm64 仅保持构建兼容性，正式 Release 单独管理。现有计划没有待执行的后续任务。
 
 ---
 
@@ -115,8 +115,8 @@ M0-09 部署/包装验收 ──→ M0-12 完整 M0 Gate ──→ M7 Alpha Gate
 | M5 REST API/Web | 11 | 11 | `DONE` | M3-13 + M4-10（M5-01 可在 M4 后半段准备） | M5-11 |
 | M6 Observability | 7 | 7 | `DONE` | M5-11 | M6-07 |
 | M7 Hardening/Alpha | 10 | 10 | `DONE` | M2-08 + M3-13 + M4-10 + M5-11 + M6-07 | M7-10 |
-| M8 Windows Server | 5 | 4 | `IN_PROGRESS` | M7-10 | M8-05 |
-| **合计** | **100** | **99** |  |  |  |
+| M8 Windows Server | 5 | 5 | `DONE` | M7-10 | M8-05 |
+| **合计** | **100** | **100** |  |  |  |
 
 `M0=IN_PROGRESS` 只表示项目已进入该阶段，不表示其中任务已完成。
 
@@ -436,7 +436,7 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 | M8-02 | Stable Target、External Lock 与 Windows 文件身份 | M8-01 | Windows Data Target Resolver、External Lock、文件身份与 Reparse Point 防线 | 绝对本地路径、Volume/File Identity、大小写不敏感 leaf 规范化；Runtime 目录中的 Stable Target Hash 锁在 SQLite/Journal/Key/Listener 前取得并持有到最终关闭；第二进程无等待失败；UNC/设备路径/ADS/跨卷/Reparse Point/身份替换全部拒绝；Windows amd64/arm64 原生竞态和崩溃释放测试 | `DONE` |
 | M8-03 | Windows Security Baseline | M8-02 | Protected DACL、Secret Durable Publisher、Public TLS 安全性质校验 | 前台 Profile 的受管 Pinned Private Key、Token Master Key 与 Data Root 通过 no-follow、对象身份与耐久发布防止低权限替换；SQLite Driver 管理其自身 Windows VFS 语义，XTunnel 不自定义 VFS；Public TLS 使用可信 Owner + 有效安全性质校验，不接管 ACL；Journal、staging 或 rollback 残留 fail-closed 并保留现场。Service Profile 的实际 DACL 随 M8-04 SCM 入口生效。在线 Backup、自动 Restore、Restore Journal 自动恢复、目录级事务切换与跨崩溃矩阵不属于本任务 | `DONE` |
 | M8-04 | `XTunnelServer` SCM Runtime | M8-03 | Server Windows Service Runtime、Installer/Uninstaller、Event Log 与提升权限 Smoke | Windows amd64 + Administrator + SCM/NTFS 前置检查无副作用；固定 Binary/Config/Data/Runtime 路径、LocalService + Service SID、Config 只读与 Data/Runtime Modify 的受保护安装根及精确继承子对象 ACL、受管 Marker 与只含 Config 路径的 ImagePath；install/start/stop/失败后有限重启/uninstall、30 秒 Stop/Shutdown、Event Log、非受管对象拒绝和保留 Config/Data 通过。升级由维护窗口的外部部署工具执行，不实现事务回滚、运行中 EXE 替换、自卸载或延迟删除 | `DONE` |
-| M8-05 | Windows amd64 Preview Gate | M8-01 至 M8-04 | Windows Server amd64 Native/SCM/Release Evidence、聚合 Gate、发布文档 | Windows amd64 原生全包 Test/Vet、前台与 SCM、Management/HTTP/WebSocket/TCP/Agent Gateway、抢锁、重启恢复和基础安全测试通过；候选 Artifact 含 Windows amd64 Server PE Binary 并验证版本/架构/SHA-256/Secret；arm64 仅交叉构建兼容性；干净 checkout 精确 CI、commit-bound 独立复审无 P0/P1、文档同步和用户明确阶段签核全部完成 | `REVIEW` |
+| M8-05 | Windows amd64 Preview Gate | M8-01 至 M8-04 | Windows Server amd64 Native/SCM/Release Evidence、聚合 Gate、发布文档 | Windows amd64 原生全包 Test/Vet、前台与 SCM、Management/HTTP/WebSocket/TCP/Agent Gateway、抢锁、重启恢复和基础安全测试通过；候选 Artifact 含 Windows amd64 Server PE Binary 并验证版本/架构/SHA-256/Secret；arm64 仅交叉构建兼容性；干净 checkout 精确 CI、commit-bound 独立复审无 P0/P1、文档同步和用户明确阶段签核全部完成 | `DONE` |
 
 ## 14.2 Windows Server amd64 Preview Gate Checklist
 
@@ -446,19 +446,19 @@ M5-01 通过前，Handler 和 Web 只能建骨架，不得各自定义 DTO、Nul
 - [x] `XTunnelServer` 在 Windows amd64 原生 Runner 完成提升权限 SCM 安装、失败后有限重启、30 秒 Stop/Shutdown、Event Log、非受管对象拒绝和卸载保留验证；升级由维护窗口外部流程执行。
 - [x] Windows amd64 的 Management、HTTP、WebSocket、TCP、Agent Gateway、重启恢复、前台/SCM 生命周期与资源收敛完整产品链路通过；在线 Backup/Restore、自动恢复和 Named Pipe 不属于本 Gate。
 - [x] 发布候选包含 Windows amd64 Server PE Binary，版本、架构、SHA-256、日志/Binary/Config/SCM Registry/Artifact Secret 扫描通过；Server/Agent OCI 仍只包含 Linux amd64/arm64。
-- [ ] 同一候选 Commit 的干净 checkout 完整 CI 与 Windows Server amd64 Preview Gate 成功，commit-bound 独立复审无 P0/P1，发布/配置/运维文档同步并取得用户明确阶段签核。
+- [x] 同一候选 Commit 的干净 checkout 完整 CI 与 Windows Server amd64 Preview Gate 成功，commit-bound 独立复审无 P0/P1，发布/配置/运维文档同步并取得用户明确阶段签核。
 
 ---
 
 # 15. 当前任务状态
 
-当前 `M0-01` 至 `M0-12`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07`、`M7-01` 至 `M7-10` 已全部完成。Post-Alpha M8 当前队列为：
+当前 `M0-01` 至 `M0-12`、`M05-01` 至 `M05-10`、`M1-01` 至 `M1-14`、`M2-01` 至 `M2-08`、`M3-01` 至 `M3-13`、`M4-01` 至 `M4-10`、`M5-01` 至 `M5-11`、`M6-01` 至 `M6-07`、`M7-01` 至 `M7-10` 已全部完成。Post-Alpha M8 完成记录如下，现有计划无待执行任务：
 
 1. `M8-01` — `DONE`。Windows Server 契约、完整配置示例、Schema 同步测试与 Windows amd64/arm64 Build Floor 已提交；最终 Head `fcdc701f03c260b2f61b4f18d4cb98ad916ac6fa` 的 [Push CI #33709519721](https://github.com/lifei6671/xtunnel/actions/runs/33709519721) 六个正式 Job 全部成功，commit-bound 独立复审为 `APPROVED`、P0/P1/P2/P3=`0/0/0/0`，用户阶段签核已完成。构建基线不扩大为 Windows Server 运行支持。
 2. `M8-02` — `DONE`。最终实现 Head `3bdaed22ad22080a9b5668533bcf3447f032c9e1` 的 [Push CI #33722274859](https://github.com/lifei6671/xtunnel/actions/runs/33722274859) 六个正式 Job 全部成功；证据提交 `4159e02939ace7a93387fd48b739e8228653c807` 的 [Push CI #33723985760](https://github.com/lifei6671/xtunnel/actions/runs/33723985760) 同样六个正式 Job 全部成功。最终 commit-bound 独立复审为 `APPROVED`、Coverage=`COMPLETE`、Freshness=`FRESH`、P0/P1/P2/P3=`0/0/0/0`，用户阶段签核已完成。
 3. `M8-03` — `DONE`。Windows Security Baseline 实现与独立代码复审已完成；候选 `683c8cbbf44a50bab119bf2426df719da7aa6f29` 的 [CI #33839053263](https://github.com/lifei6671/xtunnel/actions/runs/33839053263) 六个正式 Job 全部成功，Windows Owner 负向原生证据已补齐，用户已明确确认“M8-03 阶段验收通过”。
 4. `M8-04` — `DONE`。用户已明确阶段验收通过，证据绑定 cfbe201 与 CI #33851737928。
-5. `M8-05` — `REVIEW`。候选 `4380802` 的双模式产品、Artifact 与完整 CI #33868358816 均通过，17 文件提交绑定独审覆盖完整；等待用户明确阶段签核。
+5. `M8-05` — `DONE`。候选 `4380802` 的双模式产品、Artifact 与完整 CI #33868358816 均通过，17 文件提交绑定独审覆盖完整，用户已明确阶段验收通过。
 
 以下保留 M7 完成记录：
 
@@ -2613,3 +2613,9 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - Server 大小 40,132,608 字节，SHA-256 `dfec36c3c91dfabca26772164d1c0db71c7ba6c3e1ce56dfbabff6c38388d837`；产品报告 SHA-256 `9fb54f0ec4fbdae90f7d7749d6be398c247e46ae47465ed9220b6410ffdb125c`。下载后在干净候选 checkout 用 `go run ./tests/release/windowsverify -server <下载的EXE> -commit 43808023fd3bff5b19243ac63ecaf9d3789ee40b -product-report <下载的报告> -output <仓库外新目录>` 再次通过 PE、Go/VCS、版本、双模式报告绑定及完整 Secret 扫描，另独立核对文件集合和三项校验清单摘要。
 - 从交付基线 `d0609ef843acbda12229b476f84731350d9ef905` 至候选的 17 文件完成分区、增量、集成与提交绑定独立复审：PASSED、Coverage COMPLETE、Freshness FRESH、无 P0/P1；候选运行日志与下载 Artifact 证据也完成独立复核。总方案和运维/发布验收文档同步。
 - M8-05 转 REVIEW，前六项技术 Checklist 按上述精确候选与已验收 M8-01 至 M8-04 证据勾选；含用户阶段签核的聚合项保持未勾选。完成计数保持 99/100、M8 4/5；用户明确阶段验收前，不标记 DONE 或更新 Windows Server Preview 支持声明。
+
+## 2026-09-04 · M8-05 阶段验收通过，M8 完成
+
+- 用户明确确认 M8-05 阶段验收通过并继续。验收绑定实现候选 `43808023fd3bff5b19243ac63ecaf9d3789ee40b`、完整 CI #33868358816、Windows Artifact #9935300650 与上述独立复审；证据记录提交为 `7343e5dc4211fa9f64f49f004ba0b6c234f9a00b`。
+- M8-05 和 M8 更新为 DONE，Windows Server amd64 Preview Gate Checklist 全部完成；计数为 100/100、M8 5/5。README、配置、部署、候选发布文档和技术方案同步 Windows Server amd64 Preview（NTFS）支持声明；Windows Server arm64 仅保持构建兼容性，既有 Alpha 历史矩阵与 Linux OCI 双平台范围保持原义。
+- 本轮为验收状态和已验证支持范围的文档收尾，未修改实现或创建正式 Release。现有权威任务清单止于 M8-05，全部 100 项已完成；后续目标须另行定义任务范围和验收标准。
