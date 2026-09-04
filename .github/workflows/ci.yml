@@ -313,7 +313,7 @@ jobs:
           npm --prefix "$candidate_source/web" run build
           (
             cd "$candidate_source"
-            ./tools/check-go-version.sh
+            "$GITHUB_WORKSPACE/tools/check-go-version.sh"
             go mod verify
             candidate_version="v0.1.0-candidate.$candidate_commit"
             candidate_ldflags="-X github.com/lifei6671/xtunnel/internal/buildinfo.version=$candidate_version"
