@@ -2563,3 +2563,9 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 诊断候选 `b5e9cbe1e8bbe8aada01af3e358c75b37c06b21c` 的 [CI #33860292410](https://github.com/lifei6671/xtunnel/actions/runs/33860292410) 中，前台进程实际 exit 1，经过完整 Secret 检查的错误为 `load gateway TLS identity: gateway pinned TLS identity is missing`。未产生任何成功产品或 Artifact 证据。
 - `loadGatewayIdentity` 只在启动前数据库不存在时允许创建 Pinned 身份；原验收顺序的离线 `admin create` 提前建立数据库。前台验收现按正式顺序执行 `init → 首次启动 → Management 401 与登录 SETUP_REQUIRED → 正常停止及端口释放 → 离线创建管理员 → 正式业务启动`，保持已有数据库缺身份时的生产 fail-closed。
 - 真实 Management Handler 回归新增登录 409、生成契约 `SETUP_REQUIRED` 及 Request ID 断言，产品测试包 Test/Race/Vet 通过。继续在下一精确候选运行双模式产品与完整 CI，M8-05 保持 IN_PROGRESS。
+
+## 2026-09-04 · M8-05 Service 创建版本前置条件
+
+- 候选 `6bba74de1c53588bb1957cbcf07b1e0982de86c3` 的 [CI #33861329863](https://github.com/lifei6671/xtunnel/actions/runs/33861329863) 已实际完成前台首次身份初始化、SETUP_REQUIRED、正常停止、离线管理员创建、业务启动、登录与 Tunnel 创建；随后 Service 创建因缺少父 Tunnel 的 If-Match 返回 428，产品 Gate 仍未通过。
+- 验收请求按 OpenAPI 使用当前父 Tunnel 强 ETag：保留缺少 If-Match 时的 428/PRECONDITION_REQUIRED 断言，再创建 HTTP Service；重新读取并确认父 ETag 变化后创建 TCP Service。未放宽生产前置条件。
+- 当前 Gate 所有 API 的必填 Header、Origin/Exposure 联合类型及 HTTP/TCP 默认语义已核对。产品包 Test/Race/Vet、生产 Service TLS 生命周期、前置条件矩阵、ETag 与联合类型回归通过；继续下一精确候选完整 CI。

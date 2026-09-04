@@ -34,7 +34,7 @@ func newManagement(t *testing.T, port int, audit *secretAudit) *managementClient
 	t.Cleanup(transport.CloseIdleConnections)
 	return &managementClient{audit: audit, base: fmt.Sprintf("http://127.0.0.1:%d/api/v1", port), client: &http.Client{Timeout: 5 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
-func (c *managementClient) request(t *testing.T, method, path string, body any, want int, result any, csrf bool) *http.Response {
+func (c *managementClient) request(t *testing.T, method, path string, body any, want int, result any, csrf bool, ifMatch ...string) *http.Response {
 	t.Helper()
 	var data []byte
 	var err error
@@ -55,6 +55,9 @@ func (c *managementClient) request(t *testing.T, method, path string, body any, 
 	}
 	if csrf {
 		req.Header.Set("X-XTunnel-CSRF", c.csrf)
+	}
+	if len(ifMatch) != 0 {
+		req.Header.Set("If-Match", ifMatch[0])
 	}
 	response, err := c.client.Do(req)
 	must(t, err, "management "+method+" "+path)
@@ -145,8 +148,21 @@ func (c *managementClient) configure(t *testing.T, origin *origins, publicPort i
 	must(t, httpExposure.FromHTTPExposureInput(api.HTTPExposureInput{Type: "http", Hostname: "public.gate.test"}), "HTTP exposure union")
 	must(t, tcpExposure.FromTCPExposureInput(api.TCPExposureInput{Type: "tcp", PublicPort: &publicPort}), "TCP exposure union")
 	var httpService, tcpService api.Service
-	c.request(t, http.MethodPost, "/services", api.CreateServiceRequest{Name: "gate-http", TunnelId: tunnel, Origin: httpOrigin, Exposure: httpExposure}, http.StatusCreated, &httpService, true)
-	c.request(t, http.MethodPost, "/services", api.CreateServiceRequest{Name: "gate-tcp", TunnelId: tunnel, Origin: tcpOrigin, Exposure: tcpExposure}, http.StatusCreated, &tcpService, true)
+	httpInput := api.CreateServiceRequest{Name: "gate-http", TunnelId: tunnel, Origin: httpOrigin, Exposure: httpExposure}
+	var rejected api.ErrorResponse
+	c.request(t, http.MethodPost, "/services", httpInput, http.StatusPreconditionRequired, &rejected, true)
+	if rejected.Error.Code != api.APIErrorCodePRECONDITIONREQUIRED {
+		t.Fatal("missing If-Match did not report PRECONDITION_REQUIRED")
+	}
+	// Service 创建修改父 Tunnel 的版本。每次 Mutation 前读取当前强 ETag，不能
+	// 用第一个创建响应中的 Service ETag 或旧 Tunnel ETag 为第二次创建授权。
+	before := c.tunnelETag(t, tunnel)
+	c.request(t, http.MethodPost, "/services", httpInput, http.StatusCreated, &httpService, true, before)
+	after := c.tunnelETag(t, tunnel)
+	if before == after {
+		t.Fatal("Service creation did not advance parent Tunnel ETag")
+	}
+	c.request(t, http.MethodPost, "/services", api.CreateServiceRequest{Name: "gate-tcp", TunnelId: tunnel, Origin: tcpOrigin, Exposure: tcpExposure}, http.StatusCreated, &tcpService, true, after)
 	if httpService.Id == "" || tcpService.Id == "" || !httpService.Enabled || !tcpService.Enabled {
 		t.Fatal("created services missing identity/enabled state")
 	}
@@ -238,4 +254,15 @@ func (c *managementClient) assertSetupRequired(t *testing.T, password string) {
 	if response.Error.Code != api.APIErrorCodeSETUPREQUIRED || response.Error.RequestId == "" {
 		t.Fatal("initial runtime did not report SETUP_REQUIRED")
 	}
+}
+
+func (c *managementClient) tunnelETag(t *testing.T, tunnel string) string {
+	t.Helper()
+	var parent api.Tunnel
+	response := c.request(t, http.MethodGet, "/tunnels/"+tunnel, nil, http.StatusOK, &parent, false)
+	etag := response.Header.Get("ETag")
+	if parent.Id != tunnel || len(etag) < 2 || etag[0] != '"' || etag[len(etag)-1] != '"' {
+		t.Fatal("parent Tunnel did not return its strong ETag")
+	}
+	return etag
 }
