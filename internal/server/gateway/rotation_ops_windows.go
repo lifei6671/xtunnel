@@ -28,7 +28,7 @@ func defaultRotationFileOps() rotationFileOps {
 func syncPinnedRotationDirectory(string) error { return nil }
 
 func writePinnedRotationFile(path string, data []byte, _ os.FileMode) error {
-	security, err := winsecurity.NewForegroundFileSecurity()
+	security, err := winsecurity.NewFileSecurityForPath(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
@@ -39,7 +39,7 @@ func replacePinnedRotationFile(source, destination string) error {
 	if filepath.Dir(source) != filepath.Dir(destination) {
 		return errors.New("gateway rotation replacement crosses PKI directories")
 	}
-	security, err := winsecurity.NewForegroundFileSecurity()
+	security, err := winsecurity.NewFileSecurityForPath(filepath.Dir(source))
 	if err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func rotationTemporaryExists(path string) (bool, error) {
 }
 
 func removePinnedIdentityFile(path string) error {
-	security, err := winsecurity.NewForegroundFileSecurity()
+	security, err := winsecurity.NewFileSecurityForPath(filepath.Dir(path))
 	if err != nil {
 		return err
 	}

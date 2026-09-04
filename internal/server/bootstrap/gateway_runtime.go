@@ -28,7 +28,6 @@ import (
 	servermanagementapi "github.com/lifei6671/xtunnel/internal/server/managementapi"
 	servermetrics "github.com/lifei6671/xtunnel/internal/server/metrics"
 	serveropen "github.com/lifei6671/xtunnel/internal/server/open"
-	"github.com/lifei6671/xtunnel/internal/server/pathprofile"
 	serverrecenterror "github.com/lifei6671/xtunnel/internal/server/recenterror"
 	serverroute "github.com/lifei6671/xtunnel/internal/server/route"
 	serverruntime "github.com/lifei6671/xtunnel/internal/server/runtime"
@@ -610,11 +609,13 @@ func openGatewayAndBootstrapAtTracing(
 	startedAt time.Time,
 	traceRuntime *tracing.Runtime,
 ) (io.Closer, error) {
-	profile, err := pathprofile.Resolve(config.Server.DataDir)
-	if err != nil {
-		return nil, err
+	serverResources, ok := resources.(*serverStorage)
+	if !ok {
+		return nil, errors.New("unexpected server storage implementation")
 	}
-	runtimeDir := profile.RuntimeDir
+	// Runtime 路径来自取得 External Lock 的同一存储装配，不能在 SCM 路径上
+	// 重新按前台用户解析配置，导致两个身份使用不同的锁或维护入口。
+	runtimeDir := serverResources.runtimeDir
 	lifecycle, err := openGatewayAndBootstrapWithStartedAtTracing(ctx, config, resources, logger, startedAt, runtimeDir, func(ctx context.Context, runtimeDir, targetHash string, store *sqlite.Store, afterCreate func() error, reportRuntimeError func(error)) (io.Closer, error) {
 		return openAdminBootstrapSocketAfter(ctx, runtimeDir, targetHash, store, afterCreate, reportRuntimeError)
 	}, traceRuntime)
@@ -624,10 +625,6 @@ func openGatewayAndBootstrapAtTracing(
 	closer, ok := lifecycle.(*gatewayBootstrapCloser)
 	if !ok {
 		return nil, errors.Join(errors.New("unexpected gateway lifecycle implementation"), lifecycle.Close())
-	}
-	serverResources, ok := resources.(*serverStorage)
-	if !ok {
-		return nil, errors.Join(errors.New("unexpected server storage implementation"), lifecycle.Close())
 	}
 	reportRuntimeError := func(runtimeErr error) {
 		select {

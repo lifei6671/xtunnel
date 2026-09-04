@@ -4,6 +4,7 @@ package winsecurity
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +21,10 @@ import (
 // the interactive user that owns the profile. Files deliberately do not carry
 // inheritance flags: their children must never silently broaden this boundary.
 type ForegroundFileSecurity struct {
-	descriptor *windows.SECURITY_DESCRIPTOR
-	owner      *windows.SID
-	expected   []accessACE
+	descriptor    *windows.SECURITY_DESCRIPTOR
+	owner         *windows.SID
+	expected      []accessACE
+	serviceOwners []*windows.SID
 }
 
 // ForegroundDirectoryGuard keeps a validated managed data directory open
@@ -121,9 +123,13 @@ func (security *ForegroundFileSecurity) ValidateFile(handle windows.Handle) erro
 	}
 	if information.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
 		information.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 ||
+		information.FileAttributes&windows.FILE_ATTRIBUTE_DEVICE != 0 ||
 		information.VolumeSerialNumber == 0 ||
 		information.FileIndexHigh == 0 && information.FileIndexLow == 0 {
 		return errors.New("managed file is not a regular non-reparse file")
+	}
+	if _, err := foregroundFileID(handle); err != nil {
+		return fmt.Errorf("inspect managed file identity: %w", err)
 	}
 	descriptor, err := windows.GetSecurityInfo(
 		handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
@@ -135,7 +141,11 @@ func (security *ForegroundFileSecurity) ValidateFile(handle windows.Handle) erro
 	if err != nil {
 		return fmt.Errorf("read file owner: %w", err)
 	}
-	if owner == nil || !owner.Equals(security.owner) {
+	if owner == nil || (len(security.serviceOwners) == 0 && !owner.Equals(security.owner)) ||
+		(len(security.serviceOwners) != 0 && !sidIn(owner, security.serviceOwners)) {
+		if len(security.serviceOwners) != 0 {
+			return errors.New("file owner is not permitted by the service profile")
+		}
 		return errors.New("file owner does not match the current Windows user")
 	}
 	control, _, err := descriptor.Control()
@@ -636,7 +646,7 @@ func removeForegroundTreeNode(node foregroundTreeNode, directorySecurity *Foregr
 // candidate is durable and the final object has been revalidated, so an
 // untrusted principal cannot replace the checked parent directory mid-flight.
 func openValidatedForegroundDirectory(path string) (windows.Handle, error) {
-	security, err := NewForegroundDirectorySecurity()
+	security, err := NewDirectorySecurityForPath(path)
 	if err != nil {
 		return 0, err
 	}
@@ -689,7 +699,7 @@ func readForegroundFile(directory, name string, maximum int64) ([]byte, error) {
 		return nil, fmt.Errorf("validate managed file directory: %w", err)
 	}
 	defer windows.CloseHandle(directoryHandle)
-	security, err := NewForegroundFileSecurity()
+	security, err := NewFileSecurityForPath(directory)
 	if err != nil {
 		return nil, err
 	}
@@ -839,106 +849,40 @@ func PublishForegroundFile(directory, name string, content []byte, security *For
 		return fmt.Errorf("validate managed file directory: %w", err)
 	}
 	defer func() { resultErr = errors.Join(resultErr, windows.CloseHandle(directoryHandle)) }()
+	return publishFileCandidate(directory, name, content, security, true)
+}
+
+// publishFileCandidate 在调用方固定父目录期间发布同目录候选。安装不能覆盖，运行时受管 Secret 才允许原子替换。
+func publishFileCandidate(directory, name string, content []byte, security *ForegroundFileSecurity, replace bool) (resultErr error) {
 	finalPath := filepath.Join(directory, name)
 	if err := validateExistingForegroundFile(finalPath, security); err != nil {
 		return fmt.Errorf("validate existing managed file: %w", err)
 	}
-	temporary, err := os.CreateTemp(directory, "."+name+".tmp-*")
+	// 在不可预测名称上以 CREATE_NEW 一次设置完整 SD。LocalService 只有
+	// Modify，不能依赖 Owner 隐含 WRITE_DAC 或创建后重新接管安全描述符。
+	temporaryPath := filepath.Join(directory, "."+name+".tmp-"+rand.Text())
+	temporary, err := createSecuredFile(temporaryPath, security)
 	if err != nil {
 		return fmt.Errorf("create managed file candidate: %w", err)
 	}
-	temporaryPath := temporary.Name()
-	initialCandidateIdentity, err := foregroundFileID(windows.Handle(temporary.Fd()))
+	candidateIdentity, err := foregroundFileID(windows.Handle(temporary.Fd()))
 	if err != nil {
-		return errors.Join(
-			fmt.Errorf("inspect newly created managed file candidate identity: %w", err),
-			markForegroundFileForDeletion(windows.Handle(temporary.Fd())),
-			temporary.Close(),
-		)
+		return errors.Join(err, markForegroundFileForDeletion(windows.Handle(temporary.Fd())), temporary.Close())
 	}
 	published := false
-	candidateSecured := false
-	var candidateIdentity foregroundFileIdentity
 	defer func() {
-		candidateMarkedForDeletion := false
-		if !published && candidateSecured {
-			if temporary != nil {
-				resultErr = errors.Join(resultErr, markForegroundFileForDeletion(windows.Handle(temporary.Fd())))
-				candidateMarkedForDeletion = true
-			}
-		}
 		if temporary != nil {
-			resultErr = errors.Join(resultErr, temporary.Close())
-		}
-		if !published && !candidateMarkedForDeletion {
-			if candidateSecured {
-				resultErr = errors.Join(resultErr, deleteOwnedForegroundCandidate(temporaryPath, security, candidateIdentity))
-			} else {
-				resultErr = errors.Join(resultErr, deleteCreatedForegroundCandidate(temporaryPath, initialCandidateIdentity))
+			if !published {
+				resultErr = errors.Join(resultErr, markForegroundFileForDeletion(windows.Handle(temporary.Fd())))
 			}
+			resultErr = errors.Join(resultErr, temporary.Close())
+		} else if !published {
+			resultErr = errors.Join(resultErr, deleteOwnedForegroundCandidate(temporaryPath, security, candidateIdentity))
 		}
 	}()
-
-	// CreateTemp reserves a unique name but opens the file without WRITE_DAC.
-	// Close it before any sensitive bytes are written, then reopen its own
-	// regular object without following reparse points and with the rights needed
-	// to protect its descriptor. The parent directory's protected DACL admits
-	// only SYSTEM and this foreground profile owner during that short handoff.
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close newly created managed file candidate: %w", err)
-	}
-	temporary = nil
-	pointer, err := windows.UTF16PtrFromString(temporaryPath)
-	if err != nil {
-		return fmt.Errorf("encode managed file candidate path: %w", err)
-	}
-	handle, err := windows.CreateFile(
-		pointer,
-		windows.DELETE|windows.FILE_WRITE_DATA|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER,
-		windows.FILE_SHARE_READ,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
-	if err != nil {
-		return fmt.Errorf("re-open managed file candidate: %w", err)
-	}
-	temporary = os.NewFile(uintptr(handle), filepath.Base(temporaryPath))
-	if temporary == nil {
-		windows.CloseHandle(handle)
-		return errors.New("wrap managed file candidate handle")
-	}
-	candidateIdentity, err = foregroundFileID(windows.Handle(temporary.Fd()))
-	if err != nil {
-		return fmt.Errorf("inspect re-opened managed file candidate identity: %w", err)
-	}
-	if candidateIdentity != initialCandidateIdentity {
-		return errors.New("re-opened managed file candidate identity does not match its creation")
-	}
-
-	// A Windows token may be configured to assign a group as the default owner.
-	// Set the candidate owner explicitly to the interactive user before sensitive
-	// bytes are written; setting the caller's own SID does not require the
-	// privilege needed to assign an unrelated owner.
-	dacl, _, err := security.descriptor.DACL()
-	if err != nil {
-		return fmt.Errorf("read managed file candidate DACL: %w", err)
-	}
-	if dacl == nil {
-		return errors.New("managed file candidate DACL is absent")
-	}
-	if err := windows.SetSecurityInfo(
-		windows.Handle(temporary.Fd()), windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		security.owner, nil, dacl, nil,
-	); err != nil {
-		return fmt.Errorf("set managed file candidate security: %w", err)
-	}
 	if err := security.ValidateFile(windows.Handle(temporary.Fd())); err != nil {
 		return fmt.Errorf("validate managed file candidate: %w", err)
 	}
-	candidateSecured = true
 	if _, err := temporary.Write(content); err != nil {
 		return fmt.Errorf("write managed file candidate: %w", err)
 	}
@@ -958,12 +902,16 @@ func PublishForegroundFile(directory, name string, content []byte, security *For
 	if err != nil {
 		return fmt.Errorf("encode managed file final path: %w", err)
 	}
-	if err := windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
+	flags := uint32(windows.MOVEFILE_WRITE_THROUGH)
+	if replace {
+		flags |= windows.MOVEFILE_REPLACE_EXISTING
+	}
+	if err := windows.MoveFileEx(from, to, flags); err != nil {
 		return fmt.Errorf("publish managed file candidate: %w", err)
 	}
 	published = true
 
-	handle, err = openFileNoFollow(finalPath)
+	handle, err := openFileNoFollow(finalPath)
 	if err != nil {
 		return fmt.Errorf("re-open published managed file: %w", err)
 	}

@@ -48,11 +48,26 @@ func initializeServerDirectories(_ context.Context, options baseconfig.Options) 
 }
 
 func runtimeDirectoryForOptions(options baseconfig.Options) (string, error) {
-	config, err := serverconfig.Load(options)
+	return runtimeDirectoryForProfile(options, false)
+}
+
+func loadProfileConfig(options baseconfig.Options, serviceProfile bool) (serverconfig.Config, error) {
+	if serviceProfile {
+		return serverconfig.LoadService(options)
+	}
+	return serverconfig.Load(options)
+}
+
+func runtimeDirectoryForProfile(options baseconfig.Options, serviceProfile bool) (string, error) {
+	config, err := loadProfileConfig(options, serviceProfile)
 	if err != nil {
 		return "", fmt.Errorf("load server config: %w", err)
 	}
-	profile, err := pathprofile.Resolve(config.Server.DataDir)
+	resolve := pathprofile.Resolve
+	if serviceProfile {
+		resolve = pathprofile.ResolveService
+	}
+	profile, err := resolve(config.Server.DataDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve server path profile: %w", err)
 	}
@@ -199,7 +214,7 @@ func newServerCommandWithServicesAndInitializer(
 		},
 	}
 	admin.Commands = []*cli.Command{newAdminCreateCommand(program, environ, stderr, func(ctx context.Context, options adminCreateOptions) error {
-		runtimeDir, err := runtimeDirectoryForOptions(options.config)
+		runtimeDir, err := runtimeDirectoryForProfile(options.config, options.serviceProfile)
 		if err != nil {
 			return err
 		}
@@ -216,12 +231,12 @@ func newServerCommandWithServicesAndInitializer(
 			return errors.New("expected gateway rotate-key --maintenance")
 		},
 	}
-	gateway.Commands = []*cli.Command{newGatewayRotateKeyCommand(program, environ, stderr, func(ctx context.Context, options baseconfig.Options) error {
-		runtimeDir, err := runtimeDirectoryForOptions(options)
+	gateway.Commands = []*cli.Command{newGatewayRotateKeyCommand(program, environ, stderr, func(ctx context.Context, options baseconfig.Options, serviceProfile bool) error {
+		runtimeDir, err := runtimeDirectoryForProfile(options, serviceProfile)
 		if err != nil {
 			return err
 		}
-		return runGatewayRotateKeyWithOptions(ctx, options, stderr, runtimeDir, time.Now())
+		return runGatewayRotateKeyWithProfile(ctx, options, stderr, runtimeDir, time.Now(), serviceProfile)
 	})}
 
 	backup := &cli.Command{
@@ -430,11 +445,11 @@ func newAdminCreateCommand(
 			if strings.TrimSpace(username) == "" {
 				return errors.New("admin username must not be empty")
 			}
-			config, err := configValues.options(environ)
+			config, serviceProfile, err := maintenanceOptions(configValues, environ)
 			if err != nil {
 				return err
 			}
-			return action(ctx, adminCreateOptions{username: username, passwordFile: passwordFile, config: config})
+			return action(ctx, adminCreateOptions{username: username, passwordFile: passwordFile, config: config, serviceProfile: serviceProfile})
 		},
 	}
 }
@@ -443,7 +458,7 @@ func newGatewayRotateKeyCommand(
 	program string,
 	environ []string,
 	stderr io.Writer,
-	action func(context.Context, baseconfig.Options) error,
+	action func(context.Context, baseconfig.Options, bool) error,
 ) *cli.Command {
 	configValues := &configFlagValues{}
 	var maintenance bool
@@ -465,11 +480,11 @@ func newGatewayRotateKeyCommand(
 			if current.NArg() != 0 {
 				return fmt.Errorf("gateway rotate-key does not accept positional arguments: %s", strings.Join(current.Args().Slice(), " "))
 			}
-			options, err := configValues.options(environ)
+			options, serviceProfile, err := maintenanceOptions(configValues, environ)
 			if err != nil {
 				return err
 			}
-			return action(ctx, options)
+			return action(ctx, options, serviceProfile)
 		},
 	}
 }

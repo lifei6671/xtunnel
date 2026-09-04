@@ -142,6 +142,8 @@ Agent 刻意不提供 YAML、`--config` 或本地业务 Schema。Service、Origi
 
 - **Linux Binary + systemd**：Server 与 Agent 都由 Binary 自身执行 `service install/uninstall`。
 - **Windows SCM**：Agent 以 `LocalService` 运行，Token 使用 DPAPI Machine-scope 加密。
+  Server 的 M8-04 开发验收与操作步骤见 [Windows Server SCM](deploy/windows-server/README.md)，
+  Windows Server 支持矩阵待 M8-05 Preview Gate 完成后更新。
 - **OCI / Compose**：参见 [`deploy/docker`](deploy/docker) 与
   [双栈 Compose 模板](deploy/docker/compose.dualstack.yaml)。
 - **公网 HTTPS / WSS**：参见 [Caddy / Nginx 前置代理示例](deploy/reverse-proxy/README.md)。

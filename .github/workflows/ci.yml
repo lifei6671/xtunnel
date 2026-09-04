@@ -697,6 +697,24 @@ jobs:
           ./deploy/windows/smoke.ps1 -PreviousAgentPath $previousAgentPath `
             -AgentPath $agentPath -GateHelperPath $gateHelperPath
 
+      - name: Verify Windows Server SCM and Service SID isolation
+        shell: powershell
+        timeout-minutes: 8
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          ./tools/check-go-version.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows Server toolchain check failed' }
+          $serverPath = Join-Path $env:RUNNER_TEMP 'xtunnel-server.exe'
+          ./deploy/windows-server/smoke.ps1 -ServerPath $serverPath -ConfigPath ./configs/server.windows.example.yaml
+          $env:XTUNNEL_SERVER_SCM_SECURITY_TEST = '1'
+          try {
+            go test -v -count=1 -timeout 180s ./internal/server/winsecurity -run '^TestServiceTokenIsolation$'
+            if ($LASTEXITCODE -ne 0) { throw 'Windows Server Service SID isolation failed' }
+          } finally {
+            Remove-Item Env:\XTUNNEL_SERVER_SCM_SECURITY_TEST
+          }
+
       - name: Verify working tree remains clean
         shell: powershell
         run: |

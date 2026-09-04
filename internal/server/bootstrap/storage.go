@@ -27,6 +27,7 @@ type serverStorage struct {
 	lock            *externallock.Lock
 	parentGuard     *datadir.ParentGuard
 	dataDir         string
+	runtimeDir      string
 	targetHash      string
 	databaseExisted bool
 	tokenMasterKey  tokenkey.Key
@@ -85,6 +86,7 @@ func openServerStorage(ctx context.Context, dataDir, runtimeDir string) (*server
 	}
 	return &serverStorage{
 		database: database, lock: lock, parentGuard: parentGuard, dataDir: target.Path, targetHash: target.Hash, databaseExisted: databaseExisted,
+		runtimeDir:     runtimeDir,
 		tokenMasterKey: tokenMasterKey,
 	}, nil
 }

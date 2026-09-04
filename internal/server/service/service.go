@@ -24,7 +24,7 @@ const (
 	ManagedUnitMarker = "# Managed by xtunnel-server service install"
 )
 
-var ErrUnsupported = errors.New("Server service management is only supported on Linux")
+var ErrUnsupported = errors.New("Server service management requires Linux or Windows amd64")
 
 //go:embed xtunnel-server.service
 var unitFile []byte
@@ -33,7 +33,7 @@ var unitFile []byte
 var legacyUnitFile []byte
 
 // Install installs the current executable and supplied configuration, then
-// enables and starts the managed systemd service.
+// enables and starts the managed native service.
 func Install(ctx context.Context, configSource string) error {
 	if err := validateServicePlatform(runtime.GOOS, runtime.GOARCH); err != nil {
 		return err
@@ -41,8 +41,8 @@ func Install(ctx context.Context, configSource string) error {
 	return install(ctx, configSource)
 }
 
-// Uninstall stops the managed service and removes its unit and installed
-// binary. Server configuration, credentials, data, and service identity remain.
+// Uninstall stops the managed service and removes its registration and installed
+// binary. Server configuration, credentials, and data remain.
 func Uninstall(ctx context.Context) error {
 	if err := validateServicePlatform(runtime.GOOS, runtime.GOARCH); err != nil {
 		return err
@@ -51,6 +51,9 @@ func Uninstall(ctx context.Context) error {
 }
 
 func validateServicePlatform(goos, goarch string) error {
+	if goos == "windows" && goarch == "amd64" {
+		return nil
+	}
 	if goos != "linux" {
 		return ErrUnsupported
 	}

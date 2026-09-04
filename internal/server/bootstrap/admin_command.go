@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	baseconfig "github.com/lifei6671/xtunnel/internal/config"
-	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	"github.com/lifei6671/xtunnel/internal/server/datadir"
 )
 
@@ -24,9 +23,10 @@ const (
 )
 
 type adminCreateOptions struct {
-	username     string
-	passwordFile string
-	config       baseconfig.Options
+	username       string
+	passwordFile   string
+	config         baseconfig.Options
+	serviceProfile bool
 }
 
 func runAdminCreateWithRuntimeDir(ctx context.Context, program string, args, environ []string, stderr io.Writer, runtimeDir string) (resultErr error) {
@@ -38,7 +38,7 @@ func runAdminCreateWithRuntimeDir(ctx context.Context, program string, args, env
 }
 
 func runAdminCreateWithOptions(ctx context.Context, options adminCreateOptions, stderr io.Writer, runtimeDir string) (resultErr error) {
-	config, err := serverconfig.Load(options.config)
+	config, err := loadProfileConfig(options.config, options.serviceProfile)
 	if err != nil {
 		return fmt.Errorf("load server config: %w", err)
 	}

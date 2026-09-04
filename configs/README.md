@@ -17,7 +17,7 @@ Copy-Item .\configs\server.windows.example.yaml .\server.windows.yaml
 ```
 
 - `server.example.yaml`：Linux systemd、OCI 或前台运行示例。
-- `server.windows.example.yaml`：Windows 前台用户路径与安全边界示例。
+- `server.windows.example.yaml`：Windows 前台与受管服务的路径、安全边界示例。
 
 Windows 示例不会改变 `server.schema.json` 中面向现有 Linux 部署的默认值，也不会被
 Server 自动发现。Windows 的配置加载及后续原生运行必须显式传入配置文件：
@@ -28,12 +28,14 @@ Server 自动发现。Windows 的配置加载及后续原生运行必须显式�
 
 Windows 前台配置默认使用 `server.data_dir: auto`。它只经 Windows Known Folder API 解析为
 当前登录用户的 `%LOCALAPPDATA%\XTunnel\Server\data`，同级 Runtime 目录用于该用户的锁和
-本机运行资源。前台与服务不共用 SQLite、密钥、Journal 或锁。M8-04 的受管 Windows
-服务安装器完成后，
-`auto` 只在服务入口解析为 `%ProgramData%\XTunnel\Server\data`；`XTunnelServer` Service SID
+本机运行资源。前台与服务不共用 SQLite、密钥、Journal 或锁。受管 Windows
+服务及固定配置的离线维护入口将
+`auto` 解析为 `%ProgramData%\XTunnel\Server\data`；`XTunnelServer` Service SID
 对配置文件只有读取权限，SYSTEM 与 Administrators 保留完全控制，Data/Runtime 则仅授予
 Service SID Modify（不含更改 DACL 或 owner）。不要用 LocalService 组权限、用户目录 ACL 或
 Config 可写权限替代这组精确边界。
+Data/Runtime 的 OWNER RIGHTS 限权 ACE 抑制文件 Owner 隐含的改 ACL 权限。
+服务安装、首个管理员创建和维护步骤见 [Windows Server SCM](../deploy/windows-server/README.md)。
 
 在 M8-05 的 Windows amd64 Preview Gate 完成前，该文件只代表构建和配置契约基线，
 不代表 Windows Server 已进入正式支持矩阵。

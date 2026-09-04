@@ -23,6 +23,13 @@ import (
 
 // Execute 把操作系统输入和信号接入 Server 生命周期，并返回进程退出码。
 func Execute(program string, args, environ []string, stderr io.Writer) int {
+	if handled, err := executeService(args, environ); handled || err != nil {
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", program, err)
+			return 1
+		}
+		return 0
+	}
 	startedAt := time.Now()
 	return executeWithRun(program, args, environ, stderr, func(ctx context.Context, options baseconfig.Options, stderr io.Writer) error {
 		return runWithStorageAndBootstrapOptions(ctx, options, stderr, func(ctx context.Context, dataDir string) (storage, error) {
@@ -110,6 +117,19 @@ func runWithStorageAndBootstrapOptions(
 	if err != nil {
 		return fmt.Errorf("load server config: %w", err)
 	}
+	return runConfigured(ctx, config, stderr, openStorage, openBootstrap, nil)
+}
+
+// runConfigured 只消费已按入口 Profile 校验的配置。ready 在存储与运行时完整
+// 装配成功后通知 SCM；关闭仍由本函数等待全部 owner，最后释放数据库和外部锁。
+func runConfigured(
+	ctx context.Context,
+	config serverconfig.Config,
+	stderr io.Writer,
+	openStorage func(context.Context, string) (storage, error),
+	openBootstrap func(context.Context, serverconfig.Config, storage, *slog.Logger, *tracing.Runtime) (io.Closer, error),
+	ready func(),
+) (resultErr error) {
 	logger, err := logging.New(stderr, logging.Options{
 		Level:     config.Logging.Level,
 		Format:    config.Logging.Format,
@@ -157,6 +177,9 @@ func runWithStorageAndBootstrapOptions(
 	}
 
 	logger.InfoContext(ctx, "process_started")
+	if ready != nil {
+		ready()
+	}
 	var runtimeErr error
 	if source, ok := bootstrapSocket.(interface{ RuntimeErrors() <-chan error }); ok {
 		select {

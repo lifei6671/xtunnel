@@ -43,14 +43,14 @@ func acquire(runtimeDir, targetHash string) (func() error, error) {
 
 	// 普通启动也必须复核受管 Runtime，不能依赖此前 init 的权限快照。
 	// 只校验已固定的最终目录；祖先路径继续由 no-follow Handle 链保护。
-	directorySecurity, err := winsecurity.NewForegroundDirectorySecurity()
+	directorySecurity, err := winsecurity.NewDirectorySecurityForPath(runtimeDir)
 	if err != nil {
 		return failDirectory(err)
 	}
 	if err := directorySecurity.ValidateDirectory(directoryHandles[len(directoryHandles)-1]); err != nil {
 		return failDirectory(fmt.Errorf("validate server runtime security: %w", err))
 	}
-	fileSecurity, err := winsecurity.NewForegroundFileSecurity()
+	fileSecurity, err := winsecurity.NewFileSecurityForPath(runtimeDir)
 	if err != nil {
 		return failDirectory(err)
 	}

@@ -25,7 +25,7 @@ func writeKeyAtomicallyPlatform(directoryPath, keyPath string, key []byte) error
 	if err := winsecurity.ValidateForegroundDirectory(filepath.Dir(directoryPath)); err != nil {
 		return fmt.Errorf("validate server data directory before publishing tunnel token master key: %w", err)
 	}
-	security, err := winsecurity.NewForegroundFileSecurity()
+	security, err := winsecurity.NewFileSecurityForPath(directoryPath)
 	if err != nil {
 		return fmt.Errorf("create tunnel token master key security policy: %w", err)
 	}
@@ -77,7 +77,7 @@ func createCredentialDirectoryPlatform(dataDir, directoryPath string) error {
 	if err := winsecurity.ValidateForegroundDirectory(dataDir); err != nil {
 		return fmt.Errorf("validate server data directory before creating token credentials: %w", err)
 	}
-	security, err := winsecurity.NewForegroundDirectorySecurity()
+	security, err := winsecurity.NewDirectorySecurityForPath(directoryPath)
 	if err != nil {
 		return fmt.Errorf("create tunnel token credential directory security policy: %w", err)
 	}

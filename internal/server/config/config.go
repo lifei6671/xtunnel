@@ -139,8 +139,20 @@ func Load(options baseconfig.Options) (Config, error) {
 	return baseconfig.Load[Config](configschemas.ServerSchema(), options, validate)
 }
 
+// LoadService 使用同一 Schema 和跨字段校验，但显式选择固定的服务路径 Profile。
+// 入口由 SCM 或已验证的离线维护调用；不会改变普通前台 Load 的路径权限边界。
+func LoadService(options baseconfig.Options) (Config, error) {
+	return baseconfig.Load[Config](configschemas.ServerSchema(), options, func(value *Config) error {
+		return validateWithProfile(value, pathprofile.ResolveService)
+	})
+}
+
 func validate(value *Config) error {
-	profile, err := pathprofile.Resolve(value.Server.DataDir)
+	return validateWithProfile(value, pathprofile.Resolve)
+}
+
+func validateWithProfile(value *Config, resolve func(string) (pathprofile.Profile, error)) error {
+	profile, err := resolve(value.Server.DataDir)
 	if err != nil {
 		return fmt.Errorf("resolve server.data_dir: %w", err)
 	}

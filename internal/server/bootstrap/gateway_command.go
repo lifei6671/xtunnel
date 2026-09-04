@@ -13,7 +13,6 @@ import (
 	"github.com/lifei6671/xtunnel/internal/logging"
 	"github.com/lifei6671/xtunnel/internal/repository"
 	"github.com/lifei6671/xtunnel/internal/repository/sqlite"
-	serverconfig "github.com/lifei6671/xtunnel/internal/server/config"
 	"github.com/lifei6671/xtunnel/internal/server/datadir"
 	"github.com/lifei6671/xtunnel/internal/server/durableops"
 	"github.com/lifei6671/xtunnel/internal/server/externallock"
@@ -48,10 +47,14 @@ func runGatewayRotateKeyWithOptions(
 	runtimeDir string,
 	now time.Time,
 ) (resultErr error) {
+	return runGatewayRotateKeyWithProfile(ctx, options, stderr, runtimeDir, now, false)
+}
+
+func runGatewayRotateKeyWithProfile(ctx context.Context, options baseconfig.Options, stderr io.Writer, runtimeDir string, now time.Time, serviceProfile bool) (resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	config, err := serverconfig.Load(options)
+	config, err := loadProfileConfig(options, serviceProfile)
 	if err != nil {
 		return fmt.Errorf("load server config: %w", err)
 	}
@@ -67,9 +70,12 @@ func runGatewayRotateKeyWithOptions(
 	if now.UTC().Unix() <= 0 {
 		return errors.New("gateway rotation time must be after the Unix epoch")
 	}
-	dataDir, err := gatewayRotationDataDirectory(config.Server.DataDir)
-	if err != nil {
-		return err
+	dataDir := config.Server.DataDir
+	if !serviceProfile {
+		dataDir, err = gatewayRotationDataDirectory(dataDir)
+		if err != nil {
+			return err
+		}
 	}
 	target, err := datadir.Resolve(dataDir)
 	if err != nil {
@@ -167,7 +173,7 @@ func gatewayRotationDataDirectory(configuredDataDir string) (string, error) {
 func parseGatewayRotateKeyOptions(program string, args, environ []string, stderr io.Writer) (baseconfig.Options, error) {
 	var options baseconfig.Options
 	parsed := false
-	command := newGatewayRotateKeyCommand(program, environ, stderr, func(_ context.Context, parsedOptions baseconfig.Options) error {
+	command := newGatewayRotateKeyCommand(program, environ, stderr, func(_ context.Context, parsedOptions baseconfig.Options, _ bool) error {
 		parsed = true
 		options = parsedOptions
 		return nil

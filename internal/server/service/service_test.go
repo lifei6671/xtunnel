@@ -65,6 +65,8 @@ func TestValidateServicePlatform(t *testing.T) {
 	}{
 		{name: "linux amd64", goos: "linux", goarch: "amd64"},
 		{name: "linux arm64", goos: "linux", goarch: "arm64"},
+		{name: "windows amd64", goos: "windows", goarch: "amd64"},
+		{name: "windows arm64 runtime unsupported", goos: "windows", goarch: "arm64", wantErr: ErrUnsupported.Error()},
 		{name: "linux unsupported architecture", goos: "linux", goarch: "386", wantErr: "architecture 386"},
 		{name: "unsupported operating system", goos: "darwin", goarch: "arm64", wantErr: ErrUnsupported.Error()},
 	}

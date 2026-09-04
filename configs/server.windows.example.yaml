@@ -12,7 +12,7 @@ server:
   # 前台的默认用户数据目录。auto 由 Known Folder API 解析为当前登录用户的
   # %LOCALAPPDATA%\XTunnel\Server\data；Runtime 位于同级 runtime。前台和服务
   # 永不共用 SQLite、Token 主密钥、PKI、Journal 或 External Lock。
-  # M8-04 Windows 服务安装器完成后，service install 才会把同一 auto 解析为受管的
+  # service install 将同一 auto 解析为受管的
   # %ProgramData%\XTunnel\Server\data，并使用 Service SID 的独立 Protected DACL。
   data_dir: auto
 

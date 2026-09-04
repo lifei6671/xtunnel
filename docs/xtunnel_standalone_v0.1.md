@@ -8621,7 +8621,7 @@ Windows 有两套永不共享持久化状态的路径 Profile。前台 Profile �
 `server.data_dir: auto` 只经 Known Folder API 解析为当前登录用户的
 `%LocalAppData%\XTunnel\Server\data`，Runtime 固定为同级的
 `%LocalAppData%\XTunnel\Server\runtime`；它们只允许 SYSTEM 与该当前用户访问。
-Service Profile 的同一 `auto` 只在 `XTunnelServer` SCM 入口解析为上面的 ProgramData
+Service Profile 的同一 `auto` 在 `XTunnelServer` SCM 常驻入口及已验证的离线维护入口解析为上面的 ProgramData
 Data/Runtime，并应用 Service SID 的精确 DACL。两个 Profile 不得共用 SQLite、Token Master
 Key、Pinned Gateway Identity 或 External Lock；
 前台进程不得把 ProgramData Service Profile 当作可访问的后备路径，Service 同样不得复用用户
@@ -8648,6 +8648,20 @@ Administrators 授予 Full Control，向 Service SID 授予 Modify。这里的 M
 更改 DACL 或 owner；不得用 Full Control、宽泛 LocalService 权限或模糊的“运行所需权限”
 替代该矩阵。安装器必须拒绝 ACL、owner、对象类型或 Reparse Point 不满足契约的既有目标，
 不得通过追加一个 ACE 接管未知对象。
+
+安装器新建的 Binary、Config、Data/Runtime 根目录 Owner 固定为 Builtin Administrators；
+既有安装对象仅接受 SYSTEM 或 Builtin Administrators Owner。Service 运行时创建的受管
+文件允许 LocalService Owner，离线管理员维护创建的对象使用 Builtin Administrators Owner。
+Data/Runtime 及其受管对象的精确 DACL 还必须包含 `OWNER RIGHTS`（`S-1-3-4`）仅
+`READ_CONTROL` 的限权 ACE，抑制 Owner 隐含的 `WRITE_DAC`，不得向 LocalService
+授予数据访问 ACE。目录把该规则传播给子目录和文件；XTunnel 显式创建或发布的受管文件
+在首次创建时设置完整 Protected DACL，不依赖先创建再修权限。SQLite Driver 创建的数据库
+及 sidecar 文件从受保护 Data 目录继承限权，继续使用 Driver 的 Windows VFS；原生验证必须
+证明 XTunnelServer 和其他 LocalService 服务不能借 Owner 取得 `WRITE_DAC`/`WRITE_OWNER`。
+
+ProgramFiles/ProgramData 下与 Agent 共用的 `XTunnel` 祖先目录仅验证 no-follow、可信
+SYSTEM/Administrators Owner 及防止未授权主体替换 Server 目标的有效安全性质，不接管其
+ACL；Server 精确权限矩阵应用于其 Binary/Config 文件和 `Server` 私有子树。
 
 LocalAppData 前台 Profile 的 Data、Runtime 及其受管子对象同样关闭继承，且只向 SYSTEM 与
 当前登录用户授予 Full Control；不得把 Users、Authenticated Users、LocalService 或未来的
@@ -8725,6 +8739,11 @@ Windows Preview 不实现 Admin Bootstrap 或 Backup Barrier Named Pipe，也不
 替代。首个管理员创建必须在服务停止后通过 `xtunnel-server admin create` 执行：取得 External
 Lock、完成 SQLite Transaction，再启动服务。任何未来离线维护命令同样必须先确认服务已停止
 并取得 External Lock；在线 Backup/Restore 不属于当前 M8。
+
+Service Profile 的离线维护只接受固定 Config 路径，并核验提升管理员身份、受管
+`XTunnelServer` 已停止及配置文件安全属性，然后取得与服务相同的 External Lock。
+普通前台常驻进程仍不得使用 Service Profile；安装后尚无管理员时，Windows Server 只运行
+Management/Metrics，管理员离线创建成功并重启后才启动公网入口。
 
 ## 191.5 `XTunnelServer` SCM Runtime
 

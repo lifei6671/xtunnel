@@ -301,7 +301,7 @@ func TestServerExplicitFalseHelpDoesNotRunMaintenanceActions(t *testing.T) {
 			name: "gateway rotate-key",
 			args: []string{"--help=false", "--maintenance"},
 			newCommand: func(called *bool, output io.Writer) *cli.Command {
-				return newGatewayRotateKeyCommand("xtunnel-server", nil, output, func(context.Context, baseconfig.Options) error {
+				return newGatewayRotateKeyCommand("xtunnel-server", nil, output, func(context.Context, baseconfig.Options, bool) error {
 					*called = true
 					return nil
 				})

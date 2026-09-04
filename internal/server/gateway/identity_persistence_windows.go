@@ -45,7 +45,7 @@ func createPinnedIdentityDirectory(dataDir, directory string) error {
 	if err := winsecurity.ValidateForegroundDirectory(dataDir); err != nil {
 		return fmt.Errorf("validate server data directory before creating gateway PKI: %w", err)
 	}
-	security, err := winsecurity.NewForegroundDirectorySecurity()
+	security, err := winsecurity.NewDirectorySecurityForPath(directory)
 	if err != nil {
 		return fmt.Errorf("create gateway PKI directory security policy: %w", err)
 	}
@@ -71,7 +71,7 @@ func writePinnedIdentity(dataDir, keyPath, certPath string, certificate tlsCerti
 	if err != nil {
 		return err
 	}
-	security, err := winsecurity.NewForegroundFileSecurity()
+	security, err := winsecurity.NewFileSecurityForPath(directory)
 	if err != nil {
 		return fmt.Errorf("create gateway pinned identity security policy: %w", err)
 	}
@@ -95,7 +95,7 @@ func replacePinnedCertificate(dataDir, directory, certPath string, certificate t
 	if err != nil {
 		return err
 	}
-	security, err := winsecurity.NewForegroundFileSecurity()
+	security, err := winsecurity.NewFileSecurityForPath(directory)
 	if err != nil {
 		return fmt.Errorf("create gateway pinned certificate security policy: %w", err)
 	}

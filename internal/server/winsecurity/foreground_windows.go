@@ -22,6 +22,8 @@ type ForegroundDirectorySecurity struct {
 	descriptor *windows.SECURITY_DESCRIPTOR
 	owner      *windows.SID
 	expected   []accessACE
+	// serviceOwners 为 Service Profile 按用途冻结的可信 Owner 集合；空值保持前台语义。
+	serviceOwners []*windows.SID
 }
 
 type accessACE struct {
@@ -84,7 +86,11 @@ func (security *ForegroundDirectorySecurity) ValidateDirectory(handle windows.Ha
 	if err != nil {
 		return fmt.Errorf("read directory owner: %w", err)
 	}
-	if owner == nil || !owner.Equals(security.owner) {
+	if owner == nil || (len(security.serviceOwners) == 0 && !owner.Equals(security.owner)) ||
+		(len(security.serviceOwners) != 0 && !sidIn(owner, security.serviceOwners)) {
+		if len(security.serviceOwners) != 0 {
+			return errors.New("directory owner is not permitted by the service profile")
+		}
 		return errors.New("directory owner does not match the current Windows user")
 	}
 	control, _, err := descriptor.Control()
