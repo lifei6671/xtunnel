@@ -18,6 +18,43 @@ import (
 
 const windowsTestTargetHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+func TestValidateFileIDInfo(t *testing.T) {
+	tests := []struct {
+		name        string
+		information fileIDInfo
+		wantVolume  uint64
+		wantError   bool
+	}{
+		{
+			name:        "stable identity",
+			information: fileIDInfo{volumeSerial: 7, fileID: [16]byte{1}},
+			wantVolume:  7,
+		},
+		{
+			name:        "zero volume serial",
+			information: fileIDInfo{fileID: [16]byte{1}},
+			wantError:   true,
+		},
+		{
+			name:        "zero file ID",
+			information: fileIDInfo{volumeSerial: 7},
+			wantError:   true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := validateFileIDInfo(test.information)
+			if (err != nil) != test.wantError {
+				t.Fatalf("validateFileIDInfo() error = %v, want error = %t", err, test.wantError)
+			}
+			if err == nil && got != test.wantVolume {
+				t.Fatalf("validateFileIDInfo() = %d, want %d", got, test.wantVolume)
+			}
+		})
+	}
+}
+
 func TestWindowsRuntimeDirectoryUsesProgramDataKnownFolder(t *testing.T) {
 	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
 	if err != nil {

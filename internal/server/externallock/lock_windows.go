@@ -184,5 +184,18 @@ func volumeForHandle(handle windows.Handle) (uint64, error) {
 	); err != nil {
 		return 0, err
 	}
+	return validateFileIDInfo(information)
+}
+
+// validateFileIDInfo 只接受可用于 Stable Target 锁定边界的完整对象身份。
+// Volume Serial 或 128-bit File ID 为零时，调用方无法把当前 Handle 与一个
+// 稳定的本地卷对象关联，必须在取得锁前失败，不能只凭路径或卷号继续执行。
+func validateFileIDInfo(information fileIDInfo) (uint64, error) {
+	if information.volumeSerial == 0 {
+		return 0, errors.New("Windows file identity has an invalid volume serial")
+	}
+	if information.fileID == [16]byte{} {
+		return 0, errors.New("Windows file identity has an invalid file ID")
+	}
 	return information.volumeSerial, nil
 }
