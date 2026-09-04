@@ -216,6 +216,9 @@ func (probe *tokenProbeHandler) check() (*sql.DB, error) {
 	}
 	var database *sql.DB
 	if probe.own {
+		if err := ValidateDataParentDirectory(filepath.Dir(probe.data)); err != nil {
+			return nil, err
+		}
 		security, err := NewFileSecurityForPath(probe.data)
 		if err != nil {
 			return nil, err

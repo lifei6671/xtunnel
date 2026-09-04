@@ -2445,3 +2445,10 @@ M0、M0.5、M1、M2、M3、M4、M5、M6 与 M7 已全部完成；历史完成数
 - 部署验证产物：新增 `deploy/windows-server/smoke.ps1`、部署指南与 Windows CI 步骤。脚本使用 Windows PowerShell 5.1 兼容 API，实际 API 与语法解析检查通过；初装、无副作用拒绝、离线管理员、端口、Stop、两次恢复、Event Log、卸载重装及真实 Service SID 隔离仍需隔离提升权限 Runner 执行，当前为 `NOT_RUN`。本机普通测试中的平台/令牌跳过不计为该原生能力通过。
 - 独立复审：`CHILD_AGENT / Tier 3 / PARTITIONED_PLUS_INTEGRATION` 已完成。安全分区 9 个文件与 bootstrap/config/SCM/Smoke/CI 分区覆盖均为 `COMPLETE/FRESH`，整合 Review Gate 为 `PASSED`；PowerShell 兼容与共享祖先权限阻断项已修复并增量复审，当前无 P0/P1。保留 P2 后续项：为离线维护 Profile 和 Windows 无维护 Socket 入口增加直接回归测试。安全复审者独立执行 10 个共享祖先权限子用例全部通过。安全生产文件 SHA-256 为 `87CEB65F3102D0898F2D773B88539985DD9C0743C43A87EDFC8ADBBAD3169DC1`，对应测试为 `7CF80C8027BE2D8DD37EBDA48DFEF9A7CF4AE5AB4472CFEF33057728BDAD279E`；SCM Smoke 为 `EDB0A26E59412D176886EC91A4B16A2D9AB8FEF413D49EEE7EEAB8F258E1E3BF`。代码复审通过不替代真实 SCM、提交绑定 CI 或用户阶段验收。
 - 状态：以上为基于 `8f136a6e4939fdd653182188816e648bd569027f` 的未提交工作树开发证据；当前 M8-04 无提交绑定 CI 结果，保持 `IN_PROGRESS`。M8-03 为 `DONE`，全局 `98/100`、M8 `3/5`，M8-05 为 `NOT_STARTED`。
+
+## 2026-09-04 · M8-04 CI 启动父目录策略修复
+
+- 用户明确授权提交并推送 M8-04 候选。`034b231946bcac95513e143ab6f7efdd1eefb7f7` 已推送，独立复审提交绑定核对通过。[CI #33843428342](https://github.com/lifei6671/xtunnel/actions/runs/33843428342) 的 Windows amd64 Server Test/Vet/Build 及既有 Agent SCM 验证通过，新增 Server SCM 步骤在首次正式安装启动时报 `Server service stopped during startup`；该候选不能作为阶段通过证据。
+- 定位与修复：启动的 Restore 残留检查对固定 `ProgramData/XTunnel/Server` 父目录使用了前台 Owner/DACL 规则，而安装器按只读 ServiceConfig 策略创建该目录。新增只读父目录验证入口，精确固定路径要求授权令牌并按 ServiceConfig 验证，其余路径保持前台规则；可写 Data/Runtime 策略不扩展到父目录。补充路径分流、非法身份拒绝及真实 SCM Token 父目录验证断言。
+- 本地复验：`go1.27.1/local` 下 winsecurity/durableops/bootstrap 三包 Test/Vet 通过；Docker Desktop `./scripts/verify.ps1` 再次 exit 0。Smoke 失败分支保存原退出码并输出 SCM 状态与最多 20 条已有结构化事件，Windows PowerShell 5.1 语法检查通过，诊断增量独立复审通过。
+- 边界：真实 SCM 修复效果与剩余完整 CI 尚待新候选验证，M8-04 保持 `IN_PROGRESS`。

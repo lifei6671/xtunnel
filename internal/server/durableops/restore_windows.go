@@ -54,7 +54,7 @@ func recoverPlatform(ctx context.Context, paths restorePaths) (bool, error) {
 		return false, err
 	}
 	parent := filepath.Dir(paths.target)
-	if err := winsecurity.ValidateForegroundDirectory(parent); err != nil {
+	if err := winsecurity.ValidateDataParentDirectory(parent); err != nil {
 		return false, fmt.Errorf("validate Windows Restore parent: %w", err)
 	}
 	targetExists, err := winsecurity.ForegroundDirectoryExists(paths.target)

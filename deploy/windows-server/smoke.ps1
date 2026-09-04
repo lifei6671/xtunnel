@@ -20,7 +20,16 @@ if ((Get-Service XTunnelServer -ErrorAction SilentlyContinue) -or (Test-Path -Li
 
 function Invoke-Server([string[]]$Arguments) {
     & $binary @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "Server command failed with exit $LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) {
+        $commandExit = $LASTEXITCODE
+        # 服务失败时保留 SCM 状态和已有结构化事件，便于隔离 Runner 定位启动阶段。
+        & sc.exe queryex XTunnelServer
+        $events = @(Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='XTunnelServer'; StartTime=$eventStart} -MaxEvents 20 -ErrorAction SilentlyContinue)
+        foreach ($entry in $events) {
+            foreach ($property in $entry.Properties) { Write-Output $property.Value }
+        }
+        throw "Server command failed with exit $commandExit"
+    }
 }
 function Wait-State([string]$State) {
     $deadline = [DateTime]::UtcNow.AddSeconds(35)

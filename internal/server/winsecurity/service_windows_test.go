@@ -162,6 +162,54 @@ func TestServiceDataPathSelection(t *testing.T) {
 	}
 }
 
+func TestDataParentValidationKeepsServiceRootReadOnly(t *testing.T) {
+	base, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "XTunnel", "Server")
+	for _, tc := range []struct {
+		path    string
+		service bool
+	}{
+		{root, true}, {strings.ToUpper(root), true}, {root + "-other", false},
+		{filepath.Join(root, "data"), false}, {filepath.Join(base, "XTunnel"), false}, {t.TempDir(), false},
+	} {
+		service, err := isServiceDataParentPath(tc.path)
+		if err != nil || service != tc.service {
+			t.Fatalf("parent=%q service=%v err=%v", tc.path, service, err)
+		}
+	}
+	if _, err := isServiceDataParentPath(root + `\..\Server`); err == nil {
+		t.Fatal("accepted dot-component service parent")
+	}
+	if service, _, err := serviceDataPath(root); err != nil || service {
+		t.Fatalf("read-only root selected writable storage policy: service=%v err=%v", service, err)
+	}
+	foreground := newManagedFileDirectory(t)
+	if err := ValidateDataParentDirectory(foreground); err != nil {
+		t.Fatalf("foreground parent rejected: %v", err)
+	}
+	unsafe := t.TempDir()
+	if err := ValidateDataParentDirectory(unsafe); err == nil {
+		t.Fatal("accepted unprotected foreground parent")
+	}
+	if _, err := os.Stat(unsafe); err != nil {
+		t.Fatalf("rejected parent changed: %v", err)
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if user.User.Sid.String() != "S-1-5-18" && user.User.Sid.String() != "S-1-5-19" {
+			if err := ValidateDataParentDirectory(root); err == nil || !strings.Contains(err.Error(), "requires elevated maintenance") {
+				t.Fatalf("ordinary user service parent: %v", err)
+			}
+		}
+	}
+}
+
 func TestServiceCreateFileUsesInitialDescriptor(t *testing.T) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("requires elevated token to assign Administrators owner")

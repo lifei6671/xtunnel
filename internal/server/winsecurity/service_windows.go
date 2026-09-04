@@ -130,6 +130,38 @@ func NewFileSecurityForPath(parent string) (*ForegroundFileSecurity, error) {
 	return NewServiceFileSecurity(ServiceData)
 }
 
+// ValidateDataParentDirectory validates the read-only parent used by startup's
+// Restore-residue check. Service 的固定 Server 根按 Config 目录权限验证；
+// 此入口只读，不把该根加入运行时可创建 Data/Runtime 子对象的权限选择。
+func ValidateDataParentDirectory(path string) error {
+	service, err := isServiceDataParentPath(path)
+	if err != nil {
+		return err
+	}
+	if !service {
+		return ValidateForegroundDirectory(path)
+	}
+	if err := validateServiceStorageToken(); err != nil {
+		return err
+	}
+	return ValidateServiceObject(path, ServiceConfig, true)
+}
+
+func isServiceDataParentPath(path string) (bool, error) {
+	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
+	if err != nil {
+		return false, fmt.Errorf("resolve service ProgramData: %w", err)
+	}
+	root := filepath.Join(programData, "XTunnel", "Server")
+	if !strings.EqualFold(filepath.Clean(path), root) {
+		return false, nil
+	}
+	if err := validateOperatorTLSPath(path); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func serviceDataPath(path string) (service, root bool, err error) {
 	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
 	if err != nil {
