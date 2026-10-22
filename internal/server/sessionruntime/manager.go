@@ -779,7 +779,7 @@ func (manager *Manager) RegisterIdle(connection net.Conn, idle workauth.Idle) (*
 	return work, nil
 }
 
-// RefreshWorkDemand 在 Work 进入 ACTIVE 后重新计算非 ACTIVE 缺口。Acquire 释放
+// RefreshWorkDemand 在 Work 进入 ACTIVE 后为剩余 Pending OPEN 重新计算缺口。Acquire 释放
 // Pending 时该 Work 仍处于 OPENING，不能据此判断空闲目标已满足；必须在状态转换后
 // 再触发一次。完整 Session 身份阻止旧代操作影响新代，Lease 与 generation 仍由
 // reconcileDemand 串行裁决。调用方不持 Pool/Runtime 锁，失败按既有规则关闭 Session。
@@ -792,6 +792,14 @@ func (manager *Manager) RefreshWorkDemand(session serverruntime.Session) error {
 	manager.mu.Unlock()
 	if managed == nil || managed.session != session || !managed.isConfigReady() {
 		return ErrSessionUnavailable
+	}
+	managed.demandMu.Lock()
+	hasPending := managed.pendingOpens > 0
+	managed.demandMu.Unlock()
+	if !hasPending {
+		// 没有等待者时，空闲储备继续由 Heartbeat 维护；这个触发点只负责
+		// 在 Acquire 的短等待窗口内兑现已经存在的业务需求。
+		return nil
 	}
 	if _, err := manager.reconcileDemand(managed, managed.protocol); err != nil {
 		managed.cancel()
