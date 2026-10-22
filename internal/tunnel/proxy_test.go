@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -535,17 +536,50 @@ func TestProxyAggregatesConcurrentPendingOpensAndRefillsBeyondInitialDemand(t *t
 		return true
 	})
 
+	// 先让首批连接全部完成 Acquire，再同时放行 OPEN 响应，确定性覆盖
+	// Pending 计数先下降、非 ACTIVE 存量随后才下降的补池顺序。
+	opening := make(chan struct{}, pendingCount-1)
+	allowOpen := make(chan struct{})
+	var releaseOpen sync.Once
+	t.Cleanup(func() { releaseOpen.Do(func() { close(allowOpen) }) })
 	agentResults := make([]<-chan error, 0, pendingCount)
 	for index := 0; index < pendingCount-1; index++ {
-		agentResults = append(agentResults, registerEchoWork(t, sessions, selectedSession))
+		serverWork, agentWork := tcpPair(t)
+		t.Cleanup(func() { _ = agentWork.Close() })
+		workID, err := identity.NewWorkID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		gated := &gatedOpenReadConn{TCPConn: serverWork, opening: opening, allowOpen: allowOpen}
+		if _, err := sessions.RegisterIdle(gated, authenticatedIdleWithWorkID(t, selectedSession, workID)); err != nil {
+			t.Fatalf("RegisterIdle(%s): %v", workID, err)
+		}
+		result := make(chan error, 1)
+		agentResults = append(agentResults, result)
+		go func() { result <- runEchoConnector(agentWork) }()
 	}
-	waitForSnapshot(t, limits, func(snapshot serverlimits.Snapshot) bool { return snapshot.PendingOpens == 1 })
+	for range pendingCount - 1 {
+		select {
+		case <-opening:
+		case <-time.After(testTimeout):
+			t.Fatal("initial Work did not reach OPEN response barrier")
+		}
+	}
+	releaseOpen.Do(func() { close(allowOpen) })
+	waitForSnapshot(t, limits, func(snapshot serverlimits.Snapshot) bool {
+		return snapshot.PendingOpens == 1 && snapshot.ActiveTotal == pendingCount-1
+	})
 	refill := readDemand(t, controlForSession(t, selectedSession, connectorIDs, controlPeers))
 	if refill.GetDemandGeneration() <= 1 || refill.GetMaxNewConnections() == 0 {
 		t.Fatalf("refill WorkDemand = %#v, want a newer non-zero Demand", refill)
 	}
+	if snapshot := limits.Snapshot(); snapshot.PendingOpens != 1 || snapshot.ActiveTotal != pendingCount-1 {
+		t.Fatalf("refill arrived after pending OPEN failed: %+v", snapshot)
+	}
 	agentResults = append(agentResults, registerEchoWork(t, sessions, selectedSession))
-	waitForSnapshot(t, limits, func(snapshot serverlimits.Snapshot) bool { return snapshot.PendingOpens == 0 })
+	waitForSnapshot(t, limits, func(snapshot serverlimits.Snapshot) bool {
+		return snapshot.PendingOpens == 0 && snapshot.ActiveTotal == pendingCount
+	})
 
 	for index, client := range publicClients {
 		payload := []byte{byte(index), 0x78, 0x74}
@@ -1578,6 +1612,23 @@ func authenticatedIdleWithWorkID(t *testing.T, session serverruntime.Session, wo
 		TunnelID: session.TunnelID, ConnectorID: session.ConnectorID,
 		SessionID: session.SessionID, WorkID: workID, State: workState,
 	}
+}
+
+// gatedOpenReadConn 只暂停首个 OPEN 响应读取；测试 owner 释放屏障后，RAW
+// 保留 TCP 的读写和 Half-Close。失败清理由 t.Cleanup 同样释放屏障。
+type gatedOpenReadConn struct {
+	*net.TCPConn
+	opening   chan<- struct{}
+	allowOpen <-chan struct{}
+	once      sync.Once
+}
+
+func (connection *gatedOpenReadConn) Read(payload []byte) (int, error) {
+	connection.once.Do(func() {
+		connection.opening <- struct{}{}
+		<-connection.allowOpen
+	})
+	return connection.TCPConn.Read(payload)
 }
 
 func registerEchoWork(

@@ -580,6 +580,15 @@ func TestRegisterIdlePublishesWorkIntoCurrentSessionPool(t *testing.T) {
 	if counts.Idle != 1 || counts.Total != 1 {
 		t.Fatalf("Pool counts = %#v, want one IDLE", counts)
 	}
+	stale := session
+	stale.Generation++
+	if err := manager.RefreshWorkDemand(stale); !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("RefreshWorkDemand(stale) = %v, want ErrSessionUnavailable", err)
+	}
+	if err := manager.RefreshWorkDemand(session); err != nil {
+		t.Fatalf("RefreshWorkDemand(current) = %v", err)
+	}
+	assertNoControlMessage(t, controlClient, 40*time.Millisecond)
 	if err := work.Close(); err != nil {
 		t.Fatalf("Work.Close() error = %v", err)
 	}

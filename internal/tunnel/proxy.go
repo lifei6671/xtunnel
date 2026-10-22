@@ -435,6 +435,9 @@ func (tunnelProxy *Proxy) openConnection(
 		if err := work.MarkActive(); err != nil {
 			return nil, err
 		}
+		if err := tunnelProxy.options.Sessions.RefreshWorkDemand(selectedSession); err != nil {
+			return nil, err
+		}
 		return active, nil
 	}
 
