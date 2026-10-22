@@ -1,3 +1,22 @@
+function Get-AgentEventLogRecords {
+    param([Parameter(Mandatory = $true)][DateTime]$StartTime)
+
+    # ProviderName Hashtable 会先解析 Provider 元数据；经典 Event Source 的
+    # 消息资源在不同架构上未必可加载。直接按事件 XML 的来源和 UTC 时间查询。
+    $since = $StartTime.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    $query = "*[System[Provider[@Name='XTunnelAgent'] and TimeCreated[@SystemTime>='$since']]]"
+    try {
+        Get-WinEvent -LogName 'Application' -FilterXPath $query -ErrorAction Stop
+    }
+    catch {
+        if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') {
+            return
+        }
+        # 只有“尚无事件”允许轮询；权限、查询或读取故障必须保留明确失败。
+        throw "Windows Event Log query failed (error_id=$($_.FullyQualifiedErrorId))"
+    }
+}
+
 # Event Log 的 Message 是依赖系统消息资源和语言的展示文本；ReportEvent 写入的
 # JSON 位于唯一的 insertion string。直接验证原始属性，保证平台差异不影响契约检查。
 function ConvertFrom-AgentEventLogRecord {

@@ -815,11 +815,7 @@ function Assert-EventLogContract {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
         $lifecycleFound = $false
-        $records = @(Get-WinEvent -FilterHashtable @{
-                LogName      = 'Application'
-                ProviderName = $eventSourceName
-                StartTime    = $eventQueryStart
-            } -ErrorAction SilentlyContinue)
+        $records = @(Get-AgentEventLogRecords -StartTime $eventQueryStart)
         foreach ($record in $records) {
             $payload = ConvertFrom-AgentEventLogRecord -Record $record -ForbiddenValues $ForbiddenValues
             if (($payload.component -eq 'agent') -and
@@ -852,11 +848,7 @@ function Wait-AgentEvent {
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
-        $records = @(Get-WinEvent -FilterHashtable @{
-                LogName      = 'Application'
-                ProviderName = $eventSourceName
-                StartTime    = $StartTime
-            } -ErrorAction SilentlyContinue)
+        $records = @(Get-AgentEventLogRecords -StartTime $StartTime)
         foreach ($record in $records) {
             $payload = ConvertFrom-AgentEventLogRecord -Record $record -ForbiddenValues $ForbiddenValues
             if (($payload.component -ne 'agent') -or ($payload.event -ne $Event)) {

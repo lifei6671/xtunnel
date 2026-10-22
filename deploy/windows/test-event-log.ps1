@@ -40,4 +40,35 @@ foreach ($case in $cases) {
         throw "Event Log contract regression failed: $($case.Expected)"
     }
 }
-Write-Host 'Agent Event Log raw-record contract tests passed'
+# 使用局部替身检查查询边界，不依赖本机安装 Agent 或事件源元数据。
+function Get-WinEvent {
+    [CmdletBinding()]
+    param([string]$LogName, [string]$FilterXPath)
+    if (($LogName -ne 'Application') -or
+        ($FilterXPath -ne "*[System[Provider[@Name='XTunnelAgent'] and TimeCreated[@SystemTime>='2026-10-22T00:00:00.0000000Z']]]")) {
+        throw 'Event query lost its source or UTC time boundary'
+    }
+    if ($script:queryErrorID) {
+        Write-Error -Message 'fixture query failure' -ErrorId $script:queryErrorID
+    }
+    else {
+        [pscustomobject]@{ RecordId = 42 }
+    }
+}
+$queryStart = [DateTimeOffset]::Parse('2026-10-22T08:00:00+08:00').UtcDateTime
+$script:queryErrorID = ''
+if ((Get-AgentEventLogRecords -StartTime $queryStart).RecordId -ne 42) {
+    throw 'Event query did not preserve its result'
+}
+$script:queryErrorID = 'NoMatchingEventsFound'
+if (@(Get-AgentEventLogRecords -StartTime $queryStart).Count -ne 0) {
+    throw 'Empty event query must return no records'
+}
+$script:queryErrorID = 'EventLogAccessDenied'
+$failure = $null
+try { $null = Get-AgentEventLogRecords -StartTime $queryStart }
+catch { $failure = $_.Exception.Message }
+if (($null -eq $failure) -or (-not $failure.Contains('EventLogAccessDenied'))) {
+    throw 'Event query suppressed an unexpected failure'
+}
+Write-Host 'Agent Event Log query and raw-record contract tests passed'
