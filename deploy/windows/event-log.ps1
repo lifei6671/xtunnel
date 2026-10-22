@@ -20,6 +20,11 @@ function ConvertFrom-AgentEventLogRecord {
     if (($properties.Count -ne 1) -or ($properties[0].Value -isnot [string])) {
         throw 'Windows Event Log must contain exactly one JSON insertion string'
     }
+    # PowerShell 5.1 与 7 对顶层 null/数组的转换不同；先限定日志的对象形状，
+    # 再让 JSON 解析器校验完整语法，避免单元素数组被管道自动展开为日志对象。
+    if (-not $properties[0].Value.TrimStart().StartsWith('{')) {
+        throw 'Windows Event Log JSON must be an object'
+    }
     try {
         $payload = $properties[0].Value | ConvertFrom-Json -ErrorAction Stop
     }

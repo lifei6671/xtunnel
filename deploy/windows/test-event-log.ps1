@@ -19,9 +19,10 @@ $secret = 'fixture-token-must-remain-private'
 $cases = @(
     @{ Values = @(); Expected = 'exactly one JSON' },
     @{ Values = @($json, $json); Expected = 'exactly one JSON' },
-    @{ Values = @('not-json'); Expected = 'not valid JSON' },
+    @{ Values = @('{invalid-json'); Expected = 'not valid JSON' },
     @{ Values = @('null'); Expected = 'must be an object' },
     @{ Values = @('[]'); Expected = 'must be an object' },
+    @{ Values = @("[$json]"); Expected = 'must be an object' },
     @{ Values = @('{"level":"info","component":"agent","event":"process_started"}'); Expected = 'required field timestamp' },
     @{ Values = @($json.Replace('windows_service_running', '')); Expected = 'required field event' },
     @{ Values = @($json.Replace('windows_service_running', $secret)); Expected = 'plaintext Connection Token' },
