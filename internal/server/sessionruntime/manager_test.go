@@ -580,6 +580,15 @@ func TestRegisterIdlePublishesWorkIntoCurrentSessionPool(t *testing.T) {
 	if counts.Idle != 1 || counts.Total != 1 {
 		t.Fatalf("Pool counts = %#v, want one IDLE", counts)
 	}
+	stale := session
+	stale.Generation++
+	if err := manager.RefreshWorkDemand(stale); !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("RefreshWorkDemand(stale) = %v, want ErrSessionUnavailable", err)
+	}
+	if err := manager.RefreshWorkDemand(session); err != nil {
+		t.Fatalf("RefreshWorkDemand(current) = %v", err)
+	}
+	assertNoControlMessage(t, controlClient, 40*time.Millisecond)
 	if err := work.Close(); err != nil {
 		t.Fatalf("Work.Close() error = %v", err)
 	}
@@ -594,6 +603,58 @@ func TestRegisterIdlePublishesWorkIntoCurrentSessionPool(t *testing.T) {
 	case <-serveResult:
 	case <-time.After(testWait):
 		t.Fatal("Serve() did not stop")
+	}
+}
+
+func TestRefreshWorkDemandKeepsIdleMaintenanceOnHeartbeatWithoutPendingOpens(t *testing.T) {
+	registry := serverruntime.NewRegistry()
+	session := commitSession(t, registry, testTunnelID, testConnectorID)
+	manager := newTestManager(t, registry)
+	server, client := net.Pipe()
+	established := establishedSession(t, session, 0x56)
+	result := make(chan error, 1)
+	go func() { result <- manager.Serve(context.Background(), server, &established) }()
+	t.Cleanup(func() {
+		_ = client.Close()
+		select {
+		case <-result:
+		case <-time.After(testWait):
+			t.Error("Control Session did not stop")
+		}
+	})
+	readInitialDemand(t, client)
+	pool, exists := manager.Pool(session)
+	if !exists {
+		t.Fatal("current Session has no pool")
+	}
+	for range initialDesiredNonActive {
+		workServer, peer := net.Pipe()
+		t.Cleanup(func() { _ = peer.Close() })
+		workID, err := identity.NewWorkID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		work, err := manager.RegisterIdle(workServer, serverIdleWithWorkID(t, session, workID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = work.Close() })
+	}
+	for range initialDesiredNonActive {
+		work, err := pool.Acquire(context.Background(), testWait)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := work.MarkActive(); err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.RefreshWorkDemand(session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertNoControlMessage(t, client, 40*time.Millisecond)
+	if counts := pool.Snapshot(); counts.Active != initialDesiredNonActive || counts.Total != initialDesiredNonActive {
+		t.Fatalf("ACTIVE connections changed during idle maintenance: %+v", counts)
 	}
 }
 

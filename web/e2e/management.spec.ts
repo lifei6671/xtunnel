@@ -710,7 +710,10 @@ test(`真实管理链路满足认证、并发与 Secret 生命周期契约（${p
   );
   await deleteTunnelDialog.getByRole("button", { name: "永久删除" }).click();
   expect((await deleteTunnelResponsePromise).status()).toBe(204);
-  await expect(page.getByText("还没有 Tunnel", { exact: true })).toBeVisible();
+  await expect(page.getByText("还没有隧道", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "打开隧道 browser-e2e-current", exact: true })).toHaveCount(0);
+  expect((await browserRequest(page, tunnelPath)).status).toBe(404);
+  expect((await browserRequest(page, "/api/v1/tunnels")).body?.items).toEqual([]);
 
   const logoutResponsePromise = page.waitForResponse((response) =>
     response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/auth/logout",

@@ -14,6 +14,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+& (Join-Path $PSScriptRoot 'test-event-log.ps1')
+. (Join-Path $PSScriptRoot 'event-log.ps1')
+
 $serviceName = 'XTunnelAgent'
 $eventSourceName = 'XTunnelAgent'
 $eventSourceRegistryPath = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EventLog\Application\XTunnelAgent'
@@ -812,33 +815,9 @@ function Assert-EventLogContract {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
         $lifecycleFound = $false
-        $records = @(Get-WinEvent -FilterHashtable @{
-                LogName      = 'Application'
-                ProviderName = $eventSourceName
-                StartTime    = $eventQueryStart
-            } -ErrorAction SilentlyContinue)
+        $records = @(Get-AgentEventLogRecords -StartTime $eventQueryStart)
         foreach ($record in $records) {
-            $message = $record.Message
-            if ([string]::IsNullOrWhiteSpace($message)) {
-                continue
-            }
-            foreach ($forbidden in $ForbiddenValues) {
-                if ((-not [string]::IsNullOrEmpty($forbidden)) -and $message.Contains($forbidden)) {
-                    throw 'Windows Event Log contains a plaintext Connection Token'
-                }
-            }
-            try {
-                $payload = $message | ConvertFrom-Json
-            }
-            catch {
-                continue
-            }
-            $propertyNames = @($payload.PSObject.Properties.Name)
-            foreach ($required in @('timestamp', 'level', 'component', 'event')) {
-                if ($propertyNames -notcontains $required) {
-                    throw "Windows Event Log JSON is missing required field $required"
-                }
-            }
+            $payload = ConvertFrom-AgentEventLogRecord -Record $record -ForbiddenValues $ForbiddenValues
             if (($payload.component -eq 'agent') -and
                 ($payload.event -in @('windows_service_running', 'process_started'))) {
                 $lifecycleFound = $true
@@ -849,7 +828,7 @@ function Assert-EventLogContract {
         }
         Start-Sleep -Milliseconds 250
     }
-    throw 'Windows Event Log did not contain a valid Agent lifecycle JSON record'
+    throw "Windows Event Log did not contain a valid Agent lifecycle JSON record (records=$($records.Count))"
 }
 
 function Wait-AgentEvent {
@@ -869,27 +848,9 @@ function Wait-AgentEvent {
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
-        $records = @(Get-WinEvent -FilterHashtable @{
-                LogName      = 'Application'
-                ProviderName = $eventSourceName
-                StartTime    = $StartTime
-            } -ErrorAction SilentlyContinue)
+        $records = @(Get-AgentEventLogRecords -StartTime $StartTime)
         foreach ($record in $records) {
-            $message = $record.Message
-            if ([string]::IsNullOrWhiteSpace($message)) {
-                continue
-            }
-            foreach ($forbidden in $ForbiddenValues) {
-                if ((-not [string]::IsNullOrEmpty($forbidden)) -and $message.Contains($forbidden)) {
-                    throw 'Windows Event Log contains a plaintext Connection Token'
-                }
-            }
-            try {
-                $payload = $message | ConvertFrom-Json
-            }
-            catch {
-                continue
-            }
+            $payload = ConvertFrom-AgentEventLogRecord -Record $record -ForbiddenValues $ForbiddenValues
             if (($payload.component -ne 'agent') -or ($payload.event -ne $Event)) {
                 continue
             }
